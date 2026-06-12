@@ -285,7 +285,7 @@ def test_default_snapshot_uses_config_rtsp_credentials(monkeypatch):
     )
     captured = {}
 
-    def fake_capture(url):
+    def fake_capture(url, **kwargs):
         captured["url"] = url
         return "/tmp/snap.jpg"
 
@@ -307,7 +307,7 @@ def test_default_snapshot_empty_creds_when_env_missing(monkeypatch):
     )
     captured = {}
     monkeypatch.setattr(daemon.snapshot, "capture_rtsp",
-                        lambda url: captured.setdefault("url", url))
+                        lambda url, **kwargs: captured.setdefault("url", url))
     snap = daemon._default_snapshot(camcfg)
     snap(object(), {"start_time": 1})
     # defaults: port 554, stream1; empty credentials
