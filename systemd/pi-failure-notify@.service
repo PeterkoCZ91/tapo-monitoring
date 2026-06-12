@@ -3,4 +3,4 @@ Description=Telegram failure notification for %i
 
 [Service]
 Type=oneshot
-ExecStart=/home/user/bin/pi_notify.sh "🔴 <b>Služba selhala:</b> %i&#10;%H" "%i"
+ExecStart=/home/user/bin/pi_notify.sh "🔴 <b>Service failed:</b> %i&#10;%H" "%i"

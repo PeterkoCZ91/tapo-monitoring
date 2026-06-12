@@ -91,8 +91,3 @@ def test_raining_now_skips_without_coordinates(monkeypatch, tmp_path):
                         lambda *a, **k: {"current": {"precipitation": 9.9}})
     assert weather.is_raining_now(now=5000, poll_interval=900, cache_path=cache,
                                   lat=None, lon=None) is False
-
-
-def test_rain_window_shim_reexports():
-    import rain_window
-    assert rain_window.is_raining_now is weather.is_raining_now

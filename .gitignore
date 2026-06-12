@@ -2,7 +2,6 @@
 tapo-camera.env
 *.env
 !.env.example
-!tapo-camera.env.example
 
 # Real deployment config (coordinates, hosts, camera layout) — never published.
 cameras.yaml

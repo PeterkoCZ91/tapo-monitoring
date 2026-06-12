@@ -52,8 +52,3 @@ def test_is_night_falls_back_to_hhmm_without_coords(monkeypatch):
     monkeypatch.setenv("NIGHT_END", "6")
     # no coords -> astral raises -> HH:MM fallback; 15:00 is day
     assert scheduling.is_night(datetime(2026, 1, 1, 15, 0)) is False
-
-
-def test_night_window_shim_reexports():
-    import night_window
-    assert night_window.is_night is scheduling.is_night

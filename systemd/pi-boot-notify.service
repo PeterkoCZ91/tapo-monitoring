@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/home/user/bin/pi_notify.sh "🟢 <b>%H online</b>&#10;Pi se spustil."
+ExecStart=/home/user/bin/pi_notify.sh "🟢 <b>%H online</b>&#10;Pi booted."
 RemainAfterExit=yes
 
 [Install]

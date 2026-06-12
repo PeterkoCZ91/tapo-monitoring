@@ -67,9 +67,8 @@ systemd/                 # unit templates (generic; %H hostname, env-driven)
 tests/                   # pytest suite
 ```
 
-The original standalone scripts (`camera_automation.py`, `person_monitor.py`,
-`groq_watch.py`, `tapo.py`) still run the live deployment and now delegate to the package
-via thin shims; the detection → enrich → notify pipeline is the next piece to fold in.
+The camera-control automation (day/night/rain tracking) runs today via the daemon; the
+detection → enrich → notify pipeline is being folded into the daemon loop next.
 
 ## Development
 
