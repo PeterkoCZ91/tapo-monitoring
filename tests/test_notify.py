@@ -50,3 +50,18 @@ def test_outage_above_threshold():
 
 def test_outage_already_alerted_suppressed():
     assert notify.outage_alert_due(1000.0, 5000.0, True, threshold=900) is False
+
+
+# ── should_send_alert (detection cooldown) ───────────────────────────────────
+
+def test_alert_first_ever_allowed():
+    assert notify.should_send_alert(None, 1000.0, cooldown=120) is True
+
+def test_alert_within_cooldown_suppressed():
+    assert notify.should_send_alert(1000.0, 1050.0, cooldown=120) is False
+
+def test_alert_at_cooldown_boundary_allowed():
+    assert notify.should_send_alert(1000.0, 1120.0, cooldown=120) is True
+
+def test_alert_after_cooldown_allowed():
+    assert notify.should_send_alert(1000.0, 2000.0, cooldown=120) is True

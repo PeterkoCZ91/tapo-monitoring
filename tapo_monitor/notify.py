@@ -43,6 +43,17 @@ def outage_alert_due(fail_since, now, already_alerted, threshold):
     return now - fail_since >= threshold
 
 
+def should_send_alert(last_alert_ts, now, cooldown):
+    """True when enough time has passed since the last detection alert.
+
+    Rate-limits bursts of detections on one camera: the first alert (no prior
+    timestamp) always passes; subsequent ones only after ``cooldown`` seconds.
+    """
+    if last_alert_ts is None:
+        return True
+    return now - last_alert_ts >= cooldown
+
+
 def send_text(token, chat_id, text):
     """Send a plain (HTML) Telegram message. Returns True on success."""
     try:

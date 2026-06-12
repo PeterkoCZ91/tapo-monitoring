@@ -21,8 +21,8 @@ import os
 import time as _time
 from dataclasses import dataclass, field
 
-from . import monitor, scheduling, snapshot, tracking, weather
-from .config import AppConfig, CameraConfig
+from . import monitor, notify, scheduling, snapshot, tracking, weather
+from .config import AppConfig, CameraConfig, resolve_camera_credentials
 
 
 @dataclass
@@ -125,8 +125,44 @@ def resolve_secrets(app: AppConfig) -> dict:
 
 @dataclass
 class MonitorState:
-    """Per-camera detection watermarks carried across ticks."""
+    """Per-camera state carried across ticks.
+
+    ``last_seen``      detection watermark (newest start_time alerted).
+    ``last_alert``     timestamp of the last detection alert sent (cooldown gate).
+    ``fail_since``     when the current connect outage began, or absent if up.
+    ``outage_alerted`` cameras for which a 🔴 outage alert has already fired.
+    """
     last_seen: dict = field(default_factory=dict)
+    last_alert: dict = field(default_factory=dict)
+    fail_since: dict = field(default_factory=dict)
+    outage_alerted: dict = field(default_factory=dict)
+
+
+def update_outage(state: "MonitorState", name, ok, now, threshold):
+    """Pure per-camera outage state transition.
+
+    Returns ("alert"|"recovered"|None, state) and mutates the outage bookkeeping in
+    ``state``. ``ok`` is True when the camera connected this tick. Emits "alert" once
+    when a continuous outage reaches ``threshold`` seconds, and "recovered" once when a
+    previously-alerted camera comes back.
+    """
+    if ok:
+        was_alerted = state.outage_alerted.get(name, False)
+        state.fail_since.pop(name, None)
+        state.outage_alerted.pop(name, None)
+        if was_alerted:
+            return "recovered", state
+        return None, state
+
+    fail_since = state.fail_since.get(name)
+    if fail_since is None:
+        state.fail_since[name] = now
+        fail_since = now
+    already = state.outage_alerted.get(name, False)
+    if notify.outage_alert_due(fail_since, now, already, threshold):
+        state.outage_alerted[name] = True
+        return "alert", state
+    return None, state
 
 
 def _default_snapshot(cfg: CameraConfig):
@@ -148,9 +184,13 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
     ``cam_clients`` maps camera name -> connected client (anything exposing ``getEvents()``);
     cameras without a client are skipped. Advances ``state.last_seen[name]`` per camera and
     returns the updated mapping. Collaborators (snapshot / time_str) are injectable.
+
+    A per-camera cooldown (``app.alerts.cooldown``) rate-limits detection alerts so a
+    burst of detections within the window produces at most one notification.
     """
     snapshot_for = snapshot_for or _default_snapshot
     time_str = time_str or _default_time_str
+    cooldown = app.alerts.cooldown
     for cfg in app.cameras:
         if "getevents" not in cfg.detection.sources:
             continue
@@ -158,6 +198,14 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
         if cam is None:
             continue
         last_seen = state.last_seen.get(cfg.name, 0)
+        name = cfg.name
+
+        def can_alert(_name=name):
+            return notify.should_send_alert(state.last_alert.get(_name), now, cooldown)
+
+        def on_alert(_name=name):
+            state.last_alert[_name] = now
+
         watermark = monitor.run_monitor(
             cam, cfg, last_seen,
             now=now,
@@ -166,6 +214,8 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             telegram_chat=secrets["telegram_chat"],
             snapshot=snapshot_for(cfg),
             time_str=time_str,
+            can_alert=can_alert,
+            on_alert=on_alert,
         )
         state.last_seen[cfg.name] = watermark
     return state.last_seen
@@ -186,12 +236,25 @@ def main(argv=None):  # pragma: no cover - thin entry point
         now = _time.time()
         cam_clients = {}
         try:
-            plans = run_once(app, now=now, connect=_connect_camera(cam_clients))
-            _ = plans
+            run_once(app, now=now, connect=_connect_camera(cam_clients))
+            _watchdog_pass(app, cam_clients, state, now=now, secrets=secrets)
             run_monitor_pass(app, cam_clients, state, now=now, secrets=secrets)
         except Exception as e:  # noqa: BLE001
             print(f"[tapo-monitor] tick error: {e}")
         _time.sleep(interval)
+
+
+def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets):
+    """Advance per-camera outage state and send 🔴/🟢 alerts once per transition."""
+    token = secrets["telegram_token"]
+    chat = secrets["telegram_chat"]
+    for cfg in app.cameras:
+        ok = cam_clients.get(cfg.name) is not None
+        event, _ = update_outage(state, cfg.name, ok, now, app.alerts.outage_threshold)
+        if event == "alert":
+            notify.send_text(token, chat, f"🔴 camera '{cfg.name}' unreachable")
+        elif event == "recovered":
+            notify.send_text(token, chat, f"🟢 camera '{cfg.name}' back online")
 
 
 def _connect_camera(cam_clients):  # pragma: no cover - thin I/O glue
@@ -199,7 +262,8 @@ def _connect_camera(cam_clients):  # pragma: no cover - thin I/O glue
     from . import camera
 
     def connect(cfg: CameraConfig):
-        factory = camera.tapo_factory(cfg.host, "admin", "")
+        user, password, cloud = resolve_camera_credentials(cfg)
+        factory = camera.tapo_factory(cfg.host, user, password, cloud)
         client, err = camera.connect(factory)
         if client is not None:
             cam_clients[cfg.name] = client

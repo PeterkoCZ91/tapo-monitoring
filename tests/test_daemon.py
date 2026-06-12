@@ -172,3 +172,100 @@ def test_run_monitor_pass_skips_cameras_without_client():
     daemon.run_monitor_pass(app, {}, state, now=1, secrets=secrets,
                             snapshot_for=_no_snapshot, time_str=lambda e: "t")
     assert state.last_seen == {}
+
+
+# ── update_outage (pure transitions) ─────────────────────────────────────────
+
+def test_outage_no_alert_before_threshold():
+    state = daemon.MonitorState()
+    ev, _ = daemon.update_outage(state, "a", ok=False, now=1000, threshold=900)
+    assert ev is None
+    ev, _ = daemon.update_outage(state, "a", ok=False, now=1500, threshold=900)
+    assert ev is None  # 500s < 900s
+
+
+def test_outage_one_alert_at_threshold():
+    state = daemon.MonitorState()
+    daemon.update_outage(state, "a", ok=False, now=1000, threshold=900)
+    ev, _ = daemon.update_outage(state, "a", ok=False, now=1900, threshold=900)
+    assert ev == "alert"
+
+
+def test_outage_no_duplicate_alerts():
+    state = daemon.MonitorState()
+    daemon.update_outage(state, "a", ok=False, now=1000, threshold=900)
+    daemon.update_outage(state, "a", ok=False, now=1900, threshold=900)  # alert
+    ev, _ = daemon.update_outage(state, "a", ok=False, now=3000, threshold=900)
+    assert ev is None  # already alerted
+
+
+def test_outage_recovery_after_alert():
+    state = daemon.MonitorState()
+    daemon.update_outage(state, "a", ok=False, now=1000, threshold=900)
+    daemon.update_outage(state, "a", ok=False, now=1900, threshold=900)  # alert
+    ev, _ = daemon.update_outage(state, "a", ok=True, now=2000, threshold=900)
+    assert ev == "recovered"
+    assert "a" not in state.fail_since
+    assert "a" not in state.outage_alerted
+
+
+def test_outage_recovery_without_prior_alert_is_silent():
+    state = daemon.MonitorState()
+    daemon.update_outage(state, "a", ok=False, now=1000, threshold=900)  # below threshold
+    ev, _ = daemon.update_outage(state, "a", ok=True, now=1100, threshold=900)
+    assert ev is None  # never alerted, so no 🟢 spam
+
+
+def test_outage_ok_camera_is_noop():
+    state = daemon.MonitorState()
+    ev, _ = daemon.update_outage(state, "a", ok=True, now=1000, threshold=900)
+    assert ev is None
+    assert state.fail_since == {}
+
+
+# ── detection cooldown wired into run_monitor_pass ────────────────────────────
+
+class _CountingNotify:
+    """Capture send_photo calls so we can assert the cooldown rate-limits bursts."""
+    def __init__(self):
+        self.photos = 0
+    def send_photo(self, *a, **k):
+        self.photos += 1
+        return True
+
+
+def test_run_monitor_pass_cooldown_rate_limits(monkeypatch):
+    from tapo_monitor import monitor as mon
+    counter = _CountingNotify()
+    monkeypatch.setattr(mon.notify, "send_photo", counter.send_photo)
+    monkeypatch.setattr(mon.notify, "is_empty_scene", lambda d: False)
+
+    app = cfg.load_config_from_dict({
+        "alerts": {"cooldown": 120},
+        "cameras": [{"name": "a", "host": "1.1.1.1", "enrich": {"groq": False}}],
+    })
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": ""}
+
+    def snap(cfg):  # always returns an image path
+        return lambda cam, event: "/tmp/x.jpg"
+
+    # first tick: a detection -> one alert
+    cam = _FakeEventCam([
+        [{"start_time": 100, "event_type": "personDetection"}],
+        [{"start_time": 200, "event_type": "personDetection"}],
+        [{"start_time": 5000, "event_type": "personDetection"}],
+    ])
+    daemon.run_monitor_pass(app, {"a": cam}, state, now=1000, secrets=secrets,
+                            snapshot_for=snap, time_str=lambda e: "t")
+    assert counter.photos == 1
+
+    # second tick within cooldown: detection present but suppressed
+    daemon.run_monitor_pass(app, {"a": cam}, state, now=1050, secrets=secrets,
+                            snapshot_for=snap, time_str=lambda e: "t")
+    assert counter.photos == 1
+
+    # third tick after cooldown: alert allowed again
+    daemon.run_monitor_pass(app, {"a": cam}, state, now=1200, secrets=secrets,
+                            snapshot_for=snap, time_str=lambda e: "t")
+    assert counter.photos == 2

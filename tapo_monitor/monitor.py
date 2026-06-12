@@ -41,12 +41,14 @@ _TYPE_EMOJI = {"person": "👤", "vehicle": "🚗", "pet": "🐾", "tamper": "�
 
 
 def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_chat,
-                snapshot, time_str):
+                snapshot, time_str, can_alert=None, on_alert=None):
     """Poll one camera once and alert on new detections. Returns the new watermark.
 
     Side-effecting collaborators are injected:
       snapshot(cam, event) -> image path or None
       time_str(event) -> caption time string
+      can_alert() -> bool gate (cooldown / rate-limit); default always True
+      on_alert() -> called once after an alert is actually sent (record timestamp)
     """
     try:
         events = cam.getEvents() or []
@@ -55,6 +57,8 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
 
     alertable, watermark = collect_detections(events, last_seen, cfg.detection.strict_people)
     for event, etype in alertable:
+        if can_alert is not None and not can_alert():
+            break
         image = snapshot(cam, event)
         if not image:
             continue
@@ -65,4 +69,6 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             _TYPE_EMOJI.get(etype, "👁"), time_str(event), description=description or None
         )
         notify.send_photo(telegram_token, telegram_chat, image, caption)
+        if on_alert is not None:
+            on_alert()
     return watermark

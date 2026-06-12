@@ -120,3 +120,83 @@ def test_shipped_example_config_is_valid():
     app = cfg.load_config(example)
     assert [c.name for c in app.cameras] == ["front", "yard"]
     assert app.telegram["token_env"] == "TELEGRAM_TOKEN"
+    # credential env references parsed from the example
+    assert app.cameras[0].user_env == "CAM_USER"
+    assert app.cameras[0].password_env == "CAM_PASSWORD"
+    # alerts block parsed
+    assert app.alerts.cooldown == 120
+    assert app.alerts.outage_threshold == 900
+
+
+# ── credential env fields ─────────────────────────────────────────────────────
+
+def test_config_without_credential_fields_validates():
+    app = cfg.load_config_from_dict(_minimal())
+    cam = app.cameras[0]
+    assert cam.user_env is None
+    assert cam.password_env is None
+    assert cam.cloud_password_env is None
+
+
+def test_config_with_credential_fields_validates():
+    data = {"cameras": [{
+        "name": "front", "host": "192.168.1.50",
+        "user_env": "CAM_USER", "password_env": "CAM_PASSWORD",
+        "cloud_password_env": "CAM_CLOUD",
+    }]}
+    cam = cfg.load_config_from_dict(data).cameras[0]
+    assert cam.user_env == "CAM_USER"
+    assert cam.password_env == "CAM_PASSWORD"
+    assert cam.cloud_password_env == "CAM_CLOUD"
+
+
+def test_alerts_defaults_when_absent():
+    app = cfg.load_config_from_dict(_minimal())
+    assert app.alerts.cooldown == 120
+    assert app.alerts.outage_threshold == 900
+
+
+def test_alerts_override():
+    data = {"alerts": {"cooldown": 30, "outage_threshold": 60},
+            "cameras": [{"name": "front", "host": "192.168.1.50"}]}
+    app = cfg.load_config_from_dict(data)
+    assert app.alerts.cooldown == 30
+    assert app.alerts.outage_threshold == 60
+
+
+# ── resolve_camera_credentials (monkeypatched env) ───────────────────────────
+
+def _cred_cam(**overrides):
+    base = {"name": "front", "host": "192.168.1.50"}
+    base.update(overrides)
+    return cfg.load_config_from_dict({"cameras": [base]}).cameras[0]
+
+
+def test_resolve_credentials_present(monkeypatch):
+    monkeypatch.setenv("CAM_USER", "admin")
+    monkeypatch.setenv("CAM_PASSWORD", "pw")
+    monkeypatch.setenv("CAM_CLOUD", "cloudpw")
+    cam = _cred_cam(user_env="CAM_USER", password_env="CAM_PASSWORD",
+                    cloud_password_env="CAM_CLOUD")
+    assert cfg.resolve_camera_credentials(cam) == ("admin", "pw", "cloudpw")
+
+
+def test_resolve_credentials_missing_is_empty(monkeypatch):
+    monkeypatch.delenv("NOPE_USER", raising=False)
+    monkeypatch.delenv("NOPE_PW", raising=False)
+    cam = _cred_cam(user_env="NOPE_USER", password_env="NOPE_PW")
+    assert cfg.resolve_camera_credentials(cam) == ("", "", "")
+
+
+def test_resolve_credentials_cloud_falls_back_to_password(monkeypatch):
+    monkeypatch.setenv("CAM_USER", "admin")
+    monkeypatch.setenv("CAM_PASSWORD", "pw")
+    monkeypatch.delenv("CAM_CLOUD", raising=False)
+    cam = _cred_cam(user_env="CAM_USER", password_env="CAM_PASSWORD",
+                    cloud_password_env="CAM_CLOUD")
+    assert cfg.resolve_camera_credentials(cam) == ("admin", "pw", "pw")
+
+
+def test_resolve_credentials_no_env_names(monkeypatch):
+    cam = _cred_cam()
+    assert cfg.resolve_camera_credentials(cam) == ("", "", "")

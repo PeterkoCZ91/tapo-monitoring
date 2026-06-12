@@ -20,11 +20,21 @@ telegram:
 groq:
   api_key_env: GROQ_API_KEY
 
+# Alert rate-limiting and the camera-down watchdog.
+alerts:
+  cooldown: 120            # min seconds between detection alerts per camera
+  outage_threshold: 900    # seconds a camera must be unreachable before a 🔴 alert
+
 cameras:
   - name: front              # unique label used in logs/alerts
     host: 192.168.1.50       # camera IP on your LAN
     role: tracking           # tracking | static
     schedule: astral         # astral | always_night | always_day
+
+    # Camera login. Values below are ENV VAR NAMES, not the secrets themselves.
+    user_env: CAM_USER             # env var holding the camera username
+    password_env: CAM_PASSWORD     # env var holding the camera password
+    # cloud_password_env: CAM_CLOUD_PASSWORD  # optional; defaults to the password
 
     detection:
       sources: [getevents]   # subset of: onvif, getevents, motion

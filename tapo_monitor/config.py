@@ -11,6 +11,7 @@ operator keeps outside the repository.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 ROLES = {"tracking", "static"}
@@ -73,6 +74,10 @@ class CameraConfig:
     host: str
     role: str = "tracking"
     schedule: str = "astral"
+    # Names of env vars holding the camera credentials (never the secrets themselves).
+    user_env: str | None = None
+    password_env: str | None = None
+    cloud_password_env: str | None = None
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
@@ -81,11 +86,33 @@ class CameraConfig:
 
 
 @dataclass
+class AlertsConfig:
+    cooldown: int = 120         # min seconds between detection alerts per camera
+    outage_threshold: int = 900  # seconds a camera must be unreachable before alerting
+
+
+@dataclass
 class AppConfig:
     location: Location = field(default_factory=Location)
     telegram: dict = field(default_factory=dict)
     groq: dict = field(default_factory=dict)
+    alerts: AlertsConfig = field(default_factory=AlertsConfig)
     cameras: list[CameraConfig] = field(default_factory=list)
+
+
+def resolve_camera_credentials(cfg: CameraConfig):
+    """Read (user, password, cloud_password) from the env vars named in ``cfg``.
+
+    Pure-ish (env read only). Missing/unset env vars resolve to "" so callers never
+    crash. ``cloud_password`` falls back to ``password`` when its env var is unset.
+    """
+    def env(name):
+        return os.environ.get(name, "") if name else ""
+
+    user = env(cfg.user_env)
+    password = env(cfg.password_env)
+    cloud = env(cfg.cloud_password_env) or password
+    return user, password, cloud
 
 
 def _require(mapping, key, where):
@@ -162,6 +189,9 @@ def _camera(data, index):
         host=host,
         role=role,
         schedule=schedule,
+        user_env=data.get("user_env"),
+        password_env=data.get("password_env"),
+        cloud_password_env=data.get("cloud_password_env"),
         detection=_detection(data.get("detection"), where),
         tracking=_tracking(data.get("tracking"), where),
         weather=_weather(data.get("weather"), where),
@@ -192,10 +222,17 @@ def load_config_from_dict(data) -> AppConfig:
     loc = data.get("location") or {}
     location = Location(lat=loc.get("lat"), lon=loc.get("lon"), tz=loc.get("tz"))
 
+    alerts_raw = data.get("alerts") or {}
+    alerts = AlertsConfig(
+        cooldown=int(alerts_raw.get("cooldown", 120)),
+        outage_threshold=int(alerts_raw.get("outage_threshold", 900)),
+    )
+
     return AppConfig(
         location=location,
         telegram=data.get("telegram") or {},
         groq=data.get("groq") or {},
+        alerts=alerts,
         cameras=cameras,
     )
 
