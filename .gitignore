@@ -1,0 +1,57 @@
+# Secrets / local deployment state
+tapo-camera.env
+*.env
+!.env.example
+!tapo-camera.env.example
+
+# Real deployment config (coordinates, hosts, camera layout) — never published.
+cameras.yaml
+cameras.*.yaml
+!cameras.example.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Research docs with real device IPs, credentials, and MAC addresses
+docs/tapo-firmware-api-research.md
+docs/tapo-research-tasks/
+
+# Discovery captures may contain device identifiers, MACs, private topology, or faces
+/discovery/
+*.jsonl
+*.raw.json
+
+# Temporary editor files
+*.swp
+*~
+
+# Common local probe outputs
+*tapo*api*probe*.json
+*tapo*onvif*events*.jsonl
+*tapo*onvif*triggered*.jsonl
+# Local assistant/tooling state and private archives
+.claude/
+private/
+docs/superpowers/
+*reinstall*.md
+*tunnel*.md
+docs/camera-discovery.md
+docs/production-readiness-review-*.md
+*.lock
+*.log
+*.har
+*.pcap
+*.pcapng
+# Captured media can contain private scenes/faces
+*.jpg
+*.jpeg
+*.png
+*.mp4
+*.mov
+# Generic probe/discovery JSON outputs
+*tapo_api_probe*.json
+*discovery*.json

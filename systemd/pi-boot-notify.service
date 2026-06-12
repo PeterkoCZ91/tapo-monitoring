@@ -1,0 +1,12 @@
+[Unit]
+Description=Telegram boot notification
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/user/bin/pi_notify.sh "🟢 <b>%H online</b>&#10;Pi se spustil."
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

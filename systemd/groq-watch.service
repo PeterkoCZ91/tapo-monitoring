@@ -1,0 +1,20 @@
+[Unit]
+Description=Tapo Groq Watch - denni motion monitor (06:00-22:00)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+OnFailure=pi-failure-notify@%n.service
+
+[Service]
+EnvironmentFile=/home/user/tapo/tapo-camera.env
+Type=simple
+User=user
+WorkingDirectory=/home/user/tapo
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/user/tapo-env/bin/python -u /home/user/tapo/groq_watch.py
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

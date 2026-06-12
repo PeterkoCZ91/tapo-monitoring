@@ -1,0 +1,61 @@
+# tapo-monitor example configuration.
+#
+# Copy to `cameras.yaml` (git-ignored) and fill in your own values. NOTHING here is
+# real — no coordinates, hosts or secrets ship in the repository. Secrets are read
+# from environment variables referenced by name (so the file itself stays safe to share).
+
+# Shared location for astral (sunset/sunrise) scheduling and weather lookups.
+# Leave empty to fall back to fixed HH:MM schedules and to disable weather gating.
+location:
+  lat:            # e.g. 50.08
+  lon:            # e.g. 14.43
+  tz:             # IANA name, e.g. "Europe/Prague"
+
+# User-facing notifications. Values are ENV VAR NAMES, not the secrets themselves.
+telegram:
+  token_env: TELEGRAM_TOKEN
+  chat_id_env: TELEGRAM_CHAT_ID
+
+# Optional AI scene descriptions via Groq vision.
+groq:
+  api_key_env: GROQ_API_KEY
+
+cameras:
+  - name: front              # unique label used in logs/alerts
+    host: 192.168.1.50       # camera IP on your LAN
+    role: tracking           # tracking | static
+    schedule: astral         # astral | always_night | always_day
+
+    detection:
+      sources: [getevents]   # subset of: onvif, getevents, motion
+      strict_people: true    # only alert on confirmed people (ignore generic motion)
+
+    tracking:
+      smarttrack: [people]   # subset of: people, vehicle, pet, baby
+      day_preset: "2"        # PTZ preset to park at during the day (static)
+      night_preset:          # optional preset for night
+
+    weather:
+      strategy: lower_sensitivity   # none | disable_tracking | lower_sensitivity
+      motion_normal: 60             # motion sensitivity (0-100) when dry
+      motion_rain: 20               # lowered sensitivity while raining
+      precip_threshold: 0.1         # mm; at/above this it counts as rain
+      clear_delay: 1800             # keep rain mode this many seconds after rain stops
+      poll_interval: 900            # how often (s) to query the weather API
+
+    enrich:
+      snapshot: rtsp         # rtsp (live frame) | sd (recorded clip frame)
+      groq: true             # send the frame to Groq for a short description
+
+    coordinator:
+      group:                 # cameras sharing a group hand off detections to each other
+      handoff_preset:        # preset this camera turns to when a group peer detects
+
+  - name: yard
+    host: 192.168.1.51
+    role: static
+    schedule: astral
+    detection:
+      sources: [getevents, motion]
+    weather:
+      strategy: none

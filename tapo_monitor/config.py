@@ -1,0 +1,209 @@
+"""Configuration model for tapo_monitor.
+
+A single ``cameras.yaml`` drives the whole stack: shared location/secrets plus a list
+of cameras, each opting into capabilities (detection sources, tracking, scheduling,
+weather gating, enrichment, coordination). Parsing is pure and fully validated so the
+daemon never starts with a malformed config.
+
+No personal data lives here — coordinates and secrets come from the config file the
+operator keeps outside the repository.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+ROLES = {"tracking", "static"}
+SCHEDULES = {"astral", "always_night", "always_day"}
+WEATHER_STRATEGIES = {"none", "disable_tracking", "lower_sensitivity"}
+DETECTION_SOURCES = {"onvif", "getevents", "motion"}
+SMARTTRACK_KINDS = {"people", "vehicle", "pet", "baby"}
+SNAPSHOT_SOURCES = {"rtsp", "sd"}
+
+
+class ConfigError(ValueError):
+    """Raised when a configuration is malformed."""
+
+
+@dataclass
+class Location:
+    lat: float | None = None
+    lon: float | None = None
+    tz: str | None = None
+
+
+@dataclass
+class WeatherConfig:
+    strategy: str = "none"
+    motion_normal: int = 60
+    motion_rain: int = 20
+    precip_threshold: float = 0.1
+    clear_delay: int = 1800
+    poll_interval: int = 900
+
+
+@dataclass
+class DetectionConfig:
+    sources: list[str] = field(default_factory=lambda: ["getevents"])
+    strict_people: bool = True
+
+
+@dataclass
+class TrackingConfig:
+    smarttrack: list[str] = field(default_factory=lambda: ["people"])
+    day_preset: str | None = "2"
+    night_preset: str | None = None
+
+
+@dataclass
+class EnrichConfig:
+    snapshot: str = "rtsp"
+    groq: bool = True
+
+
+@dataclass
+class CoordinatorConfig:
+    group: str | None = None
+    handoff_preset: str | None = None
+
+
+@dataclass
+class CameraConfig:
+    name: str
+    host: str
+    role: str = "tracking"
+    schedule: str = "astral"
+    detection: DetectionConfig = field(default_factory=DetectionConfig)
+    tracking: TrackingConfig = field(default_factory=TrackingConfig)
+    weather: WeatherConfig = field(default_factory=WeatherConfig)
+    enrich: EnrichConfig = field(default_factory=EnrichConfig)
+    coordinator: CoordinatorConfig = field(default_factory=CoordinatorConfig)
+
+
+@dataclass
+class AppConfig:
+    location: Location = field(default_factory=Location)
+    telegram: dict = field(default_factory=dict)
+    groq: dict = field(default_factory=dict)
+    cameras: list[CameraConfig] = field(default_factory=list)
+
+
+def _require(mapping, key, where):
+    if key not in mapping or mapping[key] in (None, ""):
+        raise ConfigError(f"{where}: missing required field '{key}'")
+    return mapping[key]
+
+
+def _check_enum(value, allowed, key, where):
+    if value not in allowed:
+        opts = ", ".join(sorted(allowed))
+        raise ConfigError(f"{where}: '{key}' must be one of [{opts}], got {value!r}")
+    return value
+
+
+def _check_subset(values, allowed, key, where):
+    if not isinstance(values, list):
+        raise ConfigError(f"{where}: '{key}' must be a list")
+    bad = [v for v in values if v not in allowed]
+    if bad:
+        opts = ", ".join(sorted(allowed))
+        raise ConfigError(f"{where}: '{key}' has invalid {bad}; allowed: [{opts}]")
+    return values
+
+
+def _weather(data, where):
+    d = data or {}
+    strategy = _check_enum(d.get("strategy", "none"), WEATHER_STRATEGIES, "weather.strategy", where)
+    return WeatherConfig(
+        strategy=strategy,
+        motion_normal=int(d.get("motion_normal", 60)),
+        motion_rain=int(d.get("motion_rain", 20)),
+        precip_threshold=float(d.get("precip_threshold", 0.1)),
+        clear_delay=int(d.get("clear_delay", 1800)),
+        poll_interval=int(d.get("poll_interval", 900)),
+    )
+
+
+def _detection(data, where):
+    d = data or {}
+    sources = d.get("sources", ["getevents"])
+    _check_subset(sources, DETECTION_SOURCES, "detection.sources", where)
+    return DetectionConfig(sources=list(sources), strict_people=bool(d.get("strict_people", True)))
+
+
+def _tracking(data, where):
+    d = data or {}
+    smarttrack = d.get("smarttrack", ["people"])
+    _check_subset(smarttrack, SMARTTRACK_KINDS, "tracking.smarttrack", where)
+    return TrackingConfig(
+        smarttrack=list(smarttrack),
+        day_preset=d.get("day_preset", "2"),
+        night_preset=d.get("night_preset"),
+    )
+
+
+def _enrich(data, where):
+    d = data or {}
+    snapshot = _check_enum(d.get("snapshot", "rtsp"), SNAPSHOT_SOURCES, "enrich.snapshot", where)
+    return EnrichConfig(snapshot=snapshot, groq=bool(d.get("groq", True)))
+
+
+def _camera(data, index):
+    if not isinstance(data, dict):
+        raise ConfigError(f"cameras[{index}]: must be a mapping")
+    name = _require(data, "name", f"cameras[{index}]")
+    where = f"camera {name!r}"
+    host = _require(data, "host", where)
+    role = _check_enum(data.get("role", "tracking"), ROLES, "role", where)
+    schedule = _check_enum(data.get("schedule", "astral"), SCHEDULES, "schedule", where)
+    coord = data.get("coordinator") or {}
+    return CameraConfig(
+        name=name,
+        host=host,
+        role=role,
+        schedule=schedule,
+        detection=_detection(data.get("detection"), where),
+        tracking=_tracking(data.get("tracking"), where),
+        weather=_weather(data.get("weather"), where),
+        enrich=_enrich(data.get("enrich"), where),
+        coordinator=CoordinatorConfig(
+            group=coord.get("group"),
+            handoff_preset=coord.get("handoff_preset"),
+        ),
+    )
+
+
+def load_config_from_dict(data) -> AppConfig:
+    """Validate a parsed config mapping and return an AppConfig. Pure (no I/O)."""
+    if not isinstance(data, dict):
+        raise ConfigError("config root must be a mapping")
+    raw_cameras = data.get("cameras")
+    if not raw_cameras or not isinstance(raw_cameras, list):
+        raise ConfigError("config must define a non-empty 'cameras' list")
+
+    cameras = [_camera(c, i) for i, c in enumerate(raw_cameras)]
+
+    seen = set()
+    for cam in cameras:
+        if cam.name in seen:
+            raise ConfigError(f"duplicate camera name {cam.name!r}")
+        seen.add(cam.name)
+
+    loc = data.get("location") or {}
+    location = Location(lat=loc.get("lat"), lon=loc.get("lon"), tz=loc.get("tz"))
+
+    return AppConfig(
+        location=location,
+        telegram=data.get("telegram") or {},
+        groq=data.get("groq") or {},
+        cameras=cameras,
+    )
+
+
+def load_config(path) -> AppConfig:
+    """Load and validate a YAML config file."""
+    import yaml
+
+    with open(path) as f:
+        data = yaml.safe_load(f)
+    return load_config_from_dict(data)

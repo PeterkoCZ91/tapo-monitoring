@@ -1,0 +1,16 @@
+[Unit]
+Description=tapo-monitor — config-driven Tapo camera monitoring
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust the user and the path to your (git-ignored) cameras.yaml.
+User=%i
+EnvironmentFile=-/etc/tapo-monitor/secrets.env
+ExecStart=tapo-monitor run /etc/tapo-monitor/cameras.yaml
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
