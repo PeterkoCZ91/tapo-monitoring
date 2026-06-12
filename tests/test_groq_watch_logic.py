@@ -1,5 +1,4 @@
 import os
-import sys
 
 os.environ.setdefault("TAPO_IP", "192.168.1.1")
 os.environ.setdefault("TAPO_EMAIL", "test@example.com")
@@ -9,7 +8,6 @@ os.environ.setdefault("TELEGRAM_CHAT_ID", "123456")
 os.environ.setdefault("GROQ_API_KEY", "gsk_testkey")
 
 import groq_watch
-
 
 # ---- _parse_hhmm ----
 

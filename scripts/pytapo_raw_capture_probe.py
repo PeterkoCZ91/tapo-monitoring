@@ -17,7 +17,6 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-
 SENSITIVE_KEY_PARTS = (
     "account",
     "auth",
@@ -64,7 +63,7 @@ def now_iso():
 def load_env_file(path):
     if not path:
         return
-    with open(path, "r", encoding="utf-8") as fh:
+    with open(path, encoding="utf-8") as fh:
         for raw_line in fh:
             line = raw_line.strip()
             if not line or line.startswith("#"):

@@ -5,7 +5,13 @@ getEvents() polling -> events_1 bit 19 (kamera AI osoba)
 -> SD karta continuous clip (vedio_type=1, prefer vedio_type=2) -> Groq popis -> Telegram
 """
 
-import os, time, json, base64, subprocess, asyncio, urllib.request
+import asyncio
+import base64
+import json
+import os
+import subprocess
+import time
+import urllib.request
 from datetime import datetime
 
 from night_window import is_night
@@ -349,7 +355,7 @@ def handle_person_event(event, cam):
         if LOG_FACE_IDS and face_ids:
             print(f"[{ts()}] face_ids: {face_ids}", flush=True)
         face_labels = [FACE_ID_NAMES.get(fid) for fid in face_ids]
-        known = [l for l in face_labels if l]
+        known = [lbl for lbl in face_labels if lbl]
         unknown_count = face_labels.count(None)
         if known and not unknown_count:
             face_line = f"\n👤 {', '.join(known)}"

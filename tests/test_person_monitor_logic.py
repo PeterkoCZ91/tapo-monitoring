@@ -1,5 +1,4 @@
 import os
-import sys
 
 # Nastavit env proměnné PŘED importem — modul je parsuje při importu
 os.environ.setdefault("TAPO_IP", "192.168.1.1")
@@ -10,7 +9,6 @@ os.environ.setdefault("TELEGRAM_CHAT_ID", "123456")
 os.environ.setdefault("GROQ_API_KEY", "gsk_testkey")
 
 import person_monitor
-
 
 # ---- outage_alert_due ----
 

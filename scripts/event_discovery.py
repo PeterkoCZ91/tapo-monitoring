@@ -12,9 +12,10 @@ import json
 import os
 import sys
 import time
-from types import MethodType
-from datetime import date, datetime, time as dt_time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as dt_time
 from pathlib import Path
+from types import MethodType
 
 try:
     from zeep.helpers import serialize_object
@@ -161,7 +162,7 @@ def extract_message_summary(msg):
 def load_env_file(path):
     if not path:
         return
-    with open(path, "r", encoding="utf-8") as fh:
+    with open(path, encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:

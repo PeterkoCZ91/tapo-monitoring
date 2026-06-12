@@ -5,7 +5,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tapo_monitor import detection
 
-
 # ── has_person_bit ───────────────────────────────────────────────────────────
 
 def test_person_bit_set():

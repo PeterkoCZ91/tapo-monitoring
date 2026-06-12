@@ -140,7 +140,7 @@ def _face_label(event_info, mapping):
     if not ids:
         return ""
     labels  = [mapping.get(i) for i in ids]
-    known   = [l for l in labels if l]
+    known   = [lbl for lbl in labels if lbl]
     unknown = labels.count(None)
     if known and not unknown:
         return "👤 " + ", ".join(known)

@@ -5,7 +5,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tapo_monitor import weather
 
-
 # ── parse_precip ─────────────────────────────────────────────────────────────
 
 def test_parse_precip_rain_above_threshold():

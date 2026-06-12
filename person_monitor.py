@@ -307,7 +307,6 @@ def _sharpness(path):
     """Laplacian variance — vyšší = ostřejší."""
     try:
         import cv2
-        import numpy as np
         img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
         if img is None:
             return 0.0

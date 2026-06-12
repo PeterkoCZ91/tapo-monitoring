@@ -13,8 +13,8 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 
-from night_window import is_night, describe_window
 import rain_window
+from night_window import describe_window, is_night
 
 CAMERA_IP = os.getenv("TAPO_IP", "")
 CAMERA_USER = os.getenv("TAPO_EMAIL", "")
@@ -57,7 +57,7 @@ def read_last_state(path=None):
     path = path or STATE_FILE
     try:
         if os.path.exists(path):
-            with open(path, "r") as f:
+            with open(path) as f:
                 return f.read().strip()
     except Exception:
         pass

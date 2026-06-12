@@ -5,7 +5,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tapo_monitor import enrich
 
-
 # ── has_person ───────────────────────────────────────────────────────────────
 
 def test_has_person_true():

@@ -1,5 +1,4 @@
 import os
-import sys
 
 os.environ.setdefault("TAPO_IP", "192.168.1.1")
 os.environ.setdefault("TAPO_EMAIL", "test@example.com")

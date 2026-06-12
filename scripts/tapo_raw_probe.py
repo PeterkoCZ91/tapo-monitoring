@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-import argparse, json, os, sys, time
+import argparse
+import json
+import os
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+
 SENSITIVE = ("account", "auth", "barcode", "dev_id", "face_id", "email", "hw_id", "latitude", "longitude", "mac", "oem_id", "pass", "password", "secret", "serial", "token")
 def is_sensitive_key(key):
     key = str(key).lower().replace("-", "_")
