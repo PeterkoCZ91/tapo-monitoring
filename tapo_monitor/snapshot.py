@@ -30,7 +30,7 @@ def ffmpeg_args(rtsp_url, out_path):
     ]
 
 
-def capture_rtsp(rtsp_url, out_dir="/tmp", timeout=8):  # pragma: no cover - thin subprocess I/O
+def capture_rtsp(rtsp_url, out_dir="/tmp", timeout=15):  # pragma: no cover - thin subprocess I/O
     """Grab one frame from an RTSP stream. Returns the image path or None."""
     out_path = os.path.join(out_dir, f"snap_{int(_time.time() * 1000)}.jpg")
     try:

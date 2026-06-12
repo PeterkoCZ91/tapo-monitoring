@@ -213,6 +213,11 @@ def test_rtsp_fields_default_when_absent():
     assert cam.rtsp_password_env is None
     assert cam.rtsp_port == 554
     assert cam.rtsp_stream == "stream1"
+    assert cam.rtsp_timeout == 15
+
+
+def test_rtsp_timeout_parsed():
+    assert _cred_cam(rtsp_timeout=25).rtsp_timeout == 25
 
 
 def test_rtsp_fields_parsed():

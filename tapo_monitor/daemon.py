@@ -182,7 +182,7 @@ def _default_snapshot(cfg: CameraConfig):
         url = snapshot.rtsp_url(
             cfg.host, user, password, stream=cfg.rtsp_stream, port=cfg.rtsp_port
         )
-        return snapshot.capture_rtsp(url)
+        return snapshot.capture_rtsp(url, timeout=cfg.rtsp_timeout)
     return snap
 
 

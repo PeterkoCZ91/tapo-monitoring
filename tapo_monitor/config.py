@@ -84,6 +84,7 @@ class CameraConfig:
     rtsp_password_env: str | None = None
     rtsp_port: int = 554
     rtsp_stream: str = "stream1"
+    rtsp_timeout: int = 15  # seconds; slow cameras/Pis need >8s for the first keyframe
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
@@ -206,6 +207,10 @@ def _camera(data, index):
         rtsp_port = int(data.get("rtsp_port", 554))
     except (TypeError, ValueError):
         raise ConfigError(f"{where}: 'rtsp_port' must be an integer") from None
+    try:
+        rtsp_timeout = int(data.get("rtsp_timeout", 15))
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}: 'rtsp_timeout' must be an integer") from None
     return CameraConfig(
         name=name,
         host=host,
@@ -218,6 +223,7 @@ def _camera(data, index):
         rtsp_password_env=data.get("rtsp_password_env"),
         rtsp_port=rtsp_port,
         rtsp_stream=data.get("rtsp_stream", "stream1"),
+        rtsp_timeout=rtsp_timeout,
         detection=_detection(data.get("detection"), where),
         tracking=_tracking(data.get("tracking"), where),
         weather=_weather(data.get("weather"), where),
