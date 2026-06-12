@@ -92,3 +92,83 @@ def test_run_once_applies_via_connect(monkeypatch):
                     is_night=lambda: True, is_raining=lambda *a, **k: False)
     assert cam.state is True             # auto-track asserted on (night)
     assert cam.sensitivity == 60         # sensitivity applied as int
+
+
+# ── resolve_secrets (monkeypatched env) ──────────────────────────────────────
+
+def test_resolve_secrets_reads_env(monkeypatch):
+    monkeypatch.setenv("TG_TOKEN", "tok123")
+    monkeypatch.setenv("TG_CHAT", "555")
+    monkeypatch.setenv("GROQ_KEY", "gk789")
+    app = cfg.load_config_from_dict({
+        "telegram": {"token_env": "TG_TOKEN", "chat_id_env": "TG_CHAT"},
+        "groq": {"api_key_env": "GROQ_KEY"},
+        "cameras": [{"name": "a", "host": "1.1.1.1"}],
+    })
+    secrets = daemon.resolve_secrets(app)
+    assert secrets == {"telegram_token": "tok123", "telegram_chat": "555", "groq_key": "gk789"}
+
+
+def test_resolve_secrets_missing_env_is_empty(monkeypatch):
+    monkeypatch.delenv("MISSING_TOKEN", raising=False)
+    app = cfg.load_config_from_dict({
+        "telegram": {"token_env": "MISSING_TOKEN", "chat_id_env": "MISSING_CHAT"},
+        "groq": {},
+        "cameras": [{"name": "a", "host": "1.1.1.1"}],
+    })
+    secrets = daemon.resolve_secrets(app)
+    assert secrets == {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
+
+
+# ── run_monitor_pass (injected deps, fake camera) ────────────────────────────
+
+class _FakeEventCam:
+    """A fake camera returning a scripted list of getEvents() batches across ticks."""
+    def __init__(self, batches):
+        self._batches = list(batches)
+    def getEvents(self):
+        return self._batches.pop(0) if self._batches else []
+
+
+def _no_snapshot(cfg):
+    # snapshot returning None short-circuits enrich/notify (no network/ffmpeg)
+    return lambda cam, event: None
+
+
+def test_run_monitor_pass_advances_watermark_across_ticks():
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "1.1.1.1"}]})
+    cam = _FakeEventCam([
+        [{"start_time": 100, "event_type": "personDetection"}],
+        [{"start_time": 250, "event_type": "personDetection"}],
+    ])
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
+
+    daemon.run_monitor_pass(app, {"a": cam}, state, now=1, secrets=secrets,
+                            snapshot_for=_no_snapshot, time_str=lambda e: "t")
+    assert state.last_seen["a"] == 100
+
+    daemon.run_monitor_pass(app, {"a": cam}, state, now=2, secrets=secrets,
+                            snapshot_for=_no_snapshot, time_str=lambda e: "t")
+    assert state.last_seen["a"] == 250  # advanced; old events not re-alerted
+
+
+def test_run_monitor_pass_skips_non_getevents_cameras():
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "a", "host": "1.1.1.1", "detection": {"sources": ["onvif"]}},
+    ]})
+    cam = _FakeEventCam([[{"start_time": 100, "event_type": "personDetection"}]])
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
+    daemon.run_monitor_pass(app, {"a": cam}, state, now=1, secrets=secrets,
+                            snapshot_for=_no_snapshot, time_str=lambda e: "t")
+    assert "a" not in state.last_seen
+
+
+def test_run_monitor_pass_skips_cameras_without_client():
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "1.1.1.1"}]})
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
+    daemon.run_monitor_pass(app, {}, state, now=1, secrets=secrets,
+                            snapshot_for=_no_snapshot, time_str=lambda e: "t")
+    assert state.last_seen == {}
