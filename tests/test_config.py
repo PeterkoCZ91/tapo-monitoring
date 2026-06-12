@@ -123,6 +123,9 @@ def test_shipped_example_config_is_valid():
     # credential env references parsed from the example
     assert app.cameras[0].user_env == "CAM_USER"
     assert app.cameras[0].password_env == "CAM_PASSWORD"
+    # RTSP credential env references parsed from the example
+    assert app.cameras[0].rtsp_user_env == "CAM_RTSP_USER"
+    assert app.cameras[0].rtsp_password_env == "CAM_RTSP_PASSWORD"
     # alerts block parsed
     assert app.alerts.cooldown == 120
     assert app.alerts.outage_threshold == 900
@@ -200,3 +203,57 @@ def test_resolve_credentials_cloud_falls_back_to_password(monkeypatch):
 def test_resolve_credentials_no_env_names(monkeypatch):
     cam = _cred_cam()
     assert cfg.resolve_camera_credentials(cam) == ("", "", "")
+
+
+# ── RTSP credential / stream fields ──────────────────────────────────────────
+
+def test_rtsp_fields_default_when_absent():
+    cam = _cred_cam()
+    assert cam.rtsp_user_env is None
+    assert cam.rtsp_password_env is None
+    assert cam.rtsp_port == 554
+    assert cam.rtsp_stream == "stream1"
+
+
+def test_rtsp_fields_parsed():
+    cam = _cred_cam(
+        rtsp_user_env="CAM_RTSP_USER",
+        rtsp_password_env="CAM_RTSP_PASSWORD",
+        rtsp_port=8554,
+        rtsp_stream="stream2",
+    )
+    assert cam.rtsp_user_env == "CAM_RTSP_USER"
+    assert cam.rtsp_password_env == "CAM_RTSP_PASSWORD"
+    assert cam.rtsp_port == 8554
+    assert cam.rtsp_stream == "stream2"
+
+
+def test_rtsp_port_as_string_is_coerced():
+    cam = _cred_cam(rtsp_port="8554")
+    assert cam.rtsp_port == 8554
+
+
+def test_invalid_rtsp_port_is_error():
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config_from_dict({"cameras": [
+            {"name": "x", "host": "1.1.1.1", "rtsp_port": "not-a-number"}
+        ]})
+
+
+def test_resolve_rtsp_credentials_present(monkeypatch):
+    monkeypatch.setenv("CAM_RTSP_USER", "rtspadmin")
+    monkeypatch.setenv("CAM_RTSP_PASSWORD", "rtsppw")
+    cam = _cred_cam(rtsp_user_env="CAM_RTSP_USER", rtsp_password_env="CAM_RTSP_PASSWORD")
+    assert cfg.resolve_rtsp_credentials(cam) == ("rtspadmin", "rtsppw")
+
+
+def test_resolve_rtsp_credentials_missing_is_empty(monkeypatch):
+    monkeypatch.delenv("NOPE_RTSP_USER", raising=False)
+    monkeypatch.delenv("NOPE_RTSP_PW", raising=False)
+    cam = _cred_cam(rtsp_user_env="NOPE_RTSP_USER", rtsp_password_env="NOPE_RTSP_PW")
+    assert cfg.resolve_rtsp_credentials(cam) == ("", "")
+
+
+def test_resolve_rtsp_credentials_no_env_names():
+    cam = _cred_cam()
+    assert cfg.resolve_rtsp_credentials(cam) == ("", "")

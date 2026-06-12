@@ -22,7 +22,12 @@ import time as _time
 from dataclasses import dataclass, field
 
 from . import monitor, notify, scheduling, snapshot, tracking, weather
-from .config import AppConfig, CameraConfig, resolve_camera_credentials
+from .config import (
+    AppConfig,
+    CameraConfig,
+    resolve_camera_credentials,
+    resolve_rtsp_credentials,
+)
 
 
 @dataclass
@@ -166,9 +171,17 @@ def update_outage(state: "MonitorState", name, ok, now, threshold):
 
 
 def _default_snapshot(cfg: CameraConfig):
-    """Build a snapshot(cam, event) callable for one camera (RTSP only for now)."""
-    def snap(cam, _event):
-        url = snapshot.rtsp_url(cam.host, getattr(cam, "user", ""), getattr(cam, "password", ""))
+    """Build a snapshot(cam, event) callable for one camera (RTSP only for now).
+
+    Credentials and stream/port come from the config (resolved from the environment),
+    NOT from the pytapo ``cam`` object, whose login is often a different account.
+    """
+    user, password = resolve_rtsp_credentials(cfg)
+
+    def snap(_cam, _event):
+        url = snapshot.rtsp_url(
+            cfg.host, user, password, stream=cfg.rtsp_stream, port=cfg.rtsp_port
+        )
         return snapshot.capture_rtsp(url)
     return snap
 

@@ -11,11 +11,11 @@ import time as _time
 import urllib.parse
 
 
-def rtsp_url(host, user, password, stream="stream1"):
+def rtsp_url(host, user, password, stream="stream1", port=554):
     """Build an RTSP URL with URL-encoded credentials. Pure."""
     u = urllib.parse.quote(user, safe="")
     p = urllib.parse.quote(password, safe="")
-    return f"rtsp://{u}:{p}@{host}:554/{stream}"
+    return f"rtsp://{u}:{p}@{host}:{port}/{stream}"
 
 
 def ffmpeg_args(rtsp_url, out_path):

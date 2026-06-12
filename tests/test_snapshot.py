@@ -23,6 +23,16 @@ def test_rtsp_url_custom_stream():
     assert url.endswith("/stream2")
 
 
+def test_rtsp_url_custom_port():
+    url = snapshot.rtsp_url("192.168.1.50", "admin", "secret", port=8554)
+    assert url == "rtsp://admin:secret@192.168.1.50:8554/stream1"
+
+
+def test_rtsp_url_custom_port_and_stream():
+    url = snapshot.rtsp_url("192.168.1.50", "admin", "secret", stream="stream2", port=10554)
+    assert url == "rtsp://admin:secret@192.168.1.50:10554/stream2"
+
+
 def test_ffmpeg_args_shape():
     args = snapshot.ffmpeg_args("rtsp://x", "/tmp/out.jpg")
     assert args[0] == "ffmpeg"

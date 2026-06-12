@@ -78,6 +78,12 @@ class CameraConfig:
     user_env: str | None = None
     password_env: str | None = None
     cloud_password_env: str | None = None
+    # RTSP/ONVIF credentials are often a separate account from the pytapo login, so
+    # they get their own env-var-name fields. Values below name env vars, not secrets.
+    rtsp_user_env: str | None = None
+    rtsp_password_env: str | None = None
+    rtsp_port: int = 554
+    rtsp_stream: str = "stream1"
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
@@ -113,6 +119,18 @@ def resolve_camera_credentials(cfg: CameraConfig):
     password = env(cfg.password_env)
     cloud = env(cfg.cloud_password_env) or password
     return user, password, cloud
+
+
+def resolve_rtsp_credentials(cfg: CameraConfig):
+    """Read (user, password) for RTSP from the env vars named in ``cfg``.
+
+    Pure-ish (env read only). Missing/unset env vars resolve to "" so callers never
+    crash. These are independent from the pytapo login credentials.
+    """
+    def env(name):
+        return os.environ.get(name, "") if name else ""
+
+    return env(cfg.rtsp_user_env), env(cfg.rtsp_password_env)
 
 
 def _require(mapping, key, where):
@@ -184,6 +202,10 @@ def _camera(data, index):
     role = _check_enum(data.get("role", "tracking"), ROLES, "role", where)
     schedule = _check_enum(data.get("schedule", "astral"), SCHEDULES, "schedule", where)
     coord = data.get("coordinator") or {}
+    try:
+        rtsp_port = int(data.get("rtsp_port", 554))
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}: 'rtsp_port' must be an integer") from None
     return CameraConfig(
         name=name,
         host=host,
@@ -192,6 +214,10 @@ def _camera(data, index):
         user_env=data.get("user_env"),
         password_env=data.get("password_env"),
         cloud_password_env=data.get("cloud_password_env"),
+        rtsp_user_env=data.get("rtsp_user_env"),
+        rtsp_password_env=data.get("rtsp_password_env"),
+        rtsp_port=rtsp_port,
+        rtsp_stream=data.get("rtsp_stream", "stream1"),
         detection=_detection(data.get("detection"), where),
         tracking=_tracking(data.get("tracking"), where),
         weather=_weather(data.get("weather"), where),

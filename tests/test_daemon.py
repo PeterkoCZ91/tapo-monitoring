@@ -269,3 +269,46 @@ def test_run_monitor_pass_cooldown_rate_limits(monkeypatch):
     daemon.run_monitor_pass(app, {"a": cam}, state, now=1200, secrets=secrets,
                             snapshot_for=snap, time_str=lambda e: "t")
     assert counter.photos == 2
+
+
+# ── _default_snapshot builds the URL from config, not the cam object ──────────
+
+def test_default_snapshot_uses_config_rtsp_credentials(monkeypatch):
+    monkeypatch.setenv("CAM_RTSP_USER", "rtspadmin")
+    monkeypatch.setenv("CAM_RTSP_PASSWORD", "rtsppw")
+    camcfg = _cam(
+        host="192.168.1.50",
+        rtsp_user_env="CAM_RTSP_USER",
+        rtsp_password_env="CAM_RTSP_PASSWORD",
+        rtsp_port=8554,
+        rtsp_stream="stream2",
+    )
+    captured = {}
+
+    def fake_capture(url):
+        captured["url"] = url
+        return "/tmp/snap.jpg"
+
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp", fake_capture)
+    snap = daemon._default_snapshot(camcfg)
+    # cam object has NO user/password/host attributes — must not be relied upon.
+    result = snap(object(), {"start_time": 1})
+    assert result == "/tmp/snap.jpg"
+    assert captured["url"] == "rtsp://rtspadmin:rtsppw@192.168.1.50:8554/stream2"
+
+
+def test_default_snapshot_empty_creds_when_env_missing(monkeypatch):
+    monkeypatch.delenv("MISSING_RTSP_USER", raising=False)
+    monkeypatch.delenv("MISSING_RTSP_PW", raising=False)
+    camcfg = _cam(
+        host="192.168.1.51",
+        rtsp_user_env="MISSING_RTSP_USER",
+        rtsp_password_env="MISSING_RTSP_PW",
+    )
+    captured = {}
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp",
+                        lambda url: captured.setdefault("url", url))
+    snap = daemon._default_snapshot(camcfg)
+    snap(object(), {"start_time": 1})
+    # defaults: port 554, stream1; empty credentials
+    assert captured["url"] == "rtsp://:@192.168.1.51:554/stream1"

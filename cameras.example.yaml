@@ -36,6 +36,13 @@ cameras:
     password_env: CAM_PASSWORD     # env var holding the camera password
     # cloud_password_env: CAM_CLOUD_PASSWORD  # optional; defaults to the password
 
+    # RTSP/ONVIF login for snapshot capture. Often a SEPARATE account from the
+    # pytapo login above. Values are ENV VAR NAMES, not the secrets themselves.
+    rtsp_user_env: CAM_RTSP_USER       # env var holding the RTSP username
+    rtsp_password_env: CAM_RTSP_PASSWORD  # env var holding the RTSP password
+    # rtsp_port: 554             # optional; RTSP port (default 554)
+    # rtsp_stream: stream1       # optional; stream1 (HD) | stream2 (SD)
+
     detection:
       sources: [getevents]   # subset of: onvif, getevents, motion
       strict_people: true    # only alert on confirmed people (ignore generic motion)
