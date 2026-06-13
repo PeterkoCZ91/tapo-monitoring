@@ -94,6 +94,21 @@ def test_run_once_applies_via_connect(monkeypatch):
     assert cam.sensitivity == 60         # sensitivity applied as int
 
 
+# ── backoff_seconds ──────────────────────────────────────────────────────────
+
+def test_backoff_doubles_from_base():
+    assert daemon.backoff_seconds(1) == 60
+    assert daemon.backoff_seconds(2) == 120
+    assert daemon.backoff_seconds(3) == 240
+
+def test_backoff_caps_at_30_min():
+    assert daemon.backoff_seconds(10) == 1800
+    assert daemon.backoff_seconds(100) == 1800
+
+def test_backoff_zero_before_first_failure():
+    assert daemon.backoff_seconds(0) == 0
+
+
 # ── resolve_secrets (monkeypatched env) ──────────────────────────────────────
 
 def test_resolve_secrets_reads_env(monkeypatch):

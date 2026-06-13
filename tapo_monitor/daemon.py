@@ -136,15 +136,31 @@ def resolve_secrets(app: AppConfig) -> dict:
 class MonitorState:
     """Per-camera state carried across ticks.
 
-    ``last_seen``      detection watermark (newest start_time alerted).
-    ``last_alert``     timestamp of the last detection alert sent (cooldown gate).
-    ``fail_since``     when the current connect outage began, or absent if up.
-    ``outage_alerted`` cameras for which a 🔴 outage alert has already fired.
+    ``last_seen``         detection watermark (newest start_time alerted).
+    ``last_alert``        timestamp of the last detection alert sent (cooldown gate).
+    ``fail_since``        when the current connect outage began, or absent if up.
+    ``outage_alerted``    cameras for which a 🔴 outage alert has already fired.
+    ``connect_fails``     consecutive connect failures per camera (drives backoff).
+    ``connect_backoff_until`` earliest time we may try connecting again per camera.
     """
     last_seen: dict = field(default_factory=dict)
     last_alert: dict = field(default_factory=dict)
     fail_since: dict = field(default_factory=dict)
     outage_alerted: dict = field(default_factory=dict)
+    connect_fails: dict = field(default_factory=dict)
+    connect_backoff_until: dict = field(default_factory=dict)
+
+
+def backoff_seconds(fails, base=60, cap=1800):
+    """Exponential connect backoff: base, 2·base, 4·base … capped at ``cap``.
+
+    Pure. ``fails`` is the count of *consecutive* failures (1 after the first).
+    The C560WS locks out a source IP for ~30 min after repeated failed logins, so
+    backing off (rather than retrying every 60 s tick) avoids deepening a lockout.
+    """
+    if fails < 1:
+        return 0
+    return min(base * (2 ** (fails - 1)), cap)
 
 
 def update_outage(state: "MonitorState", name, ok, now, threshold):
@@ -259,7 +275,7 @@ def main(argv=None):  # pragma: no cover - thin entry point
         now = _time.time()
         cam_clients = {}
         try:
-            run_once(app, now=now, connect=_connect_camera(cam_clients))
+            run_once(app, now=now, connect=_connect_camera(cam_clients, state, now))
             _watchdog_pass(app, cam_clients, state, now=now, secrets=secrets)
             run_monitor_pass(app, cam_clients, state, now=now, secrets=secrets)
         except Exception as e:  # noqa: BLE001
@@ -280,16 +296,37 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
             notify.send_text(token, chat, f"🟢 camera '{cfg.name}' back online")
 
 
-def _connect_camera(cam_clients):  # pragma: no cover - thin I/O glue
-    """Return a connect(cfg) that builds a pytapo client and caches it for the monitor pass."""
+def _connect_camera(cam_clients, state=None, now=None):  # pragma: no cover - thin I/O glue
+    """Return a connect(cfg) that builds a pytapo client and caches it for the monitor pass.
+
+    When ``state`` and ``now`` are supplied, failed connects accrue an exponential
+    backoff (:func:`backoff_seconds`) so a struggling/locked-out camera is not retried
+    every tick. A successful connect clears the backoff. The normal (succeeding) path is
+    unchanged: no failure, no backoff.
+    """
     from . import camera
 
     def connect(cfg: CameraConfig):
+        name = cfg.name
+        if state is not None and now is not None:
+            if now < state.connect_backoff_until.get(name, 0):
+                return None, "backoff"
         user, password, cloud = resolve_camera_credentials(cfg)
         factory = camera.tapo_factory(cfg.host, user, password, cloud)
         client, err = camera.connect(factory)
+        if state is not None:
+            if client is not None:
+                state.connect_fails.pop(name, None)
+                state.connect_backoff_until.pop(name, None)
+            else:
+                fails = state.connect_fails.get(name, 0) + 1
+                state.connect_fails[name] = fails
+                wait = backoff_seconds(fails)
+                if now is not None:
+                    state.connect_backoff_until[name] = now + wait
+                log.warning("connect %s failed (#%d): %s; backing off %ds", name, fails, err, wait)
         if client is not None:
-            cam_clients[cfg.name] = client
+            cam_clients[name] = client
         return client, err
 
     return connect
