@@ -103,6 +103,9 @@ class AppConfig:
     location: Location = field(default_factory=Location)
     telegram: dict = field(default_factory=dict)
     groq: dict = field(default_factory=dict)
+    # Optional face-id labelling. ``names_env`` names an env var holding
+    # "face_id:name,face_id:name"; absent it, recognized faces show as "unknown face".
+    faces: dict = field(default_factory=dict)
     alerts: AlertsConfig = field(default_factory=AlertsConfig)
     cameras: list[CameraConfig] = field(default_factory=list)
 
@@ -264,6 +267,7 @@ def load_config_from_dict(data) -> AppConfig:
         location=location,
         telegram=data.get("telegram") or {},
         groq=data.get("groq") or {},
+        faces=data.get("faces") or {},
         alerts=alerts,
         cameras=cameras,
     )

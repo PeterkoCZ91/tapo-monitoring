@@ -20,6 +20,11 @@ telegram:
 groq:
   api_key_env: GROQ_API_KEY
 
+# Optional face labelling. names_env names an env var holding
+# "face_id:name,face_id:name"; recognized-but-unlisted faces show as "unknown face".
+faces:
+  names_env: FACE_ID_NAMES
+
 # Alert rate-limiting and the camera-down watchdog.
 alerts:
   cooldown: 120            # min seconds between detection alerts per camera

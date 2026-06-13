@@ -17,11 +17,14 @@ per-camera watermark held in :class:`MonitorState` and fires the enrich/notify s
 :func:`resolve_secrets`.
 """
 
+import logging
 import os
 import time as _time
 from dataclasses import dataclass, field
 
-from . import monitor, notify, scheduling, snapshot, tracking, weather
+log = logging.getLogger(__name__)
+
+from . import enrich, monitor, notify, scheduling, snapshot, tracking, weather
 from .config import (
     AppConfig,
     CameraConfig,
@@ -115,7 +118,7 @@ def resolve_secrets(app: AppConfig) -> dict:
     """Read secret values from the env vars named in the config. Pure-ish (env read only).
 
     Missing or unset env vars resolve to an empty string so callers never crash.
-    Returns {telegram_token, telegram_chat, groq_key}.
+    Returns {telegram_token, telegram_chat, groq_key, face_names}.
     """
     def env(mapping, key):
         name = (mapping or {}).get(key)
@@ -125,6 +128,7 @@ def resolve_secrets(app: AppConfig) -> dict:
         "telegram_token": env(app.telegram, "token_env"),
         "telegram_chat": env(app.telegram, "chat_id_env"),
         "groq_key": env(app.groq, "api_key_env"),
+        "face_names": enrich.parse_face_names(env(app.faces, "names_env")),
     }
 
 
@@ -229,6 +233,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             time_str=time_str,
             can_alert=can_alert,
             on_alert=on_alert,
+            face_names=secrets.get("face_names"),
         )
         state.last_seen[cfg.name] = watermark
     return state.last_seen
@@ -239,12 +244,17 @@ def main(argv=None):  # pragma: no cover - thin entry point
 
     from .config import load_config
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    )
     path = (argv or sys.argv[1:] or ["cameras.yaml"])[0]
     app = load_config(path)
     interval = 60
     state = MonitorState()
     secrets = resolve_secrets(app)
-    print(f"[tapo-monitor] loaded {len(app.cameras)} camera(s); tick every {interval}s")
+    log.info("loaded %d camera(s); tick every %ds; face_names=%d known",
+             len(app.cameras), interval, len(secrets.get("face_names") or {}))
     while True:
         now = _time.time()
         cam_clients = {}
@@ -253,7 +263,7 @@ def main(argv=None):  # pragma: no cover - thin entry point
             _watchdog_pass(app, cam_clients, state, now=now, secrets=secrets)
             run_monitor_pass(app, cam_clients, state, now=now, secrets=secrets)
         except Exception as e:  # noqa: BLE001
-            print(f"[tapo-monitor] tick error: {e}")
+            log.exception("tick error: %s", e)
         _time.sleep(interval)
 
 

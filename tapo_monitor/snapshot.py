@@ -25,7 +25,9 @@ def ffmpeg_args(rtsp_url, out_path):
         "-rtsp_transport", "tcp",
         "-i", rtsp_url,
         "-frames:v", "1",
+        "-vf", "scale=1280:-1",
         "-q:v", "2",
+        "-update", "1",
         "-y", out_path,
     ]
 

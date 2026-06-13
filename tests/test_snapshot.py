@@ -42,3 +42,16 @@ def test_ffmpeg_args_shape():
     assert args[args.index("-i") + 1] == "rtsp://x"
     assert args[args.index("-frames:v") + 1] == "1"
     assert args[args.index("-q:v") + 1] == "2"
+
+
+def test_ffmpeg_args_scales_frame_down():
+    # Full 4K frames are slow to upload to Groq from a Pi and heavy for Telegram;
+    # scale to 1280 wide like the proven legacy pipeline.
+    args = snapshot.ffmpeg_args("rtsp://x", "/tmp/out.jpg")
+    assert args[args.index("-vf") + 1] == "scale=1280:-1"
+
+
+def test_ffmpeg_args_single_image_update():
+    # ffmpeg 7.x errors on a fixed single-image filename without -update 1.
+    args = snapshot.ffmpeg_args("rtsp://x", "/tmp/out.jpg")
+    assert args[args.index("-update") + 1] == "1"

@@ -5,21 +5,31 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
-- `night_window.py` — astral-based `is_night()` (sunset/sunrise window) with HH:MM fallback when env vars are missing or `astral` is not installed
-- `groq_watch.py` — daytime daemon that polls `pytapo.getEvents()`, downloads SD-card clip via `pytapo.Downloader`, runs Groq vision, and posts a Telegram alert; falls back to RTSP snapshot when the SD pipeline fails
-- `tapo.py` — CLI for ad-hoc inspection (`events`, `clip`, `recordings`, `status`, `face`)
-- `tests/` — pytest suite covering pure logic in `camera_automation.py` and `person_monitor.py`
-- `camera_automation.py` — `DAY_PRESET` / `NIGHT_PRESET` env override for day/night home positions
-- Face ID enrichment in alerts via `event_info[].face_id` mapped through `FACE_ID_NAMES`
-- Groq zoom validation — skip zoom photo when the camera auto-tracked off-target
-- `systemd/groq-watch.service` unit
-
-### Changed
-- `camera_automation.py` — day/night switching now uses `night_window.is_night()` (astral sunset−30 → sunrise+30, location via env) instead of hardcoded HH:MM
-- Telegram caption time now reflects the **event time** rather than the delivery time (groq_watch.py: from `event["start_time"]`; person_monitor.py: from `event["start_time"]` for the getEvents fallback, ONVIF path keeps `now` since it is near-realtime)
-- Pre-existing scripts and discovery tools (`person_monitor.py`, `camera_automation.py`, `scripts/*`) — moved from old "Added" section after sustained production deployment
+- `tapo_monitor` package and `tapo-monitor` CLI (`check` / `run`) — one config-driven
+  daemon replacing the original per-host scripts.
+- Config-driven `cameras.yaml` model (`config.py`): per-camera detection sources,
+  tracking, scheduling, weather strategy, enrichment and coordinator settings, with
+  secrets referenced by environment-variable name only.
+- Detection via the camera's on-device AI (`getEvents`): `detection.decode_events_1`
+  decodes the `events_1` bitmask into named signals (motion / PIR / person) and reports
+  still-unmapped firmware bits as `unknown_bits` rather than guessing their meaning.
+- Per-event audit logging: every camera event is logged with its decoded signal,
+  `alarm_type`, face count and the resulting verdict (person / drop), plus
+  snapshot / Groq / alert outcomes.
+- Face labelling: `event_info[].face_id` mapped to names via `faces.names_env`;
+  unrecognized but stable IDs render as "unknown face".
+- Groq vision scene descriptions on an RTSP snapshot; frames reported as an empty scene
+  are dropped instead of alerted.
+- Auto-tracking / SmartTrack applied in a firmware-safe order (auto-track asserted last,
+  which the C560WS requires) with a self-healing re-assert.
+- Weather gating (open-meteo, cached, hysteresis): lower motion sensitivity or pause
+  auto-tracking in the rain.
+- Astral day/night scheduling (coordinates from config) with an HH:MM fallback.
+- Camera-down watchdog (🔴/🟢 Telegram) and per-camera detection-alert cooldown.
 
 ### Fixed
-- `groq_watch.py` — `dl_start = max(clip startTime, raw_start)` to avoid duplicate frames from blind clip start
-- `groq_watch.py` — `Tapo(..., TAPO_PASSWORD)` as the 4th param fixes HTTP 401 on SD download (was passing email)
-- `camera_automation.py` — `write_state()` failure is now fatal instead of silent
+- Groq vision calls were rejected by Cloudflare (HTTP 403, error 1010) because the request
+  used the default `Python-urllib` User-Agent. Every call returned empty, so no scene was
+  ever described or filtered. Now sends a real client User-Agent.
+- RTSP snapshots are scaled to 1280 wide (lighter Groq upload and Telegram photo) and use
+  ffmpeg's `-update 1` so a single fixed-name image is accepted on ffmpeg 7.x.

@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tapo_monitor import monitor
+from tapo_monitor import detection, monitor
 
 
 def test_collect_detections_basic():
@@ -22,6 +22,13 @@ def test_collect_detections_face_is_person():
                "event_info": [{"face_id": 7}]}]
     alertable, _ = monitor.collect_detections(events, last_seen=0)
     assert alertable[0][1] == "person"
+
+
+def test_collect_detections_person_bit_without_type():
+    # The live failure: firmware sends event_type=None, person signal in events_1.
+    events = [{"start_time": 10, "events_1": detection.PERSON_BIT}]
+    alertable, _ = monitor.collect_detections(events, last_seen=0, strict_people=True)
+    assert [t for _e, t in alertable] == ["person"]
 
 
 def test_collect_detections_strict_drops_motion():

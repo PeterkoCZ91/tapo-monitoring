@@ -100,13 +100,16 @@ def test_resolve_secrets_reads_env(monkeypatch):
     monkeypatch.setenv("TG_TOKEN", "tok123")
     monkeypatch.setenv("TG_CHAT", "555")
     monkeypatch.setenv("GROQ_KEY", "gk789")
+    monkeypatch.setenv("FACES", "12:alice")
     app = cfg.load_config_from_dict({
         "telegram": {"token_env": "TG_TOKEN", "chat_id_env": "TG_CHAT"},
         "groq": {"api_key_env": "GROQ_KEY"},
+        "faces": {"names_env": "FACES"},
         "cameras": [{"name": "a", "host": "1.1.1.1"}],
     })
     secrets = daemon.resolve_secrets(app)
-    assert secrets == {"telegram_token": "tok123", "telegram_chat": "555", "groq_key": "gk789"}
+    assert secrets == {"telegram_token": "tok123", "telegram_chat": "555",
+                       "groq_key": "gk789", "face_names": {12: "alice"}}
 
 
 def test_resolve_secrets_missing_env_is_empty(monkeypatch):
@@ -117,7 +120,8 @@ def test_resolve_secrets_missing_env_is_empty(monkeypatch):
         "cameras": [{"name": "a", "host": "1.1.1.1"}],
     })
     secrets = daemon.resolve_secrets(app)
-    assert secrets == {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
+    assert secrets == {"telegram_token": "", "telegram_chat": "", "groq_key": "",
+                       "face_names": {}}
 
 
 # ── run_monitor_pass (injected deps, fake camera) ────────────────────────────

@@ -1,62 +1,62 @@
 # Contributing
 
-Thank you for your interest in contributing. This project is Python-based and runs on a Raspberry Pi with a Tapo IP camera.
+Thank you for your interest in contributing. This project is a Python package
+(`tapo_monitor`) that runs on a Raspberry Pi with a TP-Link Tapo PTZ camera.
 
 ## Setup
 
 ```bash
-git clone https://github.com/PeterkoCZ91/tapo-camera-monitor.git
-cd tapo-camera-monitor
+git clone https://github.com/PeterkoCZ91/tapo-monitoring.git
+cd tapo-monitoring
 
 python3 -m venv .venv
 source .venv/bin/activate
-pip install onvif-zeep pytapo opencv-python-headless
+pip install -e ".[dev]"          # package + dev tools (pytest, ruff)
 
-cp tapo-camera.env.example tapo-camera.env
-# Fill in your camera IP, credentials, Telegram token, Groq API key
+cp cameras.example.yaml cameras.yaml
+# Edit cameras.yaml: hosts, coordinates, capabilities. Secrets are referenced by
+# environment-variable NAME only — never inline tokens.
+export TELEGRAM_TOKEN=... TELEGRAM_CHAT_ID=... GROQ_API_KEY=...
 ```
 
-**Never commit `tapo-camera.env` or any `.env` file** — they are excluded by `.gitignore`.
+**Never commit `cameras.yaml` or any `.env` file** — they are excluded by `.gitignore`.
 
 ## Testing
 
-Use the `--test` flag to run the full pipeline without ONVIF (snapshot → Groq → Telegram):
-
 ```bash
-source tapo-camera.env
-python person_monitor.py --test
+tapo-monitor check cameras.yaml   # validate config + print a summary
+pytest -q                          # run the test suite
+ruff check .                       # lint
 ```
 
-Use the discovery scripts to inspect a camera's ONVIF events and pytapo API:
-
-```bash
-python scripts/event_discovery.py --env-file tapo-camera.env --duration 60
-python scripts/tapo_api_probe.py --env-file tapo-camera.env --call-safe-defaults
-```
+The pure logic (config parsing, scheduling, weather, tracking decisions, detection
+classification, notification gating) is unit-tested without hardware. I/O collaborators
+(camera, snapshot, Groq, Telegram) are injected so the pipeline is testable offline.
 
 ## Branch naming
 
 | Type | Prefix | Example |
 |---|---|---|
-| New feature | `feature/` | `feature/sound-detection` |
+| New feature | `feature/` | `feature/onvif-events` |
 | Bug fix | `fix/` | `fix/onvif-reconnect` |
 | Documentation | `docs/` | `docs/deployment-guide` |
 
 ## Code style
 
-- Python 3.10+, no external dependencies beyond what is already in the project
+- Python 3.10+
 - 4-space indentation, LF line endings
-- No credentials, tokens, or private IPs in code or comments
+- `ruff` clean (config in `pyproject.toml`)
+- No credentials, tokens, private IPs, coordinates or personal names in code, comments,
+  tests or docs
 
 ## What we accept
 
 - Bug fixes with a clear explanation of the root cause
-- New detection types or Telegram alert improvements
-- Improvements to the discovery / probe scripts
-- Documentation and deployment guide updates
+- New detection sources or Telegram alert improvements
+- Documentation and deployment-guide updates
 
 ## What we do not accept
 
-- Commits that include `.env` files or any credentials
+- Commits that include `cameras.yaml`, `.env` files or any credentials
 - Cloud dependencies or mandatory paid services
-- Changes that break the `--test` pipeline
+- Personal data (real coordinates, hostnames, face IDs, names) anywhere in the tree

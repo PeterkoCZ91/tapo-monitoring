@@ -12,7 +12,40 @@ motion — the usual setting for unattended night monitoring.
 # events_1 bit 19 — the camera's on-device AI confirmed a person.
 PERSON_BIT = 524288
 
+# Named events_1 bits confirmed on C560WS/C260 (docs/tapo-firmware-api-research.md §5).
+# Bits the firmware sets that we have NOT yet ground-truthed (3, 7, 8 — correlated with
+# alarm_type 4/8/9, likely vehicle/pet/line-crossing AI categories) are reported as
+# ``unknown_bits`` rather than guessed at, so logs can map them empirically.
+EVENTS_1_BITS = {
+    1: "motion",   # value 2   — basic motion (often a false positive on its own)
+    5: "pir",      # value 32  — hardware PIR sensor confirmed
+    19: "person",  # value 524288 — on-device AI confirmed a person
+}
+
 EVENT_TYPES = ("person", "pet", "vehicle", "tamper", "motion")
+
+
+def decode_events_1(events_1):
+    """Decode the getEvents ``events_1`` bitmask into named flags.
+
+    Returns a dict ``{"raw": int, "motion": bool, "pir": bool, "person": bool,
+    "unknown_bits": [bit, ...]}``. Bits without a known meaning are listed (not
+    discarded) so they can be mapped from logs. Invalid input decodes to all-False.
+    """
+    try:
+        raw = int(events_1)
+    except (TypeError, ValueError):
+        raw = 0
+    flags = {"raw": raw, "motion": False, "pir": False, "person": False, "unknown_bits": []}
+    for bit in range(raw.bit_length()):
+        if not raw & (1 << bit):
+            continue
+        name = EVENTS_1_BITS.get(bit)
+        if name:
+            flags[name] = True
+        else:
+            flags["unknown_bits"].append(bit)
+    return flags
 
 _PERSON_WORDS = ("person", "human", "people")
 _VEHICLE_WORDS = ("vehicle", "car")
@@ -56,11 +89,14 @@ def classify_onvif(topic, items, prop_op="", strict_people=True):
     return (False, "")
 
 
-def classify_getevent(event_type, has_face=False, strict_people=True):
+def classify_getevent(event_type, has_face=False, strict_people=True, events_1=None):
     """Classify a getEvents() entry. Returns an event type, or '' to skip.
 
     ``event_type`` is the raw type string; ``has_face`` flags a recognized face_id.
-    Under ``strict_people`` a bare ``motion`` classification is dropped (returns '').
+    ``events_1`` is the firmware bitmask: many C560WS events arrive with
+    ``event_type=None`` and the only signal is this mask, so we consult it after the
+    string heuristics — the AI-person bit always alerts, any other motion bit only
+    when not ``strict_people``. Under ``strict_people`` a bare ``motion`` is dropped.
     """
     if has_face:
         return "person"
@@ -73,4 +109,7 @@ def classify_getevent(event_type, has_face=False, strict_people=True):
         return "pet"
     if "tamper" in raw:
         return "tamper"
+    # Typeless firmware events: the bitmask is the only signal we have.
+    if has_person_bit(events_1):
+        return "person"
     return "" if strict_people else "motion"

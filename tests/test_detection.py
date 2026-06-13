@@ -20,6 +20,38 @@ def test_person_bit_garbage():
     assert detection.has_person_bit(None) is False
 
 
+# ── decode_events_1 ──────────────────────────────────────────────────────────
+
+def test_decode_person_plus_motion():
+    # 524290 = bit 1 (motion) + bit 19 (person) — the common real-person mask.
+    f = detection.decode_events_1(524290)
+    assert f["person"] is True and f["motion"] is True
+    assert f["pir"] is False and f["unknown_bits"] == []
+
+def test_decode_motion_only():
+    f = detection.decode_events_1(2)
+    assert f["motion"] is True and f["person"] is False and f["unknown_bits"] == []
+
+def test_decode_pir_and_motion():
+    f = detection.decode_events_1(34)  # 32 PIR + 2 motion
+    assert f["pir"] is True and f["motion"] is True and f["person"] is False
+
+def test_decode_reports_unknown_bits():
+    # 130 = bit 1 (motion) + bit 7 (unmapped AI category, alarm_type 8).
+    f = detection.decode_events_1(130)
+    assert f["motion"] is True and f["person"] is False
+    assert f["unknown_bits"] == [7]
+
+def test_decode_unknown_with_person():
+    # 524418 = bit 1 + bit 7 + bit 19: person still recognized, bit 7 surfaced.
+    f = detection.decode_events_1(524418)
+    assert f["person"] is True and f["unknown_bits"] == [7]
+
+def test_decode_garbage_is_all_false():
+    f = detection.decode_events_1(None)
+    assert f == {"raw": 0, "motion": False, "pir": False, "person": False, "unknown_bits": []}
+
+
 # ── classify_onvif ───────────────────────────────────────────────────────────
 
 def test_onvif_people_flag():
@@ -69,3 +101,21 @@ def test_getevent_motion_dropped_when_strict():
 
 def test_getevent_motion_kept_when_not_strict():
     assert detection.classify_getevent("motion", strict_people=False) == "motion"
+
+
+# ── classify_getevent via events_1 bitmask (firmware reports no event_type) ───
+
+def test_getevent_person_bit_is_person_even_when_typeless():
+    # Real C560WS firmware: event_type is None, the AI-person signal is the bit.
+    assert detection.classify_getevent(None, events_1=detection.PERSON_BIT) == "person"
+
+def test_getevent_person_bit_kept_under_strict():
+    assert detection.classify_getevent(
+        None, events_1=detection.PERSON_BIT, strict_people=True
+    ) == "person"
+
+def test_getevent_nonperson_motion_bit_dropped_when_strict():
+    assert detection.classify_getevent(None, events_1=2, strict_people=True) == ""
+
+def test_getevent_nonperson_motion_bit_kept_when_not_strict():
+    assert detection.classify_getevent(None, events_1=2, strict_people=False) == "motion"
