@@ -58,6 +58,27 @@ A systemd template is in [`systemd/tapo-monitor.service`](systemd/tapo-monitor.s
 Secrets are read from the environment variables named in `cameras.yaml` (e.g.
 `TELEGRAM_TOKEN`), so the config file itself stays safe to share.
 
+## Camera prerequisites & auth
+
+Tapo cameras gate their local API; expect these one-time steps:
+
+- **Enable third-party access.** Recent firmware refuses local logins unless
+  *Tapo Lab → Third-Party Compatibility* is turned on in the Tapo app (some models
+  instead require the camera to be blocked from the internet). Without it, every login
+  fails.
+- **Create a dedicated camera account.** In the Tapo app, *Advanced Settings → Camera
+  Account*, set a username/password. These are the credentials the package logs in with
+  (`user_env` / `password_env`) and the RTSP account (`rtsp_user_env` /
+  `rtsp_password_env`) — usually the same pair.
+- **Cloud password.** A few operations (notably SD-card clip download) need your TP-Link
+  *account* password, not the camera account — set `cloud_password_env` if you use them.
+- **Lockout.** Repeated failed logins lock out the source IP for ~30 minutes, and the
+  first login right after a reconnect often fails before a retry succeeds. The daemon
+  retries with exponential backoff so it never hammers a struggling camera — but double-
+  check credentials before restarting in a loop.
+- **RTSP.** Frames are pulled over RTSP (`stream1` HD, `stream2` SD) on port 554 by
+  default; override with `rtsp_stream` / `rtsp_port`.
+
 ## Layout
 
 ```text
