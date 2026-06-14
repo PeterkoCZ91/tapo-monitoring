@@ -96,8 +96,11 @@ def test_getevent_vehicle_skipped():
 def test_getevent_pet():
     assert detection.classify_getevent("petDetection") == "pet"
 
-def test_getevent_motion_dropped_when_strict():
-    assert detection.classify_getevent("motion", strict_people=True) == ""
+def test_getevent_motion_is_candidate_even_when_strict():
+    # Bare motion is no longer dropped here: it becomes a "motion" candidate that
+    # run_monitor funnels through Groq (the camera's AI misses real people as plain
+    # motion). The strict-vs-loose decision is the alert-time gate, not classification.
+    assert detection.classify_getevent("motion", strict_people=True) == "motion"
 
 def test_getevent_motion_kept_when_not_strict():
     assert detection.classify_getevent("motion", strict_people=False) == "motion"
@@ -114,8 +117,10 @@ def test_getevent_person_bit_kept_under_strict():
         None, events_1=detection.PERSON_BIT, strict_people=True
     ) == "person"
 
-def test_getevent_nonperson_motion_bit_dropped_when_strict():
-    assert detection.classify_getevent(None, events_1=2, strict_people=True) == ""
+def test_getevent_nonperson_motion_bit_is_candidate_when_strict():
+    # events_1=2 is bare motion (the 9:22 pass-by the AI failed to flag as a person):
+    # emit a "motion" candidate so Groq can confirm it, rather than blind-dropping.
+    assert detection.classify_getevent(None, events_1=2, strict_people=True) == "motion"
 
 def test_getevent_nonperson_motion_bit_kept_when_not_strict():
     assert detection.classify_getevent(None, events_1=2, strict_people=False) == "motion"

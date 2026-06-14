@@ -23,6 +23,27 @@ def test_has_person_none():
     assert enrich.has_person(None) is False
 
 
+# ── has_animal ───────────────────────────────────────────────────────────────
+
+def test_has_animal_cat():
+    assert enrich.has_animal("a cat crossing the driveway") is True
+
+def test_has_animal_dog():
+    assert enrich.has_animal("a dog sniffing by the gate") is True
+
+def test_has_animal_false_for_person():
+    assert enrich.has_animal("a man in a dark jacket walking left") is False
+
+def test_has_animal_false_for_vehicle():
+    assert enrich.has_animal("a white car parked by the fence") is False
+
+def test_has_animal_empty_scene():
+    assert enrich.has_animal("empty scene") is False
+
+def test_has_animal_none():
+    assert enrich.has_animal(None) is False
+
+
 # ── parse_face_names / face_label ────────────────────────────────────────────
 
 def test_parse_face_names_basic():

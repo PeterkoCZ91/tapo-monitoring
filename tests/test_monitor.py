@@ -31,10 +31,12 @@ def test_collect_detections_person_bit_without_type():
     assert [t for _e, t in alertable] == ["person"]
 
 
-def test_collect_detections_strict_drops_motion():
+def test_collect_detections_strict_funnels_motion():
+    # Under strict, bare motion is now a candidate (funnelled through Groq at alert
+    # time), not blind-dropped — recovers people the on-device AI misses as motion.
     events = [{"start_time": 10, "event_type": "motion"}]
     alertable, _ = monitor.collect_detections(events, last_seen=0, strict_people=True)
-    assert alertable == []
+    assert [t for _e, t in alertable] == ["motion"]
 
 
 def test_collect_detections_keeps_motion_when_not_strict():

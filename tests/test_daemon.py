@@ -290,6 +290,51 @@ def test_run_monitor_pass_cooldown_rate_limits(monkeypatch):
     assert counter.photos == 2
 
 
+# ── motion funnel: strict motion alerts only on Groq-confirmed person/animal ──
+
+def _motion_app():
+    return cfg.load_config_from_dict({
+        "cameras": [{"name": "a", "host": "1.1.1.1"}],  # strict_people defaults True
+    })
+
+
+def _run_motion_once(monkeypatch, groq_reply):
+    """Feed one bare-motion event, script Groq's reply, return photos sent."""
+    from tapo_monitor import monitor as mon
+    counter = _CountingNotify()
+    monkeypatch.setattr(mon.notify, "send_photo", counter.send_photo)
+    monkeypatch.setattr(mon.enrich, "groq_describe", lambda *a, **k: groq_reply)
+
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": "k"}
+    cam = _FakeEventCam([[{"start_time": 100, "events_1": 2}]])  # bare motion, no person bit
+
+    def snap(cfg):
+        return lambda cam, event: "/tmp/x.jpg"
+
+    daemon.run_monitor_pass(_motion_app(), {"a": cam}, state, now=1000, secrets=secrets,
+                            snapshot_for=snap, time_str=lambda e: "t")
+    return counter.photos
+
+
+def test_motion_alerts_when_groq_sees_person(monkeypatch):
+    assert _run_motion_once(monkeypatch, "a man in a dark coat walking left") == 1
+
+
+def test_motion_alerts_when_groq_sees_animal(monkeypatch):
+    assert _run_motion_once(monkeypatch, "a cat crossing the driveway") == 1
+
+
+def test_motion_dropped_when_groq_reports_empty(monkeypatch):
+    # A lone vehicle / empty frame -> Groq says "empty scene" -> no person/animal -> drop.
+    assert _run_motion_once(monkeypatch, "empty scene") == 0
+
+
+def test_motion_dropped_when_groq_describes_only_nonliving(monkeypatch):
+    # Positive gate: anything that isn't a person/animal is dropped, even if non-empty.
+    assert _run_motion_once(monkeypatch, "tree branches swaying in the wind") == 0
+
+
 # ── _default_snapshot builds the URL from config, not the cam object ──────────
 
 def test_default_snapshot_uses_config_rtsp_credentials(monkeypatch):

@@ -7,13 +7,15 @@ I/O-bound and stay with the daemon for now — only the selection logic is extra
 
 import base64
 import json
+import re
 import urllib.request
 
 VISION_PROMPT = (
-    "You are a night security camera. If you see a person (one or more): describe "
-    "clothing, behaviour and direction of movement in at most 15 words. If you see only "
-    "a vehicle with no person, or an empty frame: reply exactly 'empty scene'. "
-    "Description only, nothing else."
+    "You are a security camera. If you see a person: describe clothing, behaviour and "
+    "direction of movement in at most 15 words. If you see an animal (cat, dog, fox, "
+    "etc.) and no person: name the animal and what it does, at most 15 words. If the "
+    "frame shows only a vehicle with no person, or is empty: reply exactly 'empty "
+    "scene'. Description only, nothing else."
 )
 
 DEFAULT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
@@ -28,11 +30,25 @@ _PERSON_WORDS = (
     "boy", "girl", "pedestrian", "figure", "someone", "human",
 )
 
+_ANIMAL_WORDS = (
+    "animal", "cat", "cats", "dog", "dogs", "fox", "deer", "bird", "birds",
+    "rabbit", "hedgehog", "raccoon", "marten", "creature",
+)
+# Word-boundary match: short animal nouns like "cat"/"dog" are substrings of common
+# words ("located", "dogged"), so naive ``in`` would false-alert on a vehicle/empty
+# scene and defeat the funnel's positive gate.
+_ANIMAL_RE = re.compile(r"\b(" + "|".join(_ANIMAL_WORDS) + r")\b")
+
 
 def has_person(description):
     """True if an AI description mentions a person (English vocabulary)."""
     low = (description or "").lower()
     return any(w in low for w in _PERSON_WORDS)
+
+
+def has_animal(description):
+    """True if an AI description mentions an animal (English vocabulary)."""
+    return _ANIMAL_RE.search((description or "").lower()) is not None
 
 
 def parse_face_names(raw):

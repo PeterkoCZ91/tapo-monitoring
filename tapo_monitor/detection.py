@@ -95,8 +95,10 @@ def classify_getevent(event_type, has_face=False, strict_people=True, events_1=N
     ``event_type`` is the raw type string; ``has_face`` flags a recognized face_id.
     ``events_1`` is the firmware bitmask: many C560WS events arrive with
     ``event_type=None`` and the only signal is this mask, so we consult it after the
-    string heuristics — the AI-person bit always alerts, any other motion bit only
-    when not ``strict_people``. Under ``strict_people`` a bare ``motion`` is dropped.
+    string heuristics — the AI-person bit always classifies as ``person``. Bare motion
+    (no person bit) classifies as ``motion`` in both modes; whether that ends in an
+    alert is decided later by run_monitor's Groq gate (strict = confirmed person/animal
+    only). Vehicles are always dropped.
     """
     if has_face:
         return "person"
@@ -112,4 +114,8 @@ def classify_getevent(event_type, has_face=False, strict_people=True, events_1=N
     # Typeless firmware events: the bitmask is the only signal we have.
     if has_person_bit(events_1):
         return "person"
-    return "" if strict_people else "motion"
+    # Bare motion (the C560WS AI routinely misses a real person and fires only motion).
+    # We no longer blind-drop it under strict; it becomes a candidate that run_monitor
+    # funnels through Groq, which alerts only on a confirmed person/animal and drops a
+    # lone vehicle/empty frame. ``strict_people`` now governs that alert-time gate.
+    return "motion"

@@ -82,7 +82,14 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             log.warning("skip %s: snapshot failed", etype)
             continue
         description = enrich.groq_describe(groq_key, image) if cfg.enrich.groq else ""
-        if notify.is_empty_scene(description):
+        if etype == "motion" and cfg.detection.strict_people:
+            # Bare motion is an unconfirmed candidate (the camera AI didn't flag a
+            # person). Trust Groq, not the motion bit: alert only on a positively
+            # described person or animal; a lone vehicle/empty/non-living scene drops.
+            if not (enrich.has_person(description) or enrich.has_animal(description)):
+                log.info("drop motion: no person/animal in scene (desc=%r)", description)
+                continue
+        elif notify.is_empty_scene(description):
             log.info("drop %s: Groq reports empty scene", etype)
             continue
         label = enrich.face_label(_face_ids(event), face_names)
