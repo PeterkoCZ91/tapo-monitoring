@@ -233,11 +233,20 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
         last_seen = state.last_seen.get(cfg.name, 0)
         name = cfg.name
 
-        def can_alert(_name=name):
-            return notify.should_send_alert(state.last_alert.get(_name), now, cooldown)
+        def can_alert(etype, _name=name):
+            # Per-type cooldown so a motion alert never eats a real person. A confirmed
+            # detection (person/pet/tamper) is gated only by other confirmed alerts;
+            # bare motion is quieted by either a recent confirmed alert (same walk, no
+            # duplicate) or a recent motion alert.
+            confirmed_ts = state.last_alert.get((_name, "confirmed"))
+            if etype != "motion":
+                return notify.should_send_alert(confirmed_ts, now, cooldown)
+            motion_ts = state.last_alert.get((_name, "motion"))
+            recent = [t for t in (confirmed_ts, motion_ts) if t is not None]
+            return notify.should_send_alert(max(recent) if recent else None, now, cooldown)
 
-        def on_alert(_name=name):
-            state.last_alert[_name] = now
+        def on_alert(etype, _name=name):
+            state.last_alert[(_name, "motion" if etype == "motion" else "confirmed")] = now
 
         watermark = monitor.run_monitor(
             cam, cfg, last_seen,

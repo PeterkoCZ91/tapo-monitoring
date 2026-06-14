@@ -64,8 +64,8 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
     Side-effecting collaborators are injected:
       snapshot(cam, event) -> image path or None
       time_str(event) -> caption time string
-      can_alert() -> bool gate (cooldown / rate-limit); default always True
-      on_alert() -> called once after an alert is actually sent (record timestamp)
+      can_alert(etype) -> bool gate (per-type cooldown / rate-limit); default always True
+      on_alert(etype) -> called once after an alert is actually sent (record timestamp)
     """
     try:
         events = cam.getEvents() or []
@@ -74,7 +74,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
 
     alertable, watermark = collect_detections(events, last_seen, cfg.detection.strict_people)
     for event, etype in alertable:
-        if can_alert is not None and not can_alert():
+        if can_alert is not None and not can_alert(etype):
             log.info("skip %s: cooldown active", etype)
             break
         image = snapshot(cam, event)
@@ -103,5 +103,5 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         notify.send_photo(telegram_token, telegram_chat, image, caption)
         log.info("alert %s sent (faces=%r, desc=%r)", etype, label, description)
         if on_alert is not None:
-            on_alert()
+            on_alert(etype)
     return watermark

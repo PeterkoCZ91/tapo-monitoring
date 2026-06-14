@@ -370,6 +370,53 @@ def test_confirmed_person_sent_with_description(monkeypatch):
     assert _run_person_once(monkeypatch, "a man in a dark coat walking left") == 1
 
 
+# ── per-type cooldown: motion must not suppress a person; person quiets motion ─
+
+def _two_tick_pass(monkeypatch, first_event, second_event):
+    """Run two ticks 5s apart with the same camera; return number of photos sent."""
+    from tapo_monitor import monitor as mon
+    counter = _CountingNotify()
+    monkeypatch.setattr(mon.notify, "send_photo", counter.send_photo)
+    monkeypatch.setattr(mon.enrich, "groq_describe", lambda *a, **k: "a man walking")
+    app = cfg.load_config_from_dict({
+        "alerts": {"cooldown": 120},
+        "cameras": [{"name": "a", "host": "1.1.1.1"}],
+    })
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": "k"}
+    cam = _FakeEventCam([[first_event], [second_event]])
+
+    def snap(cfg):
+        return lambda c, e: "/tmp/x.jpg"
+
+    daemon.run_monitor_pass(app, {"a": cam}, state, now=1000, secrets=secrets,
+                            snapshot_for=snap, time_str=lambda e: "t")
+    daemon.run_monitor_pass(app, {"a": cam}, state, now=1005, secrets=secrets,
+                            snapshot_for=snap, time_str=lambda e: "t")
+    return counter.photos
+
+
+def test_motion_alert_does_not_suppress_following_person(monkeypatch):
+    # The live leak: a motion alert armed the shared cooldown and ate a real person
+    # seconds later. Person must alert regardless of a recent motion alert.
+    photos = _two_tick_pass(
+        monkeypatch,
+        {"start_time": 100, "events_1": 2},        # bare motion -> motion alert
+        {"start_time": 200, "events_1": 524288},   # confirmed person 5s later
+    )
+    assert photos == 2
+
+
+def test_person_alert_suppresses_following_motion(monkeypatch):
+    # No duplicate of the same walk: a person alert quiets motion within the cooldown.
+    photos = _two_tick_pass(
+        monkeypatch,
+        {"start_time": 100, "events_1": 524288},   # confirmed person -> alert
+        {"start_time": 200, "events_1": 2},         # motion 5s later (same person)
+    )
+    assert photos == 1
+
+
 # ── _default_snapshot builds the URL from config, not the cam object ──────────
 
 def test_default_snapshot_uses_config_rtsp_credentials(monkeypatch):
