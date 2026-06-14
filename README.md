@@ -9,6 +9,24 @@ scene with an AI vision model, and sends Telegram alerts — running happily on 
 > enrich → notify pipeline both run in the daemon loop today. See
 > [`docs/capabilities.md`](docs/capabilities.md) for the full capability catalog.
 
+## Where this fits
+
+This is a **lightweight alternative to a full NVR**, not a replacement for one. If you
+have a Tapo PTZ camera and a Raspberry Pi and you want smart person alerts in Telegram
+*without* standing up Frigate or a GPU/Coral box, this is for you. It:
+
+- **trusts the camera's own on-device AI** for detection — there is no local
+  object-detection model to run, so it fits on hardware as small as a Pi Zero 2 W;
+- uses a **cloud vision model (Groq) only as optional enrichment** — it captions a
+  camera-confirmed person and acts as a second opinion on bare motion, but never as the
+  gate that decides whether a confirmed person is real;
+- **bundles camera control** (auto-track, day/night scheduling, weather gating) *with* the
+  detection → alert pipeline in one small daemon, where most projects do only one of the two.
+
+It is deliberately **not** Frigate: no local inference, no zones, no recording/NVR, no
+fancy hardware. If you need those, run Frigate. If you want a few hundred lines of tested
+Python that turns a Tapo camera + a Pi into reliable Telegram person alerts, start here.
+
 ## What it does
 
 - **Day/night scheduling** from astral sunset/sunrise (coordinates from config), with a
@@ -78,6 +96,41 @@ Tapo cameras gate their local API; expect these one-time steps:
   check credentials before restarting in a loop.
 - **RTSP.** Frames are pulled over RTSP (`stream1` HD, `stream2` SD) on port 554 by
   default; override with `rtsp_stream` / `rtsp_port`.
+
+## The Tapo `events_1` bitmask
+
+The camera's `getEvents` API is how the on-device AI reports activity — but on the C560WS
+many events arrive with `event_type = None`, and the only usable signal is the integer
+`events_1` **bitmask**. This field is barely documented anywhere, so the values below were
+reverse-engineered from ~24 h of real captures across two C560WS cameras. `tapo_monitor`
+decodes it in [`detection.decode_events_1()`](tapo_monitor/detection.py) and logs every
+event's decoded flags (see *Audit logging*) so the still-unmapped bits can be ground-truthed
+from your own traffic.
+
+A single event can carry several bits at once — e.g. `events_1 = 524290` is bits 19 **and**
+1, i.e. an AI person who is also moving.
+
+**Confirmed bits**
+
+| bit | value | meaning | notes |
+|----:|------:|---------|-------|
+| 1   | 2        | motion          | basic/software motion; a frequent false positive on its own |
+| 5   | 32       | PIR sensor      | named by the firmware docs, but **never once observed firing** in our `getEvents` captures |
+| 19  | 524288   | AI person       | the on-device AI confirmed a person — this is what `strict_people` alerts on |
+
+**Observed but not yet ground-truthed** (reported as `unknown_bits` rather than guessed at):
+
+| bit | value | correlated `alarm_type` | suspected (unconfirmed) |
+|----:|------:|------------------------:|-------------------------|
+| 3   | 8     | 4 | another AI category |
+| 7   | 128   | 8 | **vehicle** — by far the most common non-person event |
+| 8   | 256   | 9 | pet / line-crossing? |
+
+`alarm_type` correlates with the bits above; in our data `alarm_type = 2` accompanies the
+motion/person class, while `4 / 8 / 9` line up with bits `3 / 7 / 8`. These mappings are
+empirical, not from a spec — treat the unconfirmed rows as hypotheses and verify against the
+audit log before relying on them. If your captures pin down bits 3/7/8, a PR updating this
+table is very welcome.
 
 ## Layout
 
