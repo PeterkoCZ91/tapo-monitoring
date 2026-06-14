@@ -339,6 +339,37 @@ def test_motion_alerts_on_clothing_without_person_noun(monkeypatch):
     ) == 1
 
 
+# ── camera-confirmed person: trust the camera, always send (Groq = caption only) ─
+
+def _run_person_once(monkeypatch, groq_reply):
+    """Feed one camera-confirmed person event (AI person bit), return photos sent."""
+    from tapo_monitor import monitor as mon
+    counter = _CountingNotify()
+    monkeypatch.setattr(mon.notify, "send_photo", counter.send_photo)
+    monkeypatch.setattr(mon.enrich, "groq_describe", lambda *a, **k: groq_reply)
+
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": "k"}
+    cam = _FakeEventCam([[{"start_time": 100, "events_1": 524288}]])  # PERSON_BIT
+
+    def snap(cfg):
+        return lambda cam, event: "/tmp/x.jpg"
+
+    daemon.run_monitor_pass(_motion_app(), {"a": cam}, state, now=1000, secrets=secrets,
+                            snapshot_for=snap, time_str=lambda e: "t")
+    return counter.photos
+
+
+def test_confirmed_person_sent_even_when_groq_empty(monkeypatch):
+    # The 08:49 miss: camera confirmed a person but the (stale) RTSP frame looked empty
+    # to Groq, so we dropped a real person. Trust the camera: send anyway.
+    assert _run_person_once(monkeypatch, "empty scene") == 1
+
+
+def test_confirmed_person_sent_with_description(monkeypatch):
+    assert _run_person_once(monkeypatch, "a man in a dark coat walking left") == 1
+
+
 # ── _default_snapshot builds the URL from config, not the cam object ──────────
 
 def test_default_snapshot_uses_config_rtsp_credentials(monkeypatch):

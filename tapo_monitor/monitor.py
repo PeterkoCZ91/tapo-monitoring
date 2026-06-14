@@ -82,14 +82,19 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             log.warning("skip %s: snapshot failed", etype)
             continue
         description = enrich.groq_describe(groq_key, image) if cfg.enrich.groq else ""
-        # Groq is the arbiter for both camera-confirmed people and bare-motion
-        # candidates: the prompt makes it reply exactly "empty scene" for anything that
-        # isn't a person/animal (vehicle, trees, empty), so a non-empty reply means a
-        # living subject — even when it describes only clothing ("grey hoodie walking")
-        # with no person noun. Word-matching the description here dropped real people.
-        if notify.is_empty_scene(description):
-            log.info("drop %s: Groq reports empty scene", etype)
-            continue
+        empty = notify.is_empty_scene(description)
+        if etype == "motion":
+            # Bare motion is an unconfirmed candidate: Groq is the arbiter. The prompt
+            # makes it reply exactly "empty scene" for anything that isn't a person or
+            # animal, so a non-empty reply means a living subject — even one described
+            # only by clothing ("grey hoodie walking") with no person noun.
+            if empty:
+                log.info("drop %s: Groq reports empty scene", etype)
+                continue
+        elif empty:
+            # Camera already confirmed a person (AI bit / face): trust it and send even
+            # if a stale snapshot looks empty to Groq — just drop the misleading caption.
+            description = ""
         label = enrich.face_label(_face_ids(event), face_names)
         caption = notify.build_caption(
             _TYPE_EMOJI.get(etype, "👁"), time_str(event),
