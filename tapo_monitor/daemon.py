@@ -22,8 +22,6 @@ import os
 import time as _time
 from dataclasses import dataclass, field
 
-log = logging.getLogger(__name__)
-
 from . import enrich, monitor, notify, scheduling, snapshot, tracking, weather
 from .config import (
     AppConfig,
@@ -31,6 +29,8 @@ from .config import (
     resolve_camera_credentials,
     resolve_rtsp_credentials,
 )
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
