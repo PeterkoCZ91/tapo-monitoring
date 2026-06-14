@@ -417,6 +417,46 @@ def test_person_alert_suppresses_following_motion(monkeypatch):
     assert photos == 1
 
 
+# ── snapshot retry: a slow Pi's transient RTSP failure must not lose a person ──
+
+def _run_with_snapshots(monkeypatch, snapshot_results):
+    """Run one person event; snapshot() yields snapshot_results in order. Returns
+    (photos_sent, snapshot_call_count)."""
+    from tapo_monitor import monitor as mon
+    counter = _CountingNotify()
+    monkeypatch.setattr(mon.notify, "send_photo", counter.send_photo)
+    monkeypatch.setattr(mon.enrich, "groq_describe", lambda *a, **k: "a man walking")
+    calls = {"n": 0}
+
+    def snap(cfg):
+        def _s(cam, event):
+            i = calls["n"]
+            calls["n"] += 1
+            return snapshot_results[i] if i < len(snapshot_results) else snapshot_results[-1]
+        return _s
+
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": "k"}
+    cam = _FakeEventCam([[{"start_time": 100, "events_1": 524288}]])  # confirmed person
+    daemon.run_monitor_pass(_motion_app(), {"a": cam}, state, now=1000, secrets=secrets,
+                            snapshot_for=snap, time_str=lambda e: "t")
+    return counter.photos, calls["n"]
+
+
+def test_snapshot_retried_once_then_succeeds(monkeypatch):
+    # First RTSP grab fails (None), retry succeeds -> person still reaches Telegram.
+    photos, attempts = _run_with_snapshots(monkeypatch, [None, "/tmp/x.jpg"])
+    assert photos == 1
+    assert attempts == 2  # failed once, retried once
+
+
+def test_snapshot_failure_after_retry_drops(monkeypatch):
+    # Both attempts fail -> drop (no infinite retry), exactly two attempts.
+    photos, attempts = _run_with_snapshots(monkeypatch, [None, None])
+    assert photos == 0
+    assert attempts == 2
+
+
 # ── _default_snapshot builds the URL from config, not the cam object ──────────
 
 def test_default_snapshot_uses_config_rtsp_credentials(monkeypatch):

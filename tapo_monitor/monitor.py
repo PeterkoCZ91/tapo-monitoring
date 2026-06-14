@@ -79,7 +79,11 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             break
         image = snapshot(cam, event)
         if not image:
-            log.warning("skip %s: snapshot failed", etype)
+            # RTSP capture on a slow Pi (e.g. Pi Zero) fails transiently — one retry
+            # catches most of those so a confirmed person isn't lost to a single hiccup.
+            image = snapshot(cam, event)
+        if not image:
+            log.warning("skip %s: snapshot failed (after retry)", etype)
             continue
         description = enrich.groq_describe(groq_key, image) if cfg.enrich.groq else ""
         empty = notify.is_empty_scene(description)
