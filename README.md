@@ -160,3 +160,10 @@ tests/                   # pytest suite
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md). Licensed under
 the terms in [`LICENSE`](LICENSE).
+
+## Questions & community
+
+Setup help, usage questions, or sharing what you've learned about your camera (especially
+new `events_1` / `alarm_type` findings) — head to
+[**Discussions**](https://github.com/PeterkoCZ91/tapo-monitoring/discussions). Bug reports
+and feature requests belong in [Issues](https://github.com/PeterkoCZ91/tapo-monitoring/issues).
