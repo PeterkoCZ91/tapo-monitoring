@@ -330,9 +330,13 @@ def test_motion_dropped_when_groq_reports_empty(monkeypatch):
     assert _run_motion_once(monkeypatch, "empty scene") == 0
 
 
-def test_motion_dropped_when_groq_describes_only_nonliving(monkeypatch):
-    # Positive gate: anything that isn't a person/animal is dropped, even if non-empty.
-    assert _run_motion_once(monkeypatch, "tree branches swaying in the wind") == 0
+def test_motion_alerts_on_clothing_without_person_noun(monkeypatch):
+    # Regression (the 11:18 miss): Groq often describes a person by clothing/behaviour
+    # without ever using a person noun. We must trust the prompt (non-empty = a person
+    # or animal) and alert, not require a magic word.
+    assert _run_motion_once(
+        monkeypatch, "grey hoodie, black pants, white shoes, walking away towards a white car"
+    ) == 1
 
 
 # ── _default_snapshot builds the URL from config, not the cam object ──────────
