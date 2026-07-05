@@ -16,8 +16,17 @@ EMPTY_MARKER = "empty"
 
 
 def is_empty_scene(description, marker=EMPTY_MARKER):
-    """True if the AI description marks an empty scene (nothing to alert on)."""
-    return marker in (description or "").lower()
+    """True if the AI description marks an empty scene, or is blank.
+
+    A blank/whitespace description means the vision model returned nothing (timeout or
+    failure), so we can't confirm a subject — treat it as empty rather than letting a
+    content-free alert through. Without this a Groq timeout sent a captionless blank: a
+    bare-motion event that should have dropped, or an SD follow-up frame with no subject.
+    """
+    text = (description or "").strip()
+    if not text:
+        return True
+    return marker in text.lower()
 
 
 def build_caption(emoji, time_str, description=None, detail=None, count=None,

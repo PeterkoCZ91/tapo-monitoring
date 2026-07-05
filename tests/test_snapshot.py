@@ -1,4 +1,5 @@
 import os
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -55,3 +56,55 @@ def test_ffmpeg_args_single_image_update():
     # ffmpeg 7.x errors on a fixed single-image filename without -update 1.
     args = snapshot.ffmpeg_args("rtsp://x", "/tmp/out.jpg")
     assert args[args.index("-update") + 1] == "1"
+
+
+def test_capture_rtsp_returns_path_on_success(tmp_path):
+    # A real grab writes a non-empty JPEG; we return its path and keep the file.
+    def fake_run(args, **kwargs):
+        out = args[-1]
+        with open(out, "wb") as f:
+            f.write(b"\xff\xd8jpegbytes")
+        return subprocess.CompletedProcess(args, 0)
+
+    path = snapshot.capture_rtsp("rtsp://x", out_dir=str(tmp_path), _run=fake_run)
+    assert path is not None
+    assert os.path.exists(path)
+
+
+def test_capture_rtsp_cleans_orphan_on_timeout(tmp_path):
+    # On a slow Pi Zero ffmpeg times out AFTER partially writing the file. The
+    # orphan must be removed (not leaked into /tmp) and None returned.
+    def fake_run(args, **kwargs):
+        out = args[-1]
+        with open(out, "wb") as f:
+            f.write(b"partial")  # ffmpeg got part-way before the kill
+        raise subprocess.TimeoutExpired(args, kwargs.get("timeout", 15))
+
+    path = snapshot.capture_rtsp("rtsp://x", out_dir=str(tmp_path), _run=fake_run)
+    assert path is None
+    assert os.listdir(tmp_path) == []  # no snap_*.jpg leaked
+
+
+def test_capture_rtsp_cleans_orphan_on_nonzero_exit(tmp_path):
+    def fake_run(args, **kwargs):
+        out = args[-1]
+        with open(out, "wb") as f:
+            f.write(b"partial")
+        raise subprocess.CalledProcessError(1, args)
+
+    path = snapshot.capture_rtsp("rtsp://x", out_dir=str(tmp_path), _run=fake_run)
+    assert path is None
+    assert os.listdir(tmp_path) == []
+
+
+def test_capture_rtsp_treats_empty_file_as_failure(tmp_path):
+    # ffmpeg can exit 0 yet leave a 0-byte file; that is not a usable frame and
+    # must not be returned (downstream would send a corrupt image) nor leaked.
+    def fake_run(args, **kwargs):
+        out = args[-1]
+        open(out, "wb").close()
+        return subprocess.CompletedProcess(args, 0)
+
+    path = snapshot.capture_rtsp("rtsp://x", out_dir=str(tmp_path), _run=fake_run)
+    assert path is None
+    assert os.listdir(tmp_path) == []

@@ -22,7 +22,7 @@ import os
 import time as _time
 from dataclasses import dataclass, field
 
-from . import enrich, monitor, notify, scheduling, snapshot, tracking, weather
+from . import enrich, monitor, notify, scheduling, sdclip, snapshot, tracking, weather
 from .config import (
     AppConfig,
     CameraConfig,
@@ -32,6 +32,21 @@ from .config import (
 
 log = logging.getLogger(__name__)
 
+# Drop a queued SD fetch once its event ages past the getEvents poll window; bounds the
+# queue if a camera stays offline so it can never grow without limit.
+PENDING_MAX_AGE = 600
+
+
+def _safe_unlink(path):
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        log.debug("failed to remove temp file %s", path, exc_info=True)
+
 
 @dataclass
 class CameraPlan:
@@ -40,12 +55,13 @@ class CameraPlan:
     motion_sensitivity: int
     smarttrack: tuple
     preset: str | None
+    person_sensitivity: int | None = None
 
 
 def plan_camera(cfg: CameraConfig, night: bool, rain_active: bool) -> CameraPlan:
     """Pure: decide the camera-control actions for one tick."""
     autotrack_on, rain_parked = tracking.decide_tracking(
-        cfg.role, night, rain_active, cfg.weather.strategy
+        cfg.role, night, rain_active, cfg.weather.strategy, cfg.weather.storm_park
     )
     sensitivity = tracking.decide_motion_sensitivity(
         rain_active, cfg.weather.motion_normal, cfg.weather.motion_rain, cfg.weather.strategy
@@ -60,6 +76,7 @@ def plan_camera(cfg: CameraConfig, night: bool, rain_active: bool) -> CameraPlan
         motion_sensitivity=sensitivity,
         smarttrack=tuple(cfg.tracking.smarttrack),
         preset=preset,
+        person_sensitivity=cfg.person_sensitivity,
     )
 
 
@@ -69,18 +86,43 @@ def apply_plan(cam, plan: CameraPlan):
     SmartTrack / motion sensitivity / preset first; auto-track asserted LAST and verified.
     Returns True if auto-track ended in the intended state.
     """
-    if plan.autotrack_on:
-        try:
-            tracking.apply_smarttrack(cam, plan.smarttrack)
-        except Exception:
-            pass
     try:
         cam.setMotionDetection(sensitivity=int(plan.motion_sensitivity))
+    except Exception:
+        pass
+    # Self-heal AI person detection (events_1 bit 19). It silently went 'off'
+    # after a daemon restart (2026-06-15), demoting people to bare motion that the
+    # funnel then dropped. Re-assert ON every tick. When a per-camera
+    # person_sensitivity is configured, re-assert it too (lower = fewer false
+    # AI-person detections on an empty yard); otherwise leave sensitivity untouched.
+    try:
+        if plan.person_sensitivity is not None:
+            cam.setPersonDetection(True, sensitivity=plan.person_sensitivity)
+        else:
+            cam.setPersonDetection(True)
+    except Exception:
+        pass
+    # Keep the camera following people, not cars: the C560WS auto-track swings after any
+    # AI-detected target, so vehicle detection is re-asserted OFF every tick (SmartTrack
+    # already excludes vehicles, but that alone doesn't stop the detector feeding track).
+    try:
+        cam.setVehicleDetection(False)
     except Exception:
         pass
     if plan.preset:
         try:
             cam.setPreset(plan.preset)
+        except Exception:
+            pass
+    # apply_smarttrack MUST be the LAST configuration call before ensure_autotrack.
+    # Live evidence (2026-06-23) showed one of the calls above resets smart_track_info
+    # to ALL-OFF; running SmartTrack first let those calls wipe the night people-only
+    # filter, so auto-track followed any motion (including cars). Nothing may run between
+    # apply_smarttrack and ensure_autotrack — setSmartTrackConfig clears the auto-track
+    # master switch, so ensure_autotrack (setAutoTrackTarget) has to stay truly last.
+    if plan.autotrack_on:
+        try:
+            tracking.apply_smarttrack(cam, plan.smarttrack)
         except Exception:
             pass
     return tracking.ensure_autotrack(cam, plan.autotrack_on)
@@ -99,7 +141,7 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
     plans = {}
     for cfg in app.cameras:
         rain_active = False
-        if cfg.weather.strategy != "none":
+        if cfg.weather.strategy != "none" or cfg.weather.storm_park:
             rain_active = is_raining(
                 now,
                 threshold=cfg.weather.precip_threshold,
@@ -149,6 +191,7 @@ class MonitorState:
     outage_alerted: dict = field(default_factory=dict)
     connect_fails: dict = field(default_factory=dict)
     connect_backoff_until: dict = field(default_factory=dict)
+    pending_sd: list = field(default_factory=list)
 
 
 def backoff_seconds(fails, base=60, cap=1800):
@@ -210,6 +253,27 @@ def _default_time_str(event):  # pragma: no cover - trivial formatting
     return _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(event.get("start_time", _time.time())))
 
 
+def alert_gate(state, name, cooldown, now):
+    """Build (can_alert, on_alert) for one camera at ``now``.
+
+    Per-type cooldown: a confirmed detection (person/pet/tamper) is gated only by other
+    confirmed alerts; bare motion is quieted by either a recent confirmed or motion alert.
+    So motion never eats a real person, but a person does suppress a same-walk motion.
+    """
+    def can_alert(etype):
+        confirmed_ts = state.last_alert.get((name, "confirmed"))
+        if etype != "motion":
+            return notify.should_send_alert(confirmed_ts, now, cooldown)
+        motion_ts = state.last_alert.get((name, "motion"))
+        recent = [t for t in (confirmed_ts, motion_ts) if t is not None]
+        return notify.should_send_alert(max(recent) if recent else None, now, cooldown)
+
+    def on_alert(etype):
+        state.last_alert[(name, "motion" if etype == "motion" else "confirmed")] = now
+
+    return can_alert, on_alert
+
+
 def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
                      snapshot_for=None, time_str=None):
     """Poll the detection pipeline once per camera that uses ``getevents``.
@@ -233,20 +297,17 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
         last_seen = state.last_seen.get(cfg.name, 0)
         name = cfg.name
 
-        def can_alert(etype, _name=name):
-            # Per-type cooldown so a motion alert never eats a real person. A confirmed
-            # detection (person/pet/tamper) is gated only by other confirmed alerts;
-            # bare motion is quieted by either a recent confirmed alert (same walk, no
-            # duplicate) or a recent motion alert.
-            confirmed_ts = state.last_alert.get((_name, "confirmed"))
-            if etype != "motion":
-                return notify.should_send_alert(confirmed_ts, now, cooldown)
-            motion_ts = state.last_alert.get((_name, "motion"))
-            recent = [t for t in (confirmed_ts, motion_ts) if t is not None]
-            return notify.should_send_alert(max(recent) if recent else None, now, cooldown)
+        can_alert, on_alert = alert_gate(state, name, cooldown, now)
 
-        def on_alert(etype, _name=name):
-            state.last_alert[(_name, "motion" if etype == "motion" else "confirmed")] = now
+        def defer(event, etype, live_sent, _name=name):
+            state.pending_sd.append({
+                "camera": _name,
+                "etype": etype,
+                "event": event,
+                "due_at": (event.get("start_time") or now) + sdclip.SD_FRESH_DELAY,
+                "live_sent": live_sent,
+            })
+        defer_fn = defer if cfg.sd_snapshot else None
 
         watermark = monitor.run_monitor(
             cam, cfg, last_seen,
@@ -259,9 +320,136 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             can_alert=can_alert,
             on_alert=on_alert,
             face_names=secrets.get("face_names"),
+            defer=defer_fn,
         )
         state.last_seen[cfg.name] = watermark
     return state.last_seen
+
+
+def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=None,
+                       time_str=None, fetch_frames=None):
+    """Send queued confirmed-person SD follow-ups whose segment is now downloadable.
+
+    Each entry waits SD_FRESH_DELAY past its event, then we pull candidate frames spanning
+    the event from SD (via a fresh subprocess) and let Groq pick the one showing the
+    subject — the camera fires on motion start, so the person is often only in view a few
+    seconds in. The follow-up is sent only when it's *better* than what already went out:
+
+      * a frame shows the subject -> send it (the accurate, in-frame photo);
+      * no frame shows the subject and a (stale, empty) live frame already went out
+        (``live_sent``) -> send nothing, to avoid a duplicate empty ping;
+      * no frame shows the subject but the live grab had failed -> trust the camera and
+        send the middle frame (or a live-RTSP grab if SD produced no frames at all).
+
+    There is no cooldown gate here: the follow-up belongs to an already-alerted event (and
+    the inline path emits at most one defer per cooldown window). Entries past
+    PENDING_MAX_AGE are dropped; entries for a camera not reachable this tick are kept.
+    """
+    snapshot_for = snapshot_for or _default_snapshot
+    time_str = time_str or _default_time_str
+    fetch_frames = fetch_frames or sdclip.fetch_sd_frames_subprocess
+    cfg_by_name = {c.name: c for c in app.cameras}
+    remaining = []
+    for entry in state.pending_sd:
+        cfg = cfg_by_name.get(entry["camera"])
+        event = entry["event"]
+        etype = entry["etype"]
+        start_time = event.get("start_time") or 0
+        if cfg is None:
+            log.warning("drop %s: SD follow-up for unknown camera %r", etype, entry["camera"])
+            continue
+        if now - start_time > PENDING_MAX_AGE:
+            # Past the getEvents poll window: usually a stale event re-queued after a
+            # daemon restart (its segment is long gone). Log it so the queue isn't a
+            # silent black hole — an unexplained missing [sd] alert traces back here.
+            log.info("drop %s: SD follow-up too old (age=%ds > %ds), no segment",
+                     etype, int(now - start_time), PENDING_MAX_AGE)
+            continue
+        if now < entry["due_at"]:
+            remaining.append(entry)               # segment not fresh yet -> keep
+            continue
+        cam = cam_clients.get(entry["camera"])
+        if cam is None:
+            remaining.append(entry)               # camera offline this tick -> keep
+            continue
+
+        # Pull SD frames in a fresh subprocess; pick the frame Groq sees a subject in.
+        frames = fetch_frames(cfg, start_time)
+        image, description, fallback_image = None, "", None
+        try:
+            for frame in frames:
+                desc = enrich.groq_describe(secrets["groq_key"], frame) if cfg.enrich.groq else ""
+                if not notify.is_empty_scene(desc):
+                    image, description = frame, desc          # subject found in this frame
+                    break
+            if image is None:
+                if entry.get("live_sent"):
+                    # The (empty) live frame already went out — don't send a duplicate empty.
+                    log.info("drop %s: SD found no subject, live already sent", etype)
+                    continue
+                if frames:
+                    image = frames[len(frames) // 2]          # no live; trust camera -> middle
+                    description = ""
+                else:
+                    snap = snapshot_for(cfg)                  # SD download failed -> live RTSP
+                    image = fallback_image = snap(cam, event) or snap(cam, event)
+            if not image:
+                log.warning("skip %s: snapshot failed (after retry)", etype)
+                continue                              # drop
+            label = enrich.face_label(monitor.face_ids(event), secrets.get("face_names"))
+            caption = notify.build_caption(
+                monitor.TYPE_EMOJI.get(etype, "👤"), time_str(event),
+                description=description or None, detail=label or None,
+            )
+            notify.send_photo(secrets["telegram_token"], secrets["telegram_chat"], image, caption)
+            log.info("alert %s sent (faces=%r, desc=%r) [sd]", etype, label, description)
+        finally:
+            for frame in frames:
+                _safe_unlink(frame)
+            _safe_unlink(fallback_image)
+    state.pending_sd = remaining
+    return state.pending_sd
+
+
+def control_due(last_control, now, interval):
+    """True if the camera-control pass is due. Pure.
+
+    ``last_control`` is the time the control pass last ran, or None if it never has
+    (first tick is always due). Once run, it's due again after ``interval`` seconds.
+    """
+    return last_control is None or (now - last_control) >= interval
+
+
+def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
+              last_control, control_interval,
+              run_control=None, watchdog=None, monitor=None, drain=None,
+              connect_factory=None):
+    """One loop iteration with control decoupled from event polling.
+
+    The slow, rarely-changing work (camera tracking/sensitivity/preset + the per-tick
+    reconnect) runs only when :func:`control_due`; the fast detection poll + SD-queue
+    drain run every tick on the *already-connected* clients. This shrinks the gap between
+    a person's passage and the live snapshot from one control interval (~60s, which almost
+    always snapped an empty scene) to one poll interval (~seconds), without re-logging in
+    each poll — repeated logins are what risk the C560WS lockout.
+
+    ``cam_clients`` is rebuilt by the control pass and reused (not cleared) on the fast
+    polls between control passes. Collaborators are injectable for testing. Returns the
+    (possibly advanced) ``last_control``.
+    """
+    run_control = run_control or run_once
+    watchdog = watchdog or _watchdog_pass
+    monitor = monitor or run_monitor_pass
+    drain = drain or process_pending_sd
+    connect_factory = connect_factory or _connect_camera
+    if control_due(last_control, now, control_interval):
+        cam_clients.clear()
+        run_control(app, now=now, connect=connect_factory(cam_clients, state, now))
+        watchdog(app, cam_clients, state, now=now, secrets=secrets)
+        last_control = now
+    monitor(app, cam_clients, state, now=now, secrets=secrets)
+    drain(app, cam_clients, state, now=now, secrets=secrets)
+    return last_control
 
 
 def main(argv=None):  # pragma: no cover - thin entry point
@@ -275,21 +463,24 @@ def main(argv=None):  # pragma: no cover - thin entry point
     )
     path = (argv or sys.argv[1:] or ["cameras.yaml"])[0]
     app = load_config(path)
-    interval = 60
+    poll_interval = app.loop.event_interval
+    control_interval = app.loop.control_interval
     state = MonitorState()
     secrets = resolve_secrets(app)
-    log.info("loaded %d camera(s); tick every %ds; face_names=%d known",
-             len(app.cameras), interval, len(secrets.get("face_names") or {}))
+    log.info("loaded %d camera(s); poll events every %ds, control every %ds; face_names=%d known",
+             len(app.cameras), poll_interval, control_interval, len(secrets.get("face_names") or {}))
+    cam_clients = {}
+    last_control = None
     while True:
         now = _time.time()
-        cam_clients = {}
         try:
-            run_once(app, now=now, connect=_connect_camera(cam_clients, state, now))
-            _watchdog_pass(app, cam_clients, state, now=now, secrets=secrets)
-            run_monitor_pass(app, cam_clients, state, now=now, secrets=secrets)
+            last_control = loop_step(
+                app, cam_clients, state, now=now, secrets=secrets,
+                last_control=last_control, control_interval=control_interval,
+            )
         except Exception as e:  # noqa: BLE001
             log.exception("tick error: %s", e)
-        _time.sleep(interval)
+        _time.sleep(poll_interval)
 
 
 def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets):

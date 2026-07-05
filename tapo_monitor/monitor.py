@@ -7,13 +7,25 @@ with their side-effecting pieces injected so the orchestration stays testable.
 """
 
 import logging
+import os
 
 from . import camera, detection, enrich, notify
 
 log = logging.getLogger(__name__)
 
 
-def _face_ids(event):
+def _safe_unlink(path):
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        log.debug("failed to remove temp file %s", path, exc_info=True)
+
+
+def face_ids(event):
     info = event.get("event_info")
     if not isinstance(info, list):
         return []
@@ -31,7 +43,7 @@ def collect_detections(events, last_seen, strict_people=True):
     fresh = camera.new_events(events, last_seen)
     alertable = []
     for ev in fresh:
-        faces = _face_ids(ev)
+        faces = face_ids(ev)
         flags = detection.decode_events_1(ev.get("events_1"))
         etype = detection.classify_getevent(
             ev.get("event_type") or ev.get("type"),
@@ -54,11 +66,12 @@ def collect_detections(events, last_seen, strict_people=True):
     return alertable, (camera.newest_start(fresh) or last_seen)
 
 
-_TYPE_EMOJI = {"person": "👤", "vehicle": "🚗", "pet": "🐾", "tamper": "⚠️", "motion": "👁"}
+TYPE_EMOJI = {"person": "👤", "vehicle": "🚗", "pet": "🐾", "tamper": "⚠️", "motion": "👁"}
 
 
 def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_chat,
-                snapshot, time_str, can_alert=None, on_alert=None, face_names=None):
+                snapshot, time_str, can_alert=None, on_alert=None, face_names=None,
+                defer=None):
     """Poll one camera once and alert on new detections. Returns the new watermark.
 
     Side-effecting collaborators are injected:
@@ -66,6 +79,10 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
       time_str(event) -> caption time string
       can_alert(etype) -> bool gate (per-type cooldown / rate-limit); default always True
       on_alert(etype) -> called once after an alert is actually sent (record timestamp)
+      defer(event, etype, live_sent) -> enqueue a confirmed (non-motion) detection for a
+        deferred SD-frame follow-up. ``live_sent`` says whether a live photo already went
+        out (True) or the live grab failed (False). Called in ADDITION to the live send,
+        only when the live frame was empty or failed; motion is never deferred.
     """
     try:
         events = cam.getEvents() or []
@@ -83,29 +100,51 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             # catches most of those so a confirmed person isn't lost to a single hiccup.
             image = snapshot(cam, event)
         if not image:
-            log.warning("skip %s: snapshot failed (after retry)", etype)
+            # Confirmed person but no live frame: queue an SD follow-up that MUST send
+            # (live_sent=False) so the person isn't lost. Motion just drops.
+            if defer is not None and etype != "motion":
+                log.warning("defer %s: live snapshot failed, SD follow-up queued", etype)
+                defer(event, etype, False)
+            else:
+                log.warning("skip %s: snapshot failed (after retry)", etype)
             continue
-        description = enrich.groq_describe(groq_key, image) if cfg.enrich.groq else ""
-        empty = notify.is_empty_scene(description)
-        if etype == "motion":
-            # Bare motion is an unconfirmed candidate: Groq is the arbiter. The prompt
-            # makes it reply exactly "empty scene" for anything that isn't a person or
-            # animal, so a non-empty reply means a living subject — even one described
-            # only by clothing ("grey hoodie walking") with no person noun.
-            if empty:
-                log.info("drop %s: Groq reports empty scene", etype)
+        try:
+            description = enrich.groq_describe(groq_key, image) if cfg.enrich.groq else ""
+            empty = notify.is_empty_scene(description)
+            if etype == "motion":
+                # Bare motion is an unconfirmed candidate: Groq is the arbiter. The prompt
+                # makes it reply exactly "empty scene" for anything that isn't a person or
+                # animal, so a non-empty reply means a living subject — even one described
+                # only by clothing ("grey hoodie walking") with no person noun.
+                if empty:
+                    log.info("drop %s: Groq reports empty scene", etype)
+                    continue
+            elif empty and defer is not None:
+                # Camera confirmed a person (AI bit / face) but the live frame is empty —
+                # a mistimed grab or a phantom fire. Don't ping an empty photo now: hand it
+                # to the SD follow-up (live_sent=False), which sends the real event-time
+                # frame if it finds the subject and an event-time fallback otherwise. This
+                # drops the duplicate empty-then-real ping the always-send rule produced.
+                # Still record the alert so the per-type cooldown sees this person.
+                log.info("defer %s: live empty, SD follow-up queued (no live send)", etype)
+                if on_alert is not None:
+                    on_alert(etype)
+                defer(event, etype, False)
                 continue
-        elif empty:
-            # Camera already confirmed a person (AI bit / face): trust it and send even
-            # if a stale snapshot looks empty to Groq — just drop the misleading caption.
-            description = ""
-        label = enrich.face_label(_face_ids(event), face_names)
-        caption = notify.build_caption(
-            _TYPE_EMOJI.get(etype, "👁"), time_str(event),
-            description=description or None, detail=label or None,
-        )
-        notify.send_photo(telegram_token, telegram_chat, image, caption)
-        log.info("alert %s sent (faces=%r, desc=%r)", etype, label, description)
-        if on_alert is not None:
-            on_alert(etype)
+            elif empty:
+                # No SD path (sd_snapshot off): keep the always-send safety net — a
+                # confirmed person still goes out on a stale/empty frame so we never miss
+                # one; just drop the misleading (empty) caption.
+                description = ""
+            label = enrich.face_label(face_ids(event), face_names)
+            caption = notify.build_caption(
+                TYPE_EMOJI.get(etype, "👁"), time_str(event),
+                description=description or None, detail=label or None,
+            )
+            notify.send_photo(telegram_token, telegram_chat, image, caption)
+            log.info("alert %s sent (faces=%r, desc=%r)", etype, label, description)
+            if on_alert is not None:
+                on_alert(etype)
+        finally:
+            _safe_unlink(image)
     return watermark

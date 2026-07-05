@@ -82,8 +82,15 @@ def pick_sharpest(scored):
 
 
 def groq_describe(api_key, image_path, prompt=VISION_PROMPT, model=DEFAULT_MODEL,
-                  max_tokens=60, timeout=10):
-    """Send an image to Groq vision and return the description text (or '')."""
+                  max_tokens=60, timeout=20):
+    """Send an image to Groq vision and return the description text (or '').
+
+    ``timeout`` is generous (20 s) because a slow Pi Zero spends real time base64-
+    encoding and uploading the JPEG; at 10 s the request timed out, returned '', and the
+    caller — for whom '' is not an "empty scene" — sent a blank/false alert instead of
+    dropping it. The fast path (Pi 4) still returns in ~1-2 s, so the higher ceiling only
+    rescues the slow uploads.
+    """
     try:
         with open(image_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode()

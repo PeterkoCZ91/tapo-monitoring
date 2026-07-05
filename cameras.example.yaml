@@ -30,11 +30,20 @@ alerts:
   cooldown: 120            # min seconds between detection alerts per camera
   outage_threshold: 900    # seconds a camera must be unreachable before a 🔴 alert
 
+# Loop cadence. Detections are polled fast (event_interval) on the already-connected
+# client so the live snapshot is taken while the subject is still in frame; camera
+# control + reconnect runs on the wider control_interval (frequent re-logins risk the
+# C560WS source-IP lockout).
+loop:
+  event_interval: 4        # seconds between getEvents detection polls
+  control_interval: 60     # seconds between tracking/sensitivity/preset + reconnect
+
 cameras:
   - name: front              # unique label used in logs/alerts
     host: 192.168.1.50       # camera IP on your LAN
     role: tracking           # tracking | static
     schedule: astral         # astral | always_night | always_day
+    # person_sensitivity: 40   # optional 0-100; lower = fewer false AI-person detections
 
     # Camera login. Values below are ENV VAR NAMES, not the secrets themselves.
     user_env: CAM_USER             # env var holding the camera username
@@ -64,6 +73,8 @@ cameras:
       precip_threshold: 0.1         # mm; at/above this it counts as rain
       clear_delay: 1800             # keep rain mode this many seconds after rain stops
       poll_interval: 900            # how often (s) to query the weather API
+      storm_park: false             # rain also parks the PTZ (stop swinging after
+                                    # raindrops/branches); composes with any strategy
 
     enrich:
       snapshot: rtsp         # rtsp (live frame) | sd (recorded clip frame)

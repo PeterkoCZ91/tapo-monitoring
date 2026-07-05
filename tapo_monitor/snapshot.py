@@ -32,17 +32,34 @@ def ffmpeg_args(rtsp_url, out_path):
     ]
 
 
-def capture_rtsp(rtsp_url, out_dir="/tmp", timeout=15):  # pragma: no cover - thin subprocess I/O
-    """Grab one frame from an RTSP stream. Returns the image path or None."""
+def _safe_unlink(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def capture_rtsp(rtsp_url, out_dir="/tmp", timeout=15, _run=subprocess.run):
+    """Grab one frame from an RTSP stream. Returns the image path or None.
+
+    On a slow camera (e.g. Pi Zero) ffmpeg can time out *after* partially writing
+    the output file. We treat anything but a non-empty result as a failure and
+    remove the orphan on every failure path, so repeated timeouts don't leak
+    ``snap_*.jpg`` into /tmp until it fills.
+    """
     out_path = os.path.join(out_dir, f"snap_{int(_time.time() * 1000)}.jpg")
     try:
-        subprocess.run(
+        _run(
             ffmpeg_args(rtsp_url, out_path),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=timeout,
             check=True,
         )
+        ok = os.path.exists(out_path) and os.path.getsize(out_path) > 0
     except Exception:
-        return None
-    return out_path if os.path.exists(out_path) else None
+        ok = False
+    if ok:
+        return out_path
+    _safe_unlink(out_path)
+    return None

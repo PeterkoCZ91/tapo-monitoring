@@ -22,17 +22,19 @@ SMARTTRACK_KEYS = {
 }
 
 
-def decide_tracking(role, night, rain_active, strategy):
+def decide_tracking(role, night, rain_active, strategy, storm_park=False):
     """Return (autotrack_on, rain_parked) for one camera tick.
 
     - static cameras never track;
     - tracking cameras track only at night;
-    - at night with the ``disable_tracking`` weather strategy, rain parks the camera
-      (tracking off) instead.
+    - rain parks the camera (tracking off) when either the ``disable_tracking`` weather
+      strategy is set or ``storm_park`` is on. ``storm_park`` is independent of the
+      sensitivity strategy, so a ``lower_sensitivity`` camera can both lower motion
+      sensitivity *and* stop swinging after raindrops/branches in the rain.
     """
     if role == "static" or not night:
         return (False, False)
-    if rain_active and strategy == "disable_tracking":
+    if rain_active and (strategy == "disable_tracking" or storm_park):
         return (False, True)
     return (True, False)
 

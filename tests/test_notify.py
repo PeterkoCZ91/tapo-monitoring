@@ -13,8 +13,12 @@ def test_empty_scene_detected():
 def test_empty_scene_with_real_description():
     assert notify.is_empty_scene("a person in a dark jacket walking left") is False
 
-def test_empty_scene_none():
-    assert notify.is_empty_scene(None) is False
+def test_empty_scene_none_or_blank_is_empty():
+    # No description = vision model returned nothing (timeout/failure); we can't confirm
+    # a subject, so treat it as empty rather than sending a content-free alert.
+    assert notify.is_empty_scene(None) is True
+    assert notify.is_empty_scene("") is True
+    assert notify.is_empty_scene("   ") is True
 
 
 # ── build_caption ────────────────────────────────────────────────────────────

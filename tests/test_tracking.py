@@ -23,6 +23,19 @@ def test_night_rain_lower_sensitivity_keeps_tracking():
     # lowering sensitivity does not stop tracking
     assert tracking.decide_tracking("tracking", night=True, rain_active=True, strategy="lower_sensitivity") == (True, False)
 
+def test_storm_park_parks_even_under_lower_sensitivity():
+    # storm_park parks the PTZ in the rain regardless of the sensitivity strategy, so a
+    # tracking camera stops swinging after raindrops/branches even while it still lowers
+    # motion sensitivity.
+    assert tracking.decide_tracking(
+        "tracking", night=True, rain_active=True, strategy="lower_sensitivity",
+        storm_park=True) == (False, True)
+
+def test_storm_park_no_effect_when_dry():
+    assert tracking.decide_tracking(
+        "tracking", night=True, rain_active=False, strategy="lower_sensitivity",
+        storm_park=True) == (True, False)
+
 
 # ── decide_motion_sensitivity ────────────────────────────────────────────────
 

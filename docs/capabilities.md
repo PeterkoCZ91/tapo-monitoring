@@ -28,7 +28,12 @@ but is intentionally **not implemented** — see "Actuators".
 
 ## 3. Enrichment & notification
 
-- **Snapshot** — best-of-N sharpest RTSP frame, or a frame pulled from the SD-card clip.
+- **Snapshot, live + SD hybrid** — a live RTSP grab first; because a bare grab often misses
+  the subject (the event fires on motion start, the person walks in seconds later), a
+  confirmed person can trigger an **SD-card follow-up** that downloads the recorded segment
+  around the event, extracts several candidate frames across it, and picks the one the
+  subject is actually in — so a missed live grab becomes an in-frame photo instead of a
+  blank ping.
 - **Face crop** — Haar cascade to extract a face zoom alongside the wide shot.
 - **AI description** — Groq vision model returns a short scene description.
 - **Face-ID naming** — map stable `face_id`s to names locally.
@@ -41,6 +46,10 @@ Rain makes auto-tracking cameras chase raindrops and IR reflections. Using open-
 
 - `lower_sensitivity` — drop motion sensitivity while it rains, keep tracking.
 - `disable_tracking` — turn auto-tracking off for the duration of the rain.
+- `storm_park` — an independent flag (composes with either strategy) that **parks the PTZ**
+  while it rains, so a `lower_sensitivity` camera can both lower sensitivity *and* stop
+  swinging after raindrops/branches. (Auto-tracking runs at night here, so this bites at
+  night in the rain; by day the tracking cameras are already static.)
 
 ## 5. Multi-camera
 
@@ -85,3 +94,11 @@ lacks:
 - **Sensitivity type gotcha** — `setMotionDetection(sensitivity="60")` (a numeric string)
   is remapped by pytapo to the `"high"` label (digital 80) — the opposite of intent. Pass
   an `int` to set the digital value exactly. Encapsulated so callers can't trip on it.
+- **Decoupled fast poll** — `getEvents` is polled every few seconds on the *already
+  connected* client while camera control runs on a slower tick, so detection latency stays
+  low without a per-tick re-login (which risks the lockout above). pytapo leaves this to you.
+- **Reliable SD media download** — pytapo's media stream silently fails inside a
+  long-running poller ("Cannot run the event loop while another loop is running"). This
+  project runs the download in a fresh subprocess with its own client, pre-warms
+  `getUserID()` before the download loop, and caps `window_size` at 50 (the C560WS stalls
+  at pytapo's default 200). See the *Hard-won gotchas* section of the README.

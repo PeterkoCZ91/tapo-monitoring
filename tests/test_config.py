@@ -56,6 +56,16 @@ def test_location_and_weather_parsed():
     assert app.location.lat == 50.0
     assert app.cameras[0].weather.strategy == "lower_sensitivity"
     assert app.cameras[0].weather.motion_rain == 10
+    assert app.cameras[0].weather.storm_park is False   # opt-in, off by default
+
+
+def test_storm_park_parsed():
+    data = {"cameras": [{
+        "name": "yard", "host": "10.0.0.3",
+        "weather": {"strategy": "lower_sensitivity", "storm_park": True},
+    }]}
+    app = cfg.load_config_from_dict(data)
+    assert app.cameras[0].weather.storm_park is True
 
 
 # ── validation errors ────────────────────────────────────────────────────────
@@ -151,6 +161,19 @@ def test_config_with_credential_fields_validates():
     assert cam.user_env == "CAM_USER"
     assert cam.password_env == "CAM_PASSWORD"
     assert cam.cloud_password_env == "CAM_CLOUD"
+
+
+def test_person_sensitivity_defaults_to_none():
+    cam = cfg.load_config_from_dict(_minimal()).cameras[0]
+    assert cam.person_sensitivity is None
+
+
+def test_person_sensitivity_round_trips():
+    data = {"cameras": [{
+        "name": "front", "host": "192.168.1.50", "person_sensitivity": 40,
+    }]}
+    cam = cfg.load_config_from_dict(data).cameras[0]
+    assert cam.person_sensitivity == 40
 
 
 def test_alerts_defaults_when_absent():
@@ -262,3 +285,31 @@ def test_resolve_rtsp_credentials_missing_is_empty(monkeypatch):
 def test_resolve_rtsp_credentials_no_env_names():
     cam = _cred_cam()
     assert cfg.resolve_rtsp_credentials(cam) == ("", "")
+
+
+# ── sd_snapshot flag ──────────────────────────────────────────────────────────
+
+def test_camera_sd_snapshot_defaults_false():
+    app = cfg.load_config_from_dict({"cameras": [{"name": "front", "host": "192.168.1.50"}]})
+    assert app.cameras[0].sd_snapshot is False
+
+
+def test_camera_sd_snapshot_parsed_true():
+    app = cfg.load_config_from_dict({
+        "cameras": [{"name": "front", "host": "192.168.1.50", "sd_snapshot": True}]})
+    assert app.cameras[0].sd_snapshot is True
+
+
+def test_loop_defaults():
+    app = cfg.load_config_from_dict({"cameras": [{"name": "x", "host": "1.1.1.1"}]})
+    assert app.loop.event_interval == 4
+    assert app.loop.control_interval == 60
+
+
+def test_loop_overrides():
+    app = cfg.load_config_from_dict({
+        "cameras": [{"name": "x", "host": "1.1.1.1"}],
+        "loop": {"event_interval": 3, "control_interval": 90},
+    })
+    assert app.loop.event_interval == 3
+    assert app.loop.control_interval == 90

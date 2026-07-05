@@ -98,3 +98,19 @@ def test_groq_describe_sends_browser_user_agent(monkeypatch, tmp_path):
     ua = captured["req"].get_header("User-agent")
     assert ua
     assert "python-urllib" not in ua.lower()
+
+
+def test_groq_describe_uses_generous_timeout(monkeypatch, tmp_path):
+    # A 10 s timeout was too tight on a slow Pi Zero (base64 upload), so Groq returned ''
+    # and the caller sent a blank/false alert. The ceiling must stay generous (>= 20 s).
+    img = tmp_path / "frame.jpg"
+    img.write_bytes(b"\xff\xd8\xff\xe0jpeg")
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["timeout"] = timeout
+        return _FakeResp(b'{"choices":[{"message":{"content":"x"}}]}')
+
+    monkeypatch.setattr(enrich.urllib.request, "urlopen", fake_urlopen)
+    enrich.groq_describe("key", str(img))
+    assert captured["timeout"] >= 20

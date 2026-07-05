@@ -41,6 +41,7 @@ class WeatherConfig:
     precip_threshold: float = 0.1
     clear_delay: int = 1800
     poll_interval: int = 900
+    storm_park: bool = False
 
 
 @dataclass
@@ -85,6 +86,10 @@ class CameraConfig:
     rtsp_port: int = 554
     rtsp_stream: str = "stream1"
     rtsp_timeout: int = 15  # seconds; slow cameras/Pis need >8s for the first keyframe
+    sd_snapshot: bool = False  # pull the event-time frame from SD instead of live RTSP
+    # Optional AI person-detection sensitivity (0-100) re-asserted every control tick.
+    # None leaves the camera's value unchanged; lower = fewer false AI-person detections.
+    person_sensitivity: int | None = None
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
@@ -99,6 +104,17 @@ class AlertsConfig:
 
 
 @dataclass
+class LoopConfig:
+    # How often to poll getEvents for new detections. Kept small (seconds) so the live
+    # snapshot is taken while the person is still in frame — the wide control interval
+    # used to mean the snapshot was a near-minute-stale empty scene.
+    event_interval: int = 4
+    # How often to reconnect and re-apply camera control (tracking/sensitivity/preset).
+    # Wide on purpose: these change slowly and frequent re-logins risk the C560WS lockout.
+    control_interval: int = 60
+
+
+@dataclass
 class AppConfig:
     location: Location = field(default_factory=Location)
     telegram: dict = field(default_factory=dict)
@@ -107,6 +123,7 @@ class AppConfig:
     # "face_id:name,face_id:name"; absent it, recognized faces show as "unknown face".
     faces: dict = field(default_factory=dict)
     alerts: AlertsConfig = field(default_factory=AlertsConfig)
+    loop: LoopConfig = field(default_factory=LoopConfig)
     cameras: list[CameraConfig] = field(default_factory=list)
 
 
@@ -170,6 +187,7 @@ def _weather(data, where):
         precip_threshold=float(d.get("precip_threshold", 0.1)),
         clear_delay=int(d.get("clear_delay", 1800)),
         poll_interval=int(d.get("poll_interval", 900)),
+        storm_park=bool(d.get("storm_park", False)),
     )
 
 
@@ -227,6 +245,8 @@ def _camera(data, index):
         rtsp_port=rtsp_port,
         rtsp_stream=data.get("rtsp_stream", "stream1"),
         rtsp_timeout=rtsp_timeout,
+        sd_snapshot=bool(data.get("sd_snapshot", False)),
+        person_sensitivity=int(data["person_sensitivity"]) if data.get("person_sensitivity") is not None else None,
         detection=_detection(data.get("detection"), where),
         tracking=_tracking(data.get("tracking"), where),
         weather=_weather(data.get("weather"), where),
@@ -263,12 +283,19 @@ def load_config_from_dict(data) -> AppConfig:
         outage_threshold=int(alerts_raw.get("outage_threshold", 900)),
     )
 
+    loop_raw = data.get("loop") or {}
+    loop = LoopConfig(
+        event_interval=int(loop_raw.get("event_interval", 4)),
+        control_interval=int(loop_raw.get("control_interval", 60)),
+    )
+
     return AppConfig(
         location=location,
         telegram=data.get("telegram") or {},
         groq=data.get("groq") or {},
         faces=data.get("faces") or {},
         alerts=alerts,
+        loop=loop,
         cameras=cameras,
     )
 

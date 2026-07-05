@@ -94,6 +94,191 @@ def test_run_once_applies_via_connect(monkeypatch):
     assert cam.sensitivity == 60         # sensitivity applied as int
 
 
+def test_apply_plan_self_heals_person_detection(monkeypatch):
+    # Regression 2026-06-15: the camera's AI person detection (events_1 bit 19)
+    # silently went 'off' after a daemon restart, so people arrived only as bare
+    # motion and got dropped. apply_plan must re-assert person detection ON each
+    # tick — the same self-heal the daemon already does for motion/auto-track.
+    from tapo_monitor import tracking
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+
+    class FakeCam:
+        def __init__(self):
+            self.person = None
+        def executeFunction(self, *a, **k):
+            pass
+        def setMotionDetection(self, sensitivity=False):
+            pass
+        def setPersonDetection(self, enabled, sensitivity=False):
+            self.person = enabled
+        def setAutoTrackTarget(self, enabled):
+            pass
+        def getAutoTrackTarget(self):
+            return {"enabled": "off"}
+
+    cam = FakeCam()
+    plan = daemon.plan_camera(_cam(), night=False, rain_active=False)
+    daemon.apply_plan(cam, plan)
+    assert cam.person is True
+
+
+def test_apply_plan_sets_person_sensitivity_when_configured(monkeypatch):
+    # The camera's AI person detector (events_1 bit 19) can false-fire "person" on an
+    # empty yard. Lowering its sensitivity at the source quiets those empty alerts.
+    # When a per-camera person_sensitivity is configured, apply_plan must pass it to
+    # setPersonDetection so it is re-asserted (self-healing) every control tick.
+    from tapo_monitor import tracking
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+
+    class FakeCam:
+        def __init__(self):
+            self.person = None
+            self.person_sensitivity = "unset"
+        def executeFunction(self, *a, **k):
+            pass
+        def setMotionDetection(self, sensitivity=False):
+            pass
+        def setPersonDetection(self, enabled, sensitivity=False):
+            self.person = enabled
+            self.person_sensitivity = sensitivity
+        def setVehicleDetection(self, enabled, sensitivity=False):
+            pass
+        def setAutoTrackTarget(self, enabled):
+            pass
+        def getAutoTrackTarget(self):
+            return {"enabled": "off"}
+
+    cam = FakeCam()
+    plan = daemon.plan_camera(_cam(person_sensitivity=40), night=False, rain_active=False)
+    daemon.apply_plan(cam, plan)
+    assert cam.person is True
+    assert cam.person_sensitivity == 40
+
+
+def test_apply_plan_person_sensitivity_default_unchanged(monkeypatch):
+    # With no person_sensitivity configured, apply_plan must NOT pass a sensitivity,
+    # leaving the camera's value untouched (pytapo default sentinel False).
+    from tapo_monitor import tracking
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+
+    class FakeCam:
+        def __init__(self):
+            self.person = None
+            self.person_sensitivity = "unset"
+        def executeFunction(self, *a, **k):
+            pass
+        def setMotionDetection(self, sensitivity=False):
+            pass
+        def setPersonDetection(self, enabled, sensitivity=False):
+            self.person = enabled
+            self.person_sensitivity = sensitivity
+        def setVehicleDetection(self, enabled, sensitivity=False):
+            pass
+        def setAutoTrackTarget(self, enabled):
+            pass
+        def getAutoTrackTarget(self):
+            return {"enabled": "off"}
+
+    cam = FakeCam()
+    plan = daemon.plan_camera(_cam(), night=False, rain_active=False)
+    daemon.apply_plan(cam, plan)
+    assert cam.person is True
+    assert cam.person_sensitivity is False  # default sentinel -> camera value unchanged
+
+
+def test_apply_plan_disables_vehicle_detection(monkeypatch):
+    # The cameras should follow people, not cars. The C560WS auto-track follows any
+    # AI-detected target, so leaving vehicle detection on makes the camera swing after
+    # passing traffic. apply_plan re-asserts vehicle detection OFF each tick (mirror of
+    # the person-detection self-heal).
+    from tapo_monitor import tracking
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+
+    class FakeCam:
+        def __init__(self):
+            self.vehicle = None
+        def executeFunction(self, *a, **k):
+            pass
+        def setMotionDetection(self, sensitivity=False):
+            pass
+        def setPersonDetection(self, enabled, sensitivity=False):
+            pass
+        def setVehicleDetection(self, enabled, sensitivity=False):
+            self.vehicle = enabled
+        def setAutoTrackTarget(self, enabled):
+            pass
+        def getAutoTrackTarget(self):
+            return {"enabled": "off"}
+
+    cam = FakeCam()
+    plan = daemon.plan_camera(_cam(), night=False, rain_active=False)
+    daemon.apply_plan(cam, plan)
+    assert cam.vehicle is False
+
+
+def test_apply_plan_smarttrack_is_last_config_before_autotrack(monkeypatch):
+    # Live evidence (2026-06-23): one of setMotionDetection/setPersonDetection/
+    # setVehicleDetection/setPreset resets the camera's smart_track_info to ALL-OFF.
+    # When apply_smarttrack ran FIRST (old order), the people-only filter set at night
+    # was wiped by those later calls, leaving auto-track with no SmartTrack category, so
+    # the camera followed any motion — including passing cars. apply_smarttrack must be
+    # the LAST configuration call, immediately before ensure_autotrack (which must stay
+    # truly last because setSmartTrackConfig clears the auto-track master switch).
+    from tapo_monitor import tracking
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+
+    class FakeCam:
+        def __init__(self):
+            self.order = []
+        def executeFunction(self, name, *a, **k):
+            if name == "setSmartTrackConfig":
+                self.order.append("smarttrack")
+        def setMotionDetection(self, sensitivity=False):
+            self.order.append("motion")
+        def setPersonDetection(self, enabled, sensitivity=False):
+            self.order.append("person")
+        def setVehicleDetection(self, enabled, sensitivity=False):
+            self.order.append("vehicle")
+        def setPreset(self, preset):
+            self.order.append("preset")
+        def setAutoTrackTarget(self, enabled):
+            self.order.append("autotrack")
+        def getAutoTrackTarget(self):
+            return {"enabled": "on"}
+
+    cam = FakeCam()
+    # NIGHT plan so apply_smarttrack runs (only fires when plan.autotrack_on).
+    plan = daemon.plan_camera(_cam(), night=True, rain_active=False)
+    daemon.apply_plan(cam, plan)
+
+    o = cam.order
+    assert "smarttrack" in o and "autotrack" in o
+    assert o.index("smarttrack") > o.index("vehicle")
+    assert o.index("smarttrack") > o.index("person")
+    assert o.index("smarttrack") > o.index("motion")
+    assert o.index("autotrack") == len(o) - 1   # auto-track is truly last
+    assert o.index("autotrack") > o.index("smarttrack")
+
+
+def test_apply_plan_survives_camera_without_person_detection(monkeypatch):
+    # Older firmware / pytapo without setPersonDetection must not break the tick.
+    from tapo_monitor import tracking
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+
+    class FakeCam:
+        def executeFunction(self, *a, **k):
+            pass
+        def setMotionDetection(self, sensitivity=False):
+            pass
+        def setAutoTrackTarget(self, enabled):
+            pass
+        def getAutoTrackTarget(self):
+            return {"enabled": "off"}
+
+    plan = daemon.plan_camera(_cam(), night=False, rain_active=False)
+    daemon.apply_plan(FakeCam(), plan)  # must not raise
+
+
 # ── backoff_seconds ──────────────────────────────────────────────────────────
 
 def test_backoff_doubles_from_base():
@@ -191,6 +376,60 @@ def test_run_monitor_pass_skips_cameras_without_client():
     daemon.run_monitor_pass(app, {}, state, now=1, secrets=secrets,
                             snapshot_for=_no_snapshot, time_str=lambda e: "t")
     assert state.last_seen == {}
+
+
+# ── loop cadence: decoupled control vs fast event poll ───────────────────────
+
+def test_control_due_first_tick_and_at_interval():
+    assert daemon.control_due(None, 0, 60) is True       # never run yet
+    assert daemon.control_due(0, 30, 60) is False         # 30s < 60s
+    assert daemon.control_due(0, 60, 60) is True          # exactly due
+    assert daemon.control_due(0, 100, 60) is True         # overdue
+
+
+def test_loop_step_decouples_control_from_event_poll():
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "1.1.1.1"}]})
+    secrets = {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
+    calls = {"control": 0, "watchdog": 0, "monitor": 0, "drain": 0}
+
+    def fake_control(app, now, connect):
+        calls["control"] += 1
+        connect(app.cameras[0])  # populate cam_clients like the real connect does
+
+    def fake_watchdog(app, cc, state, *, now, secrets):
+        calls["watchdog"] += 1
+
+    def fake_monitor(app, cc, state, *, now, secrets):
+        calls["monitor"] += 1
+
+    def fake_drain(app, cc, state, *, now, secrets):
+        calls["drain"] += 1
+
+    def fake_connect_factory(cam_clients, state, now):
+        def connect(c):
+            cam_clients[c.name] = "client"
+            return "client", None
+        return connect
+
+    state = daemon.MonitorState()
+    cam_clients = {}
+    kw = dict(secrets=secrets, control_interval=60, run_control=fake_control,
+              watchdog=fake_watchdog, monitor=fake_monitor, drain=fake_drain,
+              connect_factory=fake_connect_factory)
+
+    last = daemon.loop_step(app, cam_clients, state, now=0, last_control=None, **kw)
+    assert last == 0
+    assert calls == {"control": 1, "watchdog": 1, "monitor": 1, "drain": 1}
+    assert cam_clients == {"a": "client"}
+
+    last = daemon.loop_step(app, cam_clients, state, now=4, last_control=last, **kw)
+    assert last == 0
+    assert calls == {"control": 1, "watchdog": 1, "monitor": 2, "drain": 2}
+    assert cam_clients == {"a": "client"}     # reused, not cleared
+
+    last = daemon.loop_step(app, cam_clients, state, now=60, last_control=last, **kw)
+    assert last == 60
+    assert calls == {"control": 2, "watchdog": 2, "monitor": 3, "drain": 3}
 
 
 # ── update_outage (pure transitions) ─────────────────────────────────────────
@@ -498,3 +737,257 @@ def test_default_snapshot_empty_creds_when_env_missing(monkeypatch):
     snap(object(), {"start_time": 1})
     # defaults: port 554, stream1; empty credentials
     assert captured["url"] == "rtsp://:@192.168.1.51:554/stream1"
+
+
+# ── alert_gate: module-level cooldown helper ──────────────────────────────────
+
+def test_alert_gate_confirmed_gated_only_by_confirmed():
+    state = daemon.MonitorState()
+    can, on = daemon.alert_gate(state, "a", cooldown=120, now=1000)
+    assert can("person") is True          # nothing sent yet
+    on("person")                          # records confirmed at now=1000
+    can2, _ = daemon.alert_gate(state, "a", cooldown=120, now=1050)
+    assert can2("person") is False        # within cooldown of a confirmed alert
+
+
+def test_alert_gate_motion_does_not_block_person():
+    state = daemon.MonitorState()
+    _, on = daemon.alert_gate(state, "a", cooldown=120, now=1000)
+    on("motion")                          # a motion alert at now=1000
+    can, _ = daemon.alert_gate(state, "a", cooldown=120, now=1050)
+    assert can("person") is True          # motion never silences a person
+    assert can("motion") is False         # but motion silences motion
+
+
+# ── process_pending_sd ────────────────────────────────────────────────────────
+
+def _pending(cam_clients, sent, *, sd_ok=True, rtsp_ok=True, snapshot_calls=None):
+    """Build app+state+collaborators for process_pending_sd tests."""
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True}]})
+    state = daemon.MonitorState()
+    def fetch_frames(cfg_, start_time):
+        return ["/tmp/sd.jpg"] if sd_ok else []
+    def snapshot_for(cfg_):
+        def snap(cam, ev):
+            if snapshot_calls is not None:
+                snapshot_calls.append(ev.get("start_time"))
+            return "/tmp/rtsp.jpg" if rtsp_ok else None
+        return snap
+    return app, state, fetch_frames, snapshot_for
+
+
+def _run_pending(app, state, cam_clients, now, fetch_frames, snapshot_for, sent, monkeypatch,
+                 groq=None):
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap: sent.append((img, cap)))
+    monkeypatch.setattr(daemon.enrich, "groq_describe",
+                        groq or (lambda *a, **k: "Person at door"))
+    secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
+    return daemon.process_pending_sd(
+        app, cam_clients, state, now=now, secrets=secrets,
+        snapshot_for=snapshot_for, time_str=lambda ev: "T",
+        fetch_frames=fetch_frames)
+
+
+def test_pending_not_due_is_kept(monkeypatch):
+    sent = []
+    app, state, fetch_frames, snapshot_for = _pending({}, sent)
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": True}]
+    _run_pending(app, state, {"a": object()}, 1050, fetch_frames, snapshot_for, sent, monkeypatch)
+    assert len(state.pending_sd) == 1     # still waiting (now < due_at)
+    assert sent == []
+
+
+def test_pending_due_sends_sd_frame(monkeypatch):
+    sent = []
+    app, state, fetch_frames, snapshot_for = _pending({}, sent)
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": True}]
+    _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent, monkeypatch)
+    assert len(sent) == 1
+    assert sent[0][0] == "/tmp/sd.jpg"    # the SD frame, not RTSP
+    assert state.pending_sd == []         # entry consumed
+
+
+def test_pending_falls_back_to_rtsp_when_sd_fails(monkeypatch):
+    # live never went out (live_sent=False): SD fails -> live-RTSP fallback rescues.
+    sent = []
+    app, state, fetch_frames, snapshot_for = _pending({}, sent, sd_ok=False, rtsp_ok=True)
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+    _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent, monkeypatch)
+    assert len(sent) == 1
+    assert sent[0][0] == "/tmp/rtsp.jpg"  # live RTSP fallback
+
+
+def test_pending_dropped_when_sd_and_rtsp_fail(monkeypatch):
+    sent = []
+    app, state, fetch_frames, snapshot_for = _pending({}, sent, sd_ok=False, rtsp_ok=False)
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+    _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent, monkeypatch)
+    assert sent == []
+    assert state.pending_sd == []         # given up, not retried forever
+
+
+def test_pending_follow_up_ignores_cooldown(monkeypatch):
+    # The live alert just set a confirmed cooldown timestamp; the SD follow-up for that
+    # same event must still send (it's a better photo, not a new detection).
+    sent = []
+    app, state, fetch_frames, snapshot_for = _pending({}, sent)
+    state.last_alert[("a", "confirmed")] = 1075     # live alert moments ago
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": True}]
+    _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent, monkeypatch)
+    assert len(sent) == 1                  # follow-up sent despite recent confirmed alert
+    assert sent[0][0] == "/tmp/sd.jpg"
+
+
+def test_pending_stale_entry_dropped(monkeypatch, caplog):
+    sent = []
+    app, state, fetch_frames, snapshot_for = _pending({}, sent)
+    # event 700 s old (> PENDING_MAX_AGE) -> drop without sending
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": True}]
+    with caplog.at_level("INFO", logger="tapo_monitor.daemon"):
+        _run_pending(app, state, {"a": object()}, 1700, fetch_frames, snapshot_for, sent, monkeypatch)
+    assert sent == []
+    assert state.pending_sd == []
+    assert "too old" in caplog.text and "age=700s" in caplog.text   # not a silent drop
+
+
+def test_pending_waits_when_camera_offline(monkeypatch):
+    sent = []
+    app, state, fetch_frames, snapshot_for = _pending({}, sent)
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": True}]
+    _run_pending(app, state, {}, 1080, fetch_frames, snapshot_for, sent, monkeypatch)  # no client
+    assert sent == []
+    assert len(state.pending_sd) == 1     # retained for a later tick
+
+
+def test_pending_groq_picks_frame_with_subject(monkeypatch):
+    # Camera fires on motion start, so the first SD frame is often empty and the
+    # subject only walks into view a few seconds in. Groq must pick that frame.
+    sent = []
+    app, state, _fetch, snapshot_for = _pending({}, sent)
+    frames = ["/tmp/f0.jpg", "/tmp/f1.jpg", "/tmp/f2.jpg"]
+    def fetch_frames(cfg_, start_time):
+        return frames
+    descs = {"/tmp/f0.jpg": "empty scene", "/tmp/f1.jpg": "empty scene",
+             "/tmp/f2.jpg": "Person in a red jacket"}
+    def groq(key, img):
+        return descs[img]
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": True}]
+    _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent,
+                 monkeypatch, groq=groq)
+    assert len(sent) == 1
+    assert sent[0][0] == "/tmp/f2.jpg"            # the frame with the person
+    assert "Person in a red jacket" in sent[0][1]  # caption from that frame
+
+
+def test_pending_removes_sd_candidate_frames(monkeypatch, tmp_path):
+    sent = []
+    app, state, _fetch, snapshot_for = _pending({}, sent)
+    frames = [tmp_path / "f0.jpg", tmp_path / "f1.jpg", tmp_path / "f2.jpg"]
+    for frame in frames:
+        frame.write_bytes(b"jpg")
+    frame_paths = [str(frame) for frame in frames]
+
+    def fetch_frames(cfg_, start_time):
+        return frame_paths
+
+    descs = {frame_paths[0]: "empty scene", frame_paths[1]: "Person in a red jacket",
+             frame_paths[2]: "empty scene"}
+
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": True}]
+    _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent,
+                 monkeypatch, groq=lambda _key, img: descs[img])
+    assert len(sent) == 1
+    assert all(not frame.exists() for frame in frames)
+
+
+def test_pending_removes_rtsp_fallback_snapshot(monkeypatch, tmp_path):
+    sent = []
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True}]})
+    state = daemon.MonitorState()
+    image = tmp_path / "rtsp.jpg"
+
+    def snapshot_for(cfg_):
+        def snap(cam, ev):
+            image.write_bytes(b"jpg")
+            return str(image)
+        return snap
+
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+    _run_pending(app, state, {"a": object()}, 1080, lambda _cfg, _start: [], snapshot_for,
+                 sent, monkeypatch)
+    assert len(sent) == 1
+    assert not image.exists()
+
+
+def test_pending_all_empty_with_live_sent_sends_nothing(monkeypatch):
+    # Live (empty) already went out; SD finds no subject -> no duplicate empty ping.
+    sent = []
+    app, state, _fetch, snapshot_for = _pending({}, sent)
+    frames = ["/tmp/f0.jpg", "/tmp/f1.jpg", "/tmp/f2.jpg"]
+    def fetch_frames(cfg_, start_time):
+        return frames
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": True}]
+    _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent,
+                 monkeypatch, groq=lambda *a, **k: "empty scene")
+    assert sent == []                    # nothing sent
+    assert state.pending_sd == []        # entry consumed
+
+
+def test_pending_all_empty_without_live_sends_middle_frame(monkeypatch):
+    # Live grab had failed (live_sent=False); camera confirmed a person -> trust it,
+    # send the middle frame so the person isn't lost.
+    sent = []
+    app, state, _fetch, snapshot_for = _pending({}, sent)
+    frames = ["/tmp/f0.jpg", "/tmp/f1.jpg", "/tmp/f2.jpg"]
+    def fetch_frames(cfg_, start_time):
+        return frames
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+    _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent,
+                 monkeypatch, groq=lambda *a, **k: "empty scene")
+    assert len(sent) == 1
+    assert sent[0][0] == "/tmp/f1.jpg"   # middle frame (len // 2)
+
+
+def test_run_monitor_pass_enqueues_sd_without_live_send_when_empty(monkeypatch):
+    # Confirmed person on an sd_snapshot camera with an empty live frame: nothing is
+    # pinged now; the SD follow-up is enqueued with live_sent=False so it delivers the
+    # real event-time frame (or an event-time fallback) instead of a duplicate empty.
+    sent = []
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap: sent.append(img))
+    monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "empty scene")
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True}]})
+    state = daemon.MonitorState()
+
+    class Cam:
+        def getEvents(self):
+            return [{"start_time": 500, "events_1": 524290, "alarm_type": 2}]
+
+    def snapshot_for(_cfg):
+        return lambda cam, ev: "/tmp/live.jpg"
+
+    secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
+    daemon.run_monitor_pass(app, {"a": Cam()}, state, now=2000, secrets=secrets,
+                            snapshot_for=snapshot_for, time_str=lambda ev: "T")
+    assert sent == []                                     # no empty live ping
+    assert len(state.pending_sd) == 1
+    assert state.pending_sd[0]["camera"] == "a"
+    assert state.pending_sd[0]["event"]["start_time"] == 500
+    assert state.pending_sd[0]["live_sent"] is False
+    assert state.pending_sd[0]["due_at"] == 500 + daemon.sdclip.SD_FRESH_DELAY

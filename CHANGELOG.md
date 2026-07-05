@@ -7,6 +7,19 @@ All notable changes to this project are documented here.
 ### Added
 - `tapo_monitor` package and `tapo-monitor` CLI (`check` / `run`) — one config-driven
   daemon replacing the original per-host scripts.
+- Decoupled fast detection loop: `getEvents` polled on the already-connected client every
+  few seconds while camera control runs on a slower tick, so people are seen quickly
+  without a per-tick re-login (which risks the C560WS lockout).
+- Live + SD-card hybrid snapshots (`sdclip.py`): when a live RTSP grab is empty (a bare
+  grab often misses a subject who walks into view seconds after the event fires), a
+  confirmed person triggers an SD-segment follow-up that extracts candidate frames across
+  the event and picks the one the subject is in. The extraction window spans ~36 s of the
+  clip so a subject appearing 15–25 s in is caught, tuned to the Pi Zero download budget.
+- `weather.storm_park`: opt-in flag that parks the PTZ while it rains (composes with the
+  `lower_sensitivity` / `disable_tracking` strategies) so the camera stops swinging after
+  raindrops and wet branches.
+- Self-healing person detection: the AI person-detection toggle is re-asserted each tick,
+  so a camera restart can't silently leave it off.
 - Config-driven `cameras.yaml` model (`config.py`): per-camera detection sources,
   tracking, scheduling, weather strategy, enrichment and coordinator settings, with
   secrets referenced by environment-variable name only.
