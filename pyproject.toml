@@ -11,6 +11,9 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
     "pytapo",
+    # pytapo's media_stream Downloader (SD-card clip download) imports aiofiles at
+    # runtime but does not declare it — without it, sd_snapshot fails on a clean install.
+    "aiofiles",
     "astral",
     "PyYAML",
 ]
