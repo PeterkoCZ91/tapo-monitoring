@@ -340,10 +340,11 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
     seconds in. The follow-up is sent only when it's *better* than what already went out:
 
       * a frame shows the subject -> send it (the accurate, in-frame photo);
-      * no frame shows the subject and a (stale, empty) live frame already went out
-        (``live_sent``) -> send nothing, to avoid a duplicate empty ping;
-      * no frame shows the subject but the live grab had failed -> trust the camera and
-        send the middle frame (or a live-RTSP grab if SD produced no frames at all).
+      * frames were pulled but none shows the subject -> send nothing: Groq checked the
+        whole event window, and every live such case (2026-07-02..06) was a false
+        positive (passing car at night) — a blank photo helps nobody;
+      * SD produced no frames at all and no live went out -> send a live-RTSP grab
+        (zero checked frames is no evidence of absence; trust the camera).
 
     There is no cooldown gate here: the follow-up belongs to an already-alerted event (and
     the inline path emits at most one defer per cooldown window). Entries past
@@ -388,16 +389,19 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
                     image, description = frame, desc          # subject found in this frame
                     break
             if image is None:
+                if frames:
+                    # Groq saw nobody in any frame spanning the whole event. Live
+                    # 2026-07-02..06 every such case was a false positive (passing car
+                    # at night), so a blank photo helps nobody — drop, keep the trace.
+                    log.info("drop %s: SD found no subject in %d frames%s", etype,
+                             len(frames), ", live already sent" if entry.get("live_sent") else "")
+                    continue
                 if entry.get("live_sent"):
                     # The (empty) live frame already went out — don't send a duplicate empty.
-                    log.info("drop %s: SD found no subject, live already sent", etype)
+                    log.info("drop %s: SD produced no frames, live already sent", etype)
                     continue
-                if frames:
-                    image = frames[len(frames) // 2]          # no live; trust camera -> middle
-                    description = ""
-                else:
-                    snap = snapshot_for(cfg)                  # SD download failed -> live RTSP
-                    image = fallback_image = snap(cam, event) or snap(cam, event)
+                snap = snapshot_for(cfg)                      # SD download failed -> live RTSP
+                image = fallback_image = snap(cam, event) or snap(cam, event)
             if not image:
                 log.warning("skip %s: snapshot failed (after retry)", etype)
                 continue                              # drop

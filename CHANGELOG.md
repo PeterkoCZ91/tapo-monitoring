@@ -43,6 +43,12 @@ All notable changes to this project are documented here.
 - Astral day/night scheduling (coordinates from config) with an HH:MM fallback.
 - Camera-down watchdog (🔴/🟢 Telegram) and per-camera detection-alert cooldown.
 
+### Changed
+- An SD follow-up that finds no subject in *any* extracted frame now sends nothing
+  instead of a blank middle frame: with frames spanning the whole event window, an
+  all-empty result means the detection was a false positive (in practice: passing cars
+  at night misclassified as a person). The drop is still audit-logged.
+
 ### Fixed
 - Groq vision calls were rejected by Cloudflare (HTTP 403, error 1010) because the request
   used the default `Python-urllib` User-Agent. Every call returned empty, so no scene was

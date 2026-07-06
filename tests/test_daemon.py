@@ -947,9 +947,11 @@ def test_pending_all_empty_with_live_sent_sends_nothing(monkeypatch):
     assert state.pending_sd == []        # entry consumed
 
 
-def test_pending_all_empty_without_live_sends_middle_frame(monkeypatch):
-    # Live grab had failed (live_sent=False); camera confirmed a person -> trust it,
-    # send the middle frame so the person isn't lost.
+def test_pending_all_empty_without_live_sends_nothing(monkeypatch):
+    # Groq saw nobody in ANY SD frame and no live went out either: sending the middle
+    # frame anyway meant a blank photo ping. Live 2026-07-02..06: every such case was a
+    # night false positive on a passing car (visually verified against the SD clip), so
+    # drop it — the audit log keeps the trace.
     sent = []
     app, state, _fetch, snapshot_for = _pending({}, sent)
     frames = ["/tmp/f0.jpg", "/tmp/f1.jpg", "/tmp/f2.jpg"]
@@ -959,8 +961,8 @@ def test_pending_all_empty_without_live_sends_middle_frame(monkeypatch):
                          "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
     _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent,
                  monkeypatch, groq=lambda *a, **k: "empty scene")
-    assert len(sent) == 1
-    assert sent[0][0] == "/tmp/f1.jpg"   # middle frame (len // 2)
+    assert sent == []                    # no blank photo
+    assert state.pending_sd == []        # entry consumed, not retried
 
 
 def test_run_monitor_pass_enqueues_sd_without_live_send_when_empty(monkeypatch):

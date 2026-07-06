@@ -77,9 +77,7 @@ flowchart TD
     L -->|subject in frame| G[Groq describe]
     L -->|empty / grab failed| SD["SD-card follow-up<br/>(frames around event time)"]
     SD -->|subject found in a frame| G
-    SD -->|no subject anywhere| Y{live already sent?}
-    Y -->|yes| X
-    Y -->|no · trust the camera| G
+    SD -->|"no subject in any frame<br/>(checked the whole event window)"| X
 
     M --> ML[live RTSP snapshot] --> GQ{Groq: empty scene?}
     GQ -->|empty| X
