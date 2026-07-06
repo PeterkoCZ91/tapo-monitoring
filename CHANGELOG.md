@@ -13,8 +13,11 @@ All notable changes to this project are documented here.
 - Live + SD-card hybrid snapshots (`sdclip.py`): when a live RTSP grab is empty (a bare
   grab often misses a subject who walks into view seconds after the event fires), a
   confirmed person triggers an SD-segment follow-up that extracts candidate frames across
-  the event and picks the one the subject is in. The extraction window spans ~36 s of the
-  clip so a subject appearing 15–25 s in is caught, tuned to the Pi Zero download budget.
+  the event and picks the one the subject is in. The extraction window follows the
+  camera's own event duration (`start_time`..`end_time`, clamped to 36–48 s for the
+  Pi Zero download budget), and the fetch is delayed until the whole window clears
+  pytapo's 60 s freshness guard — so a subject appearing well into a ~70 s event is
+  caught instead of an empty first slice.
 - `weather.storm_park`: opt-in flag that parks the PTZ while it rains (composes with the
   `lower_sensitivity` / `disable_tracking` strategies) so the camera stops swinging after
   raindrops and wet branches.

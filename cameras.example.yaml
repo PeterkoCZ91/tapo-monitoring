@@ -57,6 +57,12 @@ cameras:
     # rtsp_port: 554             # optional; RTSP port (default 554)
     # rtsp_stream: stream1       # optional; stream1 (HD) | stream2 (SD)
 
+    # SD-card follow-up for confirmed people: when the live grab misses the subject,
+    # pull frames from the camera's SD recording (window sized from the event's own
+    # start..end seconds) and send the one the subject is in. Needs an SD card in the
+    # camera and the TP-Link account password (cloud_password_env) for the download.
+    sd_snapshot: false
+
     detection:
       sources: [getevents]   # subset of: onvif, getevents, motion
       strict_people: true    # only alert on confirmed people (ignore generic motion)

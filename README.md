@@ -207,6 +207,16 @@ own stack on `pytapo`, these are the landmines:
   start*, but a person often only walks into clear view 15–25 s later, so a frame grabbed
   "now" is empty. Pull frames from the **recorded SD segment around the event time** and
   let the vision model pick the one the subject is in, rather than trusting the live grab.
+  Size that window from the event's **own `end_time`** — `getEvents` reports the real
+  duration (~70 s in practice), and a fixed window from the start can end before the
+  subject is ever in clear view.
+- **pytapo's `Downloader` silently writes an empty file for fresh recordings.** If the
+  requested window's *end* is younger than `FRESH_RECORDING_TIME_SECONDS` (60 s), the
+  downloader treats the recording as still in progress, yields once and produces an empty
+  file — **no error is raised**. Delay the fetch until the *entire* window (not just the
+  event start) is at least 60 s old; see `fresh_delay()` in
+  [`sdclip.py`](tapo_monitor/sdclip.py). Getting this wrong looks like a random ~75 %
+  download-failure rate that quietly falls back to stale live frames.
 - **First login right after a reconnect fails with *"Invalid authentication data"*** — a
   retry succeeds. Repeated failed logins **lock out the source IP for ~30 min**, so back
   off rather than hammering. Centralized in [`camera.py`](tapo_monitor/camera.py).
