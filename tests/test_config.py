@@ -313,3 +313,11 @@ def test_loop_overrides():
     })
     assert app.loop.event_interval == 3
     assert app.loop.control_interval == 90
+
+
+def test_camera_config_parses_sd_span_cap():
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "1.1.1.1", "sd_span_cap": 120},
+                     {"name": "b", "host": "1.1.1.2"}]})
+    assert app.cameras[0].sd_span_cap == 120
+    assert app.cameras[1].sd_span_cap is None     # default: package cap decides

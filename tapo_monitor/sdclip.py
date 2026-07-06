@@ -52,21 +52,24 @@ PYTAPO_FRESH_GUARD = 60
 FRESH_SLACK = 9
 
 
-def event_span(event):
+def event_span(event, cap=None):
     """Seconds of recording to pull for ``event``, from the camera's own seconds.
 
     The camera reports the event's real duration (``start_time``..``end_time``) — a
     person is in view somewhere inside THAT window, not necessarily in the first
     SD_SPAN seconds (live 2026-07-06: a 73 s event, subject not in the first half).
-    Clamped to [SD_SPAN, SD_SPAN_CAP]: never narrower than the proven default (the
-    fast poll can see an event whose end_time is still growing), never wider than the
-    Pi Zero download budget. Missing/degenerate end_time -> SD_SPAN.
+    Clamped to [SD_SPAN, cap]: never narrower than the proven default (the fast poll
+    can see an event whose end_time is still growing), never wider than the hardware
+    download budget. ``cap`` defaults to the Pi Zero-safe SD_SPAN_CAP; a camera on
+    capable hardware may allow more (config ``sd_span_cap`` — app clips run ~2 min,
+    and a 48 s scan misses a subject in the later two thirds). Missing/degenerate
+    end_time -> SD_SPAN.
     """
     try:
         duration = int(event.get("end_time")) - int(event.get("start_time"))
     except (AttributeError, TypeError, ValueError):
         return SD_SPAN
-    return max(SD_SPAN, min(duration, SD_SPAN_CAP))
+    return max(SD_SPAN, min(duration, cap or SD_SPAN_CAP))
 
 
 def fresh_delay(span=SD_SPAN):
@@ -85,6 +88,13 @@ SD_FRESH_DELAY = fresh_delay()  # = 105 for the default span
 # Extract one candidate frame every N seconds of the downloaded span (36/6 -> 7 candidates,
 # so a mid-clip subject is caught without exploding the per-event Groq call count).
 SD_FRAME_EVERY = 6
+
+
+def frame_every(span):
+    """Frame spacing for ``span`` that keeps the candidate count (~8) — and with it the
+    per-event Groq call count — flat as the window widens: 48/6 and 120/15 both yield
+    8 frames. Never denser than SD_FRAME_EVERY."""
+    return max(SD_FRAME_EVERY, int(span) // 8)
 
 
 def _safe_unlink(path):
@@ -290,7 +300,7 @@ _FRAME_MARKER = "FRAME:"
 
 
 def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
-                               every=SD_FRAME_EVERY, run=None, python=None):
+                               every=None, run=None, python=None):
     """Download SD frames in a FRESH subprocess and return its JPEG paths ([] on failure).
 
     The in-process download silently fails inside the daemon: its long-lived getEvents
@@ -305,6 +315,8 @@ def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
 
     run = run or _sp.run
     python = python or _sys.executable
+    if every is None:
+        every = frame_every(span)
     argv = [python, "-m", "tapo_monitor.sdclip", "download",
             cfg.host, cfg.user_env or "", cfg.password_env or "",
             cfg.cloud_password_env or "", str(int(start_time)), out_dir,

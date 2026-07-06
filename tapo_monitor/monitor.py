@@ -92,8 +92,14 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
     alertable, watermark = collect_detections(events, last_seen, cfg.detection.strict_people)
     for event, etype in alertable:
         if can_alert is not None and not can_alert(etype):
-            log.info("skip %s: cooldown active", etype)
-            break
+            if etype != "motion" and face_ids(event):
+                # A recognized face is new information, not a burst duplicate — the
+                # cooldown must not eat it (live 2026-07-06 18:37: the camera named 3
+                # known faces 40 s after a person alert and the alert was skipped).
+                log.info("cooldown override %s: recognized face present", etype)
+            else:
+                log.info("skip %s: cooldown active", etype)
+                break
         image = snapshot(cam, event)
         if not image:
             # RTSP capture on a slow Pi (e.g. Pi Zero) fails transiently — one retry

@@ -62,6 +62,10 @@ cameras:
     # start..end seconds) and send the one the subject is in. Needs an SD card in the
     # camera and the TP-Link account password (cloud_password_env) for the download.
     sd_snapshot: false
+    # sd_span_cap: 120         # optional; max seconds of SD recording to scan per event.
+    #                          # Default (48) fits a Pi Zero download budget; events run
+    #                          # ~2 min, so hosts with faster I/O (Pi 4) may raise this
+    #                          # to scan the whole event. Frame count stays ~8 regardless.
 
     detection:
       sources: [getevents]   # subset of: onvif, getevents, motion

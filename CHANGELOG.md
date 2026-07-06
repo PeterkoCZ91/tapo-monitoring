@@ -44,6 +44,14 @@ All notable changes to this project are documented here.
 - Camera-down watchdog (🔴/🟢 Telegram) and per-camera detection-alert cooldown.
 
 ### Changed
+- A recognized face breaks through the per-type alert cooldown: a face is new
+  information, not a burst duplicate (live: the camera named three known faces 40 s
+  after a person alert, and the cooldown silently skipped the richest event of the day).
+- New per-camera `sd_span_cap`: camera events run ~2 min, but the SD follow-up window
+  was capped at 48 s for the Pi Zero download budget, so a subject appearing in the
+  later part of the event was never scanned. Hosts with faster I/O can now raise the
+  cap per camera; frame spacing widens with the window so the per-event Groq call
+  count stays flat.
 - An SD follow-up that finds no subject in *any* extracted frame now sends nothing
   instead of a blank middle frame: with frames spanning the whole event window, an
   all-empty result means the detection was a false positive (in practice: passing cars

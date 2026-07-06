@@ -1037,3 +1037,37 @@ def test_pending_passes_event_span_to_fetch(monkeypatch):
     _run_pending(app, state, {"a": object()}, 1200, fetch_frames, snapshot_for, sent, monkeypatch)
     assert got["span"] == daemon.sdclip.SD_SPAN_CAP
     assert len(sent) == 1
+
+
+def test_defer_and_fetch_honor_camera_sd_span_cap(monkeypatch):
+    # A camera allowed a wider budget (Pi 4) must size BOTH the due time and the fetch
+    # window from its own cap, not the package default.
+    sent = []
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap: sent.append(img))
+    monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "empty scene")
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True,
+                                  "sd_span_cap": 120}]})
+    state = daemon.MonitorState()
+
+    class Cam:
+        def getEvents(self):
+            return [{"start_time": 500, "end_time": 640,
+                     "events_1": 524290, "alarm_type": 2}]
+
+    secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
+    daemon.run_monitor_pass(app, {"a": Cam()}, state, now=2000, secrets=secrets,
+                            snapshot_for=lambda _cfg: (lambda cam, ev: "/tmp/live.jpg"),
+                            time_str=lambda ev: "T")
+    assert state.pending_sd[0]["due_at"] == 500 + daemon.sdclip.fresh_delay(120)
+
+    got = {}
+    def fetch_frames(cfg_, start_time, span=None):
+        got["span"] = span
+        return ["/tmp/sd.jpg"]
+    monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "Person")
+    daemon.process_pending_sd(app, {"a": Cam()}, state, now=500 + 200, secrets=secrets,
+                              snapshot_for=lambda _cfg: (lambda cam, ev: None),
+                              time_str=lambda ev: "T", fetch_frames=fetch_frames)
+    assert got["span"] == 120

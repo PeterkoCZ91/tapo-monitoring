@@ -299,16 +299,17 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
 
         can_alert, on_alert = alert_gate(state, name, cooldown, now)
 
-        def defer(event, etype, live_sent, _name=name):
+        def defer(event, etype, live_sent, _name=name, _cap=cfg.sd_span_cap):
             state.pending_sd.append({
                 "camera": _name,
                 "etype": etype,
                 "event": event,
-                # Window and due time follow the camera's own event seconds (end_time):
-                # a longer event needs a wider window AND a later fetch, or the window
-                # end is still inside pytapo's freshness guard and downloads empty.
+                # Window and due time follow the camera's own event seconds (end_time),
+                # bounded by the camera's hardware budget (sd_span_cap): a longer event
+                # needs a wider window AND a later fetch, or the window end is still
+                # inside pytapo's freshness guard and downloads empty.
                 "due_at": (event.get("start_time") or now)
-                          + sdclip.fresh_delay(sdclip.event_span(event)),
+                          + sdclip.fresh_delay(sdclip.event_span(event, cap=_cap)),
                 "live_sent": live_sent,
             })
         defer_fn = defer if cfg.sd_snapshot else None
@@ -379,8 +380,9 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
             continue
 
         # Pull SD frames in a fresh subprocess; pick the frame Groq sees a subject in.
-        # The window is sized from the event's own seconds (see sdclip.event_span).
-        frames = fetch_frames(cfg, start_time, span=sdclip.event_span(event))
+        # The window is sized from the event's own seconds (see sdclip.event_span),
+        # bounded by the camera's hardware budget (sd_span_cap).
+        frames = fetch_frames(cfg, start_time, span=sdclip.event_span(event, cap=cfg.sd_span_cap))
         image, description, fallback_image = None, "", None
         try:
             for frame in frames:

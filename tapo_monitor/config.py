@@ -87,6 +87,10 @@ class CameraConfig:
     rtsp_stream: str = "stream1"
     rtsp_timeout: int = 15  # seconds; slow cameras/Pis need >8s for the first keyframe
     sd_snapshot: bool = False  # pull the event-time frame from SD instead of live RTSP
+    # Optional per-camera ceiling (seconds) for the SD follow-up window. None uses the
+    # package default (Pi Zero-safe). Camera events run ~2 min; hardware that can afford
+    # the download (Pi 4) may raise this to scan the whole event for the subject.
+    sd_span_cap: int | None = None
     # Optional AI person-detection sensitivity (0-100) re-asserted every control tick.
     # None leaves the camera's value unchanged; lower = fewer false AI-person detections.
     person_sensitivity: int | None = None
@@ -246,6 +250,7 @@ def _camera(data, index):
         rtsp_stream=data.get("rtsp_stream", "stream1"),
         rtsp_timeout=rtsp_timeout,
         sd_snapshot=bool(data.get("sd_snapshot", False)),
+        sd_span_cap=int(data["sd_span_cap"]) if data.get("sd_span_cap") is not None else None,
         person_sensitivity=int(data["person_sensitivity"]) if data.get("person_sensitivity") is not None else None,
         detection=_detection(data.get("detection"), where),
         tracking=_tracking(data.get("tracking"), where),

@@ -229,3 +229,44 @@ def test_run_monitor_drops_motion_when_groq_blank(monkeypatch):
         Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
         snapshot=lambda cam, ev: "/tmp/x.jpg", time_str=lambda ev: "T")
     assert sent == []            # blank Groq -> motion dropped, no blank alert
+
+
+def test_cooldown_overridden_by_recognized_face(monkeypatch):
+    # 2026-07-06 18:37:22 live: the camera recognized 3 known faces 40 s after a person
+    # alert, and the per-type cooldown silently ate the richest event of the day. A face
+    # is new information, not a duplicate ping — it must break through the cooldown.
+    sent = []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "Two people")
+
+    event = dict(_person_event(100), event_info=[{"face_id": 7}, {"face_id": 9}])
+
+    class Cam:
+        def getEvents(self):
+            return [event]
+
+    cfg = config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "1.1.1.1"}]}).cameras[0]
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        can_alert=lambda et: False)
+    assert len(sent) == 1     # face event alerts despite the active cooldown
+
+
+def test_cooldown_still_skips_person_without_face(monkeypatch):
+    sent = []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "A person")
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    cfg = config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "1.1.1.1"}]}).cameras[0]
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        can_alert=lambda et: False)
+    assert sent == []         # faceless burst duplicate stays cooled down

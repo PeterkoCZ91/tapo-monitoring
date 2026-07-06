@@ -295,3 +295,37 @@ def test_segment_bounds_picks_closest_segment():
 
 def test_segment_bounds_none_when_api_missing():
     assert sdclip._segment_bounds(_Cam(), 1000) is None   # _Cam has no getRecordingsUTC
+
+
+# ── per-camera span cap + frame spacing (wide events on capable hardware) ─────────
+
+def test_event_span_honors_camera_cap():
+    """App clips run ~2 min (live 2026-07-06: 01:58, 02:20) but the default cap scans
+    only the first 48 s — a Pi 4 can afford the whole event, a Pi Zero cannot, so the
+    cap is per-camera. No cap -> the proven default."""
+    long_event = {"start_time": 1000, "end_time": 1140}
+    assert sdclip.event_span(long_event, cap=120) == 120
+    assert sdclip.event_span(long_event) == sdclip.SD_SPAN_CAP
+    assert sdclip.event_span(long_event, cap=None) == sdclip.SD_SPAN_CAP
+    assert sdclip.event_span({"start_time": 1000, "end_time": 1040}, cap=120) == 40
+    assert sdclip.event_span({}, cap=120) == sdclip.SD_SPAN
+
+
+def test_frame_every_keeps_groq_call_count_flat():
+    """A wider window must spread the same ~8 candidate frames, not multiply Groq calls:
+    span 48 -> every 6 (today's behaviour, unchanged), span 120 -> every 15."""
+    assert sdclip.frame_every(36) == sdclip.SD_FRAME_EVERY
+    assert sdclip.frame_every(48) == 6
+    assert sdclip.frame_every(120) == 15
+    assert 120 // sdclip.frame_every(120) == 48 // sdclip.frame_every(48) == 8
+
+
+def test_fetch_subprocess_derives_every_from_span():
+    captured = {}
+
+    def run(argv, **kw):
+        captured["argv"] = argv
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    sdclip.fetch_sd_frames_subprocess(_cfg(), 1000, span=120, run=run, python="PY")
+    assert captured["argv"][-2:] == ["120", "15"]   # every derived, not the default 6
