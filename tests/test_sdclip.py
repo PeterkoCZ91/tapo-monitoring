@@ -38,6 +38,32 @@ def test_fresh_delay_clears_pytapo_freshness_guard_for_full_span():
     ), "SD follow-up fires before pytapo will serve the window end"
 
 
+# ── event_span: window sized from the camera's own event seconds ──────────────────
+
+def test_event_span_follows_camera_end_time():
+    """The camera reports the event's real duration (start_time..end_time); the window
+    must cover it instead of assuming a fixed span (live 2026-07-06 01:01: a 73 s person
+    event had its subject-relevant footage outside the first 36 s), capped by the Pi Zero
+    download budget and never smaller than the proven default."""
+    assert sdclip.event_span({"start_time": 1000, "end_time": 1073}) == sdclip.SD_SPAN_CAP
+    assert sdclip.event_span({"start_time": 1000, "end_time": 1042}) == 42
+    assert sdclip.event_span({"start_time": 1000, "end_time": 1020}) == sdclip.SD_SPAN
+    assert sdclip.event_span({"start_time": 1000}) == sdclip.SD_SPAN
+    assert sdclip.event_span({"start_time": 1000, "end_time": 900}) == sdclip.SD_SPAN
+    assert sdclip.event_span({}) == sdclip.SD_SPAN
+
+
+def test_fresh_delay_scales_with_event_span():
+    """Whatever span the event dictates, the follow-up must fire only once the window
+    END is past pytapo's freshness guard — otherwise the download yields an empty file."""
+    from pytapo.media_stream.downloader import Downloader
+
+    for span in (sdclip.SD_SPAN, 42, sdclip.SD_SPAN_CAP):
+        assert sdclip.fresh_delay(span) >= (
+            span + Downloader.FRESH_RECORDING_TIME_SECONDS + 5
+        )
+
+
 # ── fetch_sd_frames_subprocess: run the download in a FRESH process ───────────────
 
 def test_fetch_subprocess_parses_marked_frame_paths():

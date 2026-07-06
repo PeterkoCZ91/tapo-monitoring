@@ -766,7 +766,7 @@ def _pending(cam_clients, sent, *, sd_ok=True, rtsp_ok=True, snapshot_calls=None
     app = cfg.load_config_from_dict(
         {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True}]})
     state = daemon.MonitorState()
-    def fetch_frames(cfg_, start_time):
+    def fetch_frames(cfg_, start_time, span=None):
         return ["/tmp/sd.jpg"] if sd_ok else []
     def snapshot_for(cfg_):
         def snap(cam, ev):
@@ -874,7 +874,7 @@ def test_pending_groq_picks_frame_with_subject(monkeypatch):
     sent = []
     app, state, _fetch, snapshot_for = _pending({}, sent)
     frames = ["/tmp/f0.jpg", "/tmp/f1.jpg", "/tmp/f2.jpg"]
-    def fetch_frames(cfg_, start_time):
+    def fetch_frames(cfg_, start_time, span=None):
         return frames
     descs = {"/tmp/f0.jpg": "empty scene", "/tmp/f1.jpg": "empty scene",
              "/tmp/f2.jpg": "Person in a red jacket"}
@@ -897,7 +897,7 @@ def test_pending_removes_sd_candidate_frames(monkeypatch, tmp_path):
         frame.write_bytes(b"jpg")
     frame_paths = [str(frame) for frame in frames]
 
-    def fetch_frames(cfg_, start_time):
+    def fetch_frames(cfg_, start_time, span=None):
         return frame_paths
 
     descs = {frame_paths[0]: "empty scene", frame_paths[1]: "Person in a red jacket",
@@ -926,8 +926,8 @@ def test_pending_removes_rtsp_fallback_snapshot(monkeypatch, tmp_path):
 
     state.pending_sd = [{"camera": "a", "etype": "person",
                          "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
-    _run_pending(app, state, {"a": object()}, 1080, lambda _cfg, _start: [], snapshot_for,
-                 sent, monkeypatch)
+    _run_pending(app, state, {"a": object()}, 1080, lambda _cfg, _start, span=None: [],
+                 snapshot_for, sent, monkeypatch)
     assert len(sent) == 1
     assert not image.exists()
 
@@ -937,7 +937,7 @@ def test_pending_all_empty_with_live_sent_sends_nothing(monkeypatch):
     sent = []
     app, state, _fetch, snapshot_for = _pending({}, sent)
     frames = ["/tmp/f0.jpg", "/tmp/f1.jpg", "/tmp/f2.jpg"]
-    def fetch_frames(cfg_, start_time):
+    def fetch_frames(cfg_, start_time, span=None):
         return frames
     state.pending_sd = [{"camera": "a", "etype": "person",
                          "event": {"start_time": 1000}, "due_at": 1075, "live_sent": True}]
@@ -953,7 +953,7 @@ def test_pending_all_empty_without_live_sends_middle_frame(monkeypatch):
     sent = []
     app, state, _fetch, snapshot_for = _pending({}, sent)
     frames = ["/tmp/f0.jpg", "/tmp/f1.jpg", "/tmp/f2.jpg"]
-    def fetch_frames(cfg_, start_time):
+    def fetch_frames(cfg_, start_time, span=None):
         return frames
     state.pending_sd = [{"camera": "a", "etype": "person",
                          "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
@@ -991,3 +991,47 @@ def test_run_monitor_pass_enqueues_sd_without_live_send_when_empty(monkeypatch):
     assert state.pending_sd[0]["event"]["start_time"] == 500
     assert state.pending_sd[0]["live_sent"] is False
     assert state.pending_sd[0]["due_at"] == 500 + daemon.sdclip.SD_FRESH_DELAY
+
+
+def test_defer_due_at_follows_camera_event_end_time(monkeypatch):
+    # A long event (camera says 73 s) needs a wider window AND a later due time, or the
+    # download window end is still inside pytapo's freshness guard when the fetch fires.
+    sent = []
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap: sent.append(img))
+    monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "empty scene")
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True}]})
+    state = daemon.MonitorState()
+
+    class Cam:
+        def getEvents(self):
+            return [{"start_time": 500, "end_time": 573,
+                     "events_1": 524290, "alarm_type": 2}]
+
+    secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
+    daemon.run_monitor_pass(app, {"a": Cam()}, state, now=2000, secrets=secrets,
+                            snapshot_for=lambda _cfg: (lambda cam, ev: "/tmp/live.jpg"),
+                            time_str=lambda ev: "T")
+    assert len(state.pending_sd) == 1
+    expected_span = daemon.sdclip.event_span(state.pending_sd[0]["event"])
+    assert expected_span == daemon.sdclip.SD_SPAN_CAP
+    assert state.pending_sd[0]["due_at"] == 500 + daemon.sdclip.fresh_delay(expected_span)
+
+
+def test_pending_passes_event_span_to_fetch(monkeypatch):
+    # The SD fetch must pull the window the camera's event seconds dictate, not a fixed one.
+    sent = []
+    app, state, _fetch, snapshot_for = _pending({}, sent)
+    got = {}
+
+    def fetch_frames(cfg_, start_time, span=None):
+        got["span"] = span
+        return ["/tmp/sd.jpg"]
+
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000, "end_time": 1073},
+                         "due_at": 1117, "live_sent": False}]
+    _run_pending(app, state, {"a": object()}, 1200, fetch_frames, snapshot_for, sent, monkeypatch)
+    assert got["span"] == daemon.sdclip.SD_SPAN_CAP
+    assert len(sent) == 1

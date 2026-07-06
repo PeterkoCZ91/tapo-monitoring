@@ -40,17 +40,48 @@ SD_DOWNLOAD_TIMEOUT = 150
 # subject with margin; kept below the full segment because a 60 s pull (~107 s, ~25 MB) is
 # too close to SD_DOWNLOAD_TIMEOUT on the Pi Zero.
 SD_SPAN = 36
+# Ceiling for an event-sized window (see event_span): 48 s downloads in ~90 s on the
+# Pi Zero, comfortably under SD_DOWNLOAD_TIMEOUT where a full 60 s pull (~107 s) is not.
+SD_SPAN_CAP = 48
 # pytapo's Downloader refuses any window whose END is younger than this ("Recording in
 # progress" -> it yields once and writes an empty file). Mirrors
 # Downloader.FRESH_RECORDING_TIME_SECONDS (kept literal here so importing this module
 # never needs pytapo; a test cross-checks the value).
 PYTAPO_FRESH_GUARD = 60
-# Wait this long past the event before fetching. The window end sits up to SD_SPAN past
-# the (segment-aligned ~ event) start, so the wait must cover the span PLUS the guard,
-# with slack for camera-clock skew. 75 was tuned for the old 12 s span; left at 75 when
-# SD_SPAN went 12->36, the guard rejected ~3 of 4 downloads (live 2026-07-02..05) and the
-# alerts fell back to stale live photos.
-SD_FRESH_DELAY = SD_SPAN + PYTAPO_FRESH_GUARD + 9  # = 105
+# Slack on top of the freshness guard for camera-clock skew and poll-tick granularity.
+FRESH_SLACK = 9
+
+
+def event_span(event):
+    """Seconds of recording to pull for ``event``, from the camera's own seconds.
+
+    The camera reports the event's real duration (``start_time``..``end_time``) — a
+    person is in view somewhere inside THAT window, not necessarily in the first
+    SD_SPAN seconds (live 2026-07-06: a 73 s event, subject not in the first half).
+    Clamped to [SD_SPAN, SD_SPAN_CAP]: never narrower than the proven default (the
+    fast poll can see an event whose end_time is still growing), never wider than the
+    Pi Zero download budget. Missing/degenerate end_time -> SD_SPAN.
+    """
+    try:
+        duration = int(event.get("end_time")) - int(event.get("start_time"))
+    except (AttributeError, TypeError, ValueError):
+        return SD_SPAN
+    return max(SD_SPAN, min(duration, SD_SPAN_CAP))
+
+
+def fresh_delay(span=SD_SPAN):
+    """Seconds past the event start before its SD window can be downloaded.
+
+    The window end sits ``span`` past the (segment-aligned ~ event) start, so the wait
+    must cover the span PLUS pytapo's freshness guard. The old flat 75 was tuned for a
+    12 s span; left unchanged when the span went 12->36, the guard rejected ~3 of 4
+    downloads (live 2026-07-02..05) and alerts fell back to stale live photos — hence
+    derived, not hardcoded.
+    """
+    return span + PYTAPO_FRESH_GUARD + FRESH_SLACK
+
+
+SD_FRESH_DELAY = fresh_delay()  # = 105 for the default span
 # Extract one candidate frame every N seconds of the downloaded span (36/6 -> 7 candidates,
 # so a mid-clip subject is caught without exploding the per-event Groq call count).
 SD_FRAME_EVERY = 6

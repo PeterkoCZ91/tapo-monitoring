@@ -304,7 +304,11 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                 "camera": _name,
                 "etype": etype,
                 "event": event,
-                "due_at": (event.get("start_time") or now) + sdclip.SD_FRESH_DELAY,
+                # Window and due time follow the camera's own event seconds (end_time):
+                # a longer event needs a wider window AND a later fetch, or the window
+                # end is still inside pytapo's freshness guard and downloads empty.
+                "due_at": (event.get("start_time") or now)
+                          + sdclip.fresh_delay(sdclip.event_span(event)),
                 "live_sent": live_sent,
             })
         defer_fn = defer if cfg.sd_snapshot else None
@@ -374,7 +378,8 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
             continue
 
         # Pull SD frames in a fresh subprocess; pick the frame Groq sees a subject in.
-        frames = fetch_frames(cfg, start_time)
+        # The window is sized from the event's own seconds (see sdclip.event_span).
+        frames = fetch_frames(cfg, start_time, span=sdclip.event_span(event))
         image, description, fallback_image = None, "", None
         try:
             for frame in frames:
