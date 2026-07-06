@@ -361,6 +361,7 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
     fetch_frames = fetch_frames or sdclip.fetch_sd_frames_subprocess
     cfg_by_name = {c.name: c for c in app.cameras}
     remaining = []
+    processed_by_camera = {}
     for entry in state.pending_sd:
         cfg = cfg_by_name.get(entry["camera"])
         event = entry["event"]
@@ -383,6 +384,12 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
         if cam is None:
             remaining.append(entry)               # camera offline this tick -> keep
             continue
+
+        limit = cfg.sd_jobs_per_tick
+        if limit is not None and processed_by_camera.get(entry["camera"], 0) >= limit:
+            remaining.append(entry)               # slow-host backpressure -> next tick
+            continue
+        processed_by_camera[entry["camera"]] = processed_by_camera.get(entry["camera"], 0) + 1
 
         # Pull SD frames in a fresh subprocess; pick the frame Groq sees a subject in.
         # The window is sized from the event's own seconds (see sdclip.event_span),

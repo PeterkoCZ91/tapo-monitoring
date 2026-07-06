@@ -21,6 +21,9 @@ All notable changes to this project are documented here.
 - `sd_motion`: opt-in SD follow-up for PIR-backed bare motion when the live frame is
   empty. Software-only motion still drops, pending motion follow-ups are deduped per
   camera, and motion never sends a blind RTSP fallback without a subject-bearing frame.
+- `sd_jobs_per_tick`: optional per-camera SD backpressure for slow hosts; due
+  follow-ups above the limit stay buffered for later daemon loops instead of draining
+  a full backlog at once.
 - `weather.storm_park`: opt-in flag that parks the PTZ while it rains (composes with the
   `lower_sensitivity` / `disable_tracking` strategies) so the camera stops swinging after
   raindrops and wet branches.

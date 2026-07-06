@@ -95,6 +95,9 @@ class CameraConfig:
     # the camera never confirmed as person). Costs an SD download per motion burst, so
     # keep it off on weak hardware; never sends without a subject-bearing frame.
     sd_motion: bool = False
+    # Optional per-camera backpressure for slow hosts: process at most this many due
+    # SD follow-ups for this camera per daemon loop. None drains all due work.
+    sd_jobs_per_tick: int | None = None
     # Optional AI person-detection sensitivity (0-100) re-asserted every control tick.
     # None leaves the camera's value unchanged; lower = fewer false AI-person detections.
     person_sensitivity: int | None = None
@@ -240,6 +243,14 @@ def _camera(data, index):
         rtsp_timeout = int(data.get("rtsp_timeout", 15))
     except (TypeError, ValueError):
         raise ConfigError(f"{where}: 'rtsp_timeout' must be an integer") from None
+    sd_jobs_per_tick = None
+    if data.get("sd_jobs_per_tick") is not None:
+        try:
+            sd_jobs_per_tick = int(data["sd_jobs_per_tick"])
+        except (TypeError, ValueError):
+            raise ConfigError(f"{where}: 'sd_jobs_per_tick' must be an integer") from None
+        if sd_jobs_per_tick < 1:
+            raise ConfigError(f"{where}: 'sd_jobs_per_tick' must be >= 1")
     return CameraConfig(
         name=name,
         host=host,
@@ -256,6 +267,7 @@ def _camera(data, index):
         sd_snapshot=bool(data.get("sd_snapshot", False)),
         sd_span_cap=int(data["sd_span_cap"]) if data.get("sd_span_cap") is not None else None,
         sd_motion=bool(data.get("sd_motion", False)),
+        sd_jobs_per_tick=sd_jobs_per_tick,
         person_sensitivity=int(data["person_sensitivity"]) if data.get("person_sensitivity") is not None else None,
         detection=_detection(data.get("detection"), where),
         tracking=_tracking(data.get("tracking"), where),

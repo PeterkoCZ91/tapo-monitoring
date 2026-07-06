@@ -69,6 +69,8 @@ cameras:
     # sd_motion: false       # optional; with sd_snapshot, give PIR-backed bare motion
     #                          # an SD second chance when the live frame is empty. Leave
     #                          # off on weak hosts; software-only motion still drops.
+    # sd_jobs_per_tick: 1    # optional; slow-host backpressure. Process at most this
+    #                          # many due SD follow-ups per daemon loop; unset drains all.
 
     detection:
       sources: [getevents]   # subset of: onvif, getevents, motion

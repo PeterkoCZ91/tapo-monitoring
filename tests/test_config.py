@@ -329,3 +329,11 @@ def test_camera_config_parses_sd_motion():
                      {"name": "b", "host": "1.1.1.2"}]})
     assert app.cameras[0].sd_motion is True
     assert app.cameras[1].sd_motion is False    # opt-in: costs a download per burst
+
+
+def test_camera_config_parses_sd_jobs_per_tick():
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "1.1.1.1", "sd_jobs_per_tick": 1},
+                     {"name": "b", "host": "1.1.1.2"}]})
+    assert app.cameras[0].sd_jobs_per_tick == 1
+    assert app.cameras[1].sd_jobs_per_tick is None

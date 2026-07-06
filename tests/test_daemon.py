@@ -790,6 +790,34 @@ def _run_pending(app, state, cam_clients, now, fetch_frames, snapshot_for, sent,
         fetch_frames=fetch_frames)
 
 
+def test_pending_respects_camera_sd_jobs_per_tick(monkeypatch):
+    sent = []
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1",
+                                    "sd_snapshot": True, "sd_jobs_per_tick": 1}]})
+    state = daemon.MonitorState()
+    calls = []
+
+    def fetch_frames(cfg_, start_time, span=None):
+        calls.append(start_time)
+        return [f"/tmp/sd-{start_time}.jpg"]
+
+    def snapshot_for(cfg_):
+        return lambda cam, ev: None
+
+    state.pending_sd = [
+        {"camera": "a", "etype": "person",
+         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": True},
+        {"camera": "a", "etype": "motion",
+         "event": {"start_time": 1001}, "due_at": 1075, "live_sent": False},
+    ]
+    _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent, monkeypatch)
+    assert calls == [1000]
+    assert len(sent) == 1
+    assert state.pending_sd == [{"camera": "a", "etype": "motion",
+                                 "event": {"start_time": 1001},
+                                 "due_at": 1075, "live_sent": False}]
+
 def test_pending_not_due_is_kept(monkeypatch):
     sent = []
     app, state, fetch_frames, snapshot_for = _pending({}, sent)
