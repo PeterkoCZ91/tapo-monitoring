@@ -18,6 +18,9 @@ All notable changes to this project are documented here.
   Pi Zero download budget), and the fetch is delayed until the whole window clears
   pytapo's 60 s freshness guard — so a subject appearing well into a ~70 s event is
   caught instead of an empty first slice.
+- `sd_motion`: opt-in SD follow-up for PIR-backed bare motion when the live frame is
+  empty. Software-only motion still drops, pending motion follow-ups are deduped per
+  camera, and motion never sends a blind RTSP fallback without a subject-bearing frame.
 - `weather.storm_park`: opt-in flag that parks the PTZ while it rains (composes with the
   `lower_sensitivity` / `disable_tracking` strategies) so the camera stops swinging after
   raindrops and wet branches.

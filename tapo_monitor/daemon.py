@@ -300,6 +300,11 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
         can_alert, on_alert = alert_gate(state, name, cooldown, now)
 
         def defer(event, etype, live_sent, _name=name, _cap=cfg.sd_span_cap):
+            if etype == "motion" and any(
+                e["camera"] == _name and e["etype"] == "motion" for e in state.pending_sd
+            ):
+                log.info("drop %s: SD follow-up already pending for %s", etype, _name)
+                return
             state.pending_sd.append({
                 "camera": _name,
                 "etype": etype,
@@ -398,9 +403,11 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
                     log.info("drop %s: SD found no subject in %d frames%s", etype,
                              len(frames), ", live already sent" if entry.get("live_sent") else "")
                     continue
-                if entry.get("live_sent"):
-                    # The (empty) live frame already went out — don't send a duplicate empty.
-                    log.info("drop %s: SD produced no frames, live already sent", etype)
+                if entry.get("live_sent") or etype == "motion":
+                    # The (empty) live frame already went out, or this is unconfirmed
+                    # motion with no subject-bearing evidence. Do not send a blind ping.
+                    log.info("drop %s: SD produced no frames%s", etype,
+                             ", live already sent" if entry.get("live_sent") else "")
                     continue
                 snap = snapshot_for(cfg)                      # SD download failed -> live RTSP
                 image = fallback_image = snap(cam, event) or snap(cam, event)

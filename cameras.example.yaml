@@ -66,6 +66,9 @@ cameras:
     #                          # Default (48) fits a Pi Zero download budget; events run
     #                          # ~2 min, so hosts with faster I/O (Pi 4) may raise this
     #                          # to scan the whole event. Frame count stays ~8 regardless.
+    # sd_motion: false       # optional; with sd_snapshot, give PIR-backed bare motion
+    #                          # an SD second chance when the live frame is empty. Leave
+    #                          # off on weak hosts; software-only motion still drops.
 
     detection:
       sources: [getevents]   # subset of: onvif, getevents, motion

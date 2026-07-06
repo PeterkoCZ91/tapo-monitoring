@@ -270,3 +270,73 @@ def test_cooldown_still_skips_person_without_face(monkeypatch):
         snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
         can_alert=lambda et: False)
     assert sent == []         # faceless burst duplicate stays cooled down
+
+
+def _pir_motion_event(start=100):
+    # events_1 bit1 (motion) + bit5 (PIR) = physically-near motion, no AI person bit —
+    # exactly how the camera reported a woman with children in the yard (2026-07-06).
+    return {"start_time": start, "events_1": 34, "alarm_type": 6}
+
+
+def test_sd_motion_defers_empty_pir_motion(monkeypatch):
+    # Live 2026-07-06 16:28-16:57: five PIR-backed motion events with people in the
+    # yard were dropped because the live grab missed them and bare motion had no SD
+    # second chance. With sd_motion the empty live defers instead of dropping.
+    sent, deferred = [], []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "empty scene")
+
+    class Cam:
+        def getEvents(self):
+            return [_pir_motion_event(100)]
+
+    cfg = config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "1.1.1.1", "sd_motion": True,
+                      "detection": {"strict_people": False}}]}).cameras[0]
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        defer=lambda ev, et, live_sent: deferred.append((et, live_sent)))
+    assert sent == []
+    assert deferred == [("motion", False)]
+
+
+def test_sd_motion_ignores_software_only_motion(monkeypatch):
+    # events_1=2 (software motion, no PIR) is distant flicker — street traffic, shadows.
+    # Deferring those would queue a ~2 min SD download for every passing car; only
+    # PIR-backed motion (something physically near) earns the second chance.
+    sent, deferred = [], []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "empty scene")
+
+    class Cam:
+        def getEvents(self):
+            return [{"start_time": 100, "events_1": 2, "alarm_type": 2}]
+
+    cfg = config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "1.1.1.1", "sd_motion": True,
+                      "detection": {"strict_people": False}}]}).cameras[0]
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        defer=lambda ev, et, live_sent: deferred.append((et, live_sent)))
+    assert sent == [] and deferred == []      # dropped exactly as before
+
+
+def test_motion_empty_still_drops_without_sd_motion(monkeypatch):
+    sent, deferred = [], []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "empty scene")
+
+    class Cam:
+        def getEvents(self):
+            return [_pir_motion_event(100)]
+
+    cfg = config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "1.1.1.1",
+                      "detection": {"strict_people": False}}]}).cameras[0]
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        defer=lambda ev, et, live_sent: deferred.append((et, live_sent)))
+    assert sent == [] and deferred == []

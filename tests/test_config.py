@@ -321,3 +321,11 @@ def test_camera_config_parses_sd_span_cap():
                      {"name": "b", "host": "1.1.1.2"}]})
     assert app.cameras[0].sd_span_cap == 120
     assert app.cameras[1].sd_span_cap is None     # default: package cap decides
+
+
+def test_camera_config_parses_sd_motion():
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "1.1.1.1", "sd_motion": True},
+                     {"name": "b", "host": "1.1.1.2"}]})
+    assert app.cameras[0].sd_motion is True
+    assert app.cameras[1].sd_motion is False    # opt-in: costs a download per burst

@@ -79,10 +79,10 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
       time_str(event) -> caption time string
       can_alert(etype) -> bool gate (per-type cooldown / rate-limit); default always True
       on_alert(etype) -> called once after an alert is actually sent (record timestamp)
-      defer(event, etype, live_sent) -> enqueue a confirmed (non-motion) detection for a
-        deferred SD-frame follow-up. ``live_sent`` says whether a live photo already went
-        out (True) or the live grab failed (False). Called in ADDITION to the live send,
-        only when the live frame was empty or failed; motion is never deferred.
+      defer(event, etype, live_sent) -> enqueue a detection for a deferred SD-frame
+        follow-up. ``live_sent`` says whether a live photo already went out (True) or the
+        live grab failed (False). Confirmed detections defer when the live frame was empty
+        or failed; PIR-backed bare motion may defer only when ``cfg.sd_motion`` is enabled.
     """
     try:
         events = cam.getEvents() or []
@@ -91,6 +91,10 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
 
     alertable, watermark = collect_detections(events, last_seen, cfg.detection.strict_people)
     for event, etype in alertable:
+        event_flags = detection.decode_events_1(event.get("events_1"))
+        defer_motion = (
+            etype == "motion" and cfg.sd_motion and event_flags["pir"] and defer is not None
+        )
         if can_alert is not None and not can_alert(etype):
             if etype != "motion" and face_ids(event):
                 # A recognized face is new information, not a burst duplicate — the
@@ -107,8 +111,12 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             image = snapshot(cam, event)
         if not image:
             # Confirmed person but no live frame: queue an SD follow-up that MUST send
-            # (live_sent=False) so the person isn't lost. Motion just drops.
+            # (live_sent=False) so the person isn't lost. PIR-backed motion can opt into
+            # the same second chance, but still must find a subject in SD before alerting.
             if defer is not None and etype != "motion":
+                log.warning("defer %s: live snapshot failed, SD follow-up queued", etype)
+                defer(event, etype, False)
+            elif defer_motion:
                 log.warning("defer %s: live snapshot failed, SD follow-up queued", etype)
                 defer(event, etype, False)
             else:
@@ -123,6 +131,10 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 # animal, so a non-empty reply means a living subject — even one described
                 # only by clothing ("grey hoodie walking") with no person noun.
                 if empty:
+                    if defer_motion:
+                        log.info("defer %s: live empty, SD follow-up queued", etype)
+                        defer(event, etype, False)
+                        continue
                     log.info("drop %s: Groq reports empty scene", etype)
                     continue
             elif empty and defer is not None:

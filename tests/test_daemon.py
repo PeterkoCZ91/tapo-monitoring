@@ -1071,3 +1071,63 @@ def test_defer_and_fetch_honor_camera_sd_span_cap(monkeypatch):
                               snapshot_for=lambda _cfg: (lambda cam, ev: None),
                               time_str=lambda ev: "T", fetch_frames=fetch_frames)
     assert got["span"] == 120
+
+
+def test_defer_dedups_pending_motion_per_camera():
+    # A yard burst fires several empty-motion events in minutes; each deferred one costs
+    # a ~2 min SD download, so at most ONE motion follow-up may wait per camera. Person
+    # entries are unaffected (they are confirmed and must all deliver).
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True,
+                                  "sd_motion": True,
+                                  "detection": {"strict_people": False}}]})
+    state = daemon.MonitorState()
+    events = [{"start_time": 500, "events_1": 34, "alarm_type": 6},
+              {"start_time": 540, "events_1": 34, "alarm_type": 6}]
+
+    class Cam:
+        def getEvents(self):
+            return events
+
+    import unittest.mock as mock
+    with mock.patch.object(daemon.notify, "send_photo"), \
+         mock.patch.object(daemon.enrich, "groq_describe", return_value="empty scene"):
+        secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c",
+                   "face_names": {}}
+        daemon.run_monitor_pass(app, {"a": Cam()}, state, now=2000, secrets=secrets,
+                                snapshot_for=lambda _cfg: (lambda cam, ev: "/tmp/live.jpg"),
+                                time_str=lambda ev: "T")
+    motions = [e for e in state.pending_sd if e["etype"] == "motion"]
+    assert len(motions) == 1                  # burst deduped to one follow-up
+
+
+def test_pending_motion_never_sends_blind_fallback(monkeypatch):
+    # Motion is UNCONFIRMED: when SD yields no frames there is zero evidence of a
+    # subject, so no live-RTSP fallback may fire (that safety net is for camera-
+    # confirmed people only).
+    sent = []
+    calls = []
+    app, state, _fetch, _snap = _pending({}, sent)
+    def fetch_frames(cfg_, start_time, span=None):
+        return []
+    def snapshot_for(cfg_):
+        def snap(cam, ev):
+            calls.append(1)
+            return "/tmp/rtsp.jpg"
+        return snap
+    state.pending_sd = [{"camera": "a", "etype": "motion",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+    _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent, monkeypatch)
+    assert sent == [] and calls == []         # no blind ping, no wasted grab
+
+
+def test_pending_motion_with_subject_sends(monkeypatch):
+    sent = []
+    app, state, _fetch, snapshot_for = _pending({}, sent)
+    def fetch_frames(cfg_, start_time, span=None):
+        return ["/tmp/f0.jpg"]
+    state.pending_sd = [{"camera": "a", "etype": "motion",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+    _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent,
+                 monkeypatch, groq=lambda *a, **k: "Woman with two children by bicycles")
+    assert len(sent) == 1                     # the rescued in-frame photo

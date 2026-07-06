@@ -80,8 +80,9 @@ flowchart TD
     SD -->|"no subject in any frame<br/>(checked the whole event window)"| X
 
     M --> ML[live RTSP snapshot] --> GQ{Groq: empty scene?}
-    GQ -->|empty| X
-    GQ -->|real motion| G
+    GQ -->|"empty + PIR + sd_motion"| SD
+    GQ -->|"empty otherwise"| X
+    GQ -->|person or animal| G
 
     G --> T["Telegram alert<br/>photo + caption + face label"]
 ```
