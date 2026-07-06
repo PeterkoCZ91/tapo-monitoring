@@ -93,7 +93,11 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
     for event, etype in alertable:
         event_flags = detection.decode_events_1(event.get("events_1"))
         defer_motion = (
-            etype == "motion" and cfg.sd_motion and event_flags["pir"] and defer is not None
+            etype == "motion"
+            and cfg.sd_motion
+            and event_flags["motion"]
+            and event_flags["pir"]
+            and defer is not None
         )
         if can_alert is not None and not can_alert(etype):
             if etype != "motion" and face_ids(event):

@@ -323,6 +323,27 @@ def test_sd_motion_ignores_software_only_motion(monkeypatch):
     assert sent == [] and deferred == []      # dropped exactly as before
 
 
+def test_sd_motion_ignores_pir_without_motion_bit(monkeypatch):
+    # PIR alone is not PIR-backed motion. Some camera events carry events_1=32 and get
+    # classified as motion from alarm metadata; do not spend an SD download unless the
+    # motion bit is present too.
+    sent, deferred = [], []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "empty scene")
+
+    class Cam:
+        def getEvents(self):
+            return [{"start_time": 100, "events_1": 32, "alarm_type": 6}]
+
+    cfg = config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "1.1.1.1", "sd_motion": True,
+                      "detection": {"strict_people": False}}]}).cameras[0]
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        defer=lambda ev, et, live_sent: deferred.append((et, live_sent)))
+    assert sent == [] and deferred == []
+
 def test_motion_empty_still_drops_without_sd_motion(monkeypatch):
     sent, deferred = [], []
     monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
