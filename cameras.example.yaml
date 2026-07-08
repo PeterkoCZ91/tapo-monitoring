@@ -95,6 +95,18 @@ cameras:
       snapshot: rtsp         # rtsp (live frame) | sd (recorded clip frame)
       groq: true             # send the frame to Groq for a short description
 
+    sampler:
+      enabled: false         # follow-up grabs across the whole event window
+      interval: 30           # seconds between follow-up grabs
+      max_frames: 6          # grabs per event group (interval*max_frames = window)
+      group_gap: 90          # events closer than this merge into one group
+      stream: stream1        # optional high-res stream for follow-up grabs
+
+    scorer:
+      url:                   # e.g. http://127.0.0.1:8765/score; empty = Groq arbiter
+      threshold: 0.4         # min person/animal confidence to send a frame
+      timeout: 10            # seconds per scoring request
+
     coordinator:
       group:                 # cameras sharing a group hand off detections to each other
       handoff_preset:        # preset this camera turns to when a group peer detects

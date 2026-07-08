@@ -104,6 +104,24 @@ A camera-confirmed person is **always** sent — Groq only adds a caption and is
 gate that decides whether a confirmed person is real. Groq *is* the gate for bare motion,
 which is a frequent false positive on its own.
 
+### Local scoring service (optional)
+
+Cameras merge a whole passage into one long event, so a single frame from the event's
+first seconds misses people who appear later. Enable the `sampler` to keep grabbing
+frames across the event window, and run the local scoring service so a tiny YOLO model
+(not a vision LLM) decides which frame shows a person or animal:
+
+    pip install tapo-monitor[scorer]
+    # YOLOX-tiny (Apache-2.0), input size 416:
+    wget https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_tiny.onnx
+    python -m tapo_monitor.scorer_service --model yolox_tiny.onnx --port 8765
+
+Point each camera's `scorer.url` at the service (it can run on another host — one
+Raspberry Pi 4 comfortably scores for a whole fleet). Frames above `scorer.threshold`
+are sent to Telegram; Groq (if enabled) only writes the caption. If the service is
+unreachable the pipeline degrades to sending frames unfiltered — a scorer outage can
+add noise but never silently hide a person.
+
 ## Privacy
 
 This is **passive surveillance only** — it observes and notifies; it never triggers the
