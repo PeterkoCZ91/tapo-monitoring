@@ -25,6 +25,11 @@ def _safe_unlink(path):
         log.debug("failed to remove temp file %s", path, exc_info=True)
 
 
+def _observe(observe, event, etype, sent):
+    if observe is not None:
+        observe(event, etype, sent)
+
+
 def face_ids(event):
     info = event.get("event_info")
     if not isinstance(info, list):
@@ -71,7 +76,7 @@ TYPE_EMOJI = {"person": "👤", "vehicle": "🚗", "pet": "🐾", "tamper": "⚠
 
 def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_chat,
                 snapshot, time_str, can_alert=None, on_alert=None, face_names=None,
-                defer=None):
+                defer=None, score=None, observe=None):
     """Poll one camera once and alert on new detections. Returns the new watermark.
 
     Side-effecting collaborators are injected:
@@ -83,6 +88,11 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         follow-up. ``live_sent`` says whether a live photo already went out (True) or the
         live grab failed (False). Confirmed detections defer when the live frame was empty
         or failed; PIR-backed bare motion may defer only when ``cfg.sd_motion`` is enabled.
+      score(image_path) -> float|None — local scorer subject confidence; when passed it
+        replaces Groq as the send/drop arbiter (Groq only captions what already passed)
+        and None (scorer unreachable) degrades to raw passthrough, never a drop.
+      observe(event, etype, sent) -> feeds the sampler's event grouping; ``sent`` is
+        True when this event produced an alert or was handed to the SD follow-up.
     """
     try:
         events = cam.getEvents() or []
@@ -107,6 +117,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 log.info("cooldown override %s: recognized face present", etype)
             else:
                 log.info("skip %s: cooldown active", etype)
+                _observe(observe, event, etype, False)
                 break
         image = snapshot(cam, event)
         if not image:
@@ -120,46 +131,70 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             if defer is not None and etype != "motion":
                 log.warning("defer %s: live snapshot failed, SD follow-up queued", etype)
                 defer(event, etype, False)
+                _observe(observe, event, etype, True)
             elif defer_motion:
                 log.warning("defer %s: live snapshot failed, SD follow-up queued", etype)
                 defer(event, etype, False)
+                _observe(observe, event, etype, True)
             else:
                 log.warning("skip %s: snapshot failed (after retry)", etype)
+                _observe(observe, event, etype, False)
             continue
         try:
-            description = enrich.groq_describe(groq_key, image) if cfg.enrich.groq else ""
-            # Groq disabled = raw mode: there is no arbiter to declare a scene empty, so
-            # nothing is — every live frame goes straight out (the human is the filter).
-            empty = notify.is_empty_scene(description) if cfg.enrich.groq else False
+            description = ""
+            if score is not None:
+                # Local scorer is the arbiter; Groq no longer decides anything.
+                s = score(image)
+                if s is None:
+                    # Scorer unreachable: raw passthrough — degraded means spam,
+                    # never a silent miss.
+                    log.warning("scorer unavailable; passing %s frame through", etype)
+                    empty = False
+                else:
+                    empty = s < cfg.scorer.threshold
+            elif cfg.enrich.groq:
+                description = enrich.groq_describe(groq_key, image)
+                empty = notify.is_empty_scene(description)
+            else:
+                # Groq disabled = raw mode: there is no arbiter to declare a scene
+                # empty, so nothing is — every live frame goes straight out.
+                empty = False
             if etype == "motion":
-                # Bare motion is an unconfirmed candidate: Groq is the arbiter. The prompt
-                # makes it reply exactly "empty scene" for anything that isn't a person or
-                # animal, so a non-empty reply means a living subject — even one described
-                # only by clothing ("grey hoodie walking") with no person noun.
                 if empty:
                     if defer_motion:
                         log.info("defer %s: live empty, SD follow-up queued", etype)
                         defer(event, etype, False)
+                        _observe(observe, event, etype, True)
                         continue
-                    log.info("drop %s: Groq reports empty scene", etype)
+                    if score is not None:
+                        # Keep the score in the trace: threshold calibration reads this.
+                        log.info("drop %s: score %.2f below threshold %.2f",
+                                 etype, s, cfg.scorer.threshold)
+                    else:
+                        log.info("drop %s: Groq reports empty scene", etype)
+                    _observe(observe, event, etype, False)
                     continue
             elif empty and defer is not None:
-                # Camera confirmed a person (AI bit / face) but the live frame is empty —
-                # a mistimed grab or a phantom fire. Don't ping an empty photo now: hand it
-                # to the SD follow-up (live_sent=False), which sends the real event-time
-                # frame if it finds the subject and an event-time fallback otherwise. This
-                # drops the duplicate empty-then-real ping the always-send rule produced.
+                # Camera confirmed a person but the frame shows nothing — hand it to
+                # the SD follow-up (live_sent=False) instead of pinging a blank photo.
                 # Still record the alert so the per-type cooldown sees this person.
                 log.info("defer %s: live empty, SD follow-up queued (no live send)", etype)
                 if on_alert is not None:
                     on_alert(etype)
                 defer(event, etype, False)
+                _observe(observe, event, etype, True)
                 continue
             elif empty:
                 # No SD path (sd_snapshot off): keep the always-send safety net — a
-                # confirmed person still goes out on a stale/empty frame so we never miss
-                # one; just drop the misleading (empty) caption.
+                # confirmed person still goes out on a stale/empty frame so we never
+                # miss one; just drop the misleading (empty) caption.
                 description = ""
+            if score is not None and cfg.enrich.groq and not description:
+                # Caption-only Groq for an already-approved frame; the empty marker
+                # would be a misleading caption, not a veto.
+                description = enrich.groq_describe(groq_key, image)
+                if notify.is_empty_scene(description):
+                    description = ""
             label = enrich.face_label(face_ids(event), face_names)
             caption = notify.build_caption(
                 TYPE_EMOJI.get(etype, "👁"), time_str(event),
@@ -169,6 +204,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             log.info("alert %s sent (faces=%r, desc=%r)", etype, label, description)
             if on_alert is not None:
                 on_alert(etype)
+            _observe(observe, event, etype, True)
         finally:
             _safe_unlink(image)
     return watermark

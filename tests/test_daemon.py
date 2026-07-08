@@ -927,13 +927,13 @@ def test_pending_removes_sd_job_dir(monkeypatch):
     def fetch_frames(cfg_, start_time, span=None, out_dir=None):
         seen["dir"] = out_dir
         frame_paths = []
-        for i, desc in enumerate(("empty scene", "Person in a red jacket", "empty scene")):
+        for i, _desc in enumerate(("empty scene", "Person in a red jacket", "empty scene")):
             path = os.path.join(out_dir, f"f{i}.jpg")
             with open(path, "wb") as fh:
                 fh.write(b"jpg")
             frame_paths.append(path)
         seen["descs"] = dict(zip(frame_paths, ("empty scene", "Person in a red jacket",
-                                               "empty scene")))
+                                               "empty scene"), strict=True))
         return frame_paths
 
     state.pending_sd = [{"camera": "a", "etype": "person",

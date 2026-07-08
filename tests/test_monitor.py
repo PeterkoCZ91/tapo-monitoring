@@ -406,3 +406,121 @@ def test_run_monitor_raw_mode_sends_person_live_directly(monkeypatch):
         defer=lambda ev, et, live_sent: deferred.append(et))
     assert len(sent) == 1
     assert deferred == []
+
+def _motion_event(start=100):
+    return {"start_time": start, "event_type": "motion"}
+
+
+def _cfg_with_scorer(threshold=0.4):
+    return config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "1.1.1.1",
+                      "scorer": {"url": "http://127.0.0.1:8765/score",
+                                 "threshold": threshold}}]}).cameras[0]
+
+
+def test_run_monitor_scorer_sends_motion_above_threshold(monkeypatch):
+    sent = []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    # Groq is caption-only now: a caption comes back but must not gate the send.
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "Person walking")
+
+    class Cam:
+        def getEvents(self):
+            return [_motion_event(100)]
+
+    monitor.run_monitor(
+        Cam(), _cfg_with_scorer(), 0, now=1000, groq_key="k",
+        telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        score=lambda img: 0.9)
+    assert len(sent) == 1
+    assert "Person walking" in sent[0][3]      # caption present
+
+
+def test_run_monitor_scorer_drops_motion_below_threshold(monkeypatch):
+    sent = []
+    groq_calls = []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(monitor.enrich, "groq_describe",
+                        lambda *a, **k: groq_calls.append(a) or "whatever")
+    observed = []
+
+    class Cam:
+        def getEvents(self):
+            return [_motion_event(100)]
+
+    monitor.run_monitor(
+        Cam(), _cfg_with_scorer(), 0, now=1000, groq_key="k",
+        telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        score=lambda img: 0.1,
+        observe=lambda ev, et, s: observed.append((ev["start_time"], et, s)))
+    assert sent == []
+    assert groq_calls == []                     # no caption for a dropped frame
+    assert observed == [(100, "motion", False)]  # sampler group gets to keep looking
+
+
+def test_run_monitor_scorer_unavailable_passes_through(monkeypatch):
+    sent = []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "empty scene")
+
+    class Cam:
+        def getEvents(self):
+            return [_motion_event(100)]
+
+    monitor.run_monitor(
+        Cam(), _cfg_with_scorer(), 0, now=1000, groq_key="k",
+        telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        score=lambda img: None)
+    assert len(sent) == 1                       # raw passthrough, never a silent drop
+    assert "empty scene" not in (sent[0][3] or "")  # empty-marker caption suppressed
+
+
+def test_run_monitor_scorer_person_below_threshold_still_defers(monkeypatch):
+    # Camera-confirmed person, scorer says frame is empty -> SD follow-up path, exactly
+    # like the Groq-empty case: never dropped outright.
+    sent = []
+    deferred = []
+    alerted = []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "x")
+    observed = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    monitor.run_monitor(
+        Cam(), _cfg_with_scorer(), 0, now=1000, groq_key="k",
+        telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        score=lambda img: 0.1,
+        on_alert=lambda et: alerted.append(et),
+        defer=lambda ev, et, live_sent: deferred.append((et, live_sent)),
+        observe=lambda ev, et, s: observed.append(s))
+    assert sent == []
+    assert deferred == [("person", False)]
+    assert alerted == ["person"]
+    assert observed == [True]                   # handed to SD = handled, group stops
+
+
+def test_run_monitor_observe_reports_sent_alert(monkeypatch):
+    sent = []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "Person")
+    observed = []
+
+    class Cam:
+        def getEvents(self):
+            return [_motion_event(100)]
+
+    monitor.run_monitor(
+        Cam(), _cfg_with_scorer(), 0, now=1000, groq_key="k",
+        telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        score=lambda img: 0.9,
+        observe=lambda ev, et, s: observed.append(s))
+    assert observed == [True]
+
