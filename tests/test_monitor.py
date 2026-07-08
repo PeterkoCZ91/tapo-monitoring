@@ -361,3 +361,48 @@ def test_motion_empty_still_drops_without_sd_motion(monkeypatch):
         snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
         defer=lambda ev, et, live_sent: deferred.append((et, live_sent)))
     assert sent == [] and deferred == []
+
+
+def test_run_monitor_raw_mode_sends_motion_without_groq(monkeypatch):
+    # enrich.groq=false = raw mode: no AI arbiter, so bare motion must not be dropped
+    # as "empty scene" (blank description) — the live frame goes straight to Telegram.
+    sent = []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    groq_calls = []
+    monkeypatch.setattr(monitor.enrich, "groq_describe",
+                        lambda *a, **k: groq_calls.append(a) or "empty scene")
+
+    class Cam:
+        def getEvents(self):
+            return [{"start_time": 100, "event_type": "motion"}]
+
+    cfg = config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "1.1.1.1",
+                      "enrich": {"groq": False}}]}).cameras[0]
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T")
+    assert len(sent) == 1     # raw mode: motion frame sent, not dropped
+    assert groq_calls == []   # and Groq never called
+
+
+def test_run_monitor_raw_mode_sends_person_live_directly(monkeypatch):
+    # Raw mode: a confirmed person's live frame is never "empty" -> no SD defer detour.
+    sent = []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "empty scene")
+    deferred = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    cfg = config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "1.1.1.1",
+                      "enrich": {"groq": False}}]}).cameras[0]
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        defer=lambda ev, et, live_sent: deferred.append(et))
+    assert len(sent) == 1
+    assert deferred == []

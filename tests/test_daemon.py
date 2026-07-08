@@ -766,7 +766,7 @@ def _pending(cam_clients, sent, *, sd_ok=True, rtsp_ok=True, snapshot_calls=None
     app = cfg.load_config_from_dict(
         {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True}]})
     state = daemon.MonitorState()
-    def fetch_frames(cfg_, start_time, span=None):
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
         return ["/tmp/sd.jpg"] if sd_ok else []
     def snapshot_for(cfg_):
         def snap(cam, ev):
@@ -798,7 +798,7 @@ def test_pending_respects_camera_sd_jobs_per_tick(monkeypatch):
     state = daemon.MonitorState()
     calls = []
 
-    def fetch_frames(cfg_, start_time, span=None):
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
         calls.append(start_time)
         return [f"/tmp/sd-{start_time}.jpg"]
 
@@ -902,7 +902,7 @@ def test_pending_groq_picks_frame_with_subject(monkeypatch):
     sent = []
     app, state, _fetch, snapshot_for = _pending({}, sent)
     frames = ["/tmp/f0.jpg", "/tmp/f1.jpg", "/tmp/f2.jpg"]
-    def fetch_frames(cfg_, start_time, span=None):
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
         return frames
     descs = {"/tmp/f0.jpg": "empty scene", "/tmp/f1.jpg": "empty scene",
              "/tmp/f2.jpg": "Person in a red jacket"}
@@ -917,26 +917,55 @@ def test_pending_groq_picks_frame_with_subject(monkeypatch):
     assert "Person in a red jacket" in sent[0][1]  # caption from that frame
 
 
-def test_pending_removes_sd_candidate_frames(monkeypatch, tmp_path):
+def test_pending_removes_sd_job_dir(monkeypatch):
+    # The daemon hands the fetch a private job dir and must delete the whole tree
+    # afterwards (candidate frames and anything else the download left in it).
     sent = []
     app, state, _fetch, snapshot_for = _pending({}, sent)
-    frames = [tmp_path / "f0.jpg", tmp_path / "f1.jpg", tmp_path / "f2.jpg"]
-    for frame in frames:
-        frame.write_bytes(b"jpg")
-    frame_paths = [str(frame) for frame in frames]
+    seen = {}
 
-    def fetch_frames(cfg_, start_time, span=None):
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
+        seen["dir"] = out_dir
+        frame_paths = []
+        for i, desc in enumerate(("empty scene", "Person in a red jacket", "empty scene")):
+            path = os.path.join(out_dir, f"f{i}.jpg")
+            with open(path, "wb") as fh:
+                fh.write(b"jpg")
+            frame_paths.append(path)
+        seen["descs"] = dict(zip(frame_paths, ("empty scene", "Person in a red jacket",
+                                               "empty scene")))
         return frame_paths
-
-    descs = {frame_paths[0]: "empty scene", frame_paths[1]: "Person in a red jacket",
-             frame_paths[2]: "empty scene"}
 
     state.pending_sd = [{"camera": "a", "etype": "person",
                          "event": {"start_time": 1000}, "due_at": 1075, "live_sent": True}]
     _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent,
-                 monkeypatch, groq=lambda _key, img: descs[img])
+                 monkeypatch, groq=lambda _key, img: seen["descs"][img])
     assert len(sent) == 1
-    assert all(not frame.exists() for frame in frames)
+    assert not os.path.exists(seen["dir"])       # whole job dir gone, no frames left behind
+
+
+def test_pending_cleans_job_dir_when_subprocess_leaves_orphans(monkeypatch):
+    # Regression: a Pi Zero blows the SD subprocess timeout, the killed child never runs
+    # its own cleanup, and it leaves the segment mp4 + partial frames behind while
+    # returning no usable frames. The daemon must still drop the whole job dir.
+    sent = []
+    app, state, _fetch, snapshot_for = _pending({}, sent)
+    seen = {}
+
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
+        seen["dir"] = out_dir
+        # simulate the orphans a killed download subprocess leaves in its out_dir
+        with open(os.path.join(out_dir, "sd_1000.mp4"), "wb") as fh:
+            fh.write(b"x" * 1024)
+        with open(os.path.join(out_dir, "sdf_1000_partial.jpg"), "wb") as fh:
+            fh.write(b"jpg")
+        return []                                 # timeout -> no usable frames returned
+
+    state.pending_sd = [{"camera": "a", "etype": "motion",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+    _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent, monkeypatch)
+    assert sent == []                             # nothing to send (motion, no subject)
+    assert not os.path.exists(seen["dir"])        # orphaned mp4 + partial frame cleaned up
 
 
 def test_pending_removes_rtsp_fallback_snapshot(monkeypatch, tmp_path):
@@ -954,7 +983,7 @@ def test_pending_removes_rtsp_fallback_snapshot(monkeypatch, tmp_path):
 
     state.pending_sd = [{"camera": "a", "etype": "person",
                          "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
-    _run_pending(app, state, {"a": object()}, 1080, lambda _cfg, _start, span=None: [],
+    _run_pending(app, state, {"a": object()}, 1080, lambda _cfg, _start, span=None, out_dir=None: [],
                  snapshot_for, sent, monkeypatch)
     assert len(sent) == 1
     assert not image.exists()
@@ -965,7 +994,7 @@ def test_pending_all_empty_with_live_sent_sends_nothing(monkeypatch):
     sent = []
     app, state, _fetch, snapshot_for = _pending({}, sent)
     frames = ["/tmp/f0.jpg", "/tmp/f1.jpg", "/tmp/f2.jpg"]
-    def fetch_frames(cfg_, start_time, span=None):
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
         return frames
     state.pending_sd = [{"camera": "a", "etype": "person",
                          "event": {"start_time": 1000}, "due_at": 1075, "live_sent": True}]
@@ -983,7 +1012,7 @@ def test_pending_all_empty_without_live_sends_nothing(monkeypatch):
     sent = []
     app, state, _fetch, snapshot_for = _pending({}, sent)
     frames = ["/tmp/f0.jpg", "/tmp/f1.jpg", "/tmp/f2.jpg"]
-    def fetch_frames(cfg_, start_time, span=None):
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
         return frames
     state.pending_sd = [{"camera": "a", "etype": "person",
                          "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
@@ -1055,7 +1084,7 @@ def test_pending_passes_event_span_to_fetch(monkeypatch):
     app, state, _fetch, snapshot_for = _pending({}, sent)
     got = {}
 
-    def fetch_frames(cfg_, start_time, span=None):
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
         got["span"] = span
         return ["/tmp/sd.jpg"]
 
@@ -1091,7 +1120,7 @@ def test_defer_and_fetch_honor_camera_sd_span_cap(monkeypatch):
     assert state.pending_sd[0]["due_at"] == 500 + daemon.sdclip.fresh_delay(120)
 
     got = {}
-    def fetch_frames(cfg_, start_time, span=None):
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
         got["span"] = span
         return ["/tmp/sd.jpg"]
     monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "Person")
@@ -1136,7 +1165,7 @@ def test_pending_motion_never_sends_blind_fallback(monkeypatch):
     sent = []
     calls = []
     app, state, _fetch, _snap = _pending({}, sent)
-    def fetch_frames(cfg_, start_time, span=None):
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
         return []
     def snapshot_for(cfg_):
         def snap(cam, ev):
@@ -1152,10 +1181,34 @@ def test_pending_motion_never_sends_blind_fallback(monkeypatch):
 def test_pending_motion_with_subject_sends(monkeypatch):
     sent = []
     app, state, _fetch, snapshot_for = _pending({}, sent)
-    def fetch_frames(cfg_, start_time, span=None):
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
         return ["/tmp/f0.jpg"]
     state.pending_sd = [{"camera": "a", "etype": "motion",
                          "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
     _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent,
                  monkeypatch, groq=lambda *a, **k: "Woman with two children by bicycles")
     assert len(sent) == 1                     # the rescued in-frame photo
+
+
+def test_pending_raw_mode_sends_sd_frame_without_groq(monkeypatch):
+    # enrich.groq=false = raw mode: the SD follow-up must not require Groq to see a
+    # subject (blank desc would read as "no subject" and drop everything) — send the
+    # first frame directly.
+    sent = []
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True,
+                                    "enrich": {"groq": False}}]})
+    state = daemon.MonitorState()
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
+        return ["/tmp/sd.jpg"]
+    def snapshot_for(cfg_):
+        return lambda cam, ev: None
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+    groq_calls = []
+    _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent,
+                 monkeypatch, groq=lambda *a, **k: groq_calls.append(a) or "empty scene")
+    assert len(sent) == 1
+    assert sent[0][0] == "/tmp/sd.jpg"
+    assert groq_calls == []
+    assert state.pending_sd == []

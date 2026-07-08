@@ -19,6 +19,8 @@ per-camera watermark held in :class:`MonitorState` and fires the enrich/notify s
 
 import logging
 import os
+import shutil
+import tempfile
 import time as _time
 from dataclasses import dataclass, field
 
@@ -394,12 +396,20 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
         # Pull SD frames in a fresh subprocess; pick the frame Groq sees a subject in.
         # The window is sized from the event's own seconds (see sdclip.event_span),
         # bounded by the camera's hardware budget (sd_span_cap).
-        frames = fetch_frames(cfg, start_time, span=sdclip.event_span(event, cap=cfg.sd_span_cap))
+        # Give the job its own temp dir and drop the whole tree in `finally`: a slow host
+        # (Pi Zero) can blow the subprocess timeout, and the killed child never reaches its
+        # own cleanup -> the segment mp4 + partial frames orphan in /tmp until the tmpfs
+        # fills. Owning the dir here means we clean up even when the child returns nothing.
+        job_dir = tempfile.mkdtemp(prefix="sdjob_")
+        frames = fetch_frames(cfg, start_time,
+                              span=sdclip.event_span(event, cap=cfg.sd_span_cap),
+                              out_dir=job_dir)
         image, description, fallback_image = None, "", None
         try:
             for frame in frames:
                 desc = enrich.groq_describe(secrets["groq_key"], frame) if cfg.enrich.groq else ""
-                if not notify.is_empty_scene(desc):
+                # Raw mode (groq off): no subject arbiter -> first frame wins as-is.
+                if not cfg.enrich.groq or not notify.is_empty_scene(desc):
                     image, description = frame, desc          # subject found in this frame
                     break
             if image is None:
@@ -429,8 +439,7 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
             notify.send_photo(secrets["telegram_token"], secrets["telegram_chat"], image, caption)
             log.info("alert %s sent (faces=%r, desc=%r) [sd]", etype, label, description)
         finally:
-            for frame in frames:
-                _safe_unlink(frame)
+            shutil.rmtree(job_dir, ignore_errors=True)   # frames + any orphaned mp4/partials
             _safe_unlink(fallback_image)
     state.pending_sd = remaining
     return state.pending_sd

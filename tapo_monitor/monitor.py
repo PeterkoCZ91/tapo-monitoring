@@ -128,7 +128,9 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             continue
         try:
             description = enrich.groq_describe(groq_key, image) if cfg.enrich.groq else ""
-            empty = notify.is_empty_scene(description)
+            # Groq disabled = raw mode: there is no arbiter to declare a scene empty, so
+            # nothing is — every live frame goes straight out (the human is the filter).
+            empty = notify.is_empty_scene(description) if cfg.enrich.groq else False
             if etype == "motion":
                 # Bare motion is an unconfirmed candidate: Groq is the arbiter. The prompt
                 # makes it reply exactly "empty scene" for anything that isn't a person or
