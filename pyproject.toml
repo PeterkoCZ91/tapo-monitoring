@@ -20,6 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
+scorer = ["onnxruntime", "numpy", "Pillow"]
 
 [project.scripts]
 tapo-monitor = "tapo_monitor.cli:main"
