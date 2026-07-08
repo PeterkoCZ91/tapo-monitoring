@@ -71,6 +71,12 @@ cameras:
     #                          # off on weak hosts; software-only motion still drops.
     # sd_jobs_per_tick: 1    # optional; slow-host backpressure. Process at most this
     #                          # many due SD follow-ups per daemon loop; unset drains all.
+    # night_only: false      # optional; detect and alert only during the astral night
+    #                          # window. Camera control/tracking still runs 24/7, but by
+    #                          # day detection is muted (events drained silently so the
+    #                          # backlog doesn't replay at nightfall) and ALL Telegram —
+    #                          # including camera-down notices — is suppressed. For sites
+    #                          # that only care about after-hours intruders.
 
     detection:
       sources: [getevents]   # subset of: onvif, getevents, motion

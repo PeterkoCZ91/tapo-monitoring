@@ -396,13 +396,13 @@ def test_loop_step_decouples_control_from_event_poll():
         calls["control"] += 1
         connect(app.cameras[0])  # populate cam_clients like the real connect does
 
-    def fake_watchdog(app, cc, state, *, now, secrets):
+    def fake_watchdog(app, cc, state, *, now, secrets, night=True):
         calls["watchdog"] += 1
 
-    def fake_monitor(app, cc, state, *, now, secrets):
+    def fake_monitor(app, cc, state, *, now, secrets, night=True):
         calls["monitor"] += 1
 
-    def fake_drain(app, cc, state, *, now, secrets):
+    def fake_drain(app, cc, state, *, now, secrets, night=True):
         calls["drain"] += 1
 
     def fake_connect_factory(cam_clients, state, now):
@@ -1420,3 +1420,126 @@ def test_pending_scorer_failure_passes_frame_through(monkeypatch):
     _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent, monkeypatch)
     assert len(sent) == 1
 
+
+
+# ── night_only gating ─────────────────────────────────────────────────────────
+
+def _capture_mute(monkeypatch):
+    captured = {}
+    def fake_run_monitor(cam, c, last_seen, **kw):
+        captured["mute"] = kw.get("mute")
+        return 42
+    monkeypatch.setattr(daemon.monitor, "run_monitor", fake_run_monitor)
+    return captured
+
+
+def test_run_monitor_pass_mutes_night_only_camera_by_day(monkeypatch):
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "1.1.1.1", "night_only": True}]})
+    captured = _capture_mute(monkeypatch)
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
+    daemon.run_monitor_pass(app, {"a": object()}, state, now=1, secrets=secrets,
+                            snapshot_for=_no_snapshot, time_str=lambda e: "t", night=False)
+    assert captured["mute"] is True
+    assert state.last_seen["a"] == 42          # watermark still advanced (silent drain)
+
+
+def test_run_monitor_pass_active_night_only_camera_at_night(monkeypatch):
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "1.1.1.1", "night_only": True}]})
+    captured = _capture_mute(monkeypatch)
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
+    daemon.run_monitor_pass(app, {"a": object()}, state, now=1, secrets=secrets,
+                            snapshot_for=_no_snapshot, time_str=lambda e: "t", night=True)
+    assert captured["mute"] is False
+
+
+def test_run_monitor_pass_never_mutes_normal_camera_by_day(monkeypatch):
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "1.1.1.1"}]})
+    captured = _capture_mute(monkeypatch)
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
+    daemon.run_monitor_pass(app, {"a": object()}, state, now=1, secrets=secrets,
+                            snapshot_for=_no_snapshot, time_str=lambda e: "t", night=False)
+    assert captured["mute"] is False
+
+
+def test_sampler_skips_night_only_camera_by_day(monkeypatch):
+    sent = []
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "night_only": True,
+                                    "sampler": {"enabled": True},
+                                    "scorer": {"url": "http://x/score"}}]})
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    monkeypatch.setattr(daemon.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(daemon, "_safe_unlink", lambda p: None)
+    secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
+    daemon.process_sampler(app, {"a": object()}, state, now=1035, secrets=secrets,
+                           snapshot_for=lambda c: (lambda cam, ev: "/tmp/f.jpg"),
+                           time_str=lambda ev: "T", night=False)
+    assert sent == []
+    assert state.groups["a"]["frames"] == 0          # untouched by day
+
+
+def test_pending_skips_night_only_camera_by_day(monkeypatch):
+    sent = []
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True,
+                                    "night_only": True}]})
+    state = daemon.MonitorState()
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": True}]
+    called = []
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
+        called.append(start_time)
+        return ["/tmp/sd.jpg"]
+    monkeypatch.setattr(daemon.notify, "send_photo", lambda *a, **k: sent.append(a))
+    secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
+    daemon.process_pending_sd(app, {"a": object()}, state, now=1080, secrets=secrets,
+                              snapshot_for=lambda c: (lambda cam, ev: None),
+                              time_str=lambda ev: "T", fetch_frames=fetch_frames, night=False)
+    assert sent == []
+    assert called == []                              # SD not even fetched by day
+    assert state.pending_sd == []                    # entry dropped (won't replay at night)
+
+
+def test_watchdog_skips_night_only_camera_by_day(monkeypatch):
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "1.1.1.1", "night_only": True}]})
+    sent = []
+    monkeypatch.setattr(daemon.notify, "send_text", lambda tok, chat, msg: sent.append(msg))
+    state = daemon.MonitorState()
+    state.fail_since["a"] = 0
+    secrets = {"telegram_token": "t", "telegram_chat": "c"}
+    daemon._watchdog_pass(app, {}, state, now=100000, secrets=secrets, night=False)
+    assert sent == []                                # no 🔴 by day for a night_only camera
+
+
+def test_watchdog_alerts_night_only_camera_at_night(monkeypatch):
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "1.1.1.1", "night_only": True}]})
+    sent = []
+    monkeypatch.setattr(daemon.notify, "send_text", lambda tok, chat, msg: sent.append(msg))
+    state = daemon.MonitorState()
+    state.fail_since["a"] = 0
+    secrets = {"telegram_token": "t", "telegram_chat": "c"}
+    daemon._watchdog_pass(app, {}, state, now=100000, secrets=secrets, night=True)
+    assert len(sent) == 1 and "unreachable" in sent[0]
+
+
+def test_loop_step_passes_night_to_detection_passes():
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "1.1.1.1"}]})
+    seen = {}
+    daemon.loop_step(
+        app, {}, daemon.MonitorState(), now=1000, secrets={},
+        last_control=1000, control_interval=60,
+        run_control=lambda *a, **k: {},
+        watchdog=lambda *a, **k: seen.__setitem__("wd", k.get("night")),
+        monitor=lambda *a, **k: seen.__setitem__("mon", k.get("night")),
+        drain=lambda *a, **k: seen.__setitem__("drain", k.get("night")),
+        sample=lambda *a, **k: seen.__setitem__("sample", k.get("night")),
+        is_night=lambda: True)
+    assert seen == {"mon": True, "sample": True, "drain": True}

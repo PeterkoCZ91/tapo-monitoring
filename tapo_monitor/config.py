@@ -119,6 +119,11 @@ class CameraConfig:
     # Optional AI person-detection sensitivity (0-100) re-asserted every control tick.
     # None leaves the camera's value unchanged; lower = fewer false AI-person detections.
     person_sensitivity: int | None = None
+    # Detect/alert only during the astral night window. Camera control (tracking/presets)
+    # still runs 24/7; during the day detection is muted (events drained silently so the
+    # backlog doesn't replay at nightfall) and all Telegram — including camera-down
+    # notices — is suppressed. For sites that only care about after-hours intruders.
+    night_only: bool = False
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
@@ -320,6 +325,7 @@ def _camera(data, index):
         sd_motion=bool(data.get("sd_motion", False)),
         sd_jobs_per_tick=sd_jobs_per_tick,
         person_sensitivity=int(data["person_sensitivity"]) if data.get("person_sensitivity") is not None else None,
+        night_only=bool(data.get("night_only", False)),
         detection=_detection(data.get("detection"), where),
         tracking=_tracking(data.get("tracking"), where),
         weather=_weather(data.get("weather"), where),

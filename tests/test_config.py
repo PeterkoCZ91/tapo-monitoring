@@ -382,3 +382,14 @@ def test_sampler_interval_validated():
             "name": "a", "host": "1.1.1.1",
             "sampler": {"enabled": True, "interval": 0},
         }]})
+
+
+def test_night_only_defaults_false():
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "1.1.1.1"}]})
+    assert app.cameras[0].night_only is False
+
+
+def test_night_only_parsed():
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "1.1.1.1", "night_only": True}]})
+    assert app.cameras[0].night_only is True

@@ -251,7 +251,10 @@ def _default_snapshot(cfg: CameraConfig, stream=None):
         url = snapshot.rtsp_url(
             cfg.host, user, password, stream=stream or cfg.rtsp_stream, port=cfg.rtsp_port
         )
-        return snapshot.capture_rtsp(url, timeout=cfg.rtsp_timeout)
+        image = snapshot.capture_rtsp(url, timeout=cfg.rtsp_timeout)
+        if image:
+            return image
+        return snapshot.latest_recording_frame(cfg.host, timeout=cfg.rtsp_timeout)
     return snap
 
 
@@ -305,7 +308,7 @@ def _caption_describe(cfg, groq_key, image):
 
 
 def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
-                     snapshot_for=None, time_str=None):
+                     snapshot_for=None, time_str=None, night=True):
     """Poll the detection pipeline once per camera that uses ``getevents``.
 
     ``cam_clients`` maps camera name -> connected client (anything exposing ``getEvents()``);
@@ -354,6 +357,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             if _cfg.sampler.enabled:
                 sampler.observe_event(state.groups, _name, event, etype, sent, now, _cfg.sampler)
 
+        # night_only camera during the day: mute (drain the watermark, alert nothing).
         watermark = monitor.run_monitor(
             cam, cfg, last_seen,
             now=now,
@@ -368,13 +372,14 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             defer=defer_fn,
             score=score,
             observe=observe,
+            mute=cfg.night_only and not night,
         )
         state.last_seen[cfg.name] = watermark
     return state.last_seen
 
 
 def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=None,
-                       time_str=None, fetch_frames=None):
+                       time_str=None, fetch_frames=None, night=True):
     """Send queued confirmed-person SD follow-ups whose segment is now downloadable.
 
     Each entry waits SD_FRESH_DELAY past its event, then we pull candidate frames spanning
@@ -407,6 +412,8 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
         if cfg is None:
             log.warning("drop %s: SD follow-up for unknown camera %r", etype, entry["camera"])
             continue
+        if cfg.night_only and not night:
+            continue                          # night_only by day: drop, won't replay at night
         if now - start_time > PENDING_MAX_AGE:
             # Past the getEvents poll window: usually a stale event re-queued after a
             # daemon restart (its segment is long gone). Log it so the queue isn't a
@@ -492,7 +499,7 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
 
 
 def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
-                    time_str=None):
+                    time_str=None, night=True):
     """Advance sampler groups: follow-up grabs across each open event window.
 
     A group exists because its burst never produced a subject-bearing alert. Every
@@ -509,6 +516,8 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
         if not cfg.sampler.enabled:
             del state.groups[cfg.name]
             continue
+        if cfg.night_only and not night:
+            continue                          # night_only by day: leave the group alone
         scfg = cfg.sampler
         if sampler.expired(group, now, scfg):
             log.info("close group %s: %d follow-up frame(s), sent=%s",
@@ -568,7 +577,7 @@ def control_due(last_control, now, interval):
 def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
               last_control, control_interval,
               run_control=None, watchdog=None, monitor=None, drain=None, sample=None,
-              connect_factory=None):
+              connect_factory=None, is_night=None):
     """One loop iteration with control decoupled from event polling.
 
     The slow, rarely-changing work (camera tracking/sensitivity/preset + the per-tick
@@ -588,14 +597,16 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     drain = drain or process_pending_sd
     sample = sample or process_sampler
     connect_factory = connect_factory or _connect_camera
+    is_night = is_night or scheduling.is_night
+    night = is_night()                    # one source of truth for this tick's night gate
     if control_due(last_control, now, control_interval):
         cam_clients.clear()
         run_control(app, now=now, connect=connect_factory(cam_clients, state, now))
-        watchdog(app, cam_clients, state, now=now, secrets=secrets)
+        watchdog(app, cam_clients, state, now=now, secrets=secrets, night=night)
         last_control = now
-    monitor(app, cam_clients, state, now=now, secrets=secrets)
-    sample(app, cam_clients, state, now=now, secrets=secrets)
-    drain(app, cam_clients, state, now=now, secrets=secrets)
+    monitor(app, cam_clients, state, now=now, secrets=secrets, night=night)
+    sample(app, cam_clients, state, now=now, secrets=secrets, night=night)
+    drain(app, cam_clients, state, now=now, secrets=secrets, night=night)
     return last_control
 
 
@@ -630,11 +641,17 @@ def main(argv=None):  # pragma: no cover - thin entry point
         _time.sleep(poll_interval)
 
 
-def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets):
-    """Advance per-camera outage state and send 🔴/🟢 alerts once per transition."""
+def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets, night=True):
+    """Advance per-camera outage state and send 🔴/🟢 alerts once per transition.
+
+    A night_only camera is silent during the day (no 🔴/🟢), matching the rule that all
+    of that camera's Telegram traffic — detection and operational alike — is night-only.
+    """
     token = secrets["telegram_token"]
     chat = secrets["telegram_chat"]
     for cfg in app.cameras:
+        if cfg.night_only and not night:
+            continue
         ok = cam_clients.get(cfg.name) is not None
         event, _ = update_outage(state, cfg.name, ok, now, app.alerts.outage_threshold)
         if event == "alert":

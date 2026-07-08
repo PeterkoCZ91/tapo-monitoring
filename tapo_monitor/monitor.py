@@ -76,8 +76,12 @@ TYPE_EMOJI = {"person": "👤", "vehicle": "🚗", "pet": "🐾", "tamper": "⚠
 
 def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_chat,
                 snapshot, time_str, can_alert=None, on_alert=None, face_names=None,
-                defer=None, score=None, observe=None):
+                defer=None, score=None, observe=None, mute=False):
     """Poll one camera once and alert on new detections. Returns the new watermark.
+
+    ``mute`` polls and advances the watermark but skips all grabbing/scoring/alerting.
+    A night_only camera runs muted during the day so the daytime backlog is drained
+    silently and does not replay when night begins.
 
     Side-effecting collaborators are injected:
       snapshot(cam, event) -> image path or None
@@ -100,6 +104,8 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         return last_seen
 
     alertable, watermark = collect_detections(events, last_seen, cfg.detection.strict_people)
+    if mute:
+        return watermark          # night_only by day: drain silently, no grab/score/alert
     for event, etype in alertable:
         event_flags = detection.decode_events_1(event.get("events_1"))
         defer_motion = (

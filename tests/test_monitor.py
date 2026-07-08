@@ -524,3 +524,25 @@ def test_run_monitor_observe_reports_sent_alert(monkeypatch):
         observe=lambda ev, et, s: observed.append(s))
     assert observed == [True]
 
+
+
+def test_run_monitor_mute_drains_watermark_without_alerting(monkeypatch):
+    # night_only during the day: still poll + advance the watermark (so the day's
+    # backlog doesn't replay at nightfall) but grab nothing and send nothing.
+    sent = []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    grabbed = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    cfg = config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "1.1.1.1"}]}).cameras[0]
+    wm = monitor.run_monitor(
+        Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: grabbed.append(ev) or "/tmp/live.jpg",
+        time_str=lambda ev: "T", mute=True)
+    assert sent == []       # nothing sent
+    assert grabbed == []    # never grabbed a frame
+    assert wm == 100        # watermark advanced past the day's events
