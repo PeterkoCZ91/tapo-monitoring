@@ -54,3 +54,4 @@ docs/production-readiness-review-*.md
 # Generic probe/discovery JSON outputs
 *tapo_api_probe*.json
 *discovery*.json
+.superpowers/
