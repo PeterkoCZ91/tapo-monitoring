@@ -15,11 +15,12 @@ This is a **lightweight alternative to a full NVR**, not a replacement for one. 
 have a Tapo PTZ camera and a Raspberry Pi and you want smart person alerts in Telegram
 *without* standing up Frigate or a GPU/Coral box, this is for you. It:
 
-- **trusts the camera's own on-device AI** for detection — there is no local
-  object-detection model to run, so it fits on hardware as small as a Pi Zero 2 W;
-- uses a **cloud vision model (Groq) only as optional enrichment** — it captions a
-  camera-confirmed person and acts as a second opinion on bare motion, but never as the
-  gate that decides whether a confirmed person is real;
+- **trusts the camera's own on-device AI** for detection — no local object-detection model
+  is *required*, so it fits on hardware as small as a Pi Zero 2 W. An optional YOLO scorer
+  can sharpen *which* frame gets sent, and even that can run on another box (see
+  [How it works](#how-it-works));
+- uses a **cloud vision model (Groq) only as optional enrichment** — it captions the frame
+  that was sent, but (with the scorer enabled) never decides whether a frame goes out;
 - **bundles camera control** (auto-track, day/night scheduling, weather gating) *with* the
   detection → alert pipeline in one small daemon, where most projects do only one of the two.
 
@@ -62,30 +63,54 @@ Python that turns a Tapo camera + a Pi into reliable Telegram person alerts, sta
 
 ## How it works
 
-Every tick the daemon polls the camera's AI events, decides whether it's a person or bare
-motion, grabs the best photo it can, optionally captions it, and alerts — with an SD-card
-follow-up as the safety net when a live grab misses the subject:
+The whole journey of one frame — from the camera, through the Pi, out to Telegram — is:
+
+```mermaid
+flowchart LR
+    CAM["📷 Tapo camera<br/>on-device AI · PIR · SD card"]
+    PI["🖥️ Raspberry Pi — the daemon<br/>poll → grab frame → decide → alert"]
+    S["🧠 YOLO scorer (optional)<br/>same Pi, or a bigger box"]
+    TG["💬 Telegram"]
+    CAM -->|"event + RTSP / SD frame"| PI
+    PI -->|"POST frame"| S
+    S -->|"person / animal score"| PI
+    PI -->|"photo + caption"| TG
+```
+
+The **Raspberry Pi is the orchestrator**: it polls events, pulls the frames, and owns the
+decision to alert. Scoring is the one step that can be *forwarded* off the Pi to a stronger
+machine — the Pi just POSTs a frame and reads back a score — so even a Pi Zero, which can't
+run a real model, can lean on a server that does. The scorer is a stateless helper: if it is
+unreachable the Pi still runs (frames pass through unfiltered).
+
+Per event, the daemon decides what to do with that frame:
 
 ```mermaid
 flowchart TD
-    A["getEvents poll (~4s)"] --> B[decode events_1 bitmask]
-    B -->|AI person · bit 19| P[person]
-    B -->|motion only| M[motion]
-    B -->|nothing usable| X[drop]
+    A["getEvents poll (~4s)"] --> B["decode events_1 bitmask"]
+    B -->|"AI person · bit 19 / face"| P["person"]
+    B -->|"motion only"| M["motion"]
+    B -->|"nothing usable"| X["drop"]
 
-    P --> L[live RTSP snapshot]
-    L -->|subject in frame| G[Groq describe]
-    L -->|empty / grab failed| SD["SD-card follow-up<br/>(frames around event time)"]
-    SD -->|subject found in a frame| G
-    SD -->|"no subject in any frame<br/>(checked the whole event window)"| X
-
-    M --> ML[live RTSP snapshot] --> GQ{Groq: empty scene?}
-    GQ -->|"empty + PIR + sd_motion"| SD
-    GQ -->|"empty otherwise"| X
-    GQ -->|person or animal| G
-
+    P --> L["live RTSP frame"]
+    M --> L
+    L --> Q{"subject in the frame?<br/>local YOLO scorer · or Groq"}
+    Q -->|"yes"| G["caption (Groq, optional)"]
+    Q -->|"empty / grab missed it"| SD["SD-card follow-up<br/>frames around event time"]
+    SD -->|"subject found in a frame"| G
+    SD -->|"no subject in the whole window"| X
     G --> T["Telegram alert<br/>photo + caption + face label"]
 ```
+
+The gate — *is a subject actually in this frame?* — is the **local YOLO scorer** when one is
+configured, otherwise the **Groq** vision model. Either way it only decides *which* frames are
+worth sending; whatever passes gets an optional Groq caption. A camera-confirmed person is
+handled gently: if the gate sees nothing it defers to the SD-card follow-up instead of
+dropping, so a real person is never lost to one mistimed grab. Bare motion — a frequent false
+positive on its own — must actually show a subject to alert. And because a camera merges a
+whole passage into one long event, the optional **sampler** keeps grabbing frames across the
+event window so someone who walks in late is still caught (see
+[Local scoring service](#local-scoring-service-optional)).
 
 Detection is deliberately **decoupled** from camera control so people are seen fast without
 risking the login lockout:
@@ -100,10 +125,6 @@ flowchart LR
     E -. reuses session, no re-login .-> C
 ```
 
-A camera-confirmed person is **always** sent — Groq only adds a caption and is never the
-gate that decides whether a confirmed person is real. Groq *is* the gate for bare motion,
-which is a frequent false positive on its own.
-
 ### Local scoring service (optional)
 
 Cameras merge a whole passage into one long event, so a single frame from the event's
@@ -116,11 +137,35 @@ frames across the event window, and run the local scoring service so a tiny YOLO
     wget https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_tiny.onnx
     python -m tapo_monitor.scorer_service --model yolox_tiny.onnx --port 8765
 
-Point each camera's `scorer.url` at the service (it can run on another host — one
-Raspberry Pi 4 comfortably scores for a whole fleet). Frames above `scorer.threshold`
-are sent to Telegram; Groq (if enabled) only writes the caption. If the service is
-unreachable the pipeline degrades to sending frames unfiltered — a scorer outage can
-add noise but never silently hide a person.
+Point each camera's `scorer.url` at the service. Frames above `scorer.threshold` are sent
+to Telegram; Groq (if enabled) then only writes the caption — with the scorer enabled it,
+not Groq, is the gate that decides whether a frame goes out. If the service is unreachable
+the pipeline degrades to sending frames unfiltered — a scorer outage can add noise but
+never silently hide a person.
+
+Because scoring is forwarded over HTTP, a **stronger box can run a larger model** for the
+whole fleet: `yolox_tiny` is fine directly on a Pi 4, while a server can serve `yolox_s` /
+`yolox_m` for better accuracy. A Pi Zero, which can't run a real model at all, simply points
+its `scorer.url` at that server — the frame travels, the decision stays on the Pi.
+
+The scoring API is intentionally small and stable:
+
+```http
+POST http://SCORER_HOST:8766/score
+Content-Type: image/jpeg
+```
+
+```json
+{
+  "person": 0.87,
+  "animal": 0.0,
+  "classes": {"person": 0.87, "dog": 0.41}
+}
+```
+
+`person` and `animal` are the backward-compatible top-level scores used by tapo-monitor.
+`classes` contains per-COCO-class max confidences above a small floor, for other clients
+that need class names while sharing the same scorer service.
 
 ## Privacy
 

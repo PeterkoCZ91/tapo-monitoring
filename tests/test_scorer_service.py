@@ -71,4 +71,32 @@ def test_scores_from_output_person_and_animal():
 
 def test_scores_from_output_empty_is_zero():
     out = np.zeros((1, 10, 85), dtype=np.float32)
-    assert scorer_service.scores_from_output(out) == {"person": 0.0, "animal": 0.0}
+    assert scorer_service.scores_from_output(out) == {"person": 0.0, "animal": 0.0, "classes": {}}
+
+def test_scores_from_output_returns_named_classes():
+    out = np.zeros((1, 4, 85), dtype=np.float32)
+    out[0, 0, 4] = 0.9
+    out[0, 0, 5 + 0] = 0.8       # person -> 0.72
+    out[0, 1, 4] = 0.5
+    out[0, 1, 5 + 16] = 0.6      # dog -> 0.30
+    out[0, 2, 4] = 0.4
+    out[0, 2, 5 + 2] = 0.02      # car -> 0.008, below floor
+
+    scores = scorer_service.scores_from_output(out)
+
+    assert scores["person"] == pytest.approx(0.72, abs=1e-4)
+    assert scores["animal"] == pytest.approx(0.30, abs=1e-4)
+    assert scores["classes"]["person"] == pytest.approx(0.72, abs=1e-4)
+    assert scores["classes"]["dog"] == pytest.approx(0.30, abs=1e-4)
+    assert "car" not in scores["classes"]
+
+def test_scores_from_output_uses_a12_coco_names():
+    out = np.zeros((1, 1, 85), dtype=np.float32)
+    out[0, 0, 4] = 0.5
+    out[0, 0, 5 + 3] = 0.8       # a12 coco.names class 3: motorbike
+
+    scores = scorer_service.scores_from_output(out)
+
+    assert scores["classes"]["motorbike"] == pytest.approx(0.4, abs=1e-4)
+    assert "motorcycle" not in scores["classes"]
+

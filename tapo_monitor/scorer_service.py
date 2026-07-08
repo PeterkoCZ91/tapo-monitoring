@@ -22,17 +22,39 @@ log = logging.getLogger(__name__)
 PERSON_CLASS = 0
 # COCO ids: bird, cat, dog, horse, sheep, cow, bear
 ANIMAL_CLASSES = (14, 15, 16, 17, 18, 19, 21)
+COCO_NAMES = (
+    "person", "bicycle", "car", "motorbike", "aeroplane", "bus", "train", "truck",
+    "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
+    "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra",
+    "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove",
+    "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup",
+    "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "sofa",
+    "pottedplant", "bed", "diningtable", "toilet", "tvmonitor", "laptop", "mouse",
+    "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
+    "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier",
+    "toothbrush",
+)
 
 
-def scores_from_output(output, num_classes=80):
-    """Max person/animal confidence from a raw YOLOX head output (1, N, 5+C). Pure."""
+def scores_from_output(output, num_classes=80, floor=0.01):
+    """Max person/animal and per-class confidence from a raw YOLOX head output. Pure."""
     preds = output[0]                      # (N, 5+C)
+    if not len(preds):
+        return {"person": 0.0, "animal": 0.0, "classes": {}}
     obj = preds[:, 4]
     cls = preds[:, 5:5 + num_classes]
     conf = obj[:, None] * cls              # (N, C)
-    person = float(conf[:, PERSON_CLASS].max()) if len(preds) else 0.0
-    animal = float(conf[:, list(ANIMAL_CLASSES)].max()) if len(preds) else 0.0
-    return {"person": round(person, 4), "animal": round(animal, 4)}
+    per_class = conf.max(axis=0)
+    person = float(per_class[PERSON_CLASS])
+    animal = float(conf[:, list(ANIMAL_CLASSES)].max())
+    named = {
+        COCO_NAMES[i]: round(float(score), 4)
+        for i, score in enumerate(per_class[:min(num_classes, len(COCO_NAMES))])
+        if float(score) >= floor
+    }
+    return {"person": round(person, 4), "animal": round(animal, 4), "classes": named}
 
 
 def preprocess(jpeg_bytes, input_size):
