@@ -24,7 +24,7 @@ import tempfile
 import time as _time
 from dataclasses import dataclass, field
 
-from . import enrich, monitor, notify, scheduling, sdclip, snapshot, tracking, weather
+from . import enrich, monitor, notify, sampler, scheduling, scorer, sdclip, snapshot, tracking, weather
 from .config import (
     AppConfig,
     CameraConfig,
@@ -186,6 +186,7 @@ class MonitorState:
     ``outage_alerted``    cameras for which a 🔴 outage alert has already fired.
     ``connect_fails``     consecutive connect failures per camera (drives backoff).
     ``connect_backoff_until`` earliest time we may try connecting again per camera.
+    ``groups``            open sampler event-groups per camera (see tapo_monitor.sampler).
     """
     last_seen: dict = field(default_factory=dict)
     last_alert: dict = field(default_factory=dict)
@@ -194,6 +195,7 @@ class MonitorState:
     connect_fails: dict = field(default_factory=dict)
     connect_backoff_until: dict = field(default_factory=dict)
     pending_sd: list = field(default_factory=list)
+    groups: dict = field(default_factory=dict)
 
 
 def backoff_seconds(fails, base=60, cap=1800):
@@ -235,20 +237,26 @@ def update_outage(state: "MonitorState", name, ok, now, threshold):
     return None, state
 
 
-def _default_snapshot(cfg: CameraConfig):
+def _default_snapshot(cfg: CameraConfig, stream=None):
     """Build a snapshot(cam, event) callable for one camera (RTSP only for now).
 
     Credentials and stream/port come from the config (resolved from the environment),
     NOT from the pytapo ``cam`` object, whose login is often a different account.
+    ``stream`` overrides the camera's default RTSP stream (the sampler's follow-up
+    grabs may want the high-res stream even where the hot path uses the fast one).
     """
     user, password = resolve_rtsp_credentials(cfg)
 
     def snap(_cam, _event):
         url = snapshot.rtsp_url(
-            cfg.host, user, password, stream=cfg.rtsp_stream, port=cfg.rtsp_port
+            cfg.host, user, password, stream=stream or cfg.rtsp_stream, port=cfg.rtsp_port
         )
         return snapshot.capture_rtsp(url, timeout=cfg.rtsp_timeout)
     return snap
+
+
+def _sampler_snapshot(cfg: CameraConfig):
+    return _default_snapshot(cfg, stream=cfg.sampler.stream)
 
 
 def _default_time_str(event):  # pragma: no cover - trivial formatting
@@ -274,6 +282,26 @@ def alert_gate(state, name, cooldown, now):
         state.last_alert[(name, "motion" if etype == "motion" else "confirmed")] = now
 
     return can_alert, on_alert
+
+
+def score_for(cfg: CameraConfig):
+    """Build score(image_path) -> float|None for a camera, or None if no scorer configured."""
+    if not cfg.scorer.url:
+        return None
+
+    def score(image_path):
+        result = scorer.score_image(cfg.scorer.url, image_path, timeout=cfg.scorer.timeout)
+        return None if result is None else scorer.subject_score(result)
+
+    return score
+
+
+def _caption_describe(cfg, groq_key, image):
+    """Caption-only Groq for an already-approved frame; never blocks a send."""
+    if not cfg.enrich.groq:
+        return ""
+    desc = enrich.groq_describe(groq_key, image)
+    return "" if notify.is_empty_scene(desc) else desc
 
 
 def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
@@ -320,6 +348,11 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                 "live_sent": live_sent,
             })
         defer_fn = defer if cfg.sd_snapshot else None
+        score = score_for(cfg)
+
+        def observe(event, etype, sent, _name=name, _cfg=cfg):
+            if _cfg.sampler.enabled:
+                sampler.observe_event(state.groups, _name, event, etype, sent, now, _cfg.sampler)
 
         watermark = monitor.run_monitor(
             cam, cfg, last_seen,
@@ -333,6 +366,8 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             on_alert=on_alert,
             face_names=secrets.get("face_names"),
             defer=defer_fn,
+            score=score,
+            observe=observe,
         )
         state.last_seen[cfg.name] = watermark
     return state.last_seen
@@ -445,6 +480,72 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
     return state.pending_sd
 
 
+
+def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
+                    time_str=None):
+    """Advance sampler groups: follow-up grabs across each open event window.
+
+    A group exists because its burst never produced a subject-bearing alert. Every
+    ``sampler.interval`` seconds we grab another frame (optionally from the high-res
+    stream) and let the scorer decide; the first frame above threshold is sent and
+    closes the group. A scorer failure sends the frame through unfiltered but still
+    closes the group — degraded mode is bounded spam (one ping), never a silent miss.
+    """
+    time_str = time_str or _default_time_str
+    for cfg in app.cameras:
+        group = state.groups.get(cfg.name)
+        if group is None:
+            continue
+        if not cfg.sampler.enabled:
+            del state.groups[cfg.name]
+            continue
+        scfg = cfg.sampler
+        if sampler.expired(group, now, scfg):
+            log.info("close group %s: %d follow-up frame(s), sent=%s",
+                     cfg.name, group["frames"], group["sent"])
+            del state.groups[cfg.name]
+            continue
+        if not sampler.due(group, now, scfg):
+            continue
+        cam = cam_clients.get(cfg.name)
+        if cam is None:
+            continue                          # camera offline this tick; retry next tick
+        snap = (snapshot_for or _sampler_snapshot)(cfg)
+        image = snap(cam, group["event"])
+        sampler.record_grab(group, now, scfg)
+        if not image:
+            continue                          # grab hiccup: the schedule already moved on
+        try:
+            etype = group["etype"]
+            score = score_for(cfg)
+            s = score(image) if score is not None else None
+            if score is not None and s is not None and s < cfg.scorer.threshold:
+                log.info("sampler %s frame %d/%d: score %.2f below threshold %.2f",
+                         cfg.name, group["frames"], scfg.max_frames, s, cfg.scorer.threshold)
+                continue
+            if score is not None and s is None:
+                log.warning("scorer unavailable; sampler passes %s frame through", cfg.name)
+            can_alert, on_alert = alert_gate(state, cfg.name, app.alerts.cooldown, now)
+            if not can_alert(etype):
+                # A confirmed alert for this walk already went out elsewhere; this
+                # group's job is done.
+                log.info("skip %s: cooldown active [sampler]", etype)
+                group["sent"] = True
+                continue
+            description = _caption_describe(cfg, secrets["groq_key"], image)
+            label = enrich.face_label(monitor.face_ids(group["event"]), secrets.get("face_names"))
+            caption = notify.build_caption(
+                monitor.TYPE_EMOJI.get(etype, "👁"), time_str(group["event"]),
+                description=description or None, detail=label or None,
+            )
+            notify.send_photo(secrets["telegram_token"], secrets["telegram_chat"], image, caption)
+            log.info("alert %s sent (faces=%r, desc=%r, score=%s) [sampler]",
+                     etype, label, description, f"{s:.2f}" if s is not None else "n/a")
+            on_alert(etype)
+            group["sent"] = True
+        finally:
+            _safe_unlink(image)
+
 def control_due(last_control, now, interval):
     """True if the camera-control pass is due. Pure.
 
@@ -456,7 +557,7 @@ def control_due(last_control, now, interval):
 
 def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
               last_control, control_interval,
-              run_control=None, watchdog=None, monitor=None, drain=None,
+              run_control=None, watchdog=None, monitor=None, drain=None, sample=None,
               connect_factory=None):
     """One loop iteration with control decoupled from event polling.
 
@@ -475,6 +576,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     watchdog = watchdog or _watchdog_pass
     monitor = monitor or run_monitor_pass
     drain = drain or process_pending_sd
+    sample = sample or process_sampler
     connect_factory = connect_factory or _connect_camera
     if control_due(last_control, now, control_interval):
         cam_clients.clear()
@@ -482,6 +584,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
         watchdog(app, cam_clients, state, now=now, secrets=secrets)
         last_control = now
     monitor(app, cam_clients, state, now=now, secrets=secrets)
+    sample(app, cam_clients, state, now=now, secrets=secrets)
     drain(app, cam_clients, state, now=now, secrets=secrets)
     return last_control
 

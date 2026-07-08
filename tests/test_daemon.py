@@ -1212,3 +1212,143 @@ def test_pending_raw_mode_sends_sd_frame_without_groq(monkeypatch):
     assert sent[0][0] == "/tmp/sd.jpg"
     assert groq_calls == []
     assert state.pending_sd == []
+
+# -- process_sampler ----------------------------------------------------------
+
+def _sampler_app(threshold=0.4, url="http://127.0.0.1:1/score"):
+    return cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1",
+                                    "sampler": {"enabled": True, "interval": 30,
+                                                "max_frames": 6, "group_gap": 90},
+                                    "scorer": {"url": url, "threshold": threshold}}]})
+
+
+def _group(started=1000, etype="motion", sent=False, frames=0):
+    return {"camera": "a", "etype": etype, "event": {"start_time": started},
+            "started": started, "last_event_at": started + 10,
+            "frames": frames, "next_due": started + 30, "sent": sent}
+
+
+def _run_sampler(app, state, now, sent, monkeypatch, *, score=0.9, snap="/tmp/f.jpg",
+                 groq="Person"):
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap: sent.append((img, cap)))
+    monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: groq)
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, img, timeout=10: None if score is None
+                        else {"person": score, "animal": 0.0})
+    monkeypatch.setattr(daemon, "_safe_unlink", lambda p: None)
+    secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
+    daemon.process_sampler(app, {"a": object()}, state, now=now, secrets=secrets,
+                           snapshot_for=lambda c: (lambda cam, ev: snap),
+                           time_str=lambda ev: "T")
+
+
+def test_sampler_due_group_scores_and_sends(monkeypatch):
+    sent = []
+    app = _sampler_app()
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    _run_sampler(app, state, 1035, sent, monkeypatch, score=0.9)
+    assert len(sent) == 1
+    g = state.groups["a"]
+    assert g["sent"] is True
+    assert g["frames"] == 1
+    assert state.last_alert[("a", "motion")] == 1035   # cooldown recorded
+
+
+def test_sampler_below_threshold_keeps_sampling(monkeypatch):
+    sent = []
+    app = _sampler_app()
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    _run_sampler(app, state, 1035, sent, monkeypatch, score=0.1)
+    assert sent == []
+    g = state.groups["a"]
+    assert g["sent"] is False
+    assert g["frames"] == 1
+    assert g["next_due"] == 1035 + 30
+
+
+def test_sampler_scorer_down_sends_once(monkeypatch):
+    sent = []
+    app = _sampler_app()
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    _run_sampler(app, state, 1035, sent, monkeypatch, score=None)
+    assert len(sent) == 1                    # passthrough, but bounded:
+    assert state.groups["a"]["sent"] is True  # one send per group, not six
+
+
+def test_sampler_not_due_or_sent_group_untouched(monkeypatch):
+    sent = []
+    app = _sampler_app()
+    state = daemon.MonitorState()
+    state.groups["a"] = _group(sent=True)
+    _run_sampler(app, state, 1035, sent, monkeypatch)
+    assert sent == []
+    state.groups["a"] = _group()
+    _run_sampler(app, state, 1010, sent, monkeypatch)   # before next_due
+    assert sent == []
+    assert state.groups["a"]["frames"] == 0
+
+
+def test_sampler_expired_group_removed(monkeypatch):
+    sent = []
+    app = _sampler_app()
+    state = daemon.MonitorState()
+    state.groups["a"] = _group(sent=True)
+    _run_sampler(app, state, 1000 + 10 + 91, sent, monkeypatch)   # past gap
+    assert "a" not in state.groups
+    assert sent == []
+
+
+def test_sampler_grab_failure_counts_attempt(monkeypatch):
+    sent = []
+    app = _sampler_app()
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    _run_sampler(app, state, 1035, sent, monkeypatch, snap=None)
+    assert sent == []
+    g = state.groups["a"]
+    assert g["frames"] == 1                  # attempt consumed, schedule advanced
+    assert g["next_due"] == 1035 + 30
+
+
+def test_sampler_cooldown_blocks_and_closes(monkeypatch):
+    sent = []
+    app = _sampler_app()
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    state.last_alert[("a", "confirmed")] = 1030   # fresh confirmed alert
+    _run_sampler(app, state, 1035, sent, monkeypatch, score=0.9)
+    assert sent == []
+    assert state.groups["a"]["sent"] is True      # this walk already alerted
+
+
+def test_score_for_none_without_url():
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "1.1.1.1"}]})
+    assert daemon.score_for(app.cameras[0]) is None
+
+
+def test_score_for_maps_result_and_failure(monkeypatch):
+    app = _sampler_app(threshold=0.4)
+    camera_cfg = app.cameras[0]
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, img, timeout=10: {"person": 0.2, "animal": 0.6})
+    assert daemon.score_for(camera_cfg)("/tmp/x.jpg") == 0.6
+    monkeypatch.setattr(daemon.scorer, "score_image", lambda url, img, timeout=10: None)
+    assert daemon.score_for(camera_cfg)("/tmp/x.jpg") is None
+
+
+def test_loop_step_runs_sampler_every_tick(monkeypatch):
+    app = _sampler_app()
+    calls = []
+    daemon.loop_step(
+        app, {}, daemon.MonitorState(), now=1000, secrets={},
+        last_control=1000, control_interval=60,
+        run_control=lambda *a, **k: {}, watchdog=lambda *a, **k: None,
+        monitor=lambda *a, **k: None, drain=lambda *a, **k: None,
+        sample=lambda *a, **k: calls.append(k["now"]))
+    assert calls == [1000]
+
