@@ -64,6 +64,24 @@ class EnrichConfig:
 
 
 @dataclass
+class SamplerConfig:
+    """Follow-up frame sampling across one event group. Off by default."""
+    enabled: bool = False
+    interval: int = 30      # seconds between follow-up grabs
+    max_frames: int = 6     # follow-up grabs per group (interval*max_frames = window)
+    group_gap: int = 90     # events closer than this belong to the same group
+    stream: str | None = None  # RTSP stream for follow-up grabs; None = camera default
+
+
+@dataclass
+class ScorerConfig:
+    """Local object-detection scoring service. Disabled when url is None."""
+    url: str | None = None
+    threshold: float = 0.4  # min subject confidence to send a frame
+    timeout: int = 10       # seconds per scoring request
+
+
+@dataclass
 class CoordinatorConfig:
     group: str | None = None
     handoff_preset: str | None = None
@@ -105,6 +123,8 @@ class CameraConfig:
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
     enrich: EnrichConfig = field(default_factory=EnrichConfig)
+    sampler: SamplerConfig = field(default_factory=SamplerConfig)
+    scorer: ScorerConfig = field(default_factory=ScorerConfig)
     coordinator: CoordinatorConfig = field(default_factory=CoordinatorConfig)
 
 
@@ -226,6 +246,37 @@ def _enrich(data, where):
     return EnrichConfig(snapshot=snapshot, groq=bool(d.get("groq", True)))
 
 
+def _sampler(data, where):
+    d = data or {}
+    try:
+        interval = int(d.get("interval", 30))
+        max_frames = int(d.get("max_frames", 6))
+        group_gap = int(d.get("group_gap", 90))
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}: sampler interval/max_frames/group_gap must be integers") from None
+    if interval < 1 or max_frames < 1 or group_gap < 1:
+        raise ConfigError(f"{where}: sampler interval/max_frames/group_gap must be >= 1")
+    return SamplerConfig(
+        enabled=bool(d.get("enabled", False)),
+        interval=interval,
+        max_frames=max_frames,
+        group_gap=group_gap,
+        stream=d.get("stream"),
+    )
+
+
+def _scorer(data, where):
+    d = data or {}
+    try:
+        threshold = float(d.get("threshold", 0.4))
+        timeout = int(d.get("timeout", 10))
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}: scorer threshold/timeout must be numbers") from None
+    if not 0.0 <= threshold <= 1.0:
+        raise ConfigError(f"{where}: scorer threshold must be between 0 and 1")
+    return ScorerConfig(url=d.get("url"), threshold=threshold, timeout=timeout)
+
+
 def _camera(data, index):
     if not isinstance(data, dict):
         raise ConfigError(f"cameras[{index}]: must be a mapping")
@@ -273,6 +324,8 @@ def _camera(data, index):
         tracking=_tracking(data.get("tracking"), where),
         weather=_weather(data.get("weather"), where),
         enrich=_enrich(data.get("enrich"), where),
+        sampler=_sampler(data.get("sampler"), where),
+        scorer=_scorer(data.get("scorer"), where),
         coordinator=CoordinatorConfig(
             group=coord.get("group"),
             handoff_preset=coord.get("handoff_preset"),

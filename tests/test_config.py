@@ -337,3 +337,48 @@ def test_camera_config_parses_sd_jobs_per_tick():
                      {"name": "b", "host": "1.1.1.2"}]})
     assert app.cameras[0].sd_jobs_per_tick == 1
     assert app.cameras[1].sd_jobs_per_tick is None
+
+
+# ── sampler and scorer config ────────────────────────────────────────────────
+
+def test_sampler_scorer_defaults_off():
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "1.1.1.1"}]})
+    cam = app.cameras[0]
+    assert cam.sampler.enabled is False
+    assert (cam.sampler.interval, cam.sampler.max_frames, cam.sampler.group_gap) == (30, 6, 90)
+    assert cam.sampler.stream is None
+    assert cam.scorer.url is None
+    assert cam.scorer.threshold == 0.4
+    assert cam.scorer.timeout == 10
+
+
+def test_sampler_scorer_parsed():
+    app = cfg.load_config_from_dict({"cameras": [{
+        "name": "a", "host": "1.1.1.1",
+        "sampler": {"enabled": True, "interval": 20, "max_frames": 4,
+                    "group_gap": 60, "stream": "stream1"},
+        "scorer": {"url": "http://127.0.0.1:8765/score", "threshold": 0.55, "timeout": 5},
+    }]})
+    cam = app.cameras[0]
+    assert cam.sampler.enabled is True
+    assert (cam.sampler.interval, cam.sampler.max_frames, cam.sampler.group_gap) == (20, 4, 60)
+    assert cam.sampler.stream == "stream1"
+    assert cam.scorer.url == "http://127.0.0.1:8765/score"
+    assert cam.scorer.threshold == 0.55
+    assert cam.scorer.timeout == 5
+
+
+def test_scorer_threshold_validated():
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config_from_dict({"cameras": [{
+            "name": "a", "host": "1.1.1.1",
+            "scorer": {"url": "http://x/score", "threshold": 1.5},
+        }]})
+
+
+def test_sampler_interval_validated():
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config_from_dict({"cameras": [{
+            "name": "a", "host": "1.1.1.1",
+            "sampler": {"enabled": True, "interval": 0},
+        }]})
