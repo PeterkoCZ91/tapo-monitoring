@@ -440,8 +440,16 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
                               span=sdclip.event_span(event, cap=cfg.sd_span_cap),
                               out_dir=job_dir)
         image, description, fallback_image = None, "", None
+        score = score_for(cfg)
         try:
             for frame in frames:
+                if score is not None:
+                    # Local scorer is the arbiter (Groq captions later, at send time).
+                    s = score(frame)
+                    if s is None or s >= cfg.scorer.threshold:
+                        image = frame
+                        break
+                    continue
                 desc = enrich.groq_describe(secrets["groq_key"], frame) if cfg.enrich.groq else ""
                 # Raw mode (groq off): no subject arbiter -> first frame wins as-is.
                 if not cfg.enrich.groq or not notify.is_empty_scene(desc):
@@ -466,6 +474,8 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
             if not image:
                 log.warning("skip %s: snapshot failed (after retry)", etype)
                 continue                              # drop
+            if not description:
+                description = _caption_describe(cfg, secrets["groq_key"], image)
             label = enrich.face_label(monitor.face_ids(event), secrets.get("face_names"))
             caption = notify.build_caption(
                 monitor.TYPE_EMOJI.get(etype, "👤"), time_str(event),

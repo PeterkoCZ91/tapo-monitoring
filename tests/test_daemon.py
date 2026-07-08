@@ -1352,3 +1352,71 @@ def test_loop_step_runs_sampler_every_tick(monkeypatch):
         sample=lambda *a, **k: calls.append(k["now"]))
     assert calls == [1000]
 
+def test_pending_scorer_picks_frame_above_threshold(monkeypatch):
+    sent = []
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True,
+                                    "scorer": {"url": "http://127.0.0.1:1/score",
+                                               "threshold": 0.4}}]})
+    state = daemon.MonitorState()
+    scores = {"/tmp/sd-1.jpg": 0.1, "/tmp/sd-2.jpg": 0.9}
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, img, timeout=10: {"person": scores[img], "animal": 0.0})
+
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
+        return ["/tmp/sd-1.jpg", "/tmp/sd-2.jpg"]
+
+    def snapshot_for(cfg_):
+        return lambda cam, ev: None
+
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+    _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent,
+                 monkeypatch, groq=lambda *a, **k: "Person at door")
+    assert len(sent) == 1
+    assert sent[0][0] == "/tmp/sd-2.jpg"           # first frame ABOVE threshold wins
+    assert "Person at door" in sent[0][1]          # Groq captioned the approved frame
+
+
+def test_pending_scorer_all_below_threshold_drops(monkeypatch):
+    sent = []
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True,
+                                    "scorer": {"url": "http://127.0.0.1:1/score",
+                                               "threshold": 0.4}}]})
+    state = daemon.MonitorState()
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, img, timeout=10: {"person": 0.05, "animal": 0.0})
+
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
+        return ["/tmp/sd-1.jpg"]
+
+    def snapshot_for(cfg_):
+        return lambda cam, ev: None
+
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": True}]
+    _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent, monkeypatch)
+    assert sent == []
+
+
+def test_pending_scorer_failure_passes_frame_through(monkeypatch):
+    sent = []
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True,
+                                    "scorer": {"url": "http://127.0.0.1:1/score",
+                                               "threshold": 0.4}}]})
+    state = daemon.MonitorState()
+    monkeypatch.setattr(daemon.scorer, "score_image", lambda url, img, timeout=10: None)
+
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
+        return ["/tmp/sd-1.jpg"]
+
+    def snapshot_for(cfg_):
+        return lambda cam, ev: None
+
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+    _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent, monkeypatch)
+    assert len(sent) == 1
+
