@@ -8,7 +8,7 @@ Only the latest version on `main` receives security fixes.
 
 Please **do not** open a public GitHub issue for security vulnerabilities.
 
-Send a description to the maintainer via the email on the GitHub profile. Include:
+Send a description through the repository's configured private security contact. Include:
 - Affected component and reproduction steps
 - Potential impact
 - Any suggested mitigations

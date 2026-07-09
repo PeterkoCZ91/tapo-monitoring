@@ -8,30 +8,30 @@ from tapo_monitor import snapshot
 
 
 def test_rtsp_url_basic():
-    url = snapshot.rtsp_url("192.168.1.50", "admin", "secret")
-    assert url == "rtsp://admin:secret@192.168.1.50:554/stream1"
+    url = snapshot.rtsp_url("192.0.2.50", "admin", "secret")
+    assert url == "rtsp://admin:secret@192.0.2.50:554/stream1"
 
 
 def test_rtsp_url_quotes_credentials():
-    url = snapshot.rtsp_url("192.168.1.50", "user@host", "p/w d")
+    url = snapshot.rtsp_url("192.0.2.50", "user@host", "p/w d")
     assert "user%40host" in url
     assert "p%2Fw%20d" in url
-    assert "@192.168.1.50:554" in url
+    assert "@192.0.2.50:554" in url
 
 
 def test_rtsp_url_custom_stream():
-    url = snapshot.rtsp_url("192.168.1.50", "admin", "secret", stream="stream2")
+    url = snapshot.rtsp_url("192.0.2.50", "admin", "secret", stream="stream2")
     assert url.endswith("/stream2")
 
 
 def test_rtsp_url_custom_port():
-    url = snapshot.rtsp_url("192.168.1.50", "admin", "secret", port=8554)
-    assert url == "rtsp://admin:secret@192.168.1.50:8554/stream1"
+    url = snapshot.rtsp_url("192.0.2.50", "admin", "secret", port=8554)
+    assert url == "rtsp://admin:secret@192.0.2.50:8554/stream1"
 
 
 def test_rtsp_url_custom_port_and_stream():
-    url = snapshot.rtsp_url("192.168.1.50", "admin", "secret", stream="stream2", port=10554)
-    assert url == "rtsp://admin:secret@192.168.1.50:10554/stream2"
+    url = snapshot.rtsp_url("192.0.2.50", "admin", "secret", stream="stream2", port=10554)
+    assert url == "rtsp://admin:secret@192.0.2.50:10554/stream2"
 
 
 def test_ffmpeg_args_shape():
@@ -108,3 +108,58 @@ def test_capture_rtsp_treats_empty_file_as_failure(tmp_path):
     path = snapshot.capture_rtsp("rtsp://x", out_dir=str(tmp_path), _run=fake_run)
     assert path is None
     assert os.listdir(tmp_path) == []
+
+
+def _recording_file(root, host, name="segment.mkv", mtime=1000):
+    path = root / host / "2026-07-09" / "22" / name
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"video")
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def test_latest_recording_frame_extracts_from_fresh_segment(tmp_path):
+    host = "192.0.2.50"
+    segment = _recording_file(tmp_path, host, mtime=1000)
+
+    def fake_run(args, **kwargs):
+        assert args[args.index("-i") + 1] == str(segment)
+        out = args[-1]
+        with open(out, "wb") as f:
+            f.write(b"jpeg")
+        return subprocess.CompletedProcess(args, 0)
+
+    path = snapshot.latest_recording_frame(
+        host, root=str(tmp_path), out_dir=str(tmp_path), now=1040, max_age=60, _run=fake_run
+    )
+
+    assert path is not None
+    assert os.path.exists(path)
+
+
+def test_latest_recording_frame_ignores_stale_segment(tmp_path):
+    host = "192.0.2.50"
+    _recording_file(tmp_path, host, mtime=1000)
+    called = {"run": False}
+
+    def fake_run(args, **kwargs):
+        called["run"] = True
+
+    path = snapshot.latest_recording_frame(
+        host, root=str(tmp_path), out_dir=str(tmp_path), now=1401, max_age=300, _run=fake_run
+    )
+
+    assert path is None
+    assert called["run"] is False
+
+
+def test_latest_recording_frame_uses_env_max_age(tmp_path, monkeypatch):
+    host = "192.0.2.50"
+    _recording_file(tmp_path, host, mtime=1000)
+    monkeypatch.setenv("RECORDING_MAX_AGE", "30")
+
+    path = snapshot.latest_recording_frame(
+        host, root=str(tmp_path), out_dir=str(tmp_path), now=1040, _run=lambda *a, **k: None
+    )
+
+    assert path is None

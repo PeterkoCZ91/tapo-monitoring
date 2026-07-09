@@ -1,8 +1,9 @@
 """Command-line entry point for tapo-monitor.
 
 Usage:
-  tapo-monitor run [cameras.yaml]     # start the config-driven daemon
-  tapo-monitor check [cameras.yaml]   # validate the config and print a summary
+  tapo-monitor run [cameras.yaml]       # start the config-driven daemon
+  tapo-monitor check [cameras.yaml]     # validate the config and print a summary
+  tapo-monitor audit-log [logfile|-]    # summarize scorer/Telegram audit lines
 """
 
 import sys
@@ -30,6 +31,9 @@ def main(argv=None):
         from .daemon import main as daemon_main
         daemon_main([path])
         return 0
+    if cmd == "audit-log":
+        from .audit import main as audit_main
+        return audit_main(argv[1:])
     print(__doc__)
     return 2
 

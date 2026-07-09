@@ -11,8 +11,8 @@
 
 ## Testing
 
-- [ ] `python person_monitor.py --test` passes
-- [ ] `python -m py_compile person_monitor.py camera_automation.py` clean
+- [ ] `ruff check .` passes
+- [ ] `pytest -q` passes
 - [ ] Tested on real hardware (Raspberry Pi + camera)
 - [ ] N/A
 

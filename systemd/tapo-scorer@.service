@@ -1,0 +1,17 @@
+[Unit]
+Description=tapo-monitor shared YOLO scoring service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+EnvironmentFile=/etc/tapo-monitor/scorer.env
+# Adjust these paths to the scorer checkout/venv on the target host.
+WorkingDirectory=/opt/tapo-monitor
+ExecStart=/opt/tapo-monitor/.venv/bin/python -m tapo_monitor.scorer_service --model ${TAPO_SCORER_MODEL} --port ${TAPO_SCORER_PORT} --input-size ${TAPO_SCORER_INPUT_SIZE}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

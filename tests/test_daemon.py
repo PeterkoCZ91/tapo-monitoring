@@ -8,7 +8,7 @@ from tapo_monitor import daemon
 
 
 def _cam(**overrides):
-    base = {"name": "c", "host": "1.1.1.1"}
+    base = {"name": "c", "host": "203.0.113.10"}
     base.update(overrides)
     app = cfg.load_config_from_dict({"cameras": [base]})
     return app.cameras[0]
@@ -50,8 +50,8 @@ def test_plan_static_never_tracks():
 
 def test_run_once_plans_each_camera():
     app = cfg.load_config_from_dict({"cameras": [
-        {"name": "a", "host": "1.1.1.1"},
-        {"name": "b", "host": "1.1.1.2", "role": "static"},
+        {"name": "a", "host": "203.0.113.10"},
+        {"name": "b", "host": "203.0.113.11", "role": "static"},
     ]})
     plans = daemon.run_once(app, now=1000, is_night=lambda: True, is_raining=lambda *a, **k: False)
     assert plans["a"].autotrack_on is True
@@ -59,7 +59,7 @@ def test_run_once_plans_each_camera():
 
 
 def test_run_once_skips_weather_when_strategy_none():
-    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "1.1.1.1"}]})
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
     called = {"weather": 0}
     def is_raining(*a, **k):
         called["weather"] += 1
@@ -72,7 +72,7 @@ def test_run_once_skips_weather_when_strategy_none():
 def test_run_once_applies_via_connect(monkeypatch):
     from tapo_monitor import tracking
     monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
-    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "1.1.1.1"}]})
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
 
     class FakeCam:
         def __init__(self):
@@ -305,7 +305,7 @@ def test_resolve_secrets_reads_env(monkeypatch):
         "telegram": {"token_env": "TG_TOKEN", "chat_id_env": "TG_CHAT"},
         "groq": {"api_key_env": "GROQ_KEY"},
         "faces": {"names_env": "FACES"},
-        "cameras": [{"name": "a", "host": "1.1.1.1"}],
+        "cameras": [{"name": "a", "host": "203.0.113.10"}],
     })
     secrets = daemon.resolve_secrets(app)
     assert secrets == {"telegram_token": "tok123", "telegram_chat": "555",
@@ -317,7 +317,7 @@ def test_resolve_secrets_missing_env_is_empty(monkeypatch):
     app = cfg.load_config_from_dict({
         "telegram": {"token_env": "MISSING_TOKEN", "chat_id_env": "MISSING_CHAT"},
         "groq": {},
-        "cameras": [{"name": "a", "host": "1.1.1.1"}],
+        "cameras": [{"name": "a", "host": "203.0.113.10"}],
     })
     secrets = daemon.resolve_secrets(app)
     assert secrets == {"telegram_token": "", "telegram_chat": "", "groq_key": "",
@@ -340,7 +340,7 @@ def _no_snapshot(cfg):
 
 
 def test_run_monitor_pass_advances_watermark_across_ticks():
-    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "1.1.1.1"}]})
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
     cam = _FakeEventCam([
         [{"start_time": 100, "event_type": "personDetection"}],
         [{"start_time": 250, "event_type": "personDetection"}],
@@ -359,7 +359,7 @@ def test_run_monitor_pass_advances_watermark_across_ticks():
 
 def test_run_monitor_pass_skips_non_getevents_cameras():
     app = cfg.load_config_from_dict({"cameras": [
-        {"name": "a", "host": "1.1.1.1", "detection": {"sources": ["onvif"]}},
+        {"name": "a", "host": "203.0.113.10", "detection": {"sources": ["onvif"]}},
     ]})
     cam = _FakeEventCam([[{"start_time": 100, "event_type": "personDetection"}]])
     state = daemon.MonitorState()
@@ -370,7 +370,7 @@ def test_run_monitor_pass_skips_non_getevents_cameras():
 
 
 def test_run_monitor_pass_skips_cameras_without_client():
-    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "1.1.1.1"}]})
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
     state = daemon.MonitorState()
     secrets = {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
     daemon.run_monitor_pass(app, {}, state, now=1, secrets=secrets,
@@ -388,7 +388,7 @@ def test_control_due_first_tick_and_at_interval():
 
 
 def test_loop_step_decouples_control_from_event_poll():
-    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "1.1.1.1"}]})
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
     secrets = {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
     calls = {"control": 0, "watchdog": 0, "monitor": 0, "drain": 0}
 
@@ -500,7 +500,7 @@ def test_run_monitor_pass_cooldown_rate_limits(monkeypatch):
 
     app = cfg.load_config_from_dict({
         "alerts": {"cooldown": 120},
-        "cameras": [{"name": "a", "host": "1.1.1.1", "enrich": {"groq": False}}],
+        "cameras": [{"name": "a", "host": "203.0.113.10", "enrich": {"groq": False}}],
     })
     state = daemon.MonitorState()
     secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": ""}
@@ -533,7 +533,7 @@ def test_run_monitor_pass_cooldown_rate_limits(monkeypatch):
 
 def _motion_app():
     return cfg.load_config_from_dict({
-        "cameras": [{"name": "a", "host": "1.1.1.1"}],  # strict_people defaults True
+        "cameras": [{"name": "a", "host": "203.0.113.10"}],  # strict_people defaults True
     })
 
 
@@ -619,7 +619,7 @@ def _two_tick_pass(monkeypatch, first_event, second_event):
     monkeypatch.setattr(mon.enrich, "groq_describe", lambda *a, **k: "a man walking")
     app = cfg.load_config_from_dict({
         "alerts": {"cooldown": 120},
-        "cameras": [{"name": "a", "host": "1.1.1.1"}],
+        "cameras": [{"name": "a", "host": "203.0.113.10"}],
     })
     state = daemon.MonitorState()
     secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": "k"}
@@ -702,7 +702,7 @@ def test_default_snapshot_uses_config_rtsp_credentials(monkeypatch):
     monkeypatch.setenv("CAM_RTSP_USER", "rtspadmin")
     monkeypatch.setenv("CAM_RTSP_PASSWORD", "rtsppw")
     camcfg = _cam(
-        host="192.168.1.50",
+        host="192.0.2.50",
         rtsp_user_env="CAM_RTSP_USER",
         rtsp_password_env="CAM_RTSP_PASSWORD",
         rtsp_port=8554,
@@ -719,14 +719,14 @@ def test_default_snapshot_uses_config_rtsp_credentials(monkeypatch):
     # cam object has NO user/password/host attributes — must not be relied upon.
     result = snap(object(), {"start_time": 1})
     assert result == "/tmp/snap.jpg"
-    assert captured["url"] == "rtsp://rtspadmin:rtsppw@192.168.1.50:8554/stream2"
+    assert captured["url"] == "rtsp://rtspadmin:rtsppw@192.0.2.50:8554/stream2"
 
 
 def test_default_snapshot_empty_creds_when_env_missing(monkeypatch):
     monkeypatch.delenv("MISSING_RTSP_USER", raising=False)
     monkeypatch.delenv("MISSING_RTSP_PW", raising=False)
     camcfg = _cam(
-        host="192.168.1.51",
+        host="192.0.2.51",
         rtsp_user_env="MISSING_RTSP_USER",
         rtsp_password_env="MISSING_RTSP_PW",
     )
@@ -736,7 +736,34 @@ def test_default_snapshot_empty_creds_when_env_missing(monkeypatch):
     snap = daemon._default_snapshot(camcfg)
     snap(object(), {"start_time": 1})
     # defaults: port 554, stream1; empty credentials
-    assert captured["url"] == "rtsp://:@192.168.1.51:554/stream1"
+    assert captured["url"] == "rtsp://:@192.0.2.51:554/stream1"
+
+
+def test_default_snapshot_does_not_use_recorder_fallback_by_default(monkeypatch):
+    camcfg = _cam(host="192.0.2.52")
+    called = {"recorder": False}
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp", lambda url, **kwargs: None)
+
+    def fake_latest(*args, **kwargs):
+        called["recorder"] = True
+        return "/tmp/rec.jpg"
+
+    monkeypatch.setattr(daemon.snapshot, "latest_recording_frame", fake_latest)
+
+    assert daemon._default_snapshot(camcfg)(object(), {"start_time": 1}) is None
+    assert called["recorder"] is False
+
+
+def test_default_snapshot_uses_recorder_fallback_when_enabled(monkeypatch):
+    camcfg = _cam(host="192.0.2.52")
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp", lambda url, **kwargs: None)
+    monkeypatch.setattr(
+        daemon.snapshot, "latest_recording_frame", lambda host, **kwargs: f"/tmp/{host}.jpg"
+    )
+
+    snap = daemon._default_snapshot(camcfg, recorder_fallback=True)
+
+    assert snap(object(), {"start_time": 1}) == "/tmp/192.0.2.52.jpg"
 
 
 # ── alert_gate: module-level cooldown helper ──────────────────────────────────
@@ -764,7 +791,7 @@ def test_alert_gate_motion_does_not_block_person():
 def _pending(cam_clients, sent, *, sd_ok=True, rtsp_ok=True, snapshot_calls=None):
     """Build app+state+collaborators for process_pending_sd tests."""
     app = cfg.load_config_from_dict(
-        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True}]})
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True}]})
     state = daemon.MonitorState()
     def fetch_frames(cfg_, start_time, span=None, out_dir=None):
         return ["/tmp/sd.jpg"] if sd_ok else []
@@ -793,7 +820,7 @@ def _run_pending(app, state, cam_clients, now, fetch_frames, snapshot_for, sent,
 def test_pending_respects_camera_sd_jobs_per_tick(monkeypatch):
     sent = []
     app = cfg.load_config_from_dict(
-        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1",
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10",
                                     "sd_snapshot": True, "sd_jobs_per_tick": 1}]})
     state = daemon.MonitorState()
     calls = []
@@ -971,7 +998,7 @@ def test_pending_cleans_job_dir_when_subprocess_leaves_orphans(monkeypatch):
 def test_pending_removes_rtsp_fallback_snapshot(monkeypatch, tmp_path):
     sent = []
     app = cfg.load_config_from_dict(
-        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True}]})
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True}]})
     state = daemon.MonitorState()
     image = tmp_path / "rtsp.jpg"
 
@@ -1031,7 +1058,7 @@ def test_run_monitor_pass_enqueues_sd_without_live_send_when_empty(monkeypatch):
                         lambda tok, chat, img, cap: sent.append(img))
     monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "empty scene")
     app = cfg.load_config_from_dict(
-        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True}]})
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True}]})
     state = daemon.MonitorState()
 
     class Cam:
@@ -1060,7 +1087,7 @@ def test_defer_due_at_follows_camera_event_end_time(monkeypatch):
                         lambda tok, chat, img, cap: sent.append(img))
     monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "empty scene")
     app = cfg.load_config_from_dict(
-        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True}]})
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True}]})
     state = daemon.MonitorState()
 
     class Cam:
@@ -1104,7 +1131,7 @@ def test_defer_and_fetch_honor_camera_sd_span_cap(monkeypatch):
                         lambda tok, chat, img, cap: sent.append(img))
     monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "empty scene")
     app = cfg.load_config_from_dict(
-        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True,
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
                                   "sd_span_cap": 120}]})
     state = daemon.MonitorState()
 
@@ -1135,7 +1162,7 @@ def test_defer_dedups_pending_motion_per_camera():
     # a ~2 min SD download, so at most ONE motion follow-up may wait per camera. Person
     # entries are unaffected (they are confirmed and must all deliver).
     app = cfg.load_config_from_dict(
-        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True,
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
                                   "sd_motion": True,
                                   "detection": {"strict_people": False}}]})
     state = daemon.MonitorState()
@@ -1196,7 +1223,7 @@ def test_pending_raw_mode_sends_sd_frame_without_groq(monkeypatch):
     # first frame directly.
     sent = []
     app = cfg.load_config_from_dict(
-        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True,
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
                                     "enrich": {"groq": False}}]})
     state = daemon.MonitorState()
     def fetch_frames(cfg_, start_time, span=None, out_dir=None):
@@ -1217,7 +1244,7 @@ def test_pending_raw_mode_sends_sd_frame_without_groq(monkeypatch):
 
 def _sampler_app(threshold=0.4, url="http://127.0.0.1:1/score"):
     return cfg.load_config_from_dict(
-        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1",
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10",
                                     "sampler": {"enabled": True, "interval": 30,
                                                 "max_frames": 6, "group_gap": 90},
                                     "scorer": {"url": url, "threshold": threshold}}]})
@@ -1327,7 +1354,7 @@ def test_sampler_cooldown_blocks_and_closes(monkeypatch):
 
 
 def test_score_for_none_without_url():
-    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "1.1.1.1"}]})
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
     assert daemon.score_for(app.cameras[0]) is None
 
 
@@ -1355,7 +1382,7 @@ def test_loop_step_runs_sampler_every_tick(monkeypatch):
 def test_pending_scorer_picks_frame_above_threshold(monkeypatch):
     sent = []
     app = cfg.load_config_from_dict(
-        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True,
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
                                     "scorer": {"url": "http://127.0.0.1:1/score",
                                                "threshold": 0.4}}]})
     state = daemon.MonitorState()
@@ -1381,7 +1408,7 @@ def test_pending_scorer_picks_frame_above_threshold(monkeypatch):
 def test_pending_scorer_all_below_threshold_drops(monkeypatch):
     sent = []
     app = cfg.load_config_from_dict(
-        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True,
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
                                     "scorer": {"url": "http://127.0.0.1:1/score",
                                                "threshold": 0.4}}]})
     state = daemon.MonitorState()
@@ -1403,7 +1430,7 @@ def test_pending_scorer_all_below_threshold_drops(monkeypatch):
 def test_pending_scorer_failure_passes_frame_through(monkeypatch):
     sent = []
     app = cfg.load_config_from_dict(
-        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True,
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
                                     "scorer": {"url": "http://127.0.0.1:1/score",
                                                "threshold": 0.4}}]})
     state = daemon.MonitorState()
@@ -1435,7 +1462,7 @@ def _capture_mute(monkeypatch):
 
 def test_run_monitor_pass_mutes_night_only_camera_by_day(monkeypatch):
     app = cfg.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1", "night_only": True}]})
+        {"cameras": [{"name": "a", "host": "203.0.113.10", "night_only": True}]})
     captured = _capture_mute(monkeypatch)
     state = daemon.MonitorState()
     secrets = {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
@@ -1447,7 +1474,7 @@ def test_run_monitor_pass_mutes_night_only_camera_by_day(monkeypatch):
 
 def test_run_monitor_pass_active_night_only_camera_at_night(monkeypatch):
     app = cfg.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1", "night_only": True}]})
+        {"cameras": [{"name": "a", "host": "203.0.113.10", "night_only": True}]})
     captured = _capture_mute(monkeypatch)
     state = daemon.MonitorState()
     secrets = {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
@@ -1457,7 +1484,7 @@ def test_run_monitor_pass_active_night_only_camera_at_night(monkeypatch):
 
 
 def test_run_monitor_pass_never_mutes_normal_camera_by_day(monkeypatch):
-    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "1.1.1.1"}]})
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
     captured = _capture_mute(monkeypatch)
     state = daemon.MonitorState()
     secrets = {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
@@ -1469,7 +1496,7 @@ def test_run_monitor_pass_never_mutes_normal_camera_by_day(monkeypatch):
 def test_sampler_skips_night_only_camera_by_day(monkeypatch):
     sent = []
     app = cfg.load_config_from_dict(
-        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "night_only": True,
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "night_only": True,
                                     "sampler": {"enabled": True},
                                     "scorer": {"url": "http://x/score"}}]})
     state = daemon.MonitorState()
@@ -1487,7 +1514,7 @@ def test_sampler_skips_night_only_camera_by_day(monkeypatch):
 def test_pending_skips_night_only_camera_by_day(monkeypatch):
     sent = []
     app = cfg.load_config_from_dict(
-        {"groq": {}, "cameras": [{"name": "a", "host": "1.1.1.1", "sd_snapshot": True,
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
                                     "night_only": True}]})
     state = daemon.MonitorState()
     state.pending_sd = [{"camera": "a", "etype": "person",
@@ -1508,7 +1535,7 @@ def test_pending_skips_night_only_camera_by_day(monkeypatch):
 
 def test_watchdog_skips_night_only_camera_by_day(monkeypatch):
     app = cfg.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1", "night_only": True}]})
+        {"cameras": [{"name": "a", "host": "203.0.113.10", "night_only": True}]})
     sent = []
     monkeypatch.setattr(daemon.notify, "send_text", lambda tok, chat, msg: sent.append(msg))
     state = daemon.MonitorState()
@@ -1520,7 +1547,7 @@ def test_watchdog_skips_night_only_camera_by_day(monkeypatch):
 
 def test_watchdog_alerts_night_only_camera_at_night(monkeypatch):
     app = cfg.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1", "night_only": True}]})
+        {"cameras": [{"name": "a", "host": "203.0.113.10", "night_only": True}]})
     sent = []
     monkeypatch.setattr(daemon.notify, "send_text", lambda tok, chat, msg: sent.append(msg))
     state = daemon.MonitorState()
@@ -1531,7 +1558,7 @@ def test_watchdog_alerts_night_only_camera_at_night(monkeypatch):
 
 
 def test_loop_step_passes_night_to_detection_passes():
-    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "1.1.1.1"}]})
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
     seen = {}
     daemon.loop_step(
         app, {}, daemon.MonitorState(), now=1000, secrets={},

@@ -79,7 +79,7 @@ def test_run_monitor_defers_without_live_send_when_empty(monkeypatch):
             return [_person_event(100)]
 
     cfg = config.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1"}]}).cameras[0]
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0]
     wm = monitor.run_monitor(
         Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
         snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
@@ -103,7 +103,7 @@ def test_run_monitor_sends_empty_live_when_no_sd(monkeypatch):
             return [_person_event(100)]
 
     cfg = config.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1"}]}).cameras[0]
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0]
     monitor.run_monitor(
         Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
         snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
@@ -122,7 +122,7 @@ def test_run_monitor_no_defer_when_live_has_person(monkeypatch):
             return [_person_event(100)]
 
     cfg = config.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1"}]}).cameras[0]
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0]
     monitor.run_monitor(
         Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
         snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
@@ -143,7 +143,7 @@ def test_run_monitor_removes_live_snapshot_after_send(monkeypatch, tmp_path):
             return [_person_event(100)]
 
     cfg = config.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1"}]}).cameras[0]
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0]
     monitor.run_monitor(
         Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
         snapshot=lambda cam, ev: str(image), time_str=lambda ev: "T")
@@ -163,7 +163,7 @@ def test_run_monitor_removes_live_snapshot_after_motion_drop(monkeypatch, tmp_pa
             return [{"start_time": 100, "events_1": 2, "alarm_type": 2}]
 
     cfg = config.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1"}]}).cameras[0]
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0]
     monitor.run_monitor(
         Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
         snapshot=lambda cam, ev: str(image), time_str=lambda ev: "T")
@@ -182,7 +182,7 @@ def test_run_monitor_defers_on_live_snapshot_failure(monkeypatch):
             return [_person_event(100)]
 
     cfg = config.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1"}]}).cameras[0]
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0]
     monitor.run_monitor(
         Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
         snapshot=lambda cam, ev: None,   # live grab fails (both attempts)
@@ -203,7 +203,7 @@ def test_run_monitor_defer_leaves_motion_inline(monkeypatch):
             return [{"start_time": 100, "events_1": 2, "alarm_type": 2}]  # bare motion
 
     cfg = config.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1"}]}).cameras[0]
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0]
     monitor.run_monitor(
         Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
         snapshot=lambda cam, ev: "/tmp/x.jpg", time_str=lambda ev: "T",
@@ -224,7 +224,7 @@ def test_run_monitor_drops_motion_when_groq_blank(monkeypatch):
             return [{"start_time": 100, "events_1": 2, "alarm_type": 2}]  # bare motion
 
     cfg = config.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1"}]}).cameras[0]
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0]
     monitor.run_monitor(
         Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
         snapshot=lambda cam, ev: "/tmp/x.jpg", time_str=lambda ev: "T")
@@ -246,7 +246,7 @@ def test_cooldown_overridden_by_recognized_face(monkeypatch):
             return [event]
 
     cfg = config.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1"}]}).cameras[0]
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0]
     monitor.run_monitor(
         Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
         snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
@@ -264,7 +264,7 @@ def test_cooldown_still_skips_person_without_face(monkeypatch):
             return [_person_event(100)]
 
     cfg = config.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1"}]}).cameras[0]
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0]
     monitor.run_monitor(
         Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
         snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
@@ -291,7 +291,7 @@ def test_sd_motion_defers_empty_pir_motion(monkeypatch):
             return [_pir_motion_event(100)]
 
     cfg = config.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1", "sd_motion": True,
+        {"cameras": [{"name": "a", "host": "203.0.113.10", "sd_motion": True,
                       "detection": {"strict_people": False}}]}).cameras[0]
     monitor.run_monitor(
         Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
@@ -314,7 +314,7 @@ def test_sd_motion_ignores_software_only_motion(monkeypatch):
             return [{"start_time": 100, "events_1": 2, "alarm_type": 2}]
 
     cfg = config.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1", "sd_motion": True,
+        {"cameras": [{"name": "a", "host": "203.0.113.10", "sd_motion": True,
                       "detection": {"strict_people": False}}]}).cameras[0]
     monitor.run_monitor(
         Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
@@ -336,7 +336,7 @@ def test_sd_motion_ignores_pir_without_motion_bit(monkeypatch):
             return [{"start_time": 100, "events_1": 32, "alarm_type": 6}]
 
     cfg = config.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1", "sd_motion": True,
+        {"cameras": [{"name": "a", "host": "203.0.113.10", "sd_motion": True,
                       "detection": {"strict_people": False}}]}).cameras[0]
     monitor.run_monitor(
         Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
@@ -354,7 +354,7 @@ def test_motion_empty_still_drops_without_sd_motion(monkeypatch):
             return [_pir_motion_event(100)]
 
     cfg = config.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1",
+        {"cameras": [{"name": "a", "host": "203.0.113.10",
                       "detection": {"strict_people": False}}]}).cameras[0]
     monitor.run_monitor(
         Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
@@ -377,7 +377,7 @@ def test_run_monitor_raw_mode_sends_motion_without_groq(monkeypatch):
             return [{"start_time": 100, "event_type": "motion"}]
 
     cfg = config.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1",
+        {"cameras": [{"name": "a", "host": "203.0.113.10",
                       "enrich": {"groq": False}}]}).cameras[0]
     monitor.run_monitor(
         Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
@@ -398,7 +398,7 @@ def test_run_monitor_raw_mode_sends_person_live_directly(monkeypatch):
             return [_person_event(100)]
 
     cfg = config.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1",
+        {"cameras": [{"name": "a", "host": "203.0.113.10",
                       "enrich": {"groq": False}}]}).cameras[0]
     monitor.run_monitor(
         Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
@@ -413,7 +413,7 @@ def _motion_event(start=100):
 
 def _cfg_with_scorer(threshold=0.4):
     return config.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1",
+        {"cameras": [{"name": "a", "host": "203.0.113.10",
                       "scorer": {"url": "http://127.0.0.1:8765/score",
                                  "threshold": threshold}}]}).cameras[0]
 
@@ -538,7 +538,7 @@ def test_run_monitor_mute_drains_watermark_without_alerting(monkeypatch):
             return [_person_event(100)]
 
     cfg = config.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1"}]}).cameras[0]
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0]
     wm = monitor.run_monitor(
         Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
         snapshot=lambda cam, ev: grabbed.append(ev) or "/tmp/live.jpg",

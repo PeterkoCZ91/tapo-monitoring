@@ -1,7 +1,7 @@
 #!/bin/bash
 set -u
 
-ENV_FILE="${TAPO_ENV_FILE:-/home/user/tapo/tapo-camera.env}"
+ENV_FILE="${TAPO_ENV_FILE:-/etc/tapo-monitor/secrets.env}"
 if [ -f "$ENV_FILE" ]; then
   set -a
   . "$ENV_FILE"

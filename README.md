@@ -7,7 +7,9 @@ scene with an AI vision model, and sends Telegram alerts — running happily on 
 > **Status:** a single library (`tapo_monitor`) plus one config-driven daemon
 > (`tapo-monitor run`). The day/night/rain camera control and the detection →
 > enrich → notify pipeline both run in the daemon loop today. See
-> [`docs/capabilities.md`](docs/capabilities.md) for the full capability catalog.
+> [`docs/capabilities.md`](docs/capabilities.md) for the full capability catalog and
+> [`docs/runtime-topology.md`](docs/runtime-topology.md) for the production process map
+> when running multiple instances/services.
 
 ## Where this fits
 
@@ -67,14 +69,23 @@ The whole journey of one frame — from the camera, through the Pi, out to Teleg
 
 ```mermaid
 flowchart LR
-    CAM["📷 Tapo camera<br/>on-device AI · PIR · SD card"]
-    PI["🖥️ Raspberry Pi — the daemon<br/>poll → grab frame → decide → alert"]
-    S["🧠 YOLO scorer (optional)<br/>same Pi, or a bigger box"]
-    TG["💬 Telegram"]
-    CAM -->|"event + RTSP / SD frame"| PI
-    PI -->|"POST frame"| S
-    S -->|"person / animal score"| PI
-    PI -->|"photo + caption"| TG
+    CAM["Tapo cameras<br/>getEvents · RTSP · SD card"]
+    MON["tapo-monitor daemon<br/>stateful: sessions · cooldowns · SD queue · sampler"]
+    SCORE["shared tapo-scorer<br/>stateless HTTP /score"]
+    GROQ["Groq vision<br/>caption only"]
+    TG["Telegram alerts"]
+    A12["A12 container<br/>own pipeline + thresholds"]
+
+    CAM -->|"events + frames"| MON
+    MON -->|"JPEG"| SCORE
+    SCORE -->|"person / animal score"| MON
+    MON -->|"approved frame"| GROQ
+    GROQ -->|"description"| MON
+    MON -->|"photo + caption"| TG
+
+    A12 -->|"JPEG"| SCORE
+    SCORE -->|"classes map"| A12
+    A12 -->|"A12-owned notification flow"| TG
 ```
 
 The **Raspberry Pi is the orchestrator**: it polls events, pulls the frames, and owns the
@@ -88,18 +99,32 @@ Per event, the daemon decides what to do with that frame:
 ```mermaid
 flowchart TD
     A["getEvents poll (~4s)"] --> B["decode events_1 bitmask"]
-    B -->|"AI person · bit 19 / face"| P["person"]
-    B -->|"motion only"| M["motion"]
-    B -->|"nothing usable"| X["drop"]
+    B -->|"AI person bit / face"| P["confirmed person"]
+    B -->|"PIR / motion"| M["motion candidate"]
+    B -->|"unusable"| X["drop"]
 
     P --> L["live RTSP frame"]
     M --> L
-    L --> Q{"subject in the frame?<br/>local YOLO scorer · or Groq"}
-    Q -->|"yes"| G["caption (Groq, optional)"]
-    Q -->|"empty / grab missed it"| SD["SD-card follow-up<br/>frames around event time"]
-    SD -->|"subject found in a frame"| G
-    SD -->|"no subject in the whole window"| X
-    G --> T["Telegram alert<br/>photo + caption + face label"]
+    L --> S{"scorer enabled?"}
+    S -->|"yes"| Y["POST frame to tapo-scorer"]
+    S -->|"no"| R["Groq empty-scene check"]
+    Y --> C{"score >= camera threshold?"}
+    R --> C
+
+    C -->|"subject"| CAP["optional Groq caption"]
+    C -->|"empty confirmed person"| SD["queue SD follow-up"]
+    C -->|"empty bare motion"| D["drop or sampler follow-up"]
+    SD --> F["event-time SD frames"]
+    F -->|"subject frame found"| CAP
+    F -->|"no subject"| X
+    F -->|"no usable SD frames"| RF["late fallback live grab<br/>optional recorder fallback"]
+    RF --> CAP
+    CAP --> T["Telegram alert"]
+
+    A -.-> AUD["structured audit log"]
+    C -.-> AUD
+    SD -.-> AUD
+    T -.-> AUD
 ```
 
 The gate — *is a subject actually in this frame?* — is the **local YOLO scorer** when one is
@@ -119,10 +144,14 @@ risking the login lockout:
 flowchart LR
     subgraph loop["daemon loop"]
       direction TB
-      E["event tick (~4s)<br/>getEvents on the already-connected client"]
-      C["control tick (~60s)<br/>day/night · weather · SmartTrack · auto-track asserted last"]
+      E["event tick (~4s)<br/>getEvents on existing client"]
+      S["sampler tick<br/>follow-up RTSP grabs"]
+      SD["SD queue drain<br/>fresh event-time frames"]
+      C["control tick (~60s)<br/>day/night · weather · SmartTrack · auto-track last"]
     end
-    E -. reuses session, no re-login .-> C
+    E -->|"missed/empty subject"| S
+    E -->|"confirmed person empty/failed"| SD
+    E -. "same camera session" .-> C
 ```
 
 ### Local scoring service (optional)
@@ -165,7 +194,25 @@ Content-Type: image/jpeg
 
 `person` and `animal` are the backward-compatible top-level scores used by tapo-monitor.
 `classes` contains per-COCO-class max confidences above a small floor, for other clients
-that need class names while sharing the same scorer service.
+that need class names while sharing the same scorer service. A12 consumes this same
+contract over HTTP; see [`docs/a12-shared-scorer.md`](docs/a12-shared-scorer.md).
+
+### Threshold audit
+
+The daemon emits structured `audit ...` log lines for each camera detection, scorer
+decision, SD/sampler follow-up and Telegram send. Summarize them from journald to compare
+what the Tapo firmware detected against what actually reached Telegram:
+
+```bash
+journalctl -u tapo-monitor --since "24 hours ago" --no-pager | tapo-monitor audit-log -
+```
+
+The report is per camera: `detections` is the count of Tapo alertable events,
+`telegram_ok` / `telegram_failed` is what was sent, `dropped_below_threshold` is how many
+frames the scorer rejected, and the score min/p50/max lines show whether the threshold is
+cutting near real positives. For rotating night cameras, watch `live defer` plus `sd drop`
+lines: a parked car that the camera briefly reports as activity should stay below the
+scorer threshold and never become a Telegram send unless the scorer also sees a person.
 
 ## Privacy
 
@@ -191,6 +238,10 @@ pytest -q                         # run the test suite
 A systemd template is in [`systemd/tapo-monitor.service`](systemd/tapo-monitor.service).
 Secrets are read from the environment variables named in `cameras.yaml` (e.g.
 `TELEGRAM_TOKEN`), so the config file itself stays safe to share.
+
+For deployments with a separate scorer service, A12 container and optional recorder
+fallback, keep [`docs/runtime-topology.md`](docs/runtime-topology.md) as the source of
+truth for which process owns which responsibility.
 
 ## Camera prerequisites & auth
 
@@ -304,9 +355,11 @@ tapo_monitor/            # the library + daemon
   camera.py              # lockout-aware pytapo connect + getEvents helpers
   monitor.py             # detection pipeline (collect → snapshot → enrich → notify)
   daemon.py              # per-camera state machine tying control + pipeline together
-  cli.py                 # `tapo-monitor check|run`
+  cli.py                 # `tapo-monitor check|run|audit-log`
 cameras.example.yaml     # configuration schema (placeholders only)
 docs/capabilities.md     # what Tapo detection can do + what this project adds over pytapo
+docs/runtime-topology.md # process map: monitor daemon, scorer, A12, recorder fallback
+docs/deployment-health.md # deploy, health checks, rollback and calibration loop
 systemd/                 # unit templates (generic; %i user, env-driven)
 tests/                   # pytest suite
 ```
@@ -322,5 +375,4 @@ the terms in [`LICENSE`](LICENSE).
 
 Setup help, usage questions, or sharing what you've learned about your camera (especially
 new `events_1` / `alarm_type` findings) — head to
-[**Discussions**](https://github.com/PeterkoCZ91/tapo-monitoring/discussions). Bug reports
-and feature requests belong in [Issues](https://github.com/PeterkoCZ91/tapo-monitoring/issues).
+Use the repository's Discussions and Issues tabs for setup help, usage questions, bug reports, and feature requests.

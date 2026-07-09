@@ -8,6 +8,7 @@ with their side-effecting pieces injected so the orchestration stays testable.
 
 import logging
 import os
+import shlex
 
 from . import camera, detection, enrich, notify
 
@@ -28,6 +29,34 @@ def _safe_unlink(path):
 def _observe(observe, event, etype, sent):
     if observe is not None:
         observe(event, etype, sent)
+
+
+def _fmt_score(score):
+    return "none" if score is None else f"{float(score):.4f}"
+
+
+def _fmt_audit_value(value):
+    return shlex.quote(str(value))
+
+
+def audit_event(cfg, event, etype, path, action, *, score=None, threshold=None,
+                telegram=None, reason=None):
+    parts = [
+        f"camera={_fmt_audit_value(cfg.name)}",
+        f"path={_fmt_audit_value(path)}",
+        f"action={_fmt_audit_value(action)}",
+        f"etype={_fmt_audit_value(etype)}",
+        f"start={_fmt_audit_value(event.get('start_time', 0))}",
+    ]
+    if score is not None:
+        parts.append(f"score={_fmt_score(score)}")
+    if threshold is not None:
+        parts.append(f"threshold={_fmt_score(threshold)}")
+    if telegram is not None:
+        parts.append(f"telegram={_fmt_audit_value(str(bool(telegram)).lower())}")
+    if reason:
+        parts.append(f"reason={_fmt_audit_value(reason)}")
+    log.info("audit %s", " ".join(parts))
 
 
 def face_ids(event):
@@ -107,6 +136,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
     if mute:
         return watermark          # night_only by day: drain silently, no grab/score/alert
     for event, etype in alertable:
+        audit_event(cfg, event, etype, "getevents", "detect")
         event_flags = detection.decode_events_1(event.get("events_1"))
         defer_motion = (
             etype == "motion"
@@ -123,6 +153,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 log.info("cooldown override %s: recognized face present", etype)
             else:
                 log.info("skip %s: cooldown active", etype)
+                audit_event(cfg, event, etype, "live", "cooldown")
                 _observe(observe, event, etype, False)
                 break
         image = snapshot(cam, event)
@@ -137,17 +168,21 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             if defer is not None and etype != "motion":
                 log.warning("defer %s: live snapshot failed, SD follow-up queued", etype)
                 defer(event, etype, False)
+                audit_event(cfg, event, etype, "live", "defer", reason="snapshot_failed")
                 _observe(observe, event, etype, True)
             elif defer_motion:
                 log.warning("defer %s: live snapshot failed, SD follow-up queued", etype)
                 defer(event, etype, False)
+                audit_event(cfg, event, etype, "live", "defer", reason="snapshot_failed")
                 _observe(observe, event, etype, True)
             else:
                 log.warning("skip %s: snapshot failed (after retry)", etype)
+                audit_event(cfg, event, etype, "live", "snapshot_failed")
                 _observe(observe, event, etype, False)
             continue
         try:
             description = ""
+            s = None
             if score is not None:
                 # Local scorer is the arbiter; Groq no longer decides anything.
                 s = score(image)
@@ -155,6 +190,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                     # Scorer unreachable: raw passthrough — degraded means spam,
                     # never a silent miss.
                     log.warning("scorer unavailable; passing %s frame through", etype)
+                    audit_event(cfg, event, etype, "live", "scorer_unavailable")
                     empty = False
                 else:
                     empty = s < cfg.scorer.threshold
@@ -170,14 +206,20 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                     if defer_motion:
                         log.info("defer %s: live empty, SD follow-up queued", etype)
                         defer(event, etype, False)
+                        audit_event(cfg, event, etype, "live", "defer", score=s,
+                                    threshold=cfg.scorer.threshold if score is not None else None,
+                                    reason="below_threshold" if score is not None else "empty")
                         _observe(observe, event, etype, True)
                         continue
                     if score is not None:
                         # Keep the score in the trace: threshold calibration reads this.
                         log.info("drop %s: score %.2f below threshold %.2f",
                                  etype, s, cfg.scorer.threshold)
+                        audit_event(cfg, event, etype, "live", "drop", score=s,
+                                    threshold=cfg.scorer.threshold, reason="below_threshold")
                     else:
                         log.info("drop %s: Groq reports empty scene", etype)
+                        audit_event(cfg, event, etype, "live", "drop", reason="empty")
                     _observe(observe, event, etype, False)
                     continue
             elif empty and defer is not None:
@@ -188,6 +230,9 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 if on_alert is not None:
                     on_alert(etype)
                 defer(event, etype, False)
+                audit_event(cfg, event, etype, "live", "defer", score=s,
+                            threshold=cfg.scorer.threshold if score is not None else None,
+                            reason="below_threshold" if score is not None else "empty")
                 _observe(observe, event, etype, True)
                 continue
             elif empty:
@@ -206,8 +251,11 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 TYPE_EMOJI.get(etype, "👁"), time_str(event),
                 description=description or None, detail=label or None,
             )
-            notify.send_photo(telegram_token, telegram_chat, image, caption)
+            ok = notify.send_photo(telegram_token, telegram_chat, image, caption)
             log.info("alert %s sent (faces=%r, desc=%r)", etype, label, description)
+            audit_event(cfg, event, etype, "live", "send", score=s,
+                        threshold=cfg.scorer.threshold if score is not None else None,
+                        telegram=ok)
             if on_alert is not None:
                 on_alert(etype)
             _observe(observe, event, etype, True)

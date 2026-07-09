@@ -34,10 +34,15 @@ but is intentionally **not implemented** — see "Actuators".
   around the event, extracts several candidate frames across it, and picks the one the
   subject is actually in — so a missed live grab becomes an in-frame photo instead of a
   blank ping.
-- **Face crop** — Haar cascade to extract a face zoom alongside the wide shot.
-- **AI description** — Groq vision model returns a short scene description.
+- **Local YOLO scorer (optional)** — a stateless HTTP scorer can decide whether a
+  frame actually contains a person/animal before Telegram is sent. Groq then captions
+  only frames that already passed the scorer.
+- **Event-window sampler (optional)** — for long camera events, follow-up RTSP grabs
+  across the event window catch people who enter frame after the first live grab.
+- **AI description** — Groq vision model returns a short scene description for approved
+  frames.
 - **Face-ID naming** — map stable `face_id`s to names locally.
-- **Telegram** — wide photo + caption, optional face zoom, plus operational alerts.
+- **Telegram** — wide photo + caption plus operational alerts.
 
 ## 4. Weather gating
 
@@ -51,9 +56,11 @@ Rain makes auto-tracking cameras chase raindrops and IR reflections. Using open-
   swinging after raindrops/branches. (Auto-tracking runs at night here, so this bites at
   night in the rain; by day the tracking cameras are already static.)
 
-## 5. Multi-camera
+## 5. Multi-camera and schedules
 
 - Run any number of cameras from one config.
+- `night_only` cameras drain daytime events silently and alert only during the astral
+  night window, while camera control still runs all day.
 - **Perimeter coordination** (planned) — when one camera in a group detects a person,
   peers turn to a hand-off preset so overlapping/adjacent views cover the same target.
   Constraint: `getEvents` reports *that* a person was seen, not *where* — so direction
@@ -63,7 +70,10 @@ Rain makes auto-tracking cameras chase raindrops and IR reflections. Using open-
 
 - Camera-down watchdog with de-duplicated Telegram alerts.
 - Reconnect handling and lockout-aware sessions (see below).
-- systemd unit templates; a CLI for events, clips, recordings, status and a test path.
+- Structured audit logs plus `tapo-monitor audit-log` for threshold calibration.
+- systemd templates for the monitor daemon and shared scorer service.
+- Runtime topology and deployment/health runbooks for setups that share one scorer with
+  A12 or other callers.
 
 ## Actuators (available, documented, NOT implemented)
 
@@ -89,6 +99,8 @@ lacks:
   don't rediscover this the hard way.
 - **Unified detection** — one abstraction over ONVIF events, `getEvents` and motion,
   instead of three call sites with different shapes.
+- **Scorer/gating separation** — camera firmware produces events, the optional YOLO
+  scorer validates subject-bearing frames, and Groq is demoted to captioning.
 - **SmartTrack ordering safety** — `setSmartTrackConfig` silently clears the auto-track
   master switch on this firmware; the tracking layer always (re)asserts auto-track *last*.
 - **Sensitivity type gotcha** — `setMotionDetection(sensitivity="60")` (a numeric string)

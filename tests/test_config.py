@@ -11,7 +11,7 @@ from tapo_monitor import config as cfg
 def _minimal():
     return {
         "cameras": [
-            {"name": "front", "host": "192.168.1.50"},
+            {"name": "front", "host": "192.0.2.50"},
         ]
     }
 
@@ -23,7 +23,7 @@ def test_minimal_config_loads_with_defaults():
     assert len(app.cameras) == 1
     cam = app.cameras[0]
     assert cam.name == "front"
-    assert cam.host == "192.168.1.50"
+    assert cam.host == "192.0.2.50"
     # sensible defaults
     assert cam.role == "tracking"
     assert cam.schedule == "astral"
@@ -36,8 +36,8 @@ def test_minimal_config_loads_with_defaults():
 
 def test_multiple_cameras():
     data = {"cameras": [
-        {"name": "a", "host": "10.0.0.1"},
-        {"name": "b", "host": "10.0.0.2", "role": "static"},
+        {"name": "a", "host": "198.51.100.10"},
+        {"name": "b", "host": "198.51.100.11", "role": "static"},
     ]}
     app = cfg.load_config_from_dict(data)
     assert [c.name for c in app.cameras] == ["a", "b"]
@@ -48,7 +48,7 @@ def test_location_and_weather_parsed():
     data = {
         "location": {"lat": 50.0, "lon": 14.0, "tz": "Europe/Prague"},
         "cameras": [{
-            "name": "yard", "host": "10.0.0.3",
+            "name": "yard", "host": "198.51.100.12",
             "weather": {"strategy": "lower_sensitivity", "motion_rain": 10},
         }],
     }
@@ -61,7 +61,7 @@ def test_location_and_weather_parsed():
 
 def test_storm_park_parsed():
     data = {"cameras": [{
-        "name": "yard", "host": "10.0.0.3",
+        "name": "yard", "host": "198.51.100.12",
         "weather": {"strategy": "lower_sensitivity", "storm_park": True},
     }]}
     app = cfg.load_config_from_dict(data)
@@ -82,44 +82,44 @@ def test_missing_host_is_error():
 
 def test_missing_name_is_error():
     with pytest.raises(cfg.ConfigError):
-        cfg.load_config_from_dict({"cameras": [{"host": "10.0.0.1"}]})
+        cfg.load_config_from_dict({"cameras": [{"host": "198.51.100.10"}]})
 
 
 def test_invalid_role_is_error():
     with pytest.raises(cfg.ConfigError):
-        cfg.load_config_from_dict({"cameras": [{"name": "x", "host": "1.1.1.1", "role": "spinning"}]})
+        cfg.load_config_from_dict({"cameras": [{"name": "x", "host": "203.0.113.10", "role": "spinning"}]})
 
 
 def test_invalid_schedule_is_error():
     with pytest.raises(cfg.ConfigError):
-        cfg.load_config_from_dict({"cameras": [{"name": "x", "host": "1.1.1.1", "schedule": "midnight"}]})
+        cfg.load_config_from_dict({"cameras": [{"name": "x", "host": "203.0.113.10", "schedule": "midnight"}]})
 
 
 def test_invalid_weather_strategy_is_error():
     with pytest.raises(cfg.ConfigError):
         cfg.load_config_from_dict({"cameras": [
-            {"name": "x", "host": "1.1.1.1", "weather": {"strategy": "make_it_rain"}}
+            {"name": "x", "host": "203.0.113.10", "weather": {"strategy": "make_it_rain"}}
         ]})
 
 
 def test_invalid_detection_source_is_error():
     with pytest.raises(cfg.ConfigError):
         cfg.load_config_from_dict({"cameras": [
-            {"name": "x", "host": "1.1.1.1", "detection": {"sources": ["telepathy"]}}
+            {"name": "x", "host": "203.0.113.10", "detection": {"sources": ["telepathy"]}}
         ]})
 
 
 def test_duplicate_camera_names_is_error():
     with pytest.raises(cfg.ConfigError):
         cfg.load_config_from_dict({"cameras": [
-            {"name": "dup", "host": "1.1.1.1"},
-            {"name": "dup", "host": "1.1.1.2"},
+            {"name": "dup", "host": "203.0.113.10"},
+            {"name": "dup", "host": "203.0.113.11"},
         ]})
 
 
 def test_error_message_names_the_camera():
     with pytest.raises(cfg.ConfigError) as exc:
-        cfg.load_config_from_dict({"cameras": [{"name": "porch", "host": "1.1.1.1", "role": "bad"}]})
+        cfg.load_config_from_dict({"cameras": [{"name": "porch", "host": "203.0.113.10", "role": "bad"}]})
     assert "porch" in str(exc.value)
 
 
@@ -153,7 +153,7 @@ def test_config_without_credential_fields_validates():
 
 def test_config_with_credential_fields_validates():
     data = {"cameras": [{
-        "name": "front", "host": "192.168.1.50",
+        "name": "front", "host": "192.0.2.50",
         "user_env": "CAM_USER", "password_env": "CAM_PASSWORD",
         "cloud_password_env": "CAM_CLOUD",
     }]}
@@ -170,7 +170,7 @@ def test_person_sensitivity_defaults_to_none():
 
 def test_person_sensitivity_round_trips():
     data = {"cameras": [{
-        "name": "front", "host": "192.168.1.50", "person_sensitivity": 40,
+        "name": "front", "host": "192.0.2.50", "person_sensitivity": 40,
     }]}
     cam = cfg.load_config_from_dict(data).cameras[0]
     assert cam.person_sensitivity == 40
@@ -184,7 +184,7 @@ def test_alerts_defaults_when_absent():
 
 def test_alerts_override():
     data = {"alerts": {"cooldown": 30, "outage_threshold": 60},
-            "cameras": [{"name": "front", "host": "192.168.1.50"}]}
+            "cameras": [{"name": "front", "host": "192.0.2.50"}]}
     app = cfg.load_config_from_dict(data)
     assert app.alerts.cooldown == 30
     assert app.alerts.outage_threshold == 60
@@ -193,7 +193,7 @@ def test_alerts_override():
 # ── resolve_camera_credentials (monkeypatched env) ───────────────────────────
 
 def _cred_cam(**overrides):
-    base = {"name": "front", "host": "192.168.1.50"}
+    base = {"name": "front", "host": "192.0.2.50"}
     base.update(overrides)
     return cfg.load_config_from_dict({"cameras": [base]}).cameras[0]
 
@@ -264,7 +264,7 @@ def test_rtsp_port_as_string_is_coerced():
 def test_invalid_rtsp_port_is_error():
     with pytest.raises(cfg.ConfigError):
         cfg.load_config_from_dict({"cameras": [
-            {"name": "x", "host": "1.1.1.1", "rtsp_port": "not-a-number"}
+            {"name": "x", "host": "203.0.113.10", "rtsp_port": "not-a-number"}
         ]})
 
 
@@ -290,25 +290,25 @@ def test_resolve_rtsp_credentials_no_env_names():
 # ── sd_snapshot flag ──────────────────────────────────────────────────────────
 
 def test_camera_sd_snapshot_defaults_false():
-    app = cfg.load_config_from_dict({"cameras": [{"name": "front", "host": "192.168.1.50"}]})
+    app = cfg.load_config_from_dict({"cameras": [{"name": "front", "host": "192.0.2.50"}]})
     assert app.cameras[0].sd_snapshot is False
 
 
 def test_camera_sd_snapshot_parsed_true():
     app = cfg.load_config_from_dict({
-        "cameras": [{"name": "front", "host": "192.168.1.50", "sd_snapshot": True}]})
+        "cameras": [{"name": "front", "host": "192.0.2.50", "sd_snapshot": True}]})
     assert app.cameras[0].sd_snapshot is True
 
 
 def test_loop_defaults():
-    app = cfg.load_config_from_dict({"cameras": [{"name": "x", "host": "1.1.1.1"}]})
+    app = cfg.load_config_from_dict({"cameras": [{"name": "x", "host": "203.0.113.10"}]})
     assert app.loop.event_interval == 4
     assert app.loop.control_interval == 60
 
 
 def test_loop_overrides():
     app = cfg.load_config_from_dict({
-        "cameras": [{"name": "x", "host": "1.1.1.1"}],
+        "cameras": [{"name": "x", "host": "203.0.113.10"}],
         "loop": {"event_interval": 3, "control_interval": 90},
     })
     assert app.loop.event_interval == 3
@@ -317,24 +317,24 @@ def test_loop_overrides():
 
 def test_camera_config_parses_sd_span_cap():
     app = cfg.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1", "sd_span_cap": 120},
-                     {"name": "b", "host": "1.1.1.2"}]})
+        {"cameras": [{"name": "a", "host": "203.0.113.10", "sd_span_cap": 120},
+                     {"name": "b", "host": "203.0.113.11"}]})
     assert app.cameras[0].sd_span_cap == 120
     assert app.cameras[1].sd_span_cap is None     # default: package cap decides
 
 
 def test_camera_config_parses_sd_motion():
     app = cfg.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1", "sd_motion": True},
-                     {"name": "b", "host": "1.1.1.2"}]})
+        {"cameras": [{"name": "a", "host": "203.0.113.10", "sd_motion": True},
+                     {"name": "b", "host": "203.0.113.11"}]})
     assert app.cameras[0].sd_motion is True
     assert app.cameras[1].sd_motion is False    # opt-in: costs a download per burst
 
 
 def test_camera_config_parses_sd_jobs_per_tick():
     app = cfg.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1", "sd_jobs_per_tick": 1},
-                     {"name": "b", "host": "1.1.1.2"}]})
+        {"cameras": [{"name": "a", "host": "203.0.113.10", "sd_jobs_per_tick": 1},
+                     {"name": "b", "host": "203.0.113.11"}]})
     assert app.cameras[0].sd_jobs_per_tick == 1
     assert app.cameras[1].sd_jobs_per_tick is None
 
@@ -342,7 +342,7 @@ def test_camera_config_parses_sd_jobs_per_tick():
 # ── sampler and scorer config ────────────────────────────────────────────────
 
 def test_sampler_scorer_defaults_off():
-    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "1.1.1.1"}]})
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
     cam = app.cameras[0]
     assert cam.sampler.enabled is False
     assert (cam.sampler.interval, cam.sampler.max_frames, cam.sampler.group_gap) == (30, 6, 90)
@@ -354,7 +354,7 @@ def test_sampler_scorer_defaults_off():
 
 def test_sampler_scorer_parsed():
     app = cfg.load_config_from_dict({"cameras": [{
-        "name": "a", "host": "1.1.1.1",
+        "name": "a", "host": "203.0.113.10",
         "sampler": {"enabled": True, "interval": 20, "max_frames": 4,
                     "group_gap": 60, "stream": "stream1"},
         "scorer": {"url": "http://127.0.0.1:8765/score", "threshold": 0.55, "timeout": 5},
@@ -371,7 +371,7 @@ def test_sampler_scorer_parsed():
 def test_scorer_threshold_validated():
     with pytest.raises(cfg.ConfigError):
         cfg.load_config_from_dict({"cameras": [{
-            "name": "a", "host": "1.1.1.1",
+            "name": "a", "host": "203.0.113.10",
             "scorer": {"url": "http://x/score", "threshold": 1.5},
         }]})
 
@@ -379,17 +379,17 @@ def test_scorer_threshold_validated():
 def test_sampler_interval_validated():
     with pytest.raises(cfg.ConfigError):
         cfg.load_config_from_dict({"cameras": [{
-            "name": "a", "host": "1.1.1.1",
+            "name": "a", "host": "203.0.113.10",
             "sampler": {"enabled": True, "interval": 0},
         }]})
 
 
 def test_night_only_defaults_false():
-    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "1.1.1.1"}]})
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
     assert app.cameras[0].night_only is False
 
 
 def test_night_only_parsed():
     app = cfg.load_config_from_dict(
-        {"cameras": [{"name": "a", "host": "1.1.1.1", "night_only": True}]})
+        {"cameras": [{"name": "a", "host": "203.0.113.10", "night_only": True}]})
     assert app.cameras[0].night_only is True

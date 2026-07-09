@@ -5,6 +5,20 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Optional local YOLO scorer service and HTTP client: Tapo monitor can POST frames to a
+  shared scorer, use `person` / `animal` confidence as the send/drop gate, and keep Groq
+  as caption-only enrichment.
+- Per-class scorer response (`classes`) so A12 and other callers can reuse the same HTTP
+  scorer without importing Tapo modules.
+- Event-window sampler: follow-up RTSP grabs across long camera events, scored locally,
+  so late-entering people are still caught.
+- `tapo-monitor audit-log` CLI for summarizing structured audit lines, comparing camera
+  detections, scorer drops and Telegram sends.
+- Runtime topology and deployment/health docs covering monitor daemon, shared scorer,
+  A12 integration and optional recorder fallback.
+- `systemd/tapo-scorer@.service` template for the shared scorer process.
+- Optional local-recorder snapshot fallback guarded by `RECORDING_MAX_AGE`.
+- `night_only` mode for after-hours-only alerting while still draining daytime events.
 - `tapo_monitor` package and `tapo-monitor` CLI (`check` / `run`) — one config-driven
   daemon replacing the original per-host scripts.
 - Decoupled fast detection loop: `getEvents` polled on the already-connected client every

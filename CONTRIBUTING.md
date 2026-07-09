@@ -6,7 +6,7 @@ Thank you for your interest in contributing. This project is a Python package
 ## Setup
 
 ```bash
-git clone https://github.com/PeterkoCZ91/tapo-monitoring.git
+git clone <REPO_URL>
 cd tapo-monitoring
 
 python3 -m venv .venv

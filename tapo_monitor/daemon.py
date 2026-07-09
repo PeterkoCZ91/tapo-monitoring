@@ -237,7 +237,7 @@ def update_outage(state: "MonitorState", name, ok, now, threshold):
     return None, state
 
 
-def _default_snapshot(cfg: CameraConfig, stream=None):
+def _default_snapshot(cfg: CameraConfig, stream=None, recorder_fallback=False):
     """Build a snapshot(cam, event) callable for one camera (RTSP only for now).
 
     Credentials and stream/port come from the config (resolved from the environment),
@@ -254,7 +254,12 @@ def _default_snapshot(cfg: CameraConfig, stream=None):
         image = snapshot.capture_rtsp(url, timeout=cfg.rtsp_timeout)
         if image:
             return image
-        return snapshot.latest_recording_frame(cfg.host, timeout=cfg.rtsp_timeout)
+        if not recorder_fallback:
+            return None
+        image = snapshot.latest_recording_frame(cfg.host, timeout=cfg.rtsp_timeout)
+        if image:
+            log.info("snapshot %s: live RTSP failed, using recorder fallback", cfg.name)
+        return image
     return snap
 
 
@@ -398,7 +403,7 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
     the inline path emits at most one defer per cooldown window). Entries past
     PENDING_MAX_AGE are dropped; entries for a camera not reachable this tick are kept.
     """
-    snapshot_for = snapshot_for or _default_snapshot
+    snapshot_for = snapshot_for or (lambda cfg: _default_snapshot(cfg, recorder_fallback=True))
     time_str = time_str or _default_time_str
     fetch_frames = fetch_frames or sdclip.fetch_sd_frames_subprocess
     cfg_by_name = {c.name: c for c in app.cameras}
@@ -447,15 +452,23 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
                               span=sdclip.event_span(event, cap=cfg.sd_span_cap),
                               out_dir=job_dir)
         image, description, fallback_image = None, "", None
+        selected_score = None
         score = score_for(cfg)
         try:
             for frame in frames:
                 if score is not None:
                     # Local scorer is the arbiter (Groq captions later, at send time).
                     s = score(frame)
-                    if s is None or s >= cfg.scorer.threshold:
+                    selected_score = s
+                    if s is None:
+                        monitor.audit_event(cfg, event, etype, "sd", "scorer_unavailable")
                         image = frame
                         break
+                    if s >= cfg.scorer.threshold:
+                        image = frame
+                        break
+                    monitor.audit_event(cfg, event, etype, "sd", "drop", score=s,
+                                        threshold=cfg.scorer.threshold, reason="below_threshold")
                     continue
                 desc = enrich.groq_describe(secrets["groq_key"], frame) if cfg.enrich.groq else ""
                 # Raw mode (groq off): no subject arbiter -> first frame wins as-is.
@@ -488,8 +501,11 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
                 monitor.TYPE_EMOJI.get(etype, "👤"), time_str(event),
                 description=description or None, detail=label or None,
             )
-            notify.send_photo(secrets["telegram_token"], secrets["telegram_chat"], image, caption)
+            ok = notify.send_photo(secrets["telegram_token"], secrets["telegram_chat"], image, caption)
             log.info("alert %s sent (faces=%r, desc=%r) [sd]", etype, label, description)
+            monitor.audit_event(cfg, event, etype, "sd", "send", score=selected_score,
+                                threshold=cfg.scorer.threshold if score is not None else None,
+                                telegram=ok)
         finally:
             shutil.rmtree(job_dir, ignore_errors=True)   # frames + any orphaned mp4/partials
             _safe_unlink(fallback_image)
@@ -541,14 +557,18 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
             if score is not None and s is not None and s < cfg.scorer.threshold:
                 log.info("sampler %s frame %d/%d: score %.2f below threshold %.2f",
                          cfg.name, group["frames"], scfg.max_frames, s, cfg.scorer.threshold)
+                monitor.audit_event(cfg, group["event"], etype, "sampler", "drop", score=s,
+                                    threshold=cfg.scorer.threshold, reason="below_threshold")
                 continue
             if score is not None and s is None:
                 log.warning("scorer unavailable; sampler passes %s frame through", cfg.name)
+                monitor.audit_event(cfg, group["event"], etype, "sampler", "scorer_unavailable")
             can_alert, on_alert = alert_gate(state, cfg.name, app.alerts.cooldown, now)
             if not can_alert(etype):
                 # A confirmed alert for this walk already went out elsewhere; this
                 # group's job is done.
                 log.info("skip %s: cooldown active [sampler]", etype)
+                monitor.audit_event(cfg, group["event"], etype, "sampler", "cooldown")
                 group["sent"] = True
                 continue
             description = _caption_describe(cfg, secrets["groq_key"], image)
@@ -557,9 +577,12 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                 monitor.TYPE_EMOJI.get(etype, "👁"), time_str(group["event"]),
                 description=description or None, detail=label or None,
             )
-            notify.send_photo(secrets["telegram_token"], secrets["telegram_chat"], image, caption)
+            ok = notify.send_photo(secrets["telegram_token"], secrets["telegram_chat"], image, caption)
             log.info("alert %s sent (faces=%r, desc=%r, score=%s) [sampler]",
                      etype, label, description, f"{s:.2f}" if s is not None else "n/a")
+            monitor.audit_event(cfg, group["event"], etype, "sampler", "send", score=s,
+                                threshold=cfg.scorer.threshold if score is not None else None,
+                                telegram=ok)
             on_alert(etype)
             group["sent"] = True
         finally:

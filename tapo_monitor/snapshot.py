@@ -63,3 +63,84 @@ def capture_rtsp(rtsp_url, out_dir="/tmp", timeout=15, _run=subprocess.run):
         return out_path
     _safe_unlink(out_path)
     return None
+
+
+def _env_float(name, default):
+    value = os.getenv(name)
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def latest_recording_frame(
+    host, root=None, out_dir="/tmp", timeout=20, max_age=None, now=None, _run=subprocess.run
+):
+    """Extract one JPEG from the newest local recorder segment for a camera host.
+
+    This is an optional fallback for deployments that already record RTSP continuously
+    and where the camera refuses a second concurrent RTSP reader. It is disabled unless
+    ``root`` or ``RECORDING_ROOT`` is set. Expected layout:
+    ``<root>/<host>/<YYYY-MM-DD>/<HH>/*.mkv``.
+
+    ``max_age`` defaults to ``RECORDING_MAX_AGE`` seconds, or 300 seconds when unset.
+    Stale recorder output is ignored so a frozen recorder cannot produce old alerts.
+    """
+    root = root or os.getenv("RECORDING_ROOT", "")
+    if not root:
+        return None
+    max_age = _env_float("RECORDING_MAX_AGE", 300.0) if max_age is None else max_age
+    now = _time.time() if now is None else now
+    cam_dir = os.path.join(root, host)
+    if not os.path.isdir(cam_dir):
+        return None
+    latest = None
+    latest_mtime = -1.0
+    for dirpath, _dirnames, filenames in os.walk(cam_dir):
+        for name in filenames:
+            if not name.lower().endswith((".mkv", ".mp4", ".ts")):
+                continue
+            path = os.path.join(dirpath, name)
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            if mtime > latest_mtime:
+                latest, latest_mtime = path, mtime
+    if not latest:
+        return None
+    if max_age is not None and now - latest_mtime > max_age:
+        return None
+    out_path = os.path.join(out_dir, f"snaprec_{host.replace('.', '_')}_{int(now * 1000)}.jpg")
+    try:
+        _run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-sseof",
+                "-2",
+                "-i",
+                latest,
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
+                "-y",
+                out_path,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=True,
+        )
+        ok = os.path.exists(out_path) and os.path.getsize(out_path) > 0
+    except Exception:
+        ok = False
+    if ok:
+        return out_path
+    _safe_unlink(out_path)
+    return None

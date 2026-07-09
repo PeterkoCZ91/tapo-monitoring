@@ -13,6 +13,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+*.egg-info/
 venv/
 
 # Research docs with real device IPs, credentials, and MAC addresses

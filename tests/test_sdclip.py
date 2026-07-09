@@ -17,7 +17,7 @@ class _Cam:
 
 
 def _cfg(**kw):
-    base = {"host": "1.2.3.4", "user_env": "U", "password_env": "P",
+    base = {"host": "203.0.113.12", "user_env": "U", "password_env": "P",
             "cloud_password_env": "C"}
     base.update(kw)
     return types.SimpleNamespace(**base)
@@ -81,7 +81,7 @@ def test_fetch_subprocess_parses_marked_frame_paths():
     assert out == ["/tmp/a_00.jpg", "/tmp/a_06.jpg"]   # only FRAME:-marked lines
     argv = captured["argv"]
     assert argv[:4] == ["PY", "-m", "tapo_monitor.sdclip", "download"]
-    assert "1.2.3.4" in argv and "1000" in argv        # host + start passed through
+    assert "203.0.113.12" in argv and "1000" in argv        # host + start passed through
 
 
 def test_fetch_subprocess_empty_on_nonzero_exit():
