@@ -65,27 +65,48 @@ Python that turns a Tapo camera + a Pi into reliable Telegram person alerts, sta
 
 ## How it works
 
-The whole journey of one frame — from the camera, through the Pi, out to Telegram — is:
+There are three different responsibilities in a production setup:
+
+| Responsibility | Owner | State? | Sends Telegram? |
+| --- | --- | --- | --- |
+| Camera polling, PTZ control, snapshots, cooldowns | `tapo-monitor` | yes, per camera | yes |
+| Frame scoring | `tapo-scorer` | no, stateless HTTP | no |
+| A12 camera/audio pipeline | A12 repo/container | yes, owned by A12 | yes, through A12 |
+
+The important rule is: **the scorer can be shared, alert decisions are not shared**.
+Tapo and A12 may POST frames to the same scorer, but each runtime keeps its own thresholds,
+cooldowns and notification policy.
+
+At runtime the shape is:
 
 ```mermaid
 flowchart LR
-    CAM["Tapo cameras<br/>getEvents · RTSP · SD card"]
-    MON["tapo-monitor daemon<br/>stateful: sessions · cooldowns · SD queue · sampler"]
-    SCORE["shared tapo-scorer<br/>stateless HTTP /score"]
-    GROQ["Groq vision<br/>caption only"]
-    TG["Telegram alerts"]
-    A12["A12 container<br/>own pipeline + thresholds"]
+    subgraph tapo["Tapo monitor runtime"]
+      CAM["Tapo cameras<br/>getEvents · RTSP · SD card"]
+      MON["tapo-monitor daemon<br/>sessions · cooldowns · SD queue · sampler"]
+      GROQ["Groq vision<br/>optional caption / empty-scene check"]
+    end
+
+    subgraph shared["Shared scorer runtime"]
+      SCORE["tapo-scorer<br/>stateless HTTP /score"]
+    end
+
+    subgraph a12["A12 runtime"]
+      A12["A12 container<br/>own camera/audio pipeline"]
+    end
+
+    TG["Telegram"]
 
     CAM -->|"events + frames"| MON
-    MON -->|"JPEG"| SCORE
+    MON -->|"JPEG frame"| SCORE
     SCORE -->|"person / animal score"| MON
     MON -->|"approved frame"| GROQ
-    GROQ -->|"description"| MON
-    MON -->|"photo + caption"| TG
+    GROQ -->|"caption or empty scene"| MON
+    MON -->|"Tapo-owned alert"| TG
 
-    A12 -->|"JPEG"| SCORE
+    A12 -->|"JPEG frame"| SCORE
     SCORE -->|"classes map"| A12
-    A12 -->|"A12-owned notification flow"| TG
+    A12 -->|"A12-owned alert"| TG
 ```
 
 The **Raspberry Pi is the orchestrator**: it polls events, pulls the frames, and owns the
@@ -94,7 +115,7 @@ machine — the Pi just POSTs a frame and reads back a score — so even a Pi Ze
 run a real model, can lean on a server that does. The scorer is a stateless helper: if it is
 unreachable the Pi still runs (frames pass through unfiltered).
 
-Per event, the daemon decides what to do with that frame:
+Per Tapo event, the daemon follows this decision flow:
 
 ```mermaid
 flowchart TD
@@ -126,6 +147,16 @@ flowchart TD
     SD -.-> AUD
     T -.-> AUD
 ```
+
+Read this as a reliability pipeline:
+
+- `getEvents` is the trigger source; it says something happened, not that the first frame
+  is already useful.
+- the scorer/Groq gate answers "is the subject visible in this frame?";
+- SD follow-up gives camera-confirmed people a second chance when the first live frame is
+  empty;
+- the audit log records every branch, so threshold tuning is based on evidence rather than
+  guesswork.
 
 The gate — *is a subject actually in this frame?* — is the **local YOLO scorer** when one is
 configured, otherwise the **Groq** vision model. Either way it only decides *which* frames are
@@ -374,5 +405,5 @@ the terms in [`LICENSE`](LICENSE).
 ## Questions & community
 
 Setup help, usage questions, or sharing what you've learned about your camera (especially
-new `events_1` / `alarm_type` findings) — head to
-Use the repository's Discussions and Issues tabs for setup help, usage questions, bug reports, and feature requests.
+new `events_1` / `alarm_type` findings) — use the repository's Discussions and Issues
+tabs for setup help, bug reports, and feature requests.

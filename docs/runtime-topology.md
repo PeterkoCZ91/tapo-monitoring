@@ -26,8 +26,9 @@ The tested production shape is:
 ```mermaid
 flowchart LR
     subgraph tapo["Tapo monitor runtime"]
-      CAM["Tapo cameras"] --> MON["tapo-monitor daemon"]
-      MON --> TG["Telegram"]
+      CAM["Tapo cameras"] --> MON["tapo-monitor daemon<br/>PTZ · snapshots · cooldowns"]
+      MON --> GROQ["optional Groq caption"]
+      GROQ --> MON
     end
 
     subgraph scorer["Shared scorer runtime"]
@@ -38,12 +39,25 @@ flowchart LR
       A12["A12 container"] --> A12PIPE["A12 thresholds<br/>A12 notifications"]
     end
 
+    TG["Telegram"]
+
     MON -->|"JPEG frames"| SCORE
     SCORE -->|"person / animal"| MON
+    MON -->|"Tapo-owned alert"| TG
     A12 -->|"JPEG frames"| SCORE
     SCORE -->|"classes map"| A12
-    A12PIPE --> TG
+    A12PIPE -->|"A12-owned alert"| TG
 ```
+
+Read the graph by ownership, not by host placement:
+
+- `tapo-monitor` owns Tapo camera state, SD/sampler follow-ups, cooldowns and Telegram
+  sends for Tapo cameras.
+- `tapo-scorer` owns only model inference behind `/score`; it has no camera sessions and
+  never sends notifications.
+- A12 owns its own camera/audio pipeline and notification policy; it is only a scorer
+  client here.
+- Telegram can receive alerts from Tapo and A12, but those are separate alert pipelines.
 
 The scorer may run on the same host as A12 or on another machine reachable over the
 network. If A12 uses Docker host networking, `http://127.0.0.1:8766/score` points at the
