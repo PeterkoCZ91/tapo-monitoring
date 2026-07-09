@@ -294,6 +294,24 @@ def test_cooldown_still_skips_person_without_face(monkeypatch):
     assert sent == []         # faceless burst duplicate stays cooled down
 
 
+def test_cooldown_skip_does_not_feed_sampler():
+    observed = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    cfg = config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0]
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        can_alert=lambda et: False,
+        observe=lambda ev, et, sent: observed.append((ev, et, sent)))
+
+    assert observed == []
+
+
 def _pir_motion_event(start=100):
     # events_1 bit1 (motion) + bit5 (PIR) = physically-near motion, no AI person bit —
     # exactly how the camera reported a woman with children in the yard (2026-07-06).

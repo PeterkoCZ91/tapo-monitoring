@@ -178,7 +178,6 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             else:
                 log.info("skip %s: cooldown active", etype)
                 audit_event(cfg, event, etype, "live", "cooldown")
-                _observe(observe, event, etype, False)
                 break
         image = snapshot(cam, event)
         if not image:
