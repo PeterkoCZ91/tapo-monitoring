@@ -182,6 +182,7 @@ class MonitorState:
 
     ``last_seen``         detection watermark (newest start_time alerted).
     ``last_alert``        timestamp of the last detection alert sent (cooldown gate).
+    ``last_event_start``  camera event start time of the last alert/deferred alert.
     ``fail_since``        when the current connect outage began, or absent if up.
     ``outage_alerted``    cameras for which a 🔴 outage alert has already fired.
     ``connect_fails``     consecutive connect failures per camera (drives backoff).
@@ -190,6 +191,7 @@ class MonitorState:
     """
     last_seen: dict = field(default_factory=dict)
     last_alert: dict = field(default_factory=dict)
+    last_event_start: dict = field(default_factory=dict)
     fail_since: dict = field(default_factory=dict)
     outage_alerted: dict = field(default_factory=dict)
     connect_fails: dict = field(default_factory=dict)
@@ -277,17 +279,49 @@ def alert_gate(state, name, cooldown, now):
     Per-type cooldown: a confirmed detection (person/pet/tamper) is gated only by other
     confirmed alerts; bare motion is quieted by either a recent confirmed or motion alert.
     So motion never eats a real person, but a person does suppress a same-walk motion.
+
+    The gate also compares camera event start times. Tapo can deliver several near-identical
+    person events seconds apart, and a later one may only be processed minutes later after
+    an SD follow-up. Wall-clock cooldown alone then expires even though the camera event is
+    the same passage.
     """
-    def can_alert(etype):
+    def key_for(etype):
+        return "motion" if etype == "motion" else "confirmed"
+
+    def event_start(event):
+        if not isinstance(event, dict):
+            return None
+        try:
+            return float(event.get("start_time"))
+        except (TypeError, ValueError):
+            return None
+
+    def event_time_allowed(keys, event):
+        start = event_start(event)
+        if start is None:
+            return True
+        for key in keys:
+            last_start = state.last_event_start.get((name, key))
+            if last_start is not None and abs(start - last_start) < cooldown:
+                return False
+        return True
+
+    def can_alert(etype, event=None):
         confirmed_ts = state.last_alert.get((name, "confirmed"))
         if etype != "motion":
-            return notify.should_send_alert(confirmed_ts, now, cooldown)
+            return (notify.should_send_alert(confirmed_ts, now, cooldown)
+                    and event_time_allowed(("confirmed",), event))
         motion_ts = state.last_alert.get((name, "motion"))
         recent = [t for t in (confirmed_ts, motion_ts) if t is not None]
-        return notify.should_send_alert(max(recent) if recent else None, now, cooldown)
+        return (notify.should_send_alert(max(recent) if recent else None, now, cooldown)
+                and event_time_allowed(("confirmed", "motion"), event))
 
-    def on_alert(etype):
-        state.last_alert[(name, "motion" if etype == "motion" else "confirmed")] = now
+    def on_alert(etype, event=None):
+        key = key_for(etype)
+        state.last_alert[(name, key)] = now
+        start = event_start(event)
+        if start is not None:
+            state.last_event_start[(name, key)] = start
 
     return can_alert, on_alert
 

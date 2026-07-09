@@ -31,6 +31,24 @@ def _observe(observe, event, etype, sent):
         observe(event, etype, sent)
 
 
+def _can_alert(can_alert, etype, event):
+    if can_alert is None:
+        return True
+    try:
+        return can_alert(etype, event)
+    except TypeError:
+        return can_alert(etype)
+
+
+def _on_alert(on_alert, etype, event):
+    if on_alert is None:
+        return
+    try:
+        on_alert(etype, event)
+    except TypeError:
+        on_alert(etype)
+
+
 def _fmt_score(score):
     return "none" if score is None else f"{float(score):.4f}"
 
@@ -65,6 +83,12 @@ def face_ids(event):
         return []
     return [item["face_id"] for item in info
             if isinstance(item, dict) and item.get("face_id") is not None]
+
+
+def has_known_face(event, face_names=None):
+    """True only when the event contains a face ID mapped to a configured name."""
+    face_names = face_names or {}
+    return any(face_names.get(fid) for fid in face_ids(event))
 
 
 def collect_detections(events, last_seen, strict_people=True):
@@ -145,11 +169,11 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             and event_flags["pir"]
             and defer is not None
         )
-        if can_alert is not None and not can_alert(etype):
-            if etype != "motion" and face_ids(event):
-                # A recognized face is new information, not a burst duplicate — the
-                # cooldown must not eat it (live 2026-07-06 18:37: the camera named 3
-                # known faces 40 s after a person alert and the alert was skipped).
+        if not _can_alert(can_alert, etype, event):
+            if etype != "motion" and has_known_face(event, face_names):
+                # A known face is new information, not a burst duplicate — the cooldown
+                # must not eat it. Unknown face IDs are too noisy for this exception and
+                # stay cooldown-gated.
                 log.info("cooldown override %s: recognized face present", etype)
             else:
                 log.info("skip %s: cooldown active", etype)
@@ -227,8 +251,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 # the SD follow-up (live_sent=False) instead of pinging a blank photo.
                 # Still record the alert so the per-type cooldown sees this person.
                 log.info("defer %s: live empty, SD follow-up queued (no live send)", etype)
-                if on_alert is not None:
-                    on_alert(etype)
+                _on_alert(on_alert, etype, event)
                 defer(event, etype, False)
                 audit_event(cfg, event, etype, "live", "defer", score=s,
                             threshold=cfg.scorer.threshold if score is not None else None,
@@ -256,8 +279,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             audit_event(cfg, event, etype, "live", "send", score=s,
                         threshold=cfg.scorer.threshold if score is not None else None,
                         telegram=ok)
-            if on_alert is not None:
-                on_alert(etype)
+            _on_alert(on_alert, etype, event)
             _observe(observe, event, etype, True)
         finally:
             _safe_unlink(image)

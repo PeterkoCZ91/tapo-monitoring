@@ -777,6 +777,29 @@ def test_alert_gate_confirmed_gated_only_by_confirmed():
     assert can2("person") is False        # within cooldown of a confirmed alert
 
 
+def test_alert_gate_gates_delayed_same_event_burst_by_camera_time():
+    state = daemon.MonitorState()
+    can, on = daemon.alert_gate(state, "a", cooldown=120, now=1000)
+    first = {"start_time": 1783598881}
+    assert can("person", first) is True
+    on("person", first)
+
+    # Tapo may emit another person event one second later but the daemon only sees it
+    # minutes later after SD work. It is still the same camera-side passage.
+    can2, _ = daemon.alert_gate(state, "a", cooldown=120, now=1300)
+    assert can2("person", {"start_time": 1783598889}) is False
+
+
+def test_alert_gate_allows_later_camera_event_after_event_cooldown():
+    state = daemon.MonitorState()
+    can, on = daemon.alert_gate(state, "a", cooldown=120, now=1000)
+    first = {"start_time": 1783598881}
+    on("person", first)
+
+    can2, _ = daemon.alert_gate(state, "a", cooldown=120, now=1300)
+    assert can2("person", {"start_time": 1783599244}) is True
+
+
 def test_alert_gate_motion_does_not_block_person():
     state = daemon.MonitorState()
     _, on = daemon.alert_gate(state, "a", cooldown=120, now=1000)

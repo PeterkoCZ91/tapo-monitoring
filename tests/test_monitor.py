@@ -250,8 +250,30 @@ def test_cooldown_overridden_by_recognized_face(monkeypatch):
     monitor.run_monitor(
         Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
         snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
-        can_alert=lambda et: False)
-    assert len(sent) == 1     # face event alerts despite the active cooldown
+        can_alert=lambda et: False,
+        face_names={7: "Alice", 9: "Bob"})
+    assert len(sent) == 1     # known face event alerts despite the active cooldown
+
+
+def test_unknown_face_does_not_override_cooldown(monkeypatch):
+    sent = []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "A person")
+
+    event = dict(_person_event(100), event_info=[{"face_id": 7}])
+
+    class Cam:
+        def getEvents(self):
+            return [event]
+
+    cfg = config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0]
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        can_alert=lambda et: False,
+        face_names={})
+    assert sent == []         # unknown face burst duplicate stays cooled down
 
 
 def test_cooldown_still_skips_person_without_face(monkeypatch):
