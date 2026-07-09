@@ -191,11 +191,13 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             # the same second chance, but still must find a subject in SD before alerting.
             if defer is not None and etype != "motion":
                 log.warning("defer %s: live snapshot failed, SD follow-up queued", etype)
+                _on_alert(on_alert, etype, event)
                 defer(event, etype, False)
                 audit_event(cfg, event, etype, "live", "defer", reason="snapshot_failed")
                 _observe(observe, event, etype, True)
             elif defer_motion:
                 log.warning("defer %s: live snapshot failed, SD follow-up queued", etype)
+                _on_alert(on_alert, etype, event)
                 defer(event, etype, False)
                 audit_event(cfg, event, etype, "live", "defer", reason="snapshot_failed")
                 _observe(observe, event, etype, True)

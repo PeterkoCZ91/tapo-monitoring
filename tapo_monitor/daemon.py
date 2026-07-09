@@ -372,11 +372,31 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
         can_alert, on_alert = alert_gate(state, name, cooldown, now)
 
         def defer(event, etype, live_sent, _name=name, _cap=cfg.sd_span_cap):
-            if etype == "motion" and any(
-                e["camera"] == _name and e["etype"] == "motion" for e in state.pending_sd
-            ):
-                log.info("drop %s: SD follow-up already pending for %s", etype, _name)
-                return
+            key = "motion" if etype == "motion" else "confirmed"
+            try:
+                start = float(event.get("start_time"))
+            except (TypeError, ValueError):
+                start = None
+            for pending in state.pending_sd:
+                if pending["camera"] != _name:
+                    continue
+                pending_key = "motion" if pending["etype"] == "motion" else "confirmed"
+                if pending_key != key:
+                    continue
+                if key == "motion":
+                    log.info("drop %s: SD follow-up already pending for %s", etype, _name)
+                    return
+                try:
+                    pending_start = float(pending["event"].get("start_time"))
+                except (TypeError, ValueError):
+                    pending_start = None
+                if start is not None and pending_start is not None:
+                    if abs(start - pending_start) < cooldown:
+                        log.info("drop %s: duplicate SD follow-up already pending for %s", etype, _name)
+                        return
+                elif pending["etype"] == etype:
+                    log.info("drop %s: SD follow-up already pending for %s", etype, _name)
+                    return
             state.pending_sd.append({
                 "camera": _name,
                 "etype": etype,
@@ -537,6 +557,11 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
             )
             ok = notify.send_photo(secrets["telegram_token"], secrets["telegram_chat"], image, caption)
             log.info("alert %s sent (faces=%r, desc=%r) [sd]", etype, label, description)
+            # SD follow-up is a real user-visible alert. Record it in the same gate as
+            # live sends, otherwise a person rescued from SD can be followed minutes
+            # later by a duplicate motion SD alert from the same passage.
+            _, on_alert = alert_gate(state, cfg.name, app.alerts.cooldown, now)
+            on_alert(etype, event)
             monitor.audit_event(cfg, event, etype, "sd", "send", score=selected_score,
                                 threshold=cfg.scorer.threshold if score is not None else None,
                                 telegram=ok)

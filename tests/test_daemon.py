@@ -923,6 +923,21 @@ def test_pending_follow_up_ignores_cooldown(monkeypatch):
     assert sent[0][0] == "/tmp/sd.jpg"
 
 
+def test_pending_sd_send_updates_cooldown_for_later_motion(monkeypatch):
+    # Regression: a person was rescued by SD, then the same passage appeared
+    # as motion minutes later and sent again. SD sends must update the shared alert gate.
+    sent = []
+    app, state, fetch_frames, snapshot_for = _pending({}, sent)
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+
+    _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent, monkeypatch)
+
+    assert len(sent) == 1
+    can, _ = daemon.alert_gate(state, "a", cooldown=120, now=1090)
+    assert can("motion", {"start_time": 1010}) is False
+
+
 def test_pending_stale_entry_dropped(monkeypatch, caplog):
     sent = []
     app, state, fetch_frames, snapshot_for = _pending({}, sent)
@@ -1100,6 +1115,30 @@ def test_run_monitor_pass_enqueues_sd_without_live_send_when_empty(monkeypatch):
     assert state.pending_sd[0]["event"]["start_time"] == 500
     assert state.pending_sd[0]["live_sent"] is False
     assert state.pending_sd[0]["due_at"] == 500 + daemon.sdclip.SD_FRESH_DELAY
+
+
+def test_snapshot_failed_defer_blocks_near_duplicate_person(monkeypatch):
+    # When live RTSP fails, the first confirmed person is handed to SD. That defer must
+    # arm the same gate as a send, otherwise a near-identical Tapo event creates another
+    # SD job and later sends a duplicate photo.
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True}]})
+    state = daemon.MonitorState()
+
+    class Cam:
+        def getEvents(self):
+            return [
+                {"start_time": 500, "events_1": 524290, "alarm_type": 2},
+                {"start_time": 501, "events_1": 524290, "alarm_type": 2},
+            ]
+
+    secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
+    daemon.run_monitor_pass(app, {"a": Cam()}, state, now=2000, secrets=secrets,
+                            snapshot_for=lambda _cfg: (lambda cam, ev: None),
+                            time_str=lambda ev: "T")
+
+    assert len(state.pending_sd) == 1
+    assert state.pending_sd[0]["event"]["start_time"] == 500
 
 
 def test_defer_due_at_follows_camera_event_end_time(monkeypatch):
