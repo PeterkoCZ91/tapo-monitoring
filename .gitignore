@@ -34,6 +34,7 @@ docs/tapo-research-tasks/
 *tapo*onvif*events*.jsonl
 *tapo*onvif*triggered*.jsonl
 # Local assistant/tooling state and private archives
+AGENTS.md
 .claude/
 private/
 docs/superpowers/
