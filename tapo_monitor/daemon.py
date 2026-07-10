@@ -338,11 +338,15 @@ def score_for(cfg: CameraConfig):
     return score
 
 
-def _caption_describe(cfg, groq_key, image):
-    """Caption-only Groq for an already-approved frame; never blocks a send."""
+def _caption_describe(cfg, groq_key, images):
+    """Caption-only Groq for already-approved frame(s); never blocks a send.
+
+    ``images`` may be a single path or a chronological sequence — a sequence lets the
+    caption describe movement and direction across the event, not one frozen pose.
+    """
     if not cfg.enrich.groq:
         return ""
-    desc = enrich.groq_describe(groq_key, image)
+    desc = enrich.groq_describe(groq_key, images)
     return "" if notify.is_empty_scene(desc) else desc
 
 
@@ -549,7 +553,11 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
                 log.warning("skip %s: snapshot failed (after retry)", etype)
                 continue                              # drop
             if not description:
-                description = _caption_describe(cfg, secrets["groq_key"], image)
+                # Caption from the whole (thinned) frame sequence when the chosen frame
+                # came from SD; the RTSP fallback has no sequence to offer.
+                images = (enrich.select_frames(frames, keep=image)
+                          if image in frames else image)
+                description = _caption_describe(cfg, secrets["groq_key"], images)
             label = enrich.face_label(monitor.face_ids(event), secrets.get("face_names"))
             caption = notify.build_caption(
                 monitor.TYPE_EMOJI.get(etype, "👤"), time_str(event),

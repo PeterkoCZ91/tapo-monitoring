@@ -1279,6 +1279,35 @@ def test_pending_motion_with_subject_sends(monkeypatch):
     assert len(sent) == 1                     # the rescued in-frame photo
 
 
+def test_pending_scorer_pick_captions_with_frame_sequence(monkeypatch):
+    # With a scorer as arbiter, Groq only captions the send. Passing the whole frame
+    # sequence (not just the winning frame) lets the caption describe movement and
+    # direction across the event instead of one frozen pose.
+    sent = []
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
+                                  "scorer": {"url": "http://127.0.0.1:1/score",
+                                             "threshold": 0.4}}]})
+    state = daemon.MonitorState()
+    frames = [f"/tmp/f{i}.jpg" for i in range(3)]
+
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
+        return frames
+
+    scores = {"/tmp/f0.jpg": 0.1, "/tmp/f1.jpg": 0.9, "/tmp/f2.jpg": 0.8}
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, img, timeout=10: {"person": scores[img], "animal": 0.0})
+    groq_calls = []
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+    _run_pending(app, state, {"a": object()}, 1080, fetch_frames,
+                 lambda cfg_: (lambda cam, ev: None), sent, monkeypatch,
+                 groq=lambda _key, images, **k: groq_calls.append(images) or "Person walks right")
+    assert len(sent) == 1
+    assert sent[0][0] == "/tmp/f1.jpg"          # scorer's pick is still the photo sent
+    assert groq_calls == [frames]               # caption sees the whole sequence, in order
+
+
 def test_pending_raw_mode_sends_sd_frame_without_groq(monkeypatch):
     # enrich.groq=false = raw mode: the SD follow-up must not require Groq to see a
     # subject (blank desc would read as "no subject" and drop everything) — send the
