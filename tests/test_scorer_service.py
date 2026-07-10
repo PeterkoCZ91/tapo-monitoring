@@ -90,10 +90,10 @@ def test_scores_from_output_returns_named_classes():
     assert scores["classes"]["dog"] == pytest.approx(0.30, abs=1e-4)
     assert "car" not in scores["classes"]
 
-def test_scores_from_output_uses_a12_coco_names():
+def test_scores_from_output_uses_darknet_coco_names():
     out = np.zeros((1, 1, 85), dtype=np.float32)
     out[0, 0, 4] = 0.5
-    out[0, 0, 5 + 3] = 0.8       # a12 coco.names class 3: motorbike
+    out[0, 0, 5 + 3] = 0.8       # darknet coco.names class 3: motorbike
 
     scores = scorer_service.scores_from_output(out)
 

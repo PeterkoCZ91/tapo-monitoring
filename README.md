@@ -8,8 +8,7 @@ scene with an AI vision model, and sends Telegram alerts — running happily on 
 > (`tapo-monitor run`). The day/night/rain camera control and the detection →
 > enrich → notify pipeline both run in the daemon loop today. See
 > [`docs/capabilities.md`](docs/capabilities.md) for the full capability catalog and
-> [`docs/runtime-topology.md`](docs/runtime-topology.md) for the production process map
-> when running multiple instances/services.
+> [`docs/operations.md`](docs/operations.md) for deployment, health checks and calibration.
 
 ## Where this fits
 
@@ -29,6 +28,23 @@ have a Tapo PTZ camera and a Raspberry Pi and you want smart person alerts in Te
 It is deliberately **not** Frigate: no local inference, no zones, no recording/NVR, no
 fancy hardware. If you need those, run Frigate. If you want a few hundred lines of tested
 Python that turns a Tapo camera + a Pi into reliable Telegram person alerts, start here.
+
+## Quickstart
+
+```bash
+pip install -e ".[dev]"          # install the package + dev tools
+cp cameras.example.yaml cameras.yaml
+$EDITOR cameras.yaml             # set hosts, coordinates, capabilities
+export TELEGRAM_TOKEN=... TELEGRAM_CHAT_ID=... GROQ_API_KEY=...
+
+tapo-monitor check cameras.yaml  # validate config + print a summary
+tapo-monitor run cameras.yaml    # start the daemon
+pytest -q                         # run the test suite
+```
+
+A systemd template is in [`systemd/tapo-monitor.service`](systemd/tapo-monitor.service).
+Secrets are read from the environment variables named in `cameras.yaml` (e.g.
+`TELEGRAM_TOKEN`), so the config file itself stays safe to share.
 
 ## What it does
 
@@ -60,59 +76,15 @@ Python that turns a Tapo camera + a Pi into reliable Telegram person alerts, sta
   camera-down 🔴/🟢 notifications.
 - **Audit logging** — every camera event is logged with its decoded signal, `alarm_type`,
   face count and the resulting verdict (person / drop), so detection behaviour is always
-  auditable.
+  auditable (see [`docs/operations.md`](docs/operations.md) for the calibration loop).
 - **Multi-camera** from one config; perimeter hand-off between grouped cameras (planned).
 
 ## How it works
 
-There are three different responsibilities in a production setup:
-
-| Responsibility | Owner | State? | Sends Telegram? |
-| --- | --- | --- | --- |
-| Camera polling, PTZ control, snapshots, cooldowns | `tapo-monitor` | yes, per camera | yes |
-| Frame scoring | `tapo-scorer` | no, stateless HTTP | no |
-| A12 camera/audio pipeline | A12 repo/container | yes, owned by A12 | yes, through A12 |
-
-The important rule is: **the scorer can be shared, alert decisions are not shared**.
-Tapo and A12 may POST frames to the same scorer, but each runtime keeps its own thresholds,
-cooldowns and notification policy.
-
-At runtime the shape is:
-
-```mermaid
-flowchart LR
-    subgraph tapo["Tapo monitor runtime"]
-      CAM["Tapo cameras<br/>getEvents · RTSP · SD card"]
-      MON["tapo-monitor daemon<br/>sessions · cooldowns · SD queue · sampler"]
-      GROQ["Groq vision<br/>optional caption / empty-scene check"]
-    end
-
-    subgraph shared["Shared scorer runtime"]
-      SCORE["tapo-scorer<br/>stateless HTTP /score"]
-    end
-
-    subgraph a12["A12 runtime"]
-      A12["A12 container<br/>own camera/audio pipeline"]
-    end
-
-    TG["Telegram"]
-
-    CAM -->|"events + frames"| MON
-    MON -->|"JPEG frame"| SCORE
-    SCORE -->|"person / animal score"| MON
-    MON -->|"approved frame"| GROQ
-    GROQ -->|"caption or empty scene"| MON
-    MON -->|"Tapo-owned alert"| TG
-
-    A12 -->|"JPEG frame"| SCORE
-    SCORE -->|"classes map"| A12
-    A12 -->|"A12-owned alert"| TG
-```
-
-The **Raspberry Pi is the orchestrator**: it polls events, pulls the frames, and owns the
-decision to alert. Scoring is the one step that can be *forwarded* off the Pi to a stronger
-machine — the Pi just POSTs a frame and reads back a score — so even a Pi Zero, which can't
-run a real model, can lean on a server that does. The scorer is a stateless helper: if it is
+The **daemon is the orchestrator**: it polls events, pulls the frames, and owns the
+decision to alert. Scoring is the one step that can be *forwarded* to a stronger machine —
+the Pi just POSTs a frame and reads back a score — so even a Pi Zero, which can't run a
+real model, can lean on a server that does. The scorer is a stateless helper: if it is
 unreachable the Pi still runs (frames pass through unfiltered).
 
 Per Tapo event, the daemon follows this decision flow:
@@ -168,23 +140,6 @@ whole passage into one long event, the optional **sampler** keeps grabbing frame
 event window so someone who walks in late is still caught (see
 [Local scoring service](#local-scoring-service-optional)).
 
-Detection is deliberately **decoupled** from camera control so people are seen fast without
-risking the login lockout:
-
-```mermaid
-flowchart LR
-    subgraph loop["daemon loop"]
-      direction TB
-      E["event tick (~4s)<br/>getEvents on existing client"]
-      S["sampler tick<br/>follow-up RTSP grabs"]
-      SD["SD queue drain<br/>fresh event-time frames"]
-      C["control tick (~60s)<br/>day/night · weather · SmartTrack · auto-track last"]
-    end
-    E -->|"missed/empty subject"| S
-    E -->|"confirmed person empty/failed"| SD
-    E -. "same camera session" .-> C
-```
-
 ### Local scoring service (optional)
 
 Cameras merge a whole passage into one long event, so a single frame from the event's
@@ -224,26 +179,8 @@ Content-Type: image/jpeg
 ```
 
 `person` and `animal` are the backward-compatible top-level scores used by tapo-monitor.
-`classes` contains per-COCO-class max confidences above a small floor, for other clients
-that need class names while sharing the same scorer service. A12 consumes this same
-contract over HTTP; see [`docs/a12-shared-scorer.md`](docs/a12-shared-scorer.md).
-
-### Threshold audit
-
-The daemon emits structured `audit ...` log lines for each camera detection, scorer
-decision, SD/sampler follow-up and Telegram send. Summarize them from journald to compare
-what the Tapo firmware detected against what actually reached Telegram:
-
-```bash
-journalctl -u tapo-monitor --since "24 hours ago" --no-pager | tapo-monitor audit-log -
-```
-
-The report is per camera: `detections` is the count of Tapo alertable events,
-`telegram_ok` / `telegram_failed` is what was sent, `dropped_below_threshold` is how many
-frames the scorer rejected, and the score min/p50/max lines show whether the threshold is
-cutting near real positives. For rotating night cameras, watch `live defer` plus `sd drop`
-lines: a parked car that the camera briefly reports as activity should stay below the
-scorer threshold and never become a Telegram send unless the scorer also sees a person.
+`classes` contains per-COCO-class max confidences above a small floor, so other clients of
+your scorer can use class names while sharing the same service.
 
 ## Privacy
 
@@ -252,27 +189,6 @@ camera's siren/floodlight/speaker. No personal data lives in the repository: coo
 hostnames, face names and secrets all come from your own configuration. Copy
 [`cameras.example.yaml`](cameras.example.yaml) to `cameras.yaml` (git-ignored) and fill in
 your values; point secret fields at environment variable names rather than inlining tokens.
-
-## Quickstart
-
-```bash
-pip install -e ".[dev]"          # install the package + dev tools
-cp cameras.example.yaml cameras.yaml
-$EDITOR cameras.yaml             # set hosts, coordinates, capabilities
-export TELEGRAM_TOKEN=... TELEGRAM_CHAT_ID=... GROQ_API_KEY=...
-
-tapo-monitor check cameras.yaml  # validate config + print a summary
-tapo-monitor run cameras.yaml    # start the daemon
-pytest -q                         # run the test suite
-```
-
-A systemd template is in [`systemd/tapo-monitor.service`](systemd/tapo-monitor.service).
-Secrets are read from the environment variables named in `cameras.yaml` (e.g.
-`TELEGRAM_TOKEN`), so the config file itself stays safe to share.
-
-For deployments with a separate scorer service, A12 container and optional recorder
-fallback, keep [`docs/runtime-topology.md`](docs/runtime-topology.md) as the source of
-truth for which process owns which responsibility.
 
 ## Camera prerequisites & auth
 
@@ -297,38 +213,11 @@ Tapo cameras gate their local API; expect these one-time steps:
 
 ## The Tapo `events_1` bitmask
 
-The camera's `getEvents` API is how the on-device AI reports activity — but on the C560WS
-many events arrive with `event_type = None`, and the only usable signal is the integer
-`events_1` **bitmask**. This field is barely documented anywhere, so the values below were
-reverse-engineered from ~24 h of real captures across two C560WS cameras. `tapo_monitor`
-decodes it in [`detection.decode_events_1()`](tapo_monitor/detection.py) and logs every
-event's decoded flags (see *Audit logging*) so the still-unmapped bits can be ground-truthed
-from your own traffic.
-
-A single event can carry several bits at once — e.g. `events_1 = 524290` is bits 19 **and**
-1, i.e. an AI person who is also moving.
-
-**Confirmed bits**
-
-| bit | value | meaning | notes |
-|----:|------:|---------|-------|
-| 1   | 2        | motion          | basic/software motion; a frequent false positive on its own |
-| 5   | 32       | PIR sensor      | named by the firmware docs, but **never once observed firing** in our `getEvents` captures |
-| 19  | 524288   | AI person       | the on-device AI confirmed a person — this is what `strict_people` alerts on |
-
-**Observed but not yet ground-truthed** (reported as `unknown_bits` rather than guessed at):
-
-| bit | value | correlated `alarm_type` | suspected (unconfirmed) |
-|----:|------:|------------------------:|-------------------------|
-| 3   | 8     | 4 | another AI category |
-| 7   | 128   | 8 | **vehicle** — by far the most common non-person event |
-| 8   | 256   | 9 | pet / line-crossing? |
-
-`alarm_type` correlates with the bits above; in our data `alarm_type = 2` accompanies the
-motion/person class, while `4 / 8 / 9` line up with bits `3 / 7 / 8`. These mappings are
-empirical, not from a spec — treat the unconfirmed rows as hypotheses and verify against the
-audit log before relying on them. If your captures pin down bits 3/7/8, a PR updating this
-table is very welcome.
+On the C560WS, `event_type` is often `None` and the only usable detection signal is the
+integer `events_1` bitmask. Confirmed by real captures: bit 1 (`2`) = motion, bit 5
+(`32`) = PIR, bit 19 (`524288`) = AI-confirmed person — the bit `strict_people` alerts on.
+The full reverse-engineered table, including the not-yet-ground-truthed bits and their
+`alarm_type` correlations, is in [`docs/events1-bitmask.md`](docs/events1-bitmask.md).
 
 ## Hard-won gotchas (pytapo + C560WS)
 
@@ -389,8 +278,8 @@ tapo_monitor/            # the library + daemon
   cli.py                 # `tapo-monitor check|run|audit-log`
 cameras.example.yaml     # configuration schema (placeholders only)
 docs/capabilities.md     # what Tapo detection can do + what this project adds over pytapo
-docs/runtime-topology.md # process map: monitor daemon, scorer, A12, recorder fallback
-docs/deployment-health.md # deploy, health checks, rollback and calibration loop
+docs/operations.md       # deployment, health checks, rollback and calibration loop
+docs/events1-bitmask.md  # the reverse-engineered getEvents bitmask
 systemd/                 # unit templates (generic; %i user, env-driven)
 tests/                   # pytest suite
 ```

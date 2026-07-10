@@ -72,8 +72,8 @@ Rain makes auto-tracking cameras chase raindrops and IR reflections. Using open-
 - Reconnect handling and lockout-aware sessions (see below).
 - Structured audit logs plus `tapo-monitor audit-log` for threshold calibration.
 - systemd templates for the monitor daemon and shared scorer service.
-- Runtime topology and deployment/health runbooks for setups that share one scorer with
-  A12 or other callers.
+- Deployment, health and calibration runbook ([`operations.md`](operations.md)), including
+  setups that share one scorer across several caller services.
 
 ## Actuators (available, documented, NOT implemented)
 
