@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tapo-monitor"
 version = "0.1.0"
-description = "Comprehensive, config-driven monitoring stack for TP-Link Tapo PTZ cameras (detection, auto-tracking, AI descriptions, Telegram alerts)."
+description = "Lightweight reliability, camera-control and Telegram alerting stack for TP-Link Tapo PTZ cameras."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

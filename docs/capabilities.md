@@ -3,17 +3,17 @@
 What a TP-Link Tapo PTZ camera (validated on the C560WS) can do for monitoring, and
 what this project adds on top. Each capability is opt-in per camera via `cameras.yaml`.
 
-This project is **passive surveillance only**: it detects, describes and notifies. The
-active actuator layer (siren, floodlight, speaker) is documented below as *available*
-but is intentionally **not implemented** — see "Actuators".
+This project controls camera monitoring policy and PTZ tracking, but its response remains
+**observe and notify**. The active-response actuator layer (siren, floodlight, speaker) is
+documented below as *available* but intentionally **not implemented** — see "Actuators".
 
 ## 1. Detection inputs
 
 | Source | How | Notes |
 |---|---|---|
-| ONVIF pull-point events | Real-time event subscription | `isPeople` / `isPet` / `isCar` / `isMotion` / tamper flags. Lowest latency. |
+| ONVIF pull-point events | Researched, not daemon-wired | Transport exists, but tested firmware reliability varies; do not configure as the only production source. |
 | Camera AI (`getEvents`) | Poll recent events | Person bit (events_1 bit 19), `face_id`, vehicle/pet classification. Logged to SD regardless of detection toggles. |
-| Motion detection | Configurable | `digital_sensitivity` 0–100 (or low/normal/high). Tunable per weather. |
+| Motion detection | Camera setting / classifier support | `digital_sensitivity` 0–100 (or low/normal/high). Tunable per weather; not a standalone daemon event source today. |
 | Person detection | AI, separate sensitivity | Drives people-only auto-tracking. |
 | PIR sensor | `alarm_type` | Hardware PIR confirmation where present. |
 | Other (available, unused) | line-crossing, package, glass-break, bark / baby-cry / meow | Exposed by the firmware; not wired into this stack. |
@@ -23,8 +23,18 @@ but is intentionally **not implemented** — see "Actuators".
 - **Auto-tracking** master switch + **SmartTrack** category selection (people / vehicle
   / pet / baby) — track only what you care about.
 - **PTZ presets** — park the camera at a fixed view (static role) or return after tracking.
+- **Soft pan-limit** (optional, per camera) — `pan_limit` keeps auto-track within the span
+  of the camera's presets. The local Tapo API has no angular limit or motor-position
+  readout, so the daemon reads the pan via ONVIF and recalls the camera to its bounding
+  preset when it drifts past the leftmost/rightmost preset (e.g. auto-track swinging into a
+  wall). The presets define the allowed range; ONVIF errors never stall the loop.
 - **Day/night scheduling** — astral sunset/sunrise (coordinates from config) with a
   fixed HH:MM fallback. One source of truth shared by all components.
+- **Night vision mode** (optional, per camera) — `night_vision: ir` forces IR/B&W night
+  vision on that schedule (day/colour by day), re-asserted each control tick; `auto`
+  re-asserts the camera's own day/night switch. A colour night mode under a streetlight
+  runs a slow shutter that smears moving subjects, so IR's faster shutter keeps the event
+  frame sharper.
 
 ## 3. Enrichment & notification
 
@@ -33,16 +43,23 @@ but is intentionally **not implemented** — see "Actuators".
   confirmed person can trigger an **SD-card follow-up** that downloads the recorded segment
   around the event, extracts several candidate frames across it, and picks the one the
   subject is actually in — so a missed live grab becomes an in-frame photo instead of a
-  blank ping.
+  blank ping. With `snapshot_source: recording` the follow-up frames come from a local 24/7
+  recorder (`RECORDING_ROOT`) instead of the camera SD — full stream1 resolution even when
+  detection runs on stream2, and it sends the sharpest above-threshold frame (ffmpeg
+  `blurdetect`) rather than the first. It requires `sd_snapshot: true` (it reuses the SD
+  follow-up queue) and falls back to the SD/live path when no segment is available.
 - **Local YOLO scorer (optional)** — a stateless HTTP scorer can decide whether a
   frame actually contains a person/animal before Telegram is sent. Groq then captions
-  only frames that already passed the scorer.
+  only frames that already passed the scorer. Optional tiled inference scores the whole
+  image plus a grid to rescue distant subjects in wide views; `crop_to_subject` uses the
+  winning person box for a padded alert-photo zoom and safely falls back to the full frame.
 - **Event-window sampler (optional)** — for long camera events, follow-up RTSP grabs
   across the event window catch people who enter frame after the first live grab.
 - **AI description** — Groq vision model returns a short scene description for approved
   frames.
 - **Face-ID naming** — map stable `face_id`s to names locally.
-- **Telegram** — wide photo + caption plus operational alerts.
+- **Telegram** — photo + caption plus operational alerts. Delivery is confirmed before
+  cooldown/outage state advances; SD, sampler and recovery paths retry failed sends.
 
 ## 4. Weather gating
 
@@ -91,14 +108,24 @@ them; it stays a passive observe-and-notify stack.
 `pytapo` is a thin API client. On top of it this project adds the operational glue it
 lacks:
 
+- **Camera Digital Twin** — low-frequency, redacted snapshots from safe getters on the
+  daemon's existing session; layered network/API/events/RTSP/storage health; desired-state
+  drift with stable keys; and opt-in new/recovered drift alerts. Unsupported or empty
+  firmware responses remain unknown and do not become false alarms.
+- **Shadow Detection Auditor** — a private local, media-free event ledger correlates
+  camera `getEvents` detections with independent recorder/scorer observations. It exposes
+  deterministic matched, camera-only and shadow-only counts without pretending the latter
+  are automatically proven misses.
+
 - **Astral day/night scheduling** — pytapo has no concept of sunset/sunrise windows.
 - **Weather gating** — rain-aware sensitivity / tracking, with API caching + hysteresis.
 - **Lockout-aware sessions** — the C560WS locks out a source IP for ~30 min after failed
   logins, and the first login after a reconnect often fails with "Invalid authentication
   data" before a retry succeeds. The camera wrapper centralizes retry/backoff so callers
   don't rediscover this the hard way.
-- **Unified detection** — one abstraction over ONVIF events, `getEvents` and motion,
-  instead of three call sites with different shapes.
+- **Normalized detection model** — shared classification shapes for `getEvents`, ONVIF
+  and motion research. The production daemon currently polls `getEvents`; alternative
+  event-source wiring remains roadmap work.
 - **Scorer/gating separation** — camera firmware produces events, the optional YOLO
   scorer validates subject-bearing frames, and Groq is demoted to captioning.
 - **SmartTrack ordering safety** — `setSmartTrackConfig` silently clears the auto-track

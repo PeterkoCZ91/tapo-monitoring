@@ -7,9 +7,9 @@
 # Shared location for astral (sunset/sunrise) scheduling and weather lookups.
 # Leave empty to fall back to fixed HH:MM schedules and to disable weather gating.
 location:
-  lat:            # e.g. 50.08
-  lon:            # e.g. 14.43
-  tz:             # IANA name, e.g. "Europe/Prague"
+  lat:            # private deployment latitude
+  lon:            # private deployment longitude
+  tz:             # IANA timezone name
 
 # User-facing notifications. Values are ENV VAR NAMES, not the secrets themselves.
 telegram:
@@ -38,12 +38,30 @@ loop:
   event_interval: 4        # seconds between getEvents detection polls
   control_interval: 60     # seconds between tracking/sensitivity/preset + reconnect
 
+# Camera Digital Twin + Shadow Detection Auditor. Both are opt-in while their data and
+# alert policy are calibrated. Probes reuse the daemon's existing authenticated session;
+# they never create an extra login loop. The ledger stores normalized metadata only — no
+# frames, credentials, device IDs or face IDs.
+observability:
+  digital_twin: false      # read safe camera capabilities/state and detect config drift
+  probe_interval: 900      # seconds; deliberately low-frequency and lockout-aware
+  drift_alerts: false      # Telegram only new/recovered drift transitions when enabled
+  ledger: false            # local SQLite event/decision ledger (TAPO_LEDGER_FILE overrides)
+  ledger_retention_days: 30
+  shadow_match_window: 20  # seconds for camera ↔ independent shadow observation matching
+
 cameras:
   - name: front              # unique label used in logs/alerts
     host: "<LAN_CAMERA_IP>"    # camera IP or DNS name on your LAN
     role: tracking           # tracking | static
     schedule: astral         # astral | always_night | always_day
     # person_sensitivity: 40   # optional 0-100; lower = fewer false AI-person detections
+    # night_vision: ir         # optional; force IR/B&W night vision on the astral night
+    #                          # schedule (day/colour by day), re-asserted each control tick.
+    #                          # A colour night mode under a streetlight uses a slow shutter
+    #                          # that smears moving subjects; IR runs a faster shutter, so the
+    #                          # event frame is sharper. "auto" re-asserts the camera's own
+    #                          # day/night switch instead. Unset leaves the camera untouched.
 
     # Camera login. Values below are ENV VAR NAMES, not the secrets themselves.
     user_env: CAM_USER             # env var holding the camera username
@@ -56,15 +74,25 @@ cameras:
     rtsp_password_env: CAM_RTSP_PASSWORD  # env var holding the RTSP password
     # rtsp_port: 554             # optional; RTSP port (default 554)
     # rtsp_stream: stream1       # optional; stream1 (HD) | stream2 (SD)
-    # Optional local-recorder fallback is deployment-wide, not per camera: set
-    # RECORDING_ROOT and RECORDING_MAX_AGE in the daemon environment only if you
-    # continuously record RTSP under <root>/<camera-host>/<YYYY-MM-DD>/<HH>/.
+    # Optional local-recorder tree is deployment-wide, not per camera: set RECORDING_ROOT
+    # (e.g. /srv/recordings) and RECORDING_MAX_AGE in the daemon environment only if you
+    # continuously record RTSP under <root>/<camera-host>/<YYYY-MM-DD>/<HH>/. It powers
+    # both the last-resort live-fallback frame AND snapshot_source: recording below.
 
     # SD-card follow-up for confirmed people: when the live grab misses the subject,
     # pull frames from the camera's SD recording (window sized from the event's own
     # start..end seconds) and send the one the subject is in. Needs an SD card in the
     # camera and the TP-Link account password (cloud_password_env) for the download.
     sd_snapshot: false
+    # snapshot_source: sd      # optional; where the follow-up's candidate frames come from.
+    #                          # "sd" (default) downloads the event segment from the camera
+    #                          # SD card. "recording" instead extracts them from a local
+    #                          # 24/7 recorder mkv (RECORDING_ROOT above): full stream1 res
+    #                          # even when live detection runs on stream2, and it picks the
+    #                          # SHARPEST above-threshold frame (ffmpeg blurdetect) rather
+    #                          # than the first — night motion smears single frames. Requires
+    #                          # sd_snapshot: true (it reuses the SD follow-up queue); falls
+    #                          # back to the SD/live path when no segment or RECORDING_ROOT.
     # sd_span_cap: 120         # optional; max seconds of SD recording to scan per event.
     #                          # Default (48) fits a Pi Zero download budget; events run
     #                          # ~2 min, so hosts with faster I/O (Pi 4) may raise this
@@ -90,6 +118,21 @@ cameras:
       day_preset: "2"        # PTZ preset to park at during the day (static)
       night_preset:          # optional preset for night
 
+    # Soft pan-limit (optional). The C560WS auto-track physically follows a target
+    # anywhere — the local Tapo API exposes no angular limit and no motor position — so it
+    # can swing past your last useful preset (into a wall/neighbour) and sit there until it
+    # times out. ONVIF *does* expose position, so the daemon reads the current pan and,
+    # when it drifts outside the span of the camera's presets (leftmost..rightmost), recalls
+    # the camera to that bounding preset. Needs ONVIF enabled on the camera; the presets
+    # themselves define the allowed range (no angles to enter).
+    # pan_limit:
+    #   enabled: true
+    #   margin: 0.01           # slack (ONVIF pan units) so tracking near a bound is stable
+    #   poll_interval: 6       # seconds between ONVIF position checks
+    #   onvif_port: 2020
+    #   onvif_user_env: CAM_ONVIF_USER       # env var NAMES, not the secrets
+    #   onvif_password_env: CAM_ONVIF_PASSWORD
+
     weather:
       strategy: lower_sensitivity   # none | disable_tracking | lower_sensitivity
       motion_normal: 60             # motion sensitivity (0-100) when dry
@@ -110,21 +153,33 @@ cameras:
       max_frames: 6          # grabs per event group (interval*max_frames = window)
       group_gap: 90          # events closer than this merge into one group
       stream: stream1        # optional high-res stream for follow-up grabs
+      low_score_exit: 0      # close a motion-only group after N consecutive frames
+                             # below low_score (0 = off); person/PIR-confirmed
+                             # groups always run the full window
+      low_score: 0.15        # "nothing there" score for the early-exit streak
 
     scorer:
       url:                   # e.g. http://127.0.0.1:8765/score; empty = Groq arbiter
       threshold: 0.4         # min person/animal confidence to send a frame
       timeout: 10            # seconds per scoring request
+      tiles: 1               # 1 = whole frame only; 2+ also scores a tile grid so a
+                             # distant subject is not lost when the wide view is resized
+    # crop_to_subject: true   # optional padded zoom around the scorer's best person box;
+                             # safely keeps the full frame if no usable box is available
 
-    coordinator:
-      group:                 # cameras sharing a group hand off detections to each other
-      handoff_preset:        # preset this camera turns to when a group peer detects
+    # Reserved for the planned multi-camera handoff coordinator; parsed but not yet
+    # executed by the daemon. Leave empty in production configs.
+    # coordinator:
+    #   group:
+    #   handoff_preset:
 
   - name: yard
     host: "<SECOND_LAN_CAMERA_IP>"
     role: static
     schedule: astral
     detection:
-      sources: [getevents, motion]
+      # getevents is the production-wired source. onvif/motion are accepted for research
+      # compatibility but do not currently run as independent daemon sources.
+      sources: [getevents]
     weather:
       strategy: none

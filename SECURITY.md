@@ -20,6 +20,8 @@ You will receive an acknowledgement within **7 days**.
 - ONVIF credential handling and RTSP URL construction
 - pytapo authentication flow
 - Telegram and Groq API key storage (env files)
+- Redaction and private permissions of health, Digital Twin and Shadow ledger state
+- Leakage of camera identifiers, credentials or media through observability output
 
 ## Out of scope
 

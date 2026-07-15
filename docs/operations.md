@@ -1,5 +1,9 @@
 # Operations: deployment, health and calibration
 
+Prepare and validate the private YAML using the [configuration reference](configuration.md)
+before following this runbook. Firmware/API/media symptoms are indexed in
+[troubleshooting](troubleshooting.md).
+
 One `tapo_monitor` checkout can run more than one process in production. Keep the roles
 separate when deploying or debugging.
 
@@ -9,7 +13,7 @@ separate when deploying or debugging.
 | --- | --- | --- | --- |
 | Tapo monitor daemon | `tapo-monitor run /path/cameras.yaml` | Poll Tapo events, control PTZ/day-night/rain behaviour, grab frames, decide whether to alert, send Telegram. | `journalctl -u tapo-monitor -n 100 --no-pager` |
 | YOLO scorer service | `python -m tapo_monitor.scorer_service --model ... --port ...` | Stateless HTTP JPEG scorer. Does not poll cameras or send Telegram. | `curl -s http://127.0.0.1:8766/health` |
-| Local recorder (optional) | external process | Continuously records RTSP; tapo-monitor can use the newest segment as a last-resort snapshot fallback. | newest file age under `RECORDING_ROOT` |
+| Local recorder (optional) | external process | Continuously records RTSP; tapo-monitor can use it as a last-resort snapshot fallback and, with `snapshot_source: recording`, as the event-aligned follow-up frame source. | newest file age under `RECORDING_ROOT` |
 
 The important boundary: **the scorer is shared, the alert pipelines are not.** The scorer
 owns only model inference behind `/score`; it has no camera sessions and never notifies.
@@ -28,6 +32,37 @@ Use another instance only when cameras live on a different host/network or you w
 isolated state. Runtime state owned by an instance: event watermarks, per-camera alert
 cooldowns, camera-down watchdog, pending SD follow-up queue, sampler groups, weather and
 day/night control decisions.
+
+Network health transitions survive daemon restarts in
+`$XDG_STATE_HOME/tapo-monitor/health.json` (default
+`~/.local/state/tapo-monitor/health.json`). Override the location with
+`TAPO_HEALTH_STATE_FILE`. The file contains no credentials and is atomically replaced
+with mode `0600` only when durable health state changes; high-frequency detection state
+remains in memory.
+
+Telegram delivery is part of the alert transition, not a fire-and-forget side effect.
+Failed outage and recovery messages remain pending until Telegram confirms delivery; a
+failed SD follow-up stays queued, and a failed sampler send leaves its group open. A failed
+live send does not arm the cooldown: it is handed to the SD follow-up when enabled, or
+reported as unsent so an enabled sampler can retry the event window.
+
+Inspect the persisted observations without contacting or authenticating to a camera:
+
+```bash
+tapo-monitor status
+```
+
+The table shows the current observed online/offline interval, cumulative observed
+availability, the last completed outage and the number of offline-to-online transitions.
+Pass an explicit health JSON path when the daemon uses a custom
+`TAPO_HEALTH_STATE_FILE` location.
+
+For deeper diagnosis, the opt-in Camera Digital Twin separates network reachability from
+API, event polling, RTSP media and storage health, and compares live camera state with the
+daemon's intended control plan. The Shadow Detection Auditor keeps a media-free SQLite
+ledger for comparing firmware events with independent local observations. Configuration,
+state paths, CLI commands, privacy boundaries and rollout guidance are in
+[`observability.md`](observability.md).
 
 ## Deploy the scorer
 
@@ -73,23 +108,30 @@ journalctl -u tapo-monitor -f
 The monitor chooses frames in this order:
 
 1. Live RTSP snapshot via `ffmpeg`.
-2. SD-card follow-up around the camera event time, when `sd_snapshot` / `sd_motion` is
-   enabled and the event deserves a second chance.
+2. Event-time follow-up when `sd_snapshot` / `sd_motion` is enabled and the event deserves
+   a second chance. By default this downloads the segment from the camera **SD card**; with
+   `snapshot_source: recording` it instead reads the local recorder tree (`RECORDING_ROOT`)
+   for the event window — full stream1 resolution even when detection runs on stream2, and
+   it picks the *sharpest* above-threshold frame (ffmpeg `blurdetect`) rather than the first.
+   `recording` reuses the SD follow-up queue, so it requires `sd_snapshot: true`, and it
+   falls back to the SD/live path when no matching segment exists or `RECORDING_ROOT` is unset.
 3. Optional local-recorder fallback, only in the late fallback path after SD produced no
    usable frames.
 
-The recorder fallback is deliberately conservative. Enable it only on hosts that
-continuously record RTSP:
+The local recorder tree feeds both the conservative late fallback (step 3) and, when
+selected, the event-aligned `snapshot_source: recording` (step 2). Enable it only on hosts
+that continuously record RTSP:
 
 ```env
-RECORDING_ROOT=/recordings
+RECORDING_ROOT=/srv/recordings
 RECORDING_MAX_AGE=300
 ```
 
-It expects `<RECORDING_ROOT>/<camera-host>/<YYYY-MM-DD>/<HH>/*.mkv|*.mp4|*.ts`, extracts
-one frame near the end of the newest segment, and ignores segments older than
-`RECORDING_MAX_AGE` seconds. It is not event-aligned — SD follow-up remains the primary
-event-time path. Keep retention under each camera host bounded.
+It expects `<RECORDING_ROOT>/<camera-host>/<YYYY-MM-DD>/<HH>/*.mkv|*.mp4|*.ts`. The late
+fallback extracts one frame near the end of the newest segment and ignores segments older
+than `RECORDING_MAX_AGE` seconds; the event-aligned `recording` source instead extracts
+candidates across the event window from the matching segment. Keep retention under each
+camera host bounded.
 
 ## Audit and threshold calibration
 

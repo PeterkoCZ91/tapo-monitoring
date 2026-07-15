@@ -1,7 +1,13 @@
 # Contributing
 
 Thank you for your interest in contributing. This project is a Python package
-(`tapo_monitor`) that runs on a Raspberry Pi with a TP-Link Tapo PTZ camera.
+(`tapo_monitor`) targeting Linux and Raspberry Pi-class hosts with TP-Link Tapo PTZ
+cameras.
+
+Read the [documentation index](docs/README.md), [architecture](docs/architecture.md) and
+[capability maturity table](docs/README.md#feature-maturity) before proposing a new runtime
+path. Planned or researched features must remain clearly labelled until daemon-wired and
+covered by tests.
 
 ## Setup
 

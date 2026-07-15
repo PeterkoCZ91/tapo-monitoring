@@ -2,6 +2,56 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Documentation
+- Reworked the GitHub landing page and added a documentation index, architecture guide,
+  configuration reference and firmware-aware troubleshooting runbook. Operational,
+  opt-in, researched and planned capabilities are now labelled explicitly.
+
+### Added
+- Sampler low-score early exit (`sampler.low_score_exit` / `sampler.low_score`): a
+  motion-only event group closes once N consecutive follow-up frames score below the
+  "nothing there" mark, instead of grabbing the full window on empty bursts.
+  Person/PIR-confirmed groups always run the full window, and a confirmed detection
+  reopens an early-exited group. Off by default.
+- API reconnects after a failure streak are now logged
+  (`connect <camera> succeeded after N failure(s)`), so recovery time after an outage
+  is visible in the journal, not just the failures.
+- Opt-in Camera Digital Twin: redacted safe-getter capability snapshots on an existing
+  camera session, layered network/API/events/RTSP/storage health, desired-state drift,
+  atomic private persistence, deduplicated new/recovered drift alerts and human/JSON
+  `tapo-monitor twin-status` output.
+- Opt-in Shadow Detection Auditor: a private SQLite ledger for normalized camera events,
+  pipeline decisions and independent local scorer/recorder observations, with retention,
+  deterministic one-to-one correlation, `shadow-record` ingestion and human/JSON
+  `shadow-report` output. No frames, stream URLs or credentials are stored.
+- Unauthenticated ICMP reachability probes before camera login, with network uptime kept
+  separate from API/authentication backoff. Observed online/offline totals, reconnects and
+  pending recovery notifications survive daemon restarts in an atomic private state file;
+  `tapo-monitor status` reports current intervals and cumulative observed availability.
+- Confirmed Telegram delivery semantics: failed outage/recovery notices are retried, failed
+  SD sends remain queued, failed sampler sends keep their event group open, and a failed
+  live send never arms the cooldown (it falls back to SD or sampler when configured).
+- Scorer tiling (`scorer.tiles`) for distant subjects plus optional `crop_to_subject` alert
+  photos, using the scorer's best person box to send a readable padded zoom while retaining
+  the full frame whenever cropping is unsafe or unavailable.
+- Per-camera `night_vision`: `ir` forces IR/black-and-white night vision on the astral
+  night schedule (day/colour by day), re-asserted each control tick — a colour night mode
+  under a streetlight uses a slow shutter that smears moving subjects, while IR's faster
+  shutter keeps the event frame sharp; `auto` re-asserts the camera's own day/night switch.
+- Per-camera `snapshot_source: recording`: the SD follow-up extracts its candidate frames
+  from a local 24/7 recorder's mkv instead of the camera SD — full stream1 resolution even
+  when live detection runs on stream2, and it sends the sharpest above-threshold frame
+  (ffmpeg `blurdetect`) rather than the first. Reuses the SD follow-up queue (requires
+  `sd_snapshot: true`) and reads the recorder tree from `RECORDING_ROOT` — the same env var
+  the live recorder-fallback already uses — falling back to the SD/live path when unset.
+- Per-camera `pan_limit`: a soft PTZ pan-limit for cameras whose auto-track overshoots.
+  The local Tapo API has no angular limit or motor-position readout, but ONVIF exposes both
+  position and preset positions, so the daemon polls the current pan and recalls the camera
+  to its bounding preset whenever it drifts outside the span of the camera's presets. The
+  presets define the allowed range; ONVIF hiccups are logged and never stall the loop.
+
 ## [0.1.0] - 2026-07-10
 
 ### Added

@@ -1,298 +1,190 @@
 # tapo-monitoring
 
-A config-driven monitoring stack for TP-Link Tapo PTZ cameras (developed and validated
-on the C560WS). It detects people from the camera's on-device AI, optionally describes the
-scene with an AI vision model, and sends Telegram alerts — running happily on a Raspberry Pi.
+[![CI](https://github.com/PeterkoCZ91/tapo-monitoring/actions/workflows/ci.yml/badge.svg)](https://github.com/PeterkoCZ91/tapo-monitoring/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-> **Status:** a single library (`tapo_monitor`) plus one config-driven daemon
-> (`tapo-monitor run`). The day/night/rain camera control and the detection →
-> enrich → notify pipeline both run in the daemon loop today. See
-> [`docs/capabilities.md`](docs/capabilities.md) for the full capability catalog and
-> [`docs/operations.md`](docs/operations.md) for deployment, health checks and calibration.
+A lightweight, config-driven reliability and alerting stack for TP-Link Tapo PTZ cameras.
+It combines camera control, on-device detection events, event-aligned frame selection,
+optional local scoring, Telegram delivery and layered health monitoring in one tested
+Python daemon.
 
-## Where this fits
+> **Project status:** the core daemon and alert pipeline are operational and validated on
+> the C560WS. Camera Digital Twin and Shadow Detection Auditor foundations are implemented
+> behind opt-in flags. Camera models and firmware differ; unsupported capabilities degrade
+> to `unknown` instead of being guessed.
 
-This is a **lightweight alternative to a full NVR**, not a replacement for one. If you
-have a Tapo PTZ camera and a Raspberry Pi and you want smart person alerts in Telegram
-*without* standing up Frigate or a GPU/Coral box, this is for you. It:
+## Why this project exists
 
-- **trusts the camera's own on-device AI** for detection — no local object-detection model
-  is *required*, so it fits on hardware as small as a Pi Zero 2 W. An optional YOLO scorer
-  can sharpen *which* frame gets sent, and even that can run on another box (see
-  [How it works](#how-it-works));
-- uses a **cloud vision model (Groq) only as optional enrichment** — it captions the frame
-  that was sent, but (with the scorer enabled) never decides whether a frame goes out;
-- **bundles camera control** (auto-track, day/night scheduling, weather gating) *with* the
-  detection → alert pipeline in one small daemon, where most projects do only one of the two.
+[`pytapo`](https://github.com/JurajNyiri/pytapo) provides camera API operations.
+[`HomeAssistant-Tapo-Control`](https://github.com/JurajNyiri/HomeAssistant-Tapo-Control)
+exposes a broad Tapo feature set in Home Assistant. [Frigate](https://github.com/blakeblackshear/frigate)
+is a complete local AI NVR. This project occupies a narrower space:
 
-It is deliberately **not** Frigate: no local inference, no zones, no recording/NVR, no
-fancy hardware. If you need those, run Frigate. If you want a few hundred lines of tested
-Python that turns a Tapo camera + a Pi into reliable Telegram person alerts, start here.
+- run on modest hardware without requiring continuous local video inference;
+- use the camera's on-device AI as the primary event source;
+- encode Tapo-specific reliability knowledge such as login lockouts, sequential requests,
+  SmartTrack ordering and SD recording freshness;
+- treat an alert as successful only after the notification is delivered;
+- distinguish network, API, events, RTSP and storage failures;
+- measure desired configuration drift and, eventually, camera detection misses.
 
-## Quickstart
+It is not a full NVR, video-management UI or replacement for Frigate. An optional local
+recorder and scorer can complement the daemon, but neither is required for the basic flow.
+
+## Highlights
+
+- **One fleet daemon** — multiple cameras, one validated YAML configuration and one state
+  machine per camera.
+- **Low-login event polling** — `getEvents` is polled every few seconds on an existing
+  session while reconnect/control runs on a slower interval.
+- **Firmware-safe camera control** — day/night policy, people-only SmartTrack, presets,
+  rain gating, sensitivity control and optional ONVIF soft pan limits.
+- **Reliable event media** — live RTSP first, then an event-time SD-card or local-recorder
+  follow-up when the first frame misses the subject.
+- **Optional local scorer** — a small HTTP YOLO service can gate frames and return subject
+  boxes; Groq remains optional caption enrichment.
+- **Confirmed Telegram semantics** — failed sends do not arm cooldowns; recovery, SD and
+  sampler paths remain retryable.
+- **Camera Digital Twin** — redacted safe-getter snapshots, desired/actual drift and
+  layered health without a second login loop.
+- **Shadow Detection Auditor** — a private, media-free SQLite ledger correlates camera
+  events with independent scorer/recorder observations.
+
+See the complete [capability catalog](docs/capabilities.md) and
+[architecture](docs/architecture.md).
+
+## Quick start
+
+Requirements: Python 3.10+, `ffmpeg`, a supported Tapo camera with third-party access, and
+camera/RTSP credentials created in the Tapo app.
 
 ```bash
-pip install -e ".[dev]"          # install the package + dev tools
-cp cameras.example.yaml cameras.yaml
-$EDITOR cameras.yaml             # set hosts, coordinates, capabilities
-export TELEGRAM_TOKEN=... TELEGRAM_CHAT_ID=... GROQ_API_KEY=...
+git clone https://github.com/PeterkoCZ91/tapo-monitoring.git
+cd tapo-monitoring
 
-tapo-monitor check cameras.yaml  # validate config + print a summary
-tapo-monitor run cameras.yaml    # start the daemon
-pytest -q                         # run the test suite
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+
+cp cameras.example.yaml cameras.yaml
+$EDITOR cameras.yaml
+
+export TELEGRAM_TOKEN=...
+export TELEGRAM_CHAT_ID=...
+export CAM_USER=...
+export CAM_PASSWORD=...
+export CAM_RTSP_USER=...
+export CAM_RTSP_PASSWORD=...
+
+tapo-monitor check cameras.yaml
+tapo-monitor run cameras.yaml
 ```
 
-A systemd template is in [`systemd/tapo-monitor.service`](systemd/tapo-monitor.service).
-Secrets are read from the environment variables named in `cameras.yaml` (e.g.
-`TELEGRAM_TOKEN`), so the config file itself stays safe to share.
+The YAML contains environment-variable **names**, never secret values. `cameras.yaml`,
+`.env` files and runtime media are git-ignored. Start from the
+[configuration guide](docs/configuration.md), not by enabling every optional feature.
 
-## What it does
-
-- **Day/night scheduling** from astral sunset/sunrise (coordinates from config), with a
-  fixed HH:MM fallback. One source of truth shared by every component.
-- **Auto-tracking** with people-only SmartTrack at night and a static preset by day,
-  applied in a firmware-safe order (SmartTrack/sensitivity/preset first, auto-track
-  asserted last — the C560WS drops the master switch otherwise).
-- **Detection** from the camera's on-device AI via `getEvents`: the `events_1` bitmask is
-  decoded into named signals (motion / PIR / person) and only AI-confirmed people (bit 19)
-  or recognized faces alert under `strict_people`. ONVIF and motion classifiers exist in
-  `detection.py` for future wiring.
-- **Face labelling** — `event_info[].face_id` is mapped to names via a configured env var;
-  unrecognized but stable IDs show as "unknown face".
-- **Fast detection loop** — event polling (`getEvents`, every ~4 s) is decoupled from
-  camera control (tracking/sensitivity/preset, every ~60 s) so a person is seen within
-  seconds *without* re-logging in each tick, which would risk the C560WS lockout.
-- **Snapshot capture, live + SD hybrid** — a detection first grabs a live RTSP frame; a
-  bare live grab often *misses* the subject (the camera fires on motion start, the person
-  walks into view seconds later), so for a confirmed person the daemon can follow up with
-  frames pulled from the camera's **SD-card recording** around the event time and pick the
-  one the subject is actually in — turning a blank ping into an in-frame photo.
-- **AI descriptions** of detections via Groq vision on the chosen snapshot (scaled);
-  frames the model reports as an empty scene are dropped instead of alerted.
-- **Weather gating** — in the rain, lower motion sensitivity, **park the PTZ**
-  (`storm_park`) and/or pause auto-tracking so the camera stops chasing raindrops and wet
-  branches (open-meteo, cached, with hysteresis).
-- **Telegram alerts** for detections (rate-limited per camera) plus operational
-  camera-down 🔴/🟢 notifications.
-- **Audit logging** — every camera event is logged with its decoded signal, `alarm_type`,
-  face count and the resulting verdict (person / drop), so detection behaviour is always
-  auditable (see [`docs/operations.md`](docs/operations.md) for the calibration loop).
-- **Multi-camera** from one config; perimeter hand-off between grouped cameras (planned).
-
-## How it works
-
-The **daemon is the orchestrator**: it polls events, pulls the frames, and owns the
-decision to alert. Scoring is the one step that can be *forwarded* to a stronger machine —
-the Pi just POSTs a frame and reads back a score — so even a Pi Zero, which can't run a
-real model, can lean on a server that does. The scorer is a stateless helper: if it is
-unreachable the Pi still runs (frames pass through unfiltered).
-
-Per Tapo event, the daemon follows this decision flow:
+## Architecture at a glance
 
 ```mermaid
-flowchart TD
-    A["getEvents poll (~4s)"] --> B["decode events_1 bitmask"]
-    B -->|"AI person bit / face"| P["confirmed person"]
-    B -->|"PIR / motion"| M["motion candidate"]
-    B -->|"unusable"| X["drop"]
+flowchart LR
+    CAM["Tapo camera"] -->|"getEvents"| DAEMON["tapo-monitor daemon"]
+    CAM -->|"RTSP / SD recording"| MEDIA["frame selection"]
+    DAEMON --> MEDIA
+    MEDIA -->|"optional HTTP"| SCORE["local scorer"]
+    SCORE --> DECIDE["alert decision"]
+    MEDIA --> DECIDE
+    DECIDE -->|"optional caption"| GROQ["Groq"]
+    DECIDE --> TG["Telegram"]
 
-    P --> L["live RTSP frame"]
-    M --> L
-    L --> S{"scorer enabled?"}
-    S -->|"yes"| Y["POST frame to tapo-scorer"]
-    S -->|"no"| R["Groq empty-scene check"]
-    Y --> C{"score >= camera threshold?"}
-    R --> C
-
-    C -->|"subject"| CAP["optional Groq caption"]
-    C -->|"empty confirmed person"| SD["queue SD follow-up"]
-    C -->|"empty bare motion"| D["drop or sampler follow-up"]
-    SD --> F["event-time SD frames"]
-    F -->|"subject frame found"| CAP
-    F -->|"no subject"| X
-    F -->|"no usable SD frames"| RF["late fallback live grab<br/>optional recorder fallback"]
-    RF --> CAP
-    CAP --> T["Telegram alert"]
-
-    A -.-> AUD["structured audit log"]
-    C -.-> AUD
-    SD -.-> AUD
-    T -.-> AUD
+    DAEMON --> HEALTH["uptime + layered health"]
+    DAEMON --> TWIN["Digital Twin + drift"]
+    DAEMON --> LEDGER["Shadow audit ledger"]
+    REC["independent recorder/scorer"] --> LEDGER
 ```
 
-Read this as a reliability pipeline:
+The fast event path and slower control/reconnect path are intentionally separate. A
+camera that is pingable can still have a broken API, stale events or failed RTSP, so those
+layers are observed independently. See [Architecture](docs/architecture.md) for timing,
+failure containment and persistence.
 
-- `getEvents` is the trigger source; it says something happened, not that the first frame
-  is already useful.
-- the scorer/Groq gate answers "is the subject visible in this frame?";
-- SD follow-up gives camera-confirmed people a second chance when the first live frame is
-  empty;
-- the audit log records every branch, so threshold tuning is based on evidence rather than
-  guesswork.
+## Event decision flow
 
-The gate — *is a subject actually in this frame?* — is the **local YOLO scorer** when one is
-configured, otherwise the **Groq** vision model. Either way it only decides *which* frames are
-worth sending; whatever passes gets an optional Groq caption. A camera-confirmed person is
-handled gently: if the gate sees nothing it defers to the SD-card follow-up instead of
-dropping, so a real person is never lost to one mistimed grab. Bare motion — a frequent false
-positive on its own — must actually show a subject to alert. And because a camera merges a
-whole passage into one long event, the optional **sampler** keeps grabbing frames across the
-event window so someone who walks in late is still caught (see
-[Local scoring service](#local-scoring-service-optional)).
+1. Poll `getEvents` and decode the firmware's `events_1` bitmask.
+2. Treat a camera-confirmed person differently from bare motion.
+3. Capture a live RTSP frame and optionally score it locally.
+4. If a confirmed event's frame is empty, queue an event-aligned SD/recorder follow-up.
+5. Optionally crop and caption the chosen frame.
+6. Send Telegram and advance cooldown state only after confirmed delivery.
+7. Record the branch in the structured audit stream and optional private ledger.
 
-### Local scoring service (optional)
+This separation matters: a camera event says that something happened, not that the first
+available frame contains the subject.
 
-Cameras merge a whole passage into one long event, so a single frame from the event's
-first seconds misses people who appear later. Enable the `sampler` to keep grabbing
-frames across the event window, and run the local scoring service so a tiny YOLO model
-(not a vision LLM) decides which frame shows a person or animal:
+## CLI
 
-    pip install tapo-monitor[scorer]
-    # YOLOX-tiny (Apache-2.0), input size 416:
-    wget https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_tiny.onnx
-    python -m tapo_monitor.scorer_service --model yolox_tiny.onnx --port 8765
+| Command | Purpose |
+| --- | --- |
+| `tapo-monitor check [cameras.yaml]` | Validate configuration and print the fleet summary. |
+| `tapo-monitor run [cameras.yaml]` | Start the daemon. |
+| `tapo-monitor status [health.json]` | Inspect observed uptime, outages and reconnects offline. |
+| `tapo-monitor audit-log [logfile\|-]` | Summarize event/scorer/Telegram audit records. |
+| `tapo-monitor twin-status [twin.json] [--json]` | Inspect layered health and config drift offline. |
+| `tapo-monitor shadow-record ...` | Ingest one independent media-free observation. |
+| `tapo-monitor shadow-report ...` | Correlate camera and shadow observations. |
 
-Point each camera's `scorer.url` at the service. Frames above `scorer.threshold` are sent
-to Telegram; Groq (if enabled) then only writes the caption — with the scorer enabled it,
-not Groq, is the gate that decides whether a frame goes out. If the service is unreachable
-the pipeline degrades to sending frames unfiltered — a scorer outage can add noise but
-never silently hide a person.
+## Optional local scorer
 
-Because scoring is forwarded over HTTP, a **stronger box can run a larger model** for the
-whole fleet: `yolox_tiny` is fine directly on a Pi 4, while a server can serve `yolox_s` /
-`yolox_m` for better accuracy. A Pi Zero, which can't run a real model at all, simply points
-its `scorer.url` at that server — the frame travels, the decision stays on the Pi.
+Install scorer dependencies and run the stateless HTTP service on the same host or a
+stronger machine:
 
-The scoring API is intentionally small and stable:
-
-```http
-POST http://SCORER_HOST:8766/score
-Content-Type: image/jpeg
+```bash
+pip install -e ".[scorer]"
+python -m tapo_monitor.scorer_service --model /path/to/model.onnx --port 8766
 ```
 
-```json
-{
-  "person": 0.87,
-  "animal": 0.0,
-  "classes": {"person": 0.87, "dog": 0.41}
-}
-```
+Then set the camera's `scorer.url`. If the scorer is unavailable, the alert pipeline
+degrades to unfiltered passthrough rather than silently dropping camera-confirmed people.
+Tiled inference and optional subject cropping help with distant subjects in wide views.
 
-`person` and `animal` are the backward-compatible top-level scores used by tapo-monitor.
-`classes` contains per-COCO-class max confidences above a small floor, so other clients of
-your scorer can use class names while sharing the same service.
+## Safety and privacy
 
-## Privacy
+- No credentials, coordinates, camera addresses or face mappings belong in the repository.
+- Runtime state is stored under the XDG state directory with private file permissions.
+- Digital Twin snapshots are recursively redacted and use a fixed safe-getter allow-list.
+- The Shadow ledger stores timestamps and normalized metadata, never frames or stream URLs.
+- Siren, floodlight and speaker actuators are intentionally not implemented.
+- Repeated authentication failures use backoff because affected firmware can lock out the
+  source address.
 
-This is **passive surveillance only** — it observes and notifies; it never triggers the
-camera's siren/floodlight/speaker. No personal data lives in the repository: coordinates,
-hostnames, face names and secrets all come from your own configuration. Copy
-[`cameras.example.yaml`](cameras.example.yaml) to `cameras.yaml` (git-ignored) and fill in
-your values; point secret fields at environment variable names rather than inlining tokens.
+Do not run multiple camera-control integrations against the same device unless you
+understand the session and sequential-request limitations.
 
-## Camera prerequisites & auth
+## Documentation
 
-Tapo cameras gate their local API; expect these one-time steps:
-
-- **Enable third-party access.** Recent firmware refuses local logins unless
-  *Tapo Lab → Third-Party Compatibility* is turned on in the Tapo app (some models
-  instead require the camera to be blocked from the internet). Without it, every login
-  fails.
-- **Create a dedicated camera account.** In the Tapo app, *Advanced Settings → Camera
-  Account*, set a username/password. These are the credentials the package logs in with
-  (`user_env` / `password_env`) and the RTSP account (`rtsp_user_env` /
-  `rtsp_password_env`) — usually the same pair.
-- **Cloud password.** A few operations (notably SD-card clip download) need your TP-Link
-  *account* password, not the camera account — set `cloud_password_env` if you use them.
-- **Lockout.** Repeated failed logins lock out the source IP for ~30 minutes, and the
-  first login right after a reconnect often fails before a retry succeeds. The daemon
-  retries with exponential backoff so it never hammers a struggling camera — but double-
-  check credentials before restarting in a loop.
-- **RTSP.** Frames are pulled over RTSP (`stream1` HD, `stream2` SD) on port 554 by
-  default; override with `rtsp_stream` / `rtsp_port`.
-
-## The Tapo `events_1` bitmask
-
-On the C560WS, `event_type` is often `None` and the only usable detection signal is the
-integer `events_1` bitmask. Confirmed by real captures: bit 1 (`2`) = motion, bit 5
-(`32`) = PIR, bit 19 (`524288`) = AI-confirmed person — the bit `strict_people` alerts on.
-The full reverse-engineered table, including the not-yet-ground-truthed bits and their
-`alarm_type` correlations, is in [`docs/events1-bitmask.md`](docs/events1-bitmask.md).
-
-## Hard-won gotchas (pytapo + C560WS)
-
-These cost real debugging time and are barely documented anywhere. If you're building your
-own stack on `pytapo`, these are the landmines:
-
-- **`setSmartTrackConfig` silently clears the auto-track master switch.** Set SmartTrack
-  categories / presets / sensitivity *first* and assert `setAutoTrackTarget` **last** (and
-  read it back to verify). Otherwise the camera looks configured but never tracks. See
-  [`tracking.py`](tapo_monitor/tracking.py) (`ensure_autotrack`).
-- **SD-card / media download fails with *"Cannot run the event loop while another loop is
-  running"* (and a *"coroutine 'Transport.authenticate' was never awaited"* warning).**
-  A long-lived `getEvents` client leaves pytapo's event-loop state in a way that makes the
-  media stream download fall into a broken auth path and silently return nothing. Fixes,
-  all in [`sdclip.py`](tapo_monitor/sdclip.py): run the download in a **fresh subprocess**
-  with its own freshly-logged-in client; **pre-warm `getUserID()`** before entering the
-  download loop (it calls it internally otherwise, from inside the running loop); and use
-  **`window_size=50`** — pytapo's default `200` makes the C560WS stop sending mid-segment.
-- **A live RTSP grab usually misses the subject.** The camera fires the event at *motion
-  start*, but a person often only walks into clear view 15–25 s later, so a frame grabbed
-  "now" is empty. Pull frames from the **recorded SD segment around the event time** and
-  let the vision model pick the one the subject is in, rather than trusting the live grab.
-  Size that window from the event's **own `end_time`** — `getEvents` reports the real
-  duration (~70 s in practice), and a fixed window from the start can end before the
-  subject is ever in clear view.
-- **pytapo's `Downloader` silently writes an empty file for fresh recordings.** If the
-  requested window's *end* is younger than `FRESH_RECORDING_TIME_SECONDS` (60 s), the
-  downloader treats the recording as still in progress, yields once and produces an empty
-  file — **no error is raised**. Delay the fetch until the *entire* window (not just the
-  event start) is at least 60 s old; see `fresh_delay()` in
-  [`sdclip.py`](tapo_monitor/sdclip.py). Getting this wrong looks like a random ~75 %
-  download-failure rate that quietly falls back to stale live frames.
-- **First login right after a reconnect fails with *"Invalid authentication data"*** — a
-  retry succeeds. Repeated failed logins **lock out the source IP for ~30 min**, so back
-  off rather than hammering. Centralized in [`camera.py`](tapo_monitor/camera.py).
-- **`setMotionDetection(sensitivity="60")` with a *string* is remapped to `"high"` (digital
-  80) — the opposite of intent.** pytapo maps numeric strings through a label lookup; pass
-  an **`int`** to set the digital value exactly. Same trap for `setPersonDetection`.
-- **`event_type` is often `None` on the C560WS** — the only usable detection signal is the
-  integer `events_1` bitmask (decoded above).
-
-## Layout
-
-```text
-tapo_monitor/            # the library + daemon
-  config.py              # validated config model loaded from cameras.yaml
-  scheduling.py          # astral day/night (+ HH:MM fallback)
-  weather.py             # rain gating (cached, hysteresis); coordinates from env
-  tracking.py            # auto-track / SmartTrack decisions + firmware-safe apply
-  detection.py           # event classification + events_1 bitmask decode
-  snapshot.py            # live RTSP frame capture (ffmpeg)
-  sdclip.py              # SD-card segment download + frame extraction around an event
-  enrich.py              # Groq scene description + face labelling + frame selection
-  notify.py              # Telegram + camera-down watchdog + alert gating
-  camera.py              # lockout-aware pytapo connect + getEvents helpers
-  monitor.py             # detection pipeline (collect → snapshot → enrich → notify)
-  daemon.py              # per-camera state machine tying control + pipeline together
-  cli.py                 # `tapo-monitor check|run|audit-log`
-cameras.example.yaml     # configuration schema (placeholders only)
-docs/capabilities.md     # what Tapo detection can do + what this project adds over pytapo
-docs/operations.md       # deployment, health checks, rollback and calibration loop
-docs/events1-bitmask.md  # the reverse-engineered getEvents bitmask
-systemd/                 # unit templates (generic; %i user, env-driven)
-tests/                   # pytest suite
-```
+| Document | Start here when… |
+| --- | --- |
+| [Documentation index](docs/README.md) | You want a map of all public docs. |
+| [Configuration](docs/configuration.md) | You are preparing `cameras.yaml` and environment variables. |
+| [Architecture](docs/architecture.md) | You want component boundaries, timing and failure semantics. |
+| [Operations](docs/operations.md) | You are deploying, monitoring or calibrating a live instance. |
+| [Capabilities](docs/capabilities.md) | You need the implemented/planned feature inventory. |
+| [Observability](docs/observability.md) | You are enabling Digital Twin or Shadow Auditor. |
+| [Troubleshooting](docs/troubleshooting.md) | You hit authentication, RTSP, SD or firmware-specific problems. |
+| [`events_1` bitmask](docs/events1-bitmask.md) | Your firmware returns incomplete event types. |
+| [Roadmap](docs/roadmap.md) | You want current gaps and planned product phases. |
 
 ## Development
 
-`pytest -q` runs the suite; `ruff check .` lints. CI runs both on every push and PR.
+```bash
+pytest -q
+ruff check .
+```
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md). Licensed under
-the terms in [`LICENSE`](LICENSE).
+Pure planning, classification, drift, matching and persistence logic is tested without
+camera hardware; I/O collaborators are injected in tests. CI runs tests and Ruff for every
+push to `main` and every pull request.
 
-## Questions & community
-
-Setup help, usage questions, or sharing what you've learned about your camera (especially
-new `events_1` / `alarm_type` findings) — use the repository's Discussions and Issues
-tabs for setup help, bug reports, and feature requests.
+See [Contributing](CONTRIBUTING.md), [Security](SECURITY.md), the [changelog](CHANGELOG.md)
+and the [MIT license](LICENSE).
