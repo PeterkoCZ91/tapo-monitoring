@@ -56,3 +56,28 @@ def test_subject_score_takes_max():
     assert scorer.subject_score({"person": 0.3, "animal": 0.7}) == 0.7
     assert scorer.subject_score({"person": 0.5}) == 0.5
     assert scorer.subject_score({}) == 0.0
+
+
+def test_score_image_appends_tiles_query(monkeypatch, tmp_path):
+    img = tmp_path / "f.jpg"
+    img.write_bytes(b"x")
+    calls = []
+    _fake_urlopen(monkeypatch, payload={"person": 0.5}, capture=calls)
+    scorer.score_image("http://h/score", str(img), tiles=2)
+    assert calls[0][0] == "http://h/score?tiles=2"
+
+
+def test_score_image_no_tiles_query_when_one(monkeypatch, tmp_path):
+    img = tmp_path / "f.jpg"
+    img.write_bytes(b"x")
+    calls = []
+    _fake_urlopen(monkeypatch, payload={"person": 0.5}, capture=calls)
+    scorer.score_image("http://h/score", str(img), tiles=1)
+    assert calls[0][0] == "http://h/score"
+
+
+def test_subject_box_parses_and_validates():
+    assert scorer.subject_box({"box": [1, 2, 3, 4]}) == [1.0, 2.0, 3.0, 4.0]
+    assert scorer.subject_box({"box": None}) is None
+    assert scorer.subject_box({}) is None
+    assert scorer.subject_box({"box": [1, 2, 3]}) is None

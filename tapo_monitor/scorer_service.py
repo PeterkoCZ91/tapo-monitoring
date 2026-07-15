@@ -57,14 +57,89 @@ def scores_from_output(output, num_classes=80, floor=0.01):
     return {"person": round(person, 4), "animal": round(animal, 4), "classes": named}
 
 
-def preprocess(jpeg_bytes, input_size):
-    """JPEG bytes -> (1,3,S,S) float32 letterboxed BGR array + used ratio."""
-    import io
+def _grids_and_strides(input_size, strides):
+    """YOLOX anchor grid centres and per-anchor stride for a square input. Pure (numpy)."""
+    import numpy as np
 
+    grids, expanded = [], []
+    for s in strides:
+        hw = input_size // s
+        xv, yv = np.meshgrid(np.arange(hw), np.arange(hw))
+        grids.append(np.stack((xv, yv), 2).reshape(-1, 2))
+        expanded.append(np.full((hw * hw, 1), s))
+    return np.concatenate(grids, 0), np.concatenate(expanded, 0)
+
+
+def best_person_box(output, input_size=640, strides=(8, 16, 32), floor=0.05):
+    """Input-coord xyxy box of the highest-confidence person anchor, or None.
+
+    This YOLOX export applies sigmoid to obj/class but leaves the box head **raw**, so the
+    anchor's ``(x, y, w, h)`` must be decoded against its grid cell and stride:
+    ``xy = (raw_xy + grid) * stride``, ``wh = exp(raw_wh) * stride`` (input pixels). We pick
+    the anchor with the top person confidence (obj * person class); ``None`` when it fails
+    ``floor``. If the anchor count doesn't match the grid (a different/pre-decoded export),
+    fall back to treating the head as already-decoded ``cx,cy,w,h``. Pure.
+    """
+    import numpy as np
+
+    preds = output[0]
+    if not len(preds):
+        return None
+    conf = preds[:, 4] * preds[:, 5 + PERSON_CLASS]
+    i = int(conf.argmax())
+    if float(conf[i]) < floor:
+        return None
+    grids, expanded = _grids_and_strides(input_size, strides)
+    if len(grids) == len(preds):
+        s = float(expanded[i, 0])
+        cx = (float(preds[i, 0]) + float(grids[i, 0])) * s
+        cy = (float(preds[i, 1]) + float(grids[i, 1])) * s
+        w = float(np.exp(preds[i, 2])) * s
+        h = float(np.exp(preds[i, 3])) * s
+    else:
+        cx, cy, w, h = (float(v) for v in preds[i, :4])
+    return (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+
+
+def tile_rects(width, height, tiles, overlap=0.15):
+    """Original-coord ``(x0, y0, x1, y1)`` rects: the whole frame plus a tiles×tiles grid.
+
+    Scoring each grid cell separately lets a distant person — a few pixels once the whole
+    frame is letterboxed to the model's small input — fill a cell and register. The whole
+    frame stays in the list so a close, large subject is still caught. ``overlap`` widens
+    each cell so a subject on a seam isn't split. Pure.
+    """
+    rects = [(0.0, 0.0, float(width), float(height))]
+    n = int(tiles)
+    if n <= 1:
+        return rects
+    tw, th = width / n, height / n
+    ox, oy = tw * overlap, th * overlap
+    for j in range(n):
+        for i in range(n):
+            x0 = max(0.0, i * tw - ox)
+            y0 = max(0.0, j * th - oy)
+            x1 = min(float(width), (i + 1) * tw + ox)
+            y1 = min(float(height), (j + 1) * th + oy)
+            rects.append((x0, y0, x1, y1))
+    return rects
+
+
+def scale_box(box, ratio, off_x, off_y):
+    """Map a tile-input-coord xyxy box to full-image original coords. Pure.
+
+    ``ratio`` is the letterbox scale used for that tile (original->input); dividing undoes
+    it, then the tile's top-left ``(off_x, off_y)`` offset places it in the full frame.
+    """
+    x1, y1, x2, y2 = box
+    return (x1 / ratio + off_x, y1 / ratio + off_y, x2 / ratio + off_x, y2 / ratio + off_y)
+
+
+def preprocess_image(img, input_size):
+    """PIL RGB image -> (1,3,S,S) float32 letterboxed BGR array + used ratio."""
     import numpy as np
     from PIL import Image
 
-    img = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
     ratio = min(input_size / img.width, input_size / img.height)
     resized = img.resize((max(1, int(img.width * ratio)), max(1, int(img.height * ratio))),
                          Image.BILINEAR)
@@ -74,17 +149,54 @@ def preprocess(jpeg_bytes, input_size):
     return arr.transpose(2, 0, 1)[None].copy(), ratio
 
 
+def preprocess(jpeg_bytes, input_size):
+    """JPEG bytes -> (1,3,S,S) float32 letterboxed BGR array + used ratio."""
+    import io
+
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
+    return preprocess_image(img, input_size)
+
+
 def build_score_fn(model_path, input_size=416):
-    """Load the ONNX model once and return score_fn(jpeg_bytes) -> dict."""
+    """Load the ONNX model once and return score_fn(jpeg_bytes, tiles=1) -> dict.
+
+    ``tiles > 1`` scores the whole frame plus a tiles×tiles grid (see :func:`tile_rects`)
+    and keeps the highest person score — the way distant subjects get rescued. The
+    response gains a ``box`` (full-image xyxy in original pixels) for the winning person
+    detection, so a caller can crop/zoom to it; ``box`` is ``None`` when no person.
+    """
+    import io
+
     import onnxruntime as ort
+    from PIL import Image
 
     session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
     input_name = session.get_inputs()[0].name
 
-    def score_fn(jpeg_bytes):
-        tensor, _ratio = preprocess(jpeg_bytes, input_size)
+    def _run(img):
+        tensor, ratio = preprocess_image(img, input_size)
         (output,) = session.run(None, {input_name: tensor})
-        return scores_from_output(output)
+        return output, ratio
+
+    def score_fn(jpeg_bytes, tiles=1):
+        img = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
+        rects = tile_rects(img.width, img.height, tiles)
+        best = {"person": 0.0, "animal": 0.0, "classes": {}, "box": None,
+                "w": img.width, "h": img.height}
+        for (x0, y0, x1, y1) in rects:
+            crop = img if len(rects) == 1 else img.crop((int(x0), int(y0), int(x1), int(y1)))
+            output, ratio = _run(crop)
+            scores = scores_from_output(output)
+            if scores["animal"] > best["animal"]:
+                best["animal"] = scores["animal"]
+            if scores["person"] >= best["person"]:
+                best["person"] = scores["person"]
+                best["classes"] = scores["classes"]
+                box = best_person_box(output, input_size)
+                best["box"] = list(scale_box(box, ratio, x0, y0)) if box else None
+        return best
 
     return score_fn
 
@@ -108,13 +220,20 @@ def make_server(score_fn, port=8765):
                 self._reply(404, {"error": "not found"})
 
         def do_POST(self):
-            if self.path != "/score":
+            from urllib.parse import parse_qs, urlparse
+
+            parsed = urlparse(self.path)
+            if parsed.path != "/score":
                 self._reply(404, {"error": "not found"})
                 return
+            try:
+                tiles = max(1, int(parse_qs(parsed.query).get("tiles", ["1"])[0]))
+            except (TypeError, ValueError):
+                tiles = 1
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)
             try:
-                self._reply(200, score_fn(body))
+                self._reply(200, score_fn(body, tiles))
             except Exception as e:  # noqa: BLE001 - report, don't kill the server
                 log.warning("scoring failed: %s", e)
                 self._reply(500, {"error": str(e)})

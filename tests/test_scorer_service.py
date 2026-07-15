@@ -15,8 +15,9 @@ from tapo_monitor import scorer_service
 
 @pytest.fixture
 def server():
-    srv = scorer_service.make_server(lambda body: {"person": 0.8, "animal": 0.0, "n": len(body)},
-                                     port=0)
+    srv = scorer_service.make_server(
+        lambda body, tiles=1: {"person": 0.8, "animal": 0.0, "n": len(body), "tiles": tiles},
+        port=0)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     yield f"http://127.0.0.1:{srv.server_address[1]}"
@@ -28,7 +29,7 @@ def test_post_score_returns_json(server):
                                  headers={"Content-Type": "image/jpeg"})
     with urllib.request.urlopen(req, timeout=5) as resp:
         out = json.load(resp)
-    assert out == {"person": 0.8, "animal": 0.0, "n": 9}
+    assert out == {"person": 0.8, "animal": 0.0, "n": 9, "tiles": 1}
 
 
 def test_health(server):
@@ -43,7 +44,7 @@ def test_unknown_path_404(server):
 
 
 def test_score_fn_error_500():
-    def boom(_body):
+    def boom(_body, tiles=1):
         raise ValueError("bad image")
     srv = scorer_service.make_server(boom, port=0)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -89,6 +90,53 @@ def test_scores_from_output_returns_named_classes():
     assert scores["classes"]["person"] == pytest.approx(0.72, abs=1e-4)
     assert scores["classes"]["dog"] == pytest.approx(0.30, abs=1e-4)
     assert "car" not in scores["classes"]
+
+def test_best_person_box_decodes_grid_and_stride():
+    # input 64 -> grids 8x8(s8)+4x4(s16)+2x2(s32) = 84 anchors. Anchor 0 = grid(0,0),
+    # stride 8, raw box (0,0,0,0) -> cx=cy=0, w=h=exp(0)*8=8 -> xyxy (-4,-4,4,4).
+    out = np.zeros((1, 84, 85), dtype=np.float32)
+    out[0, 0, 4] = 0.9
+    out[0, 0, 5 + 0] = 0.8                  # person conf 0.72 on anchor 0
+    box = scorer_service.best_person_box(out, input_size=64)
+    assert box == pytest.approx((-4.0, -4.0, 4.0, 4.0))
+
+
+def test_best_person_box_none_below_floor():
+    out = np.zeros((1, 84, 85), dtype=np.float32)
+    out[0, 0, 4] = 0.1
+    out[0, 0, 5 + 0] = 0.1                  # 0.01, below default floor 0.05
+    assert scorer_service.best_person_box(out, input_size=64) is None
+
+
+def test_best_person_box_falls_back_when_anchor_count_mismatch():
+    # 3 anchors != any grid count -> treat head as already-decoded cx,cy,w,h
+    out = np.zeros((1, 3, 85), dtype=np.float32)
+    out[0, 1, :4] = [100, 80, 40, 60]
+    out[0, 1, 4] = 0.9
+    out[0, 1, 5 + 0] = 0.8
+    assert scorer_service.best_person_box(out, input_size=640) == \
+        pytest.approx((80.0, 50.0, 120.0, 110.0))
+
+
+def test_tile_rects_whole_frame_only_when_tiles_1():
+    assert scorer_service.tile_rects(400, 300, 1) == [(0.0, 0.0, 400.0, 300.0)]
+
+
+def test_tile_rects_grid_count_and_bounds():
+    rects = scorer_service.tile_rects(400, 300, 2, overlap=0.0)
+    assert len(rects) == 5                   # whole frame + 2x2
+    assert rects[0] == (0.0, 0.0, 400.0, 300.0)
+    assert rects[1] == (0.0, 0.0, 200.0, 150.0)          # top-left cell
+    assert rects[4] == (200.0, 150.0, 400.0, 300.0)      # bottom-right cell
+    for x0, y0, x1, y1 in rects:             # all within the frame
+        assert 0.0 <= x0 < x1 <= 400.0 and 0.0 <= y0 < y1 <= 300.0
+
+
+def test_scale_box_undoes_ratio_and_adds_tile_offset():
+    # tile-input box at ratio 0.5 -> /0.5 = *2, then shift by the tile origin
+    assert scorer_service.scale_box((10, 20, 30, 40), 0.5, 100, 200) == \
+        pytest.approx((120.0, 240.0, 160.0, 280.0))
+
 
 def test_scores_from_output_uses_darknet_coco_names():
     out = np.zeros((1, 1, 85), dtype=np.float32)
