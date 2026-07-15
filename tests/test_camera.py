@@ -10,6 +10,32 @@ def _no_sleep(_):
     pass
 
 
+# ── ping_reachable ───────────────────────────────────────────────────────────
+
+def test_ping_reachable_uses_one_bounded_shell_free_probe():
+    calls = []
+    class Result:
+        returncode = 0
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return Result()
+
+    assert camera.ping_reachable("203.0.113.10", run=run) is True
+    argv, kwargs = calls[0]
+    assert argv == ["ping", "-n", "-c", "1", "-W", "1", "203.0.113.10"]
+    assert kwargs["timeout"] == 2
+    assert kwargs["check"] is False
+
+
+def test_ping_reachable_returns_false_on_nonzero_or_command_error():
+    class Failed:
+        returncode = 1
+    assert camera.ping_reachable("203.0.113.10", run=lambda *a, **k: Failed()) is False
+    def missing(*args, **kwargs):
+        raise OSError("ping missing")
+    assert camera.ping_reachable("203.0.113.10", run=missing) is False
+
+
 # ── connect (retry / lockout-aware) ──────────────────────────────────────────
 
 def test_connect_succeeds_first_try():

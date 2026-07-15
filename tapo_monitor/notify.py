@@ -52,6 +52,24 @@ def outage_alert_due(fail_since, now, already_alerted, threshold):
     return now - fail_since >= threshold
 
 
+def format_duration(seconds):
+    """Return a compact human-readable duration using at most two units."""
+    total = max(0, int(seconds))
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    units = []
+    if days:
+        units.append(f"{days}d")
+    if hours:
+        units.append(f"{hours}h")
+    if minutes:
+        units.append(f"{minutes}m")
+    if secs or not units:
+        units.append(f"{secs}s")
+    return " ".join(units[:2])
+
+
 def should_send_alert(last_alert_ts, now, cooldown):
     """True when enough time has passed since the last detection alert.
 

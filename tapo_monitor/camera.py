@@ -2,6 +2,8 @@
 
 pytapo is a thin API client; this adds the operational glue around it:
 
+* **Cheap reachability probe** — ping the device before creating an authenticated session,
+  so a disconnected camera is distinct from an API/authentication failure.
 * **Lockout-aware connect** — the C560WS locks out a source IP for ~30 min after failed
   logins, and the first login after a reconnect often fails with "Invalid authentication
   data" before a retry succeeds. ``connect`` retries a few times with a delay so callers
@@ -12,7 +14,27 @@ The pytapo import is lazy (inside ``tapo_factory``) so the rest of the package �
 tests — import without the dependency present.
 """
 
+import subprocess
 import time as _time
+
+
+def ping_reachable(host, timeout=1, run=subprocess.run):
+    """True when the camera answers one ICMP echo request.
+
+    The command uses an argv list (never a shell), suppresses output and has both ping's
+    own deadline and a subprocess deadline. It performs no camera login.
+    """
+    try:
+        result = run(
+            ["ping", "-n", "-c", "1", "-W", str(max(1, int(timeout))), host],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout + 1,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def tapo_factory(host, user, password, cloud_password=None):

@@ -56,6 +56,15 @@ def test_outage_already_alerted_suppressed():
     assert notify.outage_alert_due(1000.0, 5000.0, True, threshold=900) is False
 
 
+# ── format_duration ──────────────────────────────────────────────────────────
+
+def test_format_duration_compact_two_units():
+    assert notify.format_duration(0) == "0s"
+    assert notify.format_duration(65) == "1m 5s"
+    assert notify.format_duration(3 * 3600 + 61) == "3h 1m"
+    assert notify.format_duration(2 * 86400 + 3 * 3600 + 60) == "2d 3h"
+
+
 # ── should_send_alert (detection cooldown) ───────────────────────────────────
 
 def test_alert_first_ever_allowed():
