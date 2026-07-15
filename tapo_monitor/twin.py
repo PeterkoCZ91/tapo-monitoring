@@ -1,0 +1,191 @@
+"""Camera Digital Twin orchestration and private local persistence.
+
+The low-level camera reads live in :mod:`tapo_monitor.capabilities`; the comparison
+algorithm lives in :mod:`tapo_monitor.drift`.  This module translates the few states the
+daemon actively controls into a stable desired/actual contract and persists the latest
+redacted fleet view for offline CLI inspection.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+from collections.abc import Mapping
+
+from . import capabilities, drift
+
+SCHEMA_VERSION = 1
+
+
+def default_state_path(env=None, home=None):
+    """Return the twin-state path, honoring TAPO_TWIN_STATE_FILE and XDG."""
+    env = os.environ if env is None else env
+    override = env.get("TAPO_TWIN_STATE_FILE")
+    if override:
+        return os.path.expanduser(override)
+    state_home = env.get("XDG_STATE_HOME")
+    if not state_home:
+        home = home or env.get("HOME") or os.path.expanduser("~")
+        state_home = os.path.join(home, ".local", "state")
+    return os.path.join(state_home, "tapo-monitor", "twin.json")
+
+
+def evaluate_snapshot(camera_name, plan, snapshot):
+    """Return desired/actual/drift dictionaries for one camera snapshot."""
+    desired = {
+        "detection.person.enabled": True,
+        "detection.vehicle.enabled": False,
+        "detection.motion.sensitivity": int(plan.motion_sensitivity),
+        "tracking.auto.enabled": bool(plan.autotrack_on),
+    }
+    actual = {
+        "detection.person.enabled": _enabled(_probe_value(snapshot, "detection", "person")),
+        "detection.vehicle.enabled": _enabled(
+            _probe_value(snapshot, "detection", "vehicle")
+        ),
+        "detection.motion.sensitivity": _sensitivity(
+            _probe_value(snapshot, "detection", "motion")
+        ),
+        "tracking.auto.enabled": _enabled(_probe_value(snapshot, "track", "auto_target")),
+    }
+    severities = {
+        "detection.person.enabled": "critical",
+        "detection.vehicle.enabled": "warning",
+        "detection.motion.sensitivity": "warning",
+        "tracking.auto.enabled": "critical",
+    }
+    report = drift.evaluate_drift(
+        desired, actual, severities=severities, scope=str(camera_name)
+    )
+    return {"desired": desired, "actual": _json_actual(actual), "drift": report.to_dict()}
+
+
+def fleet_entry(*, captured_at, snapshot, health, evaluation):
+    """Build one fully JSON-safe persisted fleet entry."""
+    return capabilities.redact({
+        "captured_at": float(captured_at),
+        "snapshot": snapshot,
+        "health": health.to_dict() if hasattr(health, "to_dict") else health,
+        **evaluation,
+    })
+
+
+def save_state(path, cameras, logger=None):
+    """Atomically persist a redacted fleet twin with mode 0600."""
+    directory = os.path.dirname(os.path.abspath(path))
+    temp_path = None
+    try:
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(prefix=".twin-", dir=directory, text=True)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(
+                {"version": SCHEMA_VERSION, "cameras": capabilities.redact(cameras)},
+                fh,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temp_path, path)
+        temp_path = None
+        return True
+    except (OSError, TypeError, ValueError) as exc:
+        if logger is not None:
+            logger.warning("digital twin state save failed: %s", type(exc).__name__)
+        return False
+    finally:
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+
+def load_state(path, logger=None):
+    """Load and minimally validate a fleet twin; return an empty fleet on failure."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+        if not isinstance(payload, Mapping) or payload.get("version") != SCHEMA_VERSION:
+            raise ValueError("unsupported digital twin state version")
+        cameras = payload.get("cameras")
+        if not isinstance(cameras, Mapping):
+            raise ValueError("digital twin cameras must be an object")
+        return {str(name): value for name, value in cameras.items() if isinstance(value, Mapping)}
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        if logger is not None:
+            logger.warning("digital twin state load failed: %s", type(exc).__name__)
+        return {}
+
+
+def alertable_keys(evaluation):
+    """Return stable keys for currently alertable drift results."""
+    results = evaluation.get("drift", {}).get("results", [])
+    return {str(item["key"]) for item in results
+            if isinstance(item, Mapping) and item.get("alertable") and item.get("key")}
+
+
+def alertable_results(evaluation):
+    """Return alertable drift result dictionaries in deterministic path order."""
+    results = evaluation.get("drift", {}).get("results", [])
+    return sorted(
+        (item for item in results if isinstance(item, Mapping) and item.get("alertable")),
+        key=lambda item: str(item.get("path", "")),
+    )
+
+
+def _probe_value(snapshot, group, name):
+    try:
+        result = snapshot["groups"][group][name]
+    except (KeyError, TypeError):
+        return drift.UNKNOWN
+    if not isinstance(result, Mapping):
+        return drift.UNKNOWN
+    if result.get("state") != "available":
+        return drift.UNSUPPORTED if result.get("reason") == "missing_method" else drift.UNKNOWN
+    return result.get("value", drift.UNKNOWN)
+
+
+def _enabled(value):
+    if value in (drift.UNKNOWN, drift.UNSUPPORTED):
+        return value
+    if not isinstance(value, Mapping):
+        return drift.UNKNOWN
+    raw = value.get("enabled", drift.UNKNOWN)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        if raw.lower() in {"on", "true", "1", "enabled"}:
+            return True
+        if raw.lower() in {"off", "false", "0", "disabled"}:
+            return False
+    return drift.UNKNOWN
+
+
+def _sensitivity(value):
+    if value in (drift.UNKNOWN, drift.UNSUPPORTED):
+        return value
+    if not isinstance(value, Mapping):
+        return drift.UNKNOWN
+    raw = value.get("digital_sensitivity", value.get("sensitivity", drift.UNKNOWN))
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return drift.UNKNOWN
+
+
+def _json_actual(actual):
+    return {
+        path: (
+            value.value
+            if value is drift.UNKNOWN or value is drift.UNSUPPORTED
+            else value
+        )
+        for path, value in actual.items()
+    }
