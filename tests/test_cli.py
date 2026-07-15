@@ -1,0 +1,111 @@
+import json
+import types
+
+from tapo_monitor import cli, health, ledger, twin
+
+
+def _state(**overrides):
+    values = {name: {} for name in health.PERSISTED_FIELDS}
+    values.update(overrides)
+    return types.SimpleNamespace(**values)
+
+
+def test_status_prints_observed_uptime_and_outages(tmp_path, capsys, monkeypatch):
+    path = tmp_path / "health.json"
+    state = _state(
+        online_since={"front": 100, "back": 300},
+        fail_since={"back": 900},
+        last_outage_duration={"front": 60},
+        reconnect_count={"front": 2, "back": 1},
+        total_observed_online={"back": 600},
+        total_observed_offline={"front": 100},
+    )
+    assert health.save_state(str(path), state)
+    monkeypatch.setattr(cli.time, "time", lambda: 1000)
+
+    assert cli.main(["status", str(path)]) == 0
+
+    output = capsys.readouterr().out
+    lines = output.splitlines()
+    assert next(line for line in lines if line.startswith("front")).split() == [
+        "front", "online", "15m", "90.00%", "1m", "2"]
+    assert next(line for line in lines if line.startswith("back")).split() == [
+        "back", "offline", "1m", "40s", "85.71%", "-", "1"]
+    assert output.count("reconnects") == 1
+
+
+def test_status_missing_state_returns_failure(tmp_path, capsys):
+    path = tmp_path / "missing.json"
+
+    assert cli.main(["status", str(path)]) == 1
+    assert str(path) in capsys.readouterr().err
+
+
+def test_health_status_rows_are_sorted_and_clamp_clock_skew():
+    state = _state(
+        online_since={"z": 200, "a": 100},
+        fail_since={"z": 150},
+        last_observed_uptime={"z": 50},
+    )
+
+    rows = health.status_rows(state, now=120)
+
+    assert [row["camera"] for row in rows] == ["a", "z"]
+    assert rows[0]["current_for"] == 20
+    assert rows[1]["state"] == "offline"
+    assert rows[1]["current_for"] == 0
+
+
+def test_twin_status_prints_layered_health_and_drift(tmp_path, capsys):
+    path = tmp_path / "twin.json"
+    cameras = {
+        "front": {
+            "health": {
+                "status": "degraded",
+                "layers": {
+                    "network": "ok", "api": "ok", "events": "degraded",
+                    "rtsp": "ok", "storage": "unknown",
+                },
+            },
+            "drift": {"counts": {"drift": 1, "unknown": 2}},
+        }
+    }
+    assert twin.save_state(str(path), cameras)
+
+    assert cli.main(["twin-status", str(path)]) == 0
+
+    row = next(line for line in capsys.readouterr().out.splitlines()
+               if line.startswith("front"))
+    assert row.split() == [
+        "front", "degraded", "ok", "ok", "degraded", "ok", "unknown", "1", "2"
+    ]
+
+
+def test_twin_status_json_is_machine_readable(tmp_path, capsys):
+    path = tmp_path / "twin.json"
+    assert twin.save_state(str(path), {"front": {"health": {}, "drift": {}}})
+
+    assert cli.main(["twin-status", str(path), "--json"]) == 0
+
+    assert "front" in json.loads(capsys.readouterr().out)["cameras"]
+
+
+def test_shadow_record_and_report_commands(tmp_path, capsys):
+    path = tmp_path / "events.sqlite3"
+    events = ledger.EventLedger(path)
+    events.record_camera_event(camera="front", event_type="person", event_at=100)
+
+    assert cli.main([
+        "shadow-record", "front", "person", "101", "--confidence", "0.9",
+        "--ledger", str(path),
+    ]) == 0
+    capsys.readouterr()
+    assert cli.main([
+        "shadow-report", "front", "--end", "110", "--hours", "1",
+        "--window", "2", "--ledger", str(path), "--json",
+    ]) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["matched"] == 1
+    assert report["camera_only"] == 0
+    assert report["shadow_only"] == 0

@@ -83,6 +83,20 @@ class ScorerConfig:
     url: str | None = None
     threshold: float = 0.4  # min subject confidence to send a frame
     timeout: int = 10       # seconds per scoring request
+    # Score the whole frame plus a tiles×tiles grid and keep the best. >1 rescues distant
+    # subjects that vanish once a wide frame is downscaled to the model input. 1 = off.
+    tiles: int = 1
+
+
+@dataclass
+class PanLimitConfig:
+    """Soft pan-limit via ONVIF: keep auto-track within the span of the camera's presets."""
+    enabled: bool = False
+    margin: float = 0.01          # slack (ONVIF pan units) so tracking near a bound is stable
+    poll_interval: int = 6        # seconds between ONVIF position polls
+    onvif_port: int = 2020
+    onvif_user_env: str | None = None       # names of env vars, not the secrets themselves
+    onvif_password_env: str | None = None
 
 
 @dataclass
@@ -128,6 +142,19 @@ class CameraConfig:
     # backlog doesn't replay at nightfall) and all Telegram — including camera-down
     # notices — is suppressed. For sites that only care about after-hours intruders.
     night_only: bool = False
+    # Force IR night vision on the astral night schedule. "ir" makes the daemon set the
+    # camera to inf_night_vision (B&W, faster shutter -> less motion blur) at night and
+    # back to day/colour mode by day; "auto" re-asserts the camera's own auto switch each
+    # tick. None leaves the camera's day/night mode untouched (its current default).
+    night_vision: str | None = None
+    # Where the alert snapshot's candidate frames come from: "sd" (download the event
+    # segment from the camera SD, default) or "recording" (extract from a local 24/7
+    # recorder mkv — full stream1, picks the sharpest above-threshold frame). "recording"
+    # reuses the SD follow-up queue, so it requires sd_snapshot: true.
+    snapshot_source: str = "sd"
+    # Crop the alert photo to the detected person (a zoom) before sending. Needs a scorer
+    # that returns a box (scorer.tiles>1 also rescues distant subjects). Off = full frame.
+    crop_to_subject: bool = False
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
@@ -135,6 +162,7 @@ class CameraConfig:
     sampler: SamplerConfig = field(default_factory=SamplerConfig)
     scorer: ScorerConfig = field(default_factory=ScorerConfig)
     coordinator: CoordinatorConfig = field(default_factory=CoordinatorConfig)
+    pan_limit: PanLimitConfig = field(default_factory=PanLimitConfig)
 
 
 @dataclass
@@ -155,6 +183,17 @@ class LoopConfig:
 
 
 @dataclass
+class ObservabilityConfig:
+    """Opt-in Camera Digital Twin and Shadow Detection Auditor settings."""
+    digital_twin: bool = False
+    probe_interval: int = 900
+    drift_alerts: bool = False
+    ledger: bool = False
+    ledger_retention_days: int = 30
+    shadow_match_window: int = 20
+
+
+@dataclass
 class AppConfig:
     location: Location = field(default_factory=Location)
     telegram: dict = field(default_factory=dict)
@@ -164,6 +203,7 @@ class AppConfig:
     faces: dict = field(default_factory=dict)
     alerts: AlertsConfig = field(default_factory=AlertsConfig)
     loop: LoopConfig = field(default_factory=LoopConfig)
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     cameras: list[CameraConfig] = field(default_factory=list)
 
 
@@ -290,11 +330,35 @@ def _scorer(data, where):
     try:
         threshold = float(d.get("threshold", 0.4))
         timeout = int(d.get("timeout", 10))
+        tiles = int(d.get("tiles", 1))
     except (TypeError, ValueError):
-        raise ConfigError(f"{where}: scorer threshold/timeout must be numbers") from None
+        raise ConfigError(f"{where}: scorer threshold/timeout/tiles must be numbers") from None
     if not 0.0 <= threshold <= 1.0:
         raise ConfigError(f"{where}: scorer threshold must be between 0 and 1")
-    return ScorerConfig(url=d.get("url"), threshold=threshold, timeout=timeout)
+    if tiles < 1:
+        raise ConfigError(f"{where}: scorer tiles must be >= 1")
+    return ScorerConfig(url=d.get("url"), threshold=threshold, timeout=timeout, tiles=tiles)
+
+
+def _pan_limit(data, where):
+    d = data or {}
+    try:
+        margin = float(d.get("margin", 0.01))
+        poll_interval = int(d.get("poll_interval", 6))
+        onvif_port = int(d.get("onvif_port", 2020))
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}: pan_limit margin/poll_interval/onvif_port must be numbers") \
+            from None
+    if poll_interval < 1:
+        raise ConfigError(f"{where}: pan_limit poll_interval must be >= 1")
+    return PanLimitConfig(
+        enabled=bool(d.get("enabled", False)),
+        margin=margin,
+        poll_interval=poll_interval,
+        onvif_port=onvif_port,
+        onvif_user_env=d.get("onvif_user_env"),
+        onvif_password_env=d.get("onvif_password_env"),
+    )
 
 
 def _camera(data, index):
@@ -322,6 +386,14 @@ def _camera(data, index):
             raise ConfigError(f"{where}: 'sd_jobs_per_tick' must be an integer") from None
         if sd_jobs_per_tick < 1:
             raise ConfigError(f"{where}: 'sd_jobs_per_tick' must be >= 1")
+    night_vision = data.get("night_vision")
+    if night_vision is not None and night_vision not in ("ir", "auto"):
+        raise ConfigError(f"{where}: 'night_vision' must be 'ir' or 'auto'")
+    snapshot_source = data.get("snapshot_source", "sd")
+    if snapshot_source not in ("sd", "recording"):
+        raise ConfigError(f"{where}: 'snapshot_source' must be 'sd' or 'recording'")
+    if snapshot_source == "recording" and not bool(data.get("sd_snapshot", False)):
+        raise ConfigError(f"{where}: snapshot_source 'recording' requires sd_snapshot: true")
     return CameraConfig(
         name=name,
         host=host,
@@ -341,12 +413,16 @@ def _camera(data, index):
         sd_jobs_per_tick=sd_jobs_per_tick,
         person_sensitivity=int(data["person_sensitivity"]) if data.get("person_sensitivity") is not None else None,
         night_only=bool(data.get("night_only", False)),
+        night_vision=night_vision,
+        snapshot_source=snapshot_source,
+        crop_to_subject=bool(data.get("crop_to_subject", False)),
         detection=_detection(data.get("detection"), where),
         tracking=_tracking(data.get("tracking"), where),
         weather=_weather(data.get("weather"), where),
         enrich=_enrich(data.get("enrich"), where),
         sampler=_sampler(data.get("sampler"), where),
         scorer=_scorer(data.get("scorer"), where),
+        pan_limit=_pan_limit(data.get("pan_limit"), where),
         coordinator=CoordinatorConfig(
             group=coord.get("group"),
             handoff_preset=coord.get("handoff_preset"),
@@ -385,6 +461,31 @@ def load_config_from_dict(data) -> AppConfig:
         control_interval=int(loop_raw.get("control_interval", 60)),
     )
 
+    obs_raw = data.get("observability") or {}
+    try:
+        probe_interval = int(obs_raw.get("probe_interval", 900))
+        retention_days = int(obs_raw.get("ledger_retention_days", 30))
+        match_window = int(obs_raw.get("shadow_match_window", 20))
+    except (TypeError, ValueError):
+        raise ConfigError(
+            "observability probe_interval/ledger_retention_days/shadow_match_window "
+            "must be integers"
+        ) from None
+    if probe_interval < 60:
+        raise ConfigError("observability.probe_interval must be >= 60")
+    if retention_days < 1:
+        raise ConfigError("observability.ledger_retention_days must be >= 1")
+    if match_window < 1:
+        raise ConfigError("observability.shadow_match_window must be >= 1")
+    observability = ObservabilityConfig(
+        digital_twin=bool(obs_raw.get("digital_twin", False)),
+        probe_interval=probe_interval,
+        drift_alerts=bool(obs_raw.get("drift_alerts", False)),
+        ledger=bool(obs_raw.get("ledger", False)),
+        ledger_retention_days=retention_days,
+        shadow_match_window=match_window,
+    )
+
     return AppConfig(
         location=location,
         telegram=data.get("telegram") or {},
@@ -392,6 +493,7 @@ def load_config_from_dict(data) -> AppConfig:
         faces=data.get("faces") or {},
         alerts=alerts,
         loop=loop,
+        observability=observability,
         cameras=cameras,
     )
 

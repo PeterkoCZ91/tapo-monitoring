@@ -34,6 +34,77 @@ def test_minimal_config_loads_with_defaults():
     assert cam.enrich.snapshot == "rtsp"
 
 
+def test_night_vision_defaults_none_and_parses():
+    assert cfg.load_config_from_dict(_minimal()).cameras[0].night_vision is None
+    data = {"cameras": [{"name": "f", "host": "192.0.2.50", "night_vision": "ir"}]}
+    assert cfg.load_config_from_dict(data).cameras[0].night_vision == "ir"
+
+
+def test_night_vision_rejects_bad_value():
+    data = {"cameras": [{"name": "f", "host": "192.0.2.50", "night_vision": "sometimes"}]}
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config_from_dict(data)
+
+
+def test_snapshot_source_defaults_sd():
+    assert cfg.load_config_from_dict(_minimal()).cameras[0].snapshot_source == "sd"
+
+
+def test_snapshot_source_recording_requires_sd_snapshot():
+    ok = {"cameras": [{"name": "f", "host": "192.0.2.50",
+                       "sd_snapshot": True, "snapshot_source": "recording"}]}
+    assert cfg.load_config_from_dict(ok).cameras[0].snapshot_source == "recording"
+    bad = {"cameras": [{"name": "f", "host": "192.0.2.50", "snapshot_source": "recording"}]}
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config_from_dict(bad)
+
+
+def test_snapshot_source_rejects_bad_value():
+    data = {"cameras": [{"name": "f", "host": "192.0.2.50", "snapshot_source": "cloud"}]}
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config_from_dict(data)
+
+
+def test_crop_to_subject_defaults_false_and_parses():
+    assert cfg.load_config_from_dict(_minimal()).cameras[0].crop_to_subject is False
+    data = {"cameras": [{"name": "f", "host": "192.0.2.50", "crop_to_subject": True}]}
+    assert cfg.load_config_from_dict(data).cameras[0].crop_to_subject is True
+
+
+def test_scorer_tiles_defaults_one_and_parses():
+    assert cfg.load_config_from_dict(_minimal()).cameras[0].scorer.tiles == 1
+    data = {"cameras": [{"name": "f", "host": "192.0.2.50",
+                         "scorer": {"url": "http://x/score", "tiles": 2}}]}
+    assert cfg.load_config_from_dict(data).cameras[0].scorer.tiles == 2
+
+
+def test_scorer_tiles_rejects_below_one():
+    data = {"cameras": [{"name": "f", "host": "192.0.2.50", "scorer": {"tiles": 0}}]}
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config_from_dict(data)
+
+
+def test_pan_limit_defaults_disabled():
+    pl = cfg.load_config_from_dict(_minimal()).cameras[0].pan_limit
+    assert pl.enabled is False and pl.margin == 0.01 and pl.poll_interval == 6
+
+
+def test_pan_limit_parses():
+    data = {"cameras": [{"name": "f", "host": "192.0.2.50", "pan_limit": {
+        "enabled": True, "margin": 0.02, "poll_interval": 8, "onvif_port": 2020,
+        "onvif_user_env": "ONVIF_USER", "onvif_password_env": "ONVIF_PASS"}}]}
+    pl = cfg.load_config_from_dict(data).cameras[0].pan_limit
+    assert pl.enabled is True and pl.margin == 0.02 and pl.poll_interval == 8
+    assert pl.onvif_user_env == "ONVIF_USER" and pl.onvif_port == 2020
+
+
+def test_pan_limit_rejects_bad_poll_interval():
+    data = {"cameras": [{"name": "f", "host": "192.0.2.50",
+                         "pan_limit": {"poll_interval": 0}}]}
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config_from_dict(data)
+
+
 def test_multiple_cameras():
     data = {"cameras": [
         {"name": "a", "host": "198.51.100.10"},
@@ -188,6 +259,50 @@ def test_alerts_override():
     app = cfg.load_config_from_dict(data)
     assert app.alerts.cooldown == 30
     assert app.alerts.outage_threshold == 60
+
+
+def test_observability_defaults_are_safe_and_opt_in():
+    obs = cfg.load_config_from_dict(_minimal()).observability
+    assert obs.digital_twin is False
+    assert obs.drift_alerts is False
+    assert obs.ledger is False
+    assert obs.probe_interval == 900
+    assert obs.ledger_retention_days == 30
+    assert obs.shadow_match_window == 20
+
+
+def test_observability_overrides_round_trip():
+    data = {
+        "observability": {
+            "digital_twin": True,
+            "probe_interval": 600,
+            "drift_alerts": True,
+            "ledger": True,
+            "ledger_retention_days": 14,
+            "shadow_match_window": 12,
+        },
+        "cameras": [{"name": "front", "host": "192.0.2.50"}],
+    }
+    obs = cfg.load_config_from_dict(data).observability
+    assert obs.digital_twin is True
+    assert obs.probe_interval == 600
+    assert obs.drift_alerts is True
+    assert obs.ledger is True
+    assert obs.ledger_retention_days == 14
+    assert obs.shadow_match_window == 12
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("probe_interval", 59), ("ledger_retention_days", 0), ("shadow_match_window", 0)],
+)
+def test_observability_rejects_unsafe_ranges(key, value):
+    data = {
+        "observability": {key: value},
+        "cameras": [{"name": "front", "host": "192.0.2.50"}],
+    }
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config_from_dict(data)
 
 
 # ── resolve_camera_credentials (monkeypatched env) ───────────────────────────
@@ -347,6 +462,8 @@ def test_sampler_scorer_defaults_off():
     assert cam.sampler.enabled is False
     assert (cam.sampler.interval, cam.sampler.max_frames, cam.sampler.group_gap) == (30, 6, 90)
     assert cam.sampler.stream is None
+    assert cam.sampler.low_score_exit == 0
+    assert cam.sampler.low_score == 0.15
     assert cam.scorer.url is None
     assert cam.scorer.threshold == 0.4
     assert cam.scorer.timeout == 10
@@ -356,13 +473,16 @@ def test_sampler_scorer_parsed():
     app = cfg.load_config_from_dict({"cameras": [{
         "name": "a", "host": "203.0.113.10",
         "sampler": {"enabled": True, "interval": 20, "max_frames": 4,
-                    "group_gap": 60, "stream": "stream1"},
+                    "group_gap": 60, "stream": "stream1",
+                    "low_score_exit": 3, "low_score": 0.2},
         "scorer": {"url": "http://127.0.0.1:8765/score", "threshold": 0.55, "timeout": 5},
     }]})
     cam = app.cameras[0]
     assert cam.sampler.enabled is True
     assert (cam.sampler.interval, cam.sampler.max_frames, cam.sampler.group_gap) == (20, 4, 60)
     assert cam.sampler.stream == "stream1"
+    assert cam.sampler.low_score_exit == 3
+    assert cam.sampler.low_score == 0.2
     assert cam.scorer.url == "http://127.0.0.1:8765/score"
     assert cam.scorer.threshold == 0.55
     assert cam.scorer.timeout == 5

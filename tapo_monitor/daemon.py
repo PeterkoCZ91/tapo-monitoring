@@ -20,11 +20,31 @@ per-camera watermark held in :class:`MonitorState` and fires the enrich/notify s
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 import time as _time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from . import enrich, monitor, notify, sampler, scheduling, scorer, sdclip, snapshot, tracking, weather
+from . import (
+    capabilities,
+    drift,
+    enrich,
+    health,
+    ledger,
+    monitor,
+    notify,
+    panlimit,
+    recclip,
+    sampler,
+    scheduling,
+    scorer,
+    sdclip,
+    snapshot,
+    tracking,
+    twin,
+    weather,
+)
 from .config import (
     AppConfig,
     CameraConfig,
@@ -58,6 +78,9 @@ class CameraPlan:
     smarttrack: tuple
     preset: str | None
     person_sensitivity: int | None = None
+    # Day/night mode to assert this tick ("on" = IR/B&W, "off" = day/colour, "auto"), or
+    # None to leave the camera's day/night mode untouched.
+    night_vision: str | None = None
 
 
 def plan_camera(cfg: CameraConfig, night: bool, rain_active: bool) -> CameraPlan:
@@ -72,6 +95,11 @@ def plan_camera(cfg: CameraConfig, night: bool, rain_active: bool) -> CameraPlan
         preset = cfg.tracking.day_preset          # parked (day or rain) -> day preset
     else:
         preset = cfg.tracking.night_preset        # tracking at night -> optional night preset
+    night_vision = None
+    if cfg.night_vision == "ir":
+        night_vision = "on" if night else "off"   # IR/B&W at night, day/colour by day
+    elif cfg.night_vision == "auto":
+        night_vision = "auto"                      # re-assert the camera's own auto switch
     return CameraPlan(
         autotrack_on=autotrack_on,
         rain_parked=rain_parked,
@@ -79,6 +107,7 @@ def plan_camera(cfg: CameraConfig, night: bool, rain_active: bool) -> CameraPlan
         smarttrack=tuple(cfg.tracking.smarttrack),
         preset=preset,
         person_sensitivity=cfg.person_sensitivity,
+        night_vision=night_vision,
     )
 
 
@@ -92,6 +121,16 @@ def apply_plan(cam, plan: CameraPlan):
         cam.setMotionDetection(sensitivity=int(plan.motion_sensitivity))
     except Exception:
         pass
+    # Force IR night vision when configured (night_vision: ir). The camera otherwise stays
+    # in colour mode under a streetlight, whose slow shutter smears any moving subject; IR
+    # runs a faster shutter, so the event frame is sharper. Re-asserted every tick so it
+    # follows the day/night schedule. Left before apply_smarttrack (safe zone): SmartTrack
+    # and auto-track re-assert last, so this cannot leave the tracking filter wiped.
+    if plan.night_vision is not None:
+        try:
+            cam.setDayNightMode(plan.night_vision)
+        except Exception:
+            pass
     # Self-heal AI person detection (events_1 bit 19). It silently went 'off'
     # after a daemon restart (2026-06-15), demoting people to bare motion that the
     # funnel then dropped. Re-assert ON every tick. When a per-camera
@@ -183,10 +222,24 @@ class MonitorState:
     ``last_seen``         detection watermark (newest start_time alerted).
     ``last_alert``        timestamp of the last detection alert sent (cooldown gate).
     ``last_event_start``  camera event start time of the last alert/deferred alert.
-    ``fail_since``        when the current connect outage began, or absent if up.
+    ``fail_since``        when the current network outage began, or absent if up.
     ``outage_alerted``    cameras for which a 🔴 outage alert has already fired.
-    ``connect_fails``     consecutive connect failures per camera (drives backoff).
+    ``online_since``      beginning of the current observed-online interval.
+    ``last_success``      most recent successful health observation.
+    ``last_outage_duration`` duration of the most recently completed outage.
+    ``last_observed_uptime`` observed uptime immediately before the current/last outage.
+    ``reconnect_count``   completed observed offline -> online transitions.
+    ``recovery_pending``  recovery notifications awaiting confirmed delivery.
+    ``total_observed_online`` accumulated completed online intervals.
+    ``total_observed_offline`` accumulated completed offline intervals.
+    ``network_reachable`` latest unauthenticated ICMP observation per camera.
+    ``network_fails``     consecutive failed ICMP observations per camera.
+    ``connect_fails``     consecutive API failures per camera (drives auth backoff).
     ``connect_backoff_until`` earliest time we may try connecting again per camera.
+    ``health_path``       optional durable health-state path used by the daemon.
+    ``events_reachable``  latest getEvents poll outcome per camera.
+    ``rtsp_reachable``    latest event-triggered RTSP snapshot outcome per camera.
+    ``twin_fleet``        latest redacted Digital Twin entry per camera.
     ``groups``            open sampler event-groups per camera (see tapo_monitor.sampler).
     """
     last_seen: dict = field(default_factory=dict)
@@ -194,10 +247,31 @@ class MonitorState:
     last_event_start: dict = field(default_factory=dict)
     fail_since: dict = field(default_factory=dict)
     outage_alerted: dict = field(default_factory=dict)
+    online_since: dict = field(default_factory=dict)
+    last_success: dict = field(default_factory=dict)
+    last_outage_duration: dict = field(default_factory=dict)
+    last_observed_uptime: dict = field(default_factory=dict)
+    reconnect_count: dict = field(default_factory=dict)
+    recovery_pending: dict = field(default_factory=dict)
+    total_observed_online: dict = field(default_factory=dict)
+    total_observed_offline: dict = field(default_factory=dict)
+    network_reachable: dict = field(default_factory=dict)
+    network_fails: dict = field(default_factory=dict)
     connect_fails: dict = field(default_factory=dict)
     connect_backoff_until: dict = field(default_factory=dict)
+    health_path: str | None = None
+    events_reachable: dict = field(default_factory=dict)
+    rtsp_reachable: dict = field(default_factory=dict)
+    desired_plans: dict = field(default_factory=dict)
+    twin_last_probe: dict = field(default_factory=dict)
+    twin_fleet: dict = field(default_factory=dict)
+    twin_alerted: dict = field(default_factory=dict)
+    twin_path: str | None = None
+    event_ledger: object | None = None
+    ledger_handler: object | None = None
     pending_sd: list = field(default_factory=list)
     groups: dict = field(default_factory=dict)
+    pan_guard: dict = field(default_factory=dict)   # per-camera ONVIF pan-limit state
 
 
 def backoff_seconds(fails, base=60, cap=1800):
@@ -216,15 +290,28 @@ def update_outage(state: "MonitorState", name, ok, now, threshold):
     """Pure per-camera outage state transition.
 
     Returns ("alert"|"recovered"|None, state) and mutates the outage bookkeeping in
-    ``state``. ``ok`` is True when the camera connected this tick. Emits "alert" once
-    when a continuous outage reaches ``threshold`` seconds, and "recovered" once when a
-    previously-alerted camera comes back.
+    ``state``. ``ok`` is the latest unauthenticated network-health observation.
+    Emits "alert" once when a continuous outage reaches ``threshold`` seconds, and
+    "recovered" once when a previously-alerted camera comes back.
     """
     if ok:
+        state.last_success[name] = now
+        fail_since = state.fail_since.pop(name, None)
         was_alerted = state.outage_alerted.get(name, False)
-        state.fail_since.pop(name, None)
         state.outage_alerted.pop(name, None)
+        if fail_since is None:
+            state.online_since.setdefault(name, now)
+        else:
+            state.last_outage_duration[name] = max(0, now - fail_since)
+            state.total_observed_offline[name] = (
+                state.total_observed_offline.get(name, 0)
+                + state.last_outage_duration[name]
+            )
+            state.online_since[name] = now
+            state.reconnect_count[name] = state.reconnect_count.get(name, 0) + 1
         if was_alerted:
+            state.recovery_pending[name] = state.last_outage_duration.get(name, 0)
+        if name in state.recovery_pending:
             return "recovered", state
         return None, state
 
@@ -232,6 +319,13 @@ def update_outage(state: "MonitorState", name, ok, now, threshold):
     if fail_since is None:
         state.fail_since[name] = now
         fail_since = now
+        online_since = state.online_since.get(name)
+        if online_since is not None:
+            state.last_observed_uptime[name] = max(0, now - online_since)
+            state.total_observed_online[name] = (
+                state.total_observed_online.get(name, 0)
+                + state.last_observed_uptime[name]
+            )
     already = state.outage_alerted.get(name, False)
     if notify.outage_alert_due(fail_since, now, already, threshold):
         state.outage_alerted[name] = True
@@ -332,10 +426,77 @@ def score_for(cfg: CameraConfig):
         return None
 
     def score(image_path):
-        result = scorer.score_image(cfg.scorer.url, image_path, timeout=cfg.scorer.timeout)
+        result = scorer.score_image(cfg.scorer.url, image_path, timeout=cfg.scorer.timeout,
+                                    tiles=cfg.scorer.tiles)
         return None if result is None else scorer.subject_score(result)
 
     return score
+
+
+def compute_crop(box, w, h, pad=0.4, min_frac=0.22, skip_frac=0.55):
+    """Padded, clamped integer crop rect ``(x, y, cw, ch)`` around a person box, or None.
+
+    Returns None when the subject already fills >= ``skip_frac`` of the frame (nothing to
+    zoom to). Otherwise pads the box by ``pad`` on each side and enforces a minimum size
+    (``min_frac`` of the frame) so a distant, tiny box still yields a readable photo with
+    context rather than a postage stamp; the rect is centred on the box and clamped inside
+    the frame. Pure.
+    """
+    x1, y1, x2, y2 = box
+    bw, bh = max(0.0, x2 - x1), max(0.0, y2 - y1)
+    if bw <= 0 or bh <= 0 or w <= 0 or h <= 0:
+        return None
+    if bw * bh >= skip_frac * w * h:
+        return None
+    cw = min(max(bw * (1 + 2 * pad), min_frac * w), float(w))
+    ch = min(max(bh * (1 + 2 * pad), min_frac * h), float(h))
+    ccx, ccy = (x1 + x2) / 2, (y1 + y2) / 2
+    x = min(max(0.0, ccx - cw / 2), w - cw)
+    y = min(max(0.0, ccy - ch / 2), h - ch)
+    return (int(x), int(y), int(cw), int(ch))
+
+
+def _run_crop_ffmpeg(image, out_path, rect):  # pragma: no cover - subprocess I/O
+    x, y, cw, ch = rect
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", image, "-vf", f"crop={cw}:{ch}:{x}:{y}", "-q:v", "2", out_path],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20, check=True,
+    )
+
+
+def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_ffmpeg=None):
+    """Crop ``image`` to the detected person (a zoom) for ``crop_to_subject`` cameras.
+
+    Re-scores the chosen frame with tiling to get the person box + frame dims, then
+    ffmpeg-crops to a padded box. Returns the crop path, or ``image`` unchanged when
+    cropping is off, there is no box, the subject already fills the frame, or ffmpeg fails
+    — the alert always goes out with *some* image.
+    """
+    if not getattr(cfg, "crop_to_subject", False) or not cfg.scorer.url:
+        return image
+    result = score_result
+    if result is None:
+        result = scorer.score_image(cfg.scorer.url, image, timeout=cfg.scorer.timeout,
+                                    tiles=cfg.scorer.tiles)
+    if not result:
+        return image
+    box = scorer.subject_box(result)
+    w, h = result.get("w"), result.get("h")
+    if not box or not w or not h:
+        return image
+    rect = compute_crop(box, w, h)
+    if rect is None:
+        return image
+    out_path = os.path.join(out_dir or "/tmp", f"crop_{int(_time.time() * 1000)}.jpg")
+    try:
+        (run_ffmpeg or _run_crop_ffmpeg)(image, out_path, rect)
+    except Exception:
+        log.debug("crop_to_subject: ffmpeg failed for %s", image, exc_info=True)
+        return image
+    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        log.info("crop_to_subject %s: zoomed to %s", cfg.name, rect)
+        return out_path
+    return image
 
 
 def _caption_describe(cfg, groq_key, images):
@@ -375,7 +536,8 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
 
         can_alert, on_alert = alert_gate(state, name, cooldown, now)
 
-        def defer(event, etype, live_sent, _name=name, _cap=cfg.sd_span_cap):
+        def defer(event, etype, live_sent, _name=name, _cap=cfg.sd_span_cap,
+                  _source=cfg.snapshot_source):
             key = "motion" if etype == "motion" else "confirmed"
             try:
                 start = float(event.get("start_time"))
@@ -410,7 +572,9 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                 # needs a wider window AND a later fetch, or the window end is still
                 # inside pytapo's freshness guard and downloads empty.
                 "due_at": (event.get("start_time") or now)
-                          + sdclip.fresh_delay(sdclip.event_span(event, cap=_cap)),
+                          + (recclip.fresh_delay(sdclip.event_span(event, cap=_cap))
+                             if _source == "recording"
+                             else sdclip.fresh_delay(sdclip.event_span(event, cap=_cap))),
                 "live_sent": live_sent,
             })
         defer_fn = defer if cfg.sd_snapshot else None
@@ -419,6 +583,12 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
         def observe(event, etype, sent, _name=name, _cfg=cfg):
             if _cfg.sampler.enabled:
                 sampler.observe_event(state.groups, _name, event, etype, sent, now, _cfg.sampler)
+
+        def poll_observe(ok, _name=name):
+            state.events_reachable[_name] = bool(ok)
+
+        def media_observe(ok, _name=name):
+            state.rtsp_reachable[_name] = bool(ok)
 
         # night_only camera during the day: mute (drain the watermark, alert nothing).
         watermark = monitor.run_monitor(
@@ -435,10 +605,41 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             defer=defer_fn,
             score=score,
             observe=observe,
+            poll_observe=poll_observe,
+            media_observe=media_observe,
             mute=cfg.night_only and not night,
         )
         state.last_seen[cfg.name] = watermark
     return state.last_seen
+
+
+def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None):
+    """Score every recorder frame; return the sharpest above-threshold one and its score.
+
+    The SD path stops at the first above-threshold frame (each download is expensive). A
+    local recording hands us the whole high-res buffer for free, so we rank every hit by
+    sharpness (ffmpeg blurdetect) and pick the clearest — night motion smears single
+    frames. Returns ``(frame, score)`` or ``(None, None)`` when nothing clears the bar; if
+    the scorer is unavailable it passes the offending frame through (``(frame, None)``).
+    """
+    blur_score = blur_score or recclip.blur_score
+    above = []
+    for frame in frames:
+        s = score(frame)
+        if s is None:
+            return frame, s                       # scorer down -> pass this frame through
+        if s >= cfg.scorer.threshold:
+            above.append((frame, s))
+        else:
+            monitor.audit_event(cfg, event, etype, "sd", "drop", score=s,
+                                threshold=cfg.scorer.threshold, reason="below_threshold")
+    if not above:
+        return None, None
+    above.sort(key=lambda fs: fs[1], reverse=True)          # best score first
+    ranked = [(f, blur_score(f)) for f, _ in above]
+    image = recclip.select_sharpest(ranked)
+    selected = next(s for f, s in above if f == image)
+    return image, selected
 
 
 def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=None,
@@ -463,7 +664,7 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
     """
     snapshot_for = snapshot_for or (lambda cfg: _default_snapshot(cfg, recorder_fallback=True))
     time_str = time_str or _default_time_str
-    fetch_frames = fetch_frames or sdclip.fetch_sd_frames_subprocess
+    fetch_override = fetch_frames   # tests inject one fetch for every source
     cfg_by_name = {c.name: c for c in app.cameras}
     remaining = []
     processed_by_camera = {}
@@ -506,14 +707,25 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
         # own cleanup -> the segment mp4 + partial frames orphan in /tmp until the tmpfs
         # fills. Owning the dir here means we clean up even when the child returns nothing.
         job_dir = tempfile.mkdtemp(prefix="sdjob_")
-        frames = fetch_frames(cfg, start_time,
-                              span=sdclip.event_span(event, cap=cfg.sd_span_cap),
-                              out_dir=job_dir)
+        if fetch_override is not None:
+            fetch = fetch_override
+        elif cfg.snapshot_source == "recording":
+            fetch = recclip.fetch_recording_frames   # reads RECORDING_ROOT for the tree
+        else:
+            fetch = sdclip.fetch_sd_frames_subprocess
+        frames = fetch(cfg, start_time,
+                       span=sdclip.event_span(event, cap=cfg.sd_span_cap),
+                       out_dir=job_dir)
         image, description, fallback_image = None, "", None
         selected_score = None
         score = score_for(cfg)
         try:
-            for frame in frames:
+            recording_pick = cfg.snapshot_source == "recording" and score is not None
+            if recording_pick:
+                image, selected_score = _select_recording_frame(cfg, event, etype, frames, score)
+            # SD path: first above-threshold frame wins. Skipped (empty) when the recording
+            # path already made the pick above.
+            for frame in (() if recording_pick else frames):
                 if score is not None:
                     # Local scorer is the arbiter (Groq captions later, at send time).
                     s = score(frame)
@@ -563,13 +775,19 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
                 monitor.TYPE_EMOJI.get(etype, "👤"), time_str(event),
                 description=description or None, detail=label or None,
             )
+            image = crop_for_subject(cfg, image, os.path.dirname(image), secrets)
             ok = notify.send_photo(secrets["telegram_token"], secrets["telegram_chat"], image, caption)
-            log.info("alert %s sent (faces=%r, desc=%r) [sd]", etype, label, description)
             # SD follow-up is a real user-visible alert. Record it in the same gate as
             # live sends, otherwise a person rescued from SD can be followed minutes
             # later by a duplicate motion SD alert from the same passage.
             _, on_alert = alert_gate(state, cfg.name, app.alerts.cooldown, now)
-            on_alert(etype, event)
+            if ok:
+                log.info("alert %s sent (faces=%r, desc=%r) [sd]", etype, label, description)
+                on_alert(etype, event)
+            else:
+                log.warning("alert %s Telegram delivery failed [sd]; retry queued", etype)
+                entry["due_at"] = now + 60
+                remaining.append(entry)
             monitor.audit_event(cfg, event, etype, "sd", "send", score=selected_score,
                                 threshold=cfg.scorer.threshold if score is not None else None,
                                 telegram=ok)
@@ -626,6 +844,12 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                          cfg.name, group["frames"], scfg.max_frames, s, cfg.scorer.threshold)
                 monitor.audit_event(cfg, group["event"], etype, "sampler", "drop", score=s,
                                     threshold=cfg.scorer.threshold, reason="below_threshold")
+                if sampler.note_score(group, s, scfg):
+                    log.info("sampler %s: early exit after %d consecutive low frames",
+                             cfg.name, group["low_streak"])
+                    monitor.audit_event(cfg, group["event"], etype, "sampler", "early_exit",
+                                        score=s, threshold=scfg.low_score,
+                                        reason="low_score_streak")
                 continue
             if score is not None and s is None:
                 log.warning("scorer unavailable; sampler passes %s frame through", cfg.name)
@@ -644,14 +868,18 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                 monitor.TYPE_EMOJI.get(etype, "👁"), time_str(group["event"]),
                 description=description or None, detail=label or None,
             )
+            image = crop_for_subject(cfg, image, os.path.dirname(image), secrets)
             ok = notify.send_photo(secrets["telegram_token"], secrets["telegram_chat"], image, caption)
-            log.info("alert %s sent (faces=%r, desc=%r, score=%s) [sampler]",
-                     etype, label, description, f"{s:.2f}" if s is not None else "n/a")
             monitor.audit_event(cfg, group["event"], etype, "sampler", "send", score=s,
                                 threshold=cfg.scorer.threshold if score is not None else None,
                                 telegram=ok)
-            on_alert(etype)
-            group["sent"] = True
+            if ok:
+                log.info("alert %s sent (faces=%r, desc=%r, score=%s) [sampler]",
+                         etype, label, description, f"{s:.2f}" if s is not None else "n/a")
+                on_alert(etype)
+                group["sent"] = True
+            else:
+                log.warning("alert %s Telegram delivery failed [sampler]", etype)
         finally:
             _safe_unlink(image)
 
@@ -664,10 +892,127 @@ def control_due(last_control, now, interval):
     return last_control is None or (now - last_control) >= interval
 
 
+def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
+    """Refresh the opt-in Camera Digital Twin using already-connected clients only."""
+    if not app.observability.digital_twin:
+        return state.twin_fleet
+    probe = probe or capabilities.collect_snapshot
+    changed = False
+    for cfg in app.cameras:
+        cam = cam_clients.get(cfg.name)
+        if cam is None:
+            continue
+        last_probe = state.twin_last_probe.get(cfg.name)
+        if last_probe is not None and now - last_probe < app.observability.probe_interval:
+            continue
+
+        try:
+            snapshot_data = probe(cam)
+            layers = capabilities.derive_health(
+                snapshot_data,
+                network=state.network_reachable.get(cfg.name),
+                events=state.events_reachable.get(cfg.name),
+                rtsp=state.rtsp_reachable.get(cfg.name),
+            )
+            aggregate = drift.aggregate_health(layers)
+            plan = state.desired_plans.get(cfg.name)
+            if plan is None:
+                empty_report = drift.evaluate_drift({}, {}, scope=cfg.name)
+                evaluation = {
+                    "desired": {},
+                    "actual": {},
+                    "drift": empty_report.to_dict(),
+                }
+            else:
+                evaluation = twin.evaluate_snapshot(cfg.name, plan, snapshot_data)
+        except Exception as exc:  # noqa: BLE001 - observability must not block alerts
+            log.warning("digital twin %s probe failed: %s", cfg.name, type(exc).__name__)
+            state.twin_last_probe[cfg.name] = now
+            continue
+
+        current_keys = twin.alertable_keys(evaluation)
+        alerted = set(state.twin_alerted.get(cfg.name, set()))
+        if app.observability.drift_alerts:
+            new_results = [item for item in twin.alertable_results(evaluation)
+                           if item["key"] not in alerted]
+            if new_results:
+                details = ", ".join(
+                    f"{item['path']} expected={item['expected']} actual={item['actual']}"
+                    for item in new_results
+                )
+                if notify.send_text(
+                    secrets["telegram_token"], secrets["telegram_chat"],
+                    f"⚠️ camera '{cfg.name}' configuration drift: {details}",
+                ):
+                    alerted.update(item["key"] for item in new_results)
+            recovered = alerted - current_keys
+            if recovered and notify.send_text(
+                secrets["telegram_token"], secrets["telegram_chat"],
+                f"✅ camera '{cfg.name}' configuration drift recovered",
+            ):
+                alerted.difference_update(recovered)
+        state.twin_alerted[cfg.name] = alerted
+
+        entry = twin.fleet_entry(
+            captured_at=now,
+            snapshot=snapshot_data,
+            health=aggregate,
+            evaluation=evaluation,
+        )
+        entry["alerted_keys"] = sorted(alerted)
+        state.twin_fleet[cfg.name] = entry
+        state.twin_last_probe[cfg.name] = now
+        changed = True
+        log.info(
+            "digital twin %s: health=%s drift=%d unknown=%d",
+            cfg.name,
+            aggregate.status,
+            evaluation["drift"]["counts"]["drift"],
+            evaluation["drift"]["counts"]["unknown"],
+        )
+    if changed and state.twin_path:
+        twin.save_state(state.twin_path, state.twin_fleet, logger=log)
+    return state.twin_fleet
+
+
+def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
+                    night=True):
+    """Soft pan-limit: recall a camera that auto-tracked past its preset span (see
+    :mod:`tapo_monitor.panlimit`). Runs every tick, throttled per camera by
+    ``pan_limit.poll_interval``. ONVIF is independent of the pytapo ``cam_clients`` and its
+    own client/bounds are cached in ``state.pan_guard``; any ONVIF error is logged and the
+    client rebuilt next poll — the guard must never kill the loop.
+    """
+    for cfg in app.cameras:
+        pl = cfg.pan_limit
+        if not pl.enabled:
+            continue
+        g = state.pan_guard.setdefault(cfg.name, {})
+        if g.get("last_poll") is not None and now - g["last_poll"] < pl.poll_interval:
+            continue
+        g["last_poll"] = now
+        try:
+            if "ptz" not in g:
+                user = os.getenv(pl.onvif_user_env or "", "")
+                password = os.getenv(pl.onvif_password_env or "", "")
+                g["ptz"], g["token"] = panlimit.build_ptz(cfg.host, pl.onvif_port, user, password)
+                g["bounds"] = panlimit.read_preset_bounds(g["ptz"], g["token"])
+                log.info("pan_limit %s: preset bounds %s", cfg.name, g["bounds"])
+            x = panlimit.read_pan_x(g["ptz"], g["token"])
+            target = panlimit.limit_target(x, g.get("bounds"), pl.margin)
+            if target is not None:
+                panlimit.goto_preset(g["ptz"], g["token"], target)
+                log.info("pan_limit %s: pan x=%.4f out of bounds -> recall preset %s",
+                         cfg.name, x, target)
+        except Exception as e:  # noqa: BLE001 - an ONVIF hiccup must not kill the loop
+            log.warning("pan_limit %s: %s", cfg.name, e)
+            g.pop("ptz", None)          # force a clean rebuild on the next poll
+
+
 def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
               last_control, control_interval,
               run_control=None, watchdog=None, monitor=None, drain=None, sample=None,
-              connect_factory=None, is_night=None):
+              connect_factory=None, is_night=None, guard=None, inspect=None):
     """One loop iteration with control decoupled from event polling.
 
     The slow, rarely-changing work (camera tracking/sensitivity/preset + the per-tick
@@ -686,17 +1031,23 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     monitor = monitor or run_monitor_pass
     drain = drain or process_pending_sd
     sample = sample or process_sampler
+    guard = guard or _pan_guard_pass
+    inspect = inspect or process_digital_twin
     connect_factory = connect_factory or _connect_camera
     is_night = is_night or scheduling.is_night
     night = is_night()                    # one source of truth for this tick's night gate
     if control_due(last_control, now, control_interval):
         cam_clients.clear()
-        run_control(app, now=now, connect=connect_factory(cam_clients, state, now))
+        plans = run_control(app, now=now, connect=connect_factory(cam_clients, state, now))
+        if isinstance(plans, Mapping):
+            state.desired_plans.update(plans)
         watchdog(app, cam_clients, state, now=now, secrets=secrets, night=night)
+        inspect(app, cam_clients, state, now=now, secrets=secrets)
         last_control = now
     monitor(app, cam_clients, state, now=now, secrets=secrets, night=night)
     sample(app, cam_clients, state, now=now, secrets=secrets, night=night)
     drain(app, cam_clients, state, now=now, secrets=secrets, night=night)
+    guard(app, cam_clients, state, now=now, secrets=secrets, night=night)
     return last_control
 
 
@@ -714,9 +1065,30 @@ def main(argv=None):  # pragma: no cover - thin entry point
     poll_interval = app.loop.event_interval
     control_interval = app.loop.control_interval
     state = MonitorState()
+    state.health_path = health.default_state_path()
+    restored = health.load_state(state.health_path, state, logger=log)
+    state.twin_path = twin.default_state_path()
+    state.twin_fleet = twin.load_state(state.twin_path, logger=log)
+    state.twin_alerted = {
+        name: set(entry.get("alerted_keys", []))
+        for name, entry in state.twin_fleet.items()
+    }
+    if app.observability.ledger:
+        try:
+            state.event_ledger = ledger.EventLedger()
+            state.event_ledger.cleanup(
+                app.observability.ledger_retention_days * 86400,
+                now=_time.time(),
+            )
+            state.ledger_handler = ledger.AuditLedgerHandler(state.event_ledger)
+            monitor.log.addHandler(state.ledger_handler)
+            log.info("event ledger initialized: %s", state.event_ledger.path)
+        except Exception as exc:  # noqa: BLE001 - observability must not block startup
+            log.warning("event ledger initialization failed: %s", type(exc).__name__)
     secrets = resolve_secrets(app)
     log.info("loaded %d camera(s); poll events every %ds, control every %ds; face_names=%d known",
              len(app.cameras), poll_interval, control_interval, len(secrets.get("face_names") or {}))
+    log.info("health state %s: %s", "restored" if restored else "initialized", state.health_path)
     cam_clients = {}
     last_control = None
     while True:
@@ -739,39 +1111,79 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
     """
     token = secrets["telegram_token"]
     chat = secrets["telegram_chat"]
+    previous = health.snapshot(state)
     for cfg in app.cameras:
         if cfg.night_only and not night:
             continue
-        ok = cam_clients.get(cfg.name) is not None
+        # Network uptime is intentionally independent from API/auth health. The connector
+        # records a fresh ping result on every control pass; fall back to the historical
+        # client-based behaviour only for injected/test connectors that do not.
+        ok = state.network_reachable.get(cfg.name, cam_clients.get(cfg.name) is not None)
         event, _ = update_outage(state, cfg.name, ok, now, app.alerts.outage_threshold)
         if event == "alert":
-            notify.send_text(token, chat, f"🔴 camera '{cfg.name}' unreachable")
+            uptime = state.last_observed_uptime.get(cfg.name)
+            detail = (f" after {notify.format_duration(uptime)} observed uptime"
+                      if uptime is not None else "")
+            delivered = notify.send_text(
+                token, chat, f"🔴 camera '{cfg.name}' unreachable{detail}")
+            if not delivered:
+                # Delivery is part of the transition: retry while the outage remains due.
+                state.outage_alerted.pop(cfg.name, None)
+                log.warning("outage notification delivery failed for %s", cfg.name)
         elif event == "recovered":
-            notify.send_text(token, chat, f"🟢 camera '{cfg.name}' back online")
+            duration = state.last_outage_duration.get(cfg.name)
+            detail = (f" after {notify.format_duration(duration)} outage"
+                      if duration is not None else "")
+            delivered = notify.send_text(
+                token, chat, f"🟢 camera '{cfg.name}' back online{detail}")
+            if delivered:
+                state.recovery_pending.pop(cfg.name, None)
+            else:
+                log.warning("recovery notification delivery failed for %s", cfg.name)
+    if state.health_path and health.snapshot(state) != previous:
+        health.save_state(state.health_path, state, logger=log)
 
 
-def _connect_camera(cam_clients, state=None, now=None):  # pragma: no cover - thin I/O glue
+def _connect_camera(cam_clients, state=None, now=None):
     """Return a connect(cfg) that builds a pytapo client and caches it for the monitor pass.
 
-    When ``state`` and ``now`` are supplied, failed connects accrue an exponential
-    backoff (:func:`backoff_seconds`) so a struggling/locked-out camera is not retried
-    every tick. A successful connect clears the backoff. The normal (succeeding) path is
-    unchanged: no failure, no backoff.
+    A cheap ping separates a disconnected camera from an API or authentication failure.
+    Offline devices never reach the login path. Ping runs on every control pass, including
+    while API login is backed off, so physical availability remains independently visible.
     """
     from . import camera
 
     def connect(cfg: CameraConfig):
         name = cfg.name
+        reachable = camera.ping_reachable(cfg.host)
+        if state is not None:
+            was_reachable = state.network_reachable.get(name)
+            state.network_reachable[name] = reachable
+            if reachable:
+                state.network_fails.pop(name, None)
+                if was_reachable is False:
+                    log.info("network %s reachable again", name)
+            else:
+                fails = state.network_fails.get(name, 0) + 1
+                state.network_fails[name] = fails
+                if was_reachable is not False:
+                    log.warning("network %s unreachable", name)
+        if not reachable:
+            return None, ConnectionError("camera did not answer ping")
+
         if state is not None and now is not None:
             if now < state.connect_backoff_until.get(name, 0):
                 return None, "backoff"
+
         user, password, cloud = resolve_camera_credentials(cfg)
         factory = camera.tapo_factory(cfg.host, user, password, cloud)
         client, err = camera.connect(factory)
         if state is not None:
             if client is not None:
-                state.connect_fails.pop(name, None)
+                fails = state.connect_fails.pop(name, 0)
                 state.connect_backoff_until.pop(name, None)
+                if fails:
+                    log.info("connect %s succeeded after %d failure(s)", name, fails)
             else:
                 fails = state.connect_fails.get(name, 0) + 1
                 state.connect_fails[name] = fails

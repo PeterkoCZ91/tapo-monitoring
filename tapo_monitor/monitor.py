@@ -31,6 +31,11 @@ def _observe(observe, event, etype, sent):
         observe(event, etype, sent)
 
 
+def _health_observe(observe, ok):
+    if observe is not None:
+        observe(bool(ok))
+
+
 def _can_alert(can_alert, etype, event):
     if can_alert is None:
         return True
@@ -129,7 +134,8 @@ TYPE_EMOJI = {"person": "👤", "vehicle": "🚗", "pet": "🐾", "tamper": "⚠
 
 def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_chat,
                 snapshot, time_str, can_alert=None, on_alert=None, face_names=None,
-                defer=None, score=None, observe=None, mute=False):
+                defer=None, score=None, observe=None, poll_observe=None,
+                media_observe=None, mute=False):
     """Poll one camera once and alert on new detections. Returns the new watermark.
 
     ``mute`` polls and advances the watermark but skips all grabbing/scoring/alerting.
@@ -154,7 +160,9 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
     try:
         events = cam.getEvents() or []
     except Exception:
+        _health_observe(poll_observe, False)
         return last_seen
+    _health_observe(poll_observe, True)
 
     alertable, watermark = collect_detections(events, last_seen, cfg.detection.strict_people)
     if mute:
@@ -184,6 +192,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             # RTSP capture on a slow Pi (e.g. Pi Zero) fails transiently — one retry
             # catches most of those so a confirmed person isn't lost to a single hiccup.
             image = snapshot(cam, event)
+        _health_observe(media_observe, image is not None)
         if not image:
             # Confirmed person but no live frame: queue an SD follow-up that MUST send
             # (live_sent=False) so the person isn't lost. PIR-backed motion can opt into
@@ -276,12 +285,24 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 description=description or None, detail=label or None,
             )
             ok = notify.send_photo(telegram_token, telegram_chat, image, caption)
-            log.info("alert %s sent (faces=%r, desc=%r)", etype, label, description)
             audit_event(cfg, event, etype, "live", "send", score=s,
                         threshold=cfg.scorer.threshold if score is not None else None,
                         telegram=ok)
-            _on_alert(on_alert, etype, event)
-            _observe(observe, event, etype, True)
+            if ok:
+                log.info("alert %s sent (faces=%r, desc=%r)", etype, label, description)
+                _on_alert(on_alert, etype, event)
+                _observe(observe, event, etype, True)
+            else:
+                # The event watermark has already advanced, so the live poll cannot
+                # simply see this event again. Hand it to an available SD follow-up;
+                # otherwise report it unsent so the sampler can keep the group open.
+                if defer is not None:
+                    log.warning("alert %s Telegram delivery failed; SD retry queued", etype)
+                    defer(event, etype, False)
+                    _observe(observe, event, etype, True)
+                else:
+                    log.warning("alert %s Telegram delivery failed", etype)
+                    _observe(observe, event, etype, False)
         finally:
             _safe_unlink(image)
     return watermark

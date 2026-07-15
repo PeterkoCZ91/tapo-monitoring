@@ -45,6 +45,20 @@ def test_plan_static_never_tracks():
     plan = daemon.plan_camera(_cam(role="static"), night=True, rain_active=False)
     assert plan.autotrack_on is False
 
+def test_plan_night_vision_untouched_by_default():
+    assert daemon.plan_camera(_cam(), night=True, rain_active=False).night_vision is None
+    assert daemon.plan_camera(_cam(), night=False, rain_active=False).night_vision is None
+
+def test_plan_night_vision_ir_follows_schedule():
+    cam = _cam(night_vision="ir")
+    assert daemon.plan_camera(cam, night=True, rain_active=False).night_vision == "on"
+    assert daemon.plan_camera(cam, night=False, rain_active=False).night_vision == "off"
+
+def test_plan_night_vision_auto_reasserts():
+    cam = _cam(night_vision="auto")
+    assert daemon.plan_camera(cam, night=True, rain_active=False).night_vision == "auto"
+    assert daemon.plan_camera(cam, night=False, rain_active=False).night_vision == "auto"
+
 
 # ── run_once (injected deps) ─────────────────────────────────────────────────
 
@@ -186,6 +200,92 @@ def test_apply_plan_person_sensitivity_default_unchanged(monkeypatch):
     assert cam.person_sensitivity is False  # default sentinel -> camera value unchanged
 
 
+def _nightvision_fakecam():
+    from tapo_monitor import tracking
+
+    class FakeCam:
+        def __init__(self):
+            self.daynight = "unset"
+        def executeFunction(self, *a, **k):
+            pass
+        def setMotionDetection(self, sensitivity=False):
+            pass
+        def setPersonDetection(self, enabled, sensitivity=False):
+            pass
+        def setVehicleDetection(self, enabled, sensitivity=False):
+            pass
+        def setDayNightMode(self, mode):
+            self.daynight = mode
+        def setAutoTrackTarget(self, enabled):
+            pass
+        def getAutoTrackTarget(self):
+            return {"enabled": "off"}
+
+    return FakeCam, tracking
+
+
+def test_apply_plan_forces_ir_at_night(monkeypatch):
+    # night_vision: ir -> daemon forces the camera to IR ("on") during the night window.
+    FakeCam, tracking = _nightvision_fakecam()
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+    cam = FakeCam()
+    plan = daemon.plan_camera(_cam(night_vision="ir"), night=True, rain_active=False)
+    daemon.apply_plan(cam, plan)
+    assert cam.daynight == "on"
+
+
+def test_apply_plan_ir_daytime_restores_colour(monkeypatch):
+    # By day the same camera must be put back to day/colour ("off"), not left on IR.
+    FakeCam, tracking = _nightvision_fakecam()
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+    cam = FakeCam()
+    plan = daemon.plan_camera(_cam(night_vision="ir"), night=False, rain_active=False)
+    daemon.apply_plan(cam, plan)
+    assert cam.daynight == "off"
+
+
+def test_select_recording_frame_picks_sharpest_above_threshold():
+    cam = _cam(sd_snapshot=True, snapshot_source="recording",
+               scorer={"url": "http://x/score", "threshold": 0.4})
+    frames = ["f0.jpg", "f1.jpg", "f2.jpg"]
+    scores = {"f0.jpg": 0.2, "f1.jpg": 0.9, "f2.jpg": 0.7}   # f0 below threshold
+    blur = {"f1.jpg": 8.0, "f2.jpg": 3.0}                    # f2 sharper
+    image, s = daemon._select_recording_frame(
+        cam, event={"start_time": 1}, etype="person", frames=frames,
+        score=lambda f: scores[f], blur_score=lambda f: blur[f])
+    assert image == "f2.jpg"
+    assert s == 0.7
+
+
+def test_select_recording_frame_none_when_all_below():
+    cam = _cam(sd_snapshot=True, snapshot_source="recording",
+               scorer={"url": "http://x/score", "threshold": 0.4})
+    image, s = daemon._select_recording_frame(
+        cam, event={"start_time": 1}, etype="person", frames=["a.jpg"],
+        score=lambda f: 0.05, blur_score=lambda f: 1.0)
+    assert image is None and s is None
+
+
+def test_select_recording_frame_passes_through_when_scorer_down():
+    cam = _cam(sd_snapshot=True, snapshot_source="recording",
+               scorer={"url": "http://x/score", "threshold": 0.4})
+    image, s = daemon._select_recording_frame(
+        cam, event={"start_time": 1}, etype="person", frames=["a.jpg", "b.jpg"],
+        score=lambda f: None, blur_score=lambda f: 1.0)
+    assert image == "a.jpg" and s is None
+
+
+def test_apply_plan_leaves_daynight_untouched_by_default(monkeypatch):
+    # With no night_vision configured, apply_plan must never touch the camera's day/night
+    # mode (a camera happily on its own "auto" stays there).
+    FakeCam, tracking = _nightvision_fakecam()
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+    cam = FakeCam()
+    plan = daemon.plan_camera(_cam(), night=True, rain_active=False)
+    daemon.apply_plan(cam, plan)
+    assert cam.daynight == "unset"
+
+
 def test_apply_plan_disables_vehicle_detection(monkeypatch):
     # The cameras should follow people, not cars. The C560WS auto-track follows any
     # AI-detected target, so leaving vehicle detection on makes the camera swing after
@@ -292,6 +392,86 @@ def test_backoff_caps_at_30_min():
 
 def test_backoff_zero_before_first_failure():
     assert daemon.backoff_seconds(0) == 0
+
+
+# ── ping preflight / API backoff separation ──────────────────────────────────
+
+def test_connect_camera_ping_failure_skips_login(monkeypatch):
+    from tapo_monitor import camera
+    monkeypatch.setattr(camera, "ping_reachable", lambda host: False)
+    monkeypatch.setattr(
+        camera, "tapo_factory",
+        lambda *a: (_ for _ in ()).throw(AssertionError("must not build API client")))
+    state = daemon.MonitorState()
+
+    client, err = daemon._connect_camera({}, state, now=100)(_cam())
+
+    assert client is None
+    assert isinstance(err, ConnectionError)
+    assert state.network_reachable["c"] is False
+    assert state.network_fails["c"] == 1
+    assert state.connect_fails == {}
+
+
+def test_connect_camera_ping_success_then_logs_in(monkeypatch):
+    from tapo_monitor import camera
+    monkeypatch.setattr(camera, "ping_reachable", lambda host: True)
+    monkeypatch.setattr(camera, "tapo_factory", lambda *a: lambda: "CAM")
+    monkeypatch.setattr(camera, "connect", lambda factory: (factory(), None))
+    state = daemon.MonitorState()
+    clients = {}
+
+    client, err = daemon._connect_camera(clients, state, now=100)(_cam())
+
+    assert (client, err) == ("CAM", None)
+    assert clients == {"c": "CAM"}
+    assert state.network_reachable["c"] is True
+
+
+def test_connect_camera_still_pings_during_api_backoff(monkeypatch):
+    from tapo_monitor import camera
+    calls = []
+    monkeypatch.setattr(camera, "ping_reachable", lambda host: calls.append(host) or True)
+    state = daemon.MonitorState()
+    state.connect_backoff_until["c"] = 1000
+
+    assert daemon._connect_camera({}, state, now=100)(_cam()) == (None, "backoff")
+    assert calls == ["203.0.113.10"]
+    assert state.network_reachable["c"] is True
+
+
+def test_connect_camera_success_after_failures_logs_recovery(monkeypatch, caplog):
+    import logging
+
+    from tapo_monitor import camera
+    monkeypatch.setattr(camera, "ping_reachable", lambda host: True)
+    monkeypatch.setattr(camera, "tapo_factory", lambda *a: lambda: "CAM")
+    monkeypatch.setattr(camera, "connect", lambda factory: (factory(), None))
+    state = daemon.MonitorState()
+    state.connect_fails["c"] = 3
+
+    with caplog.at_level(logging.INFO, logger="tapo_monitor.daemon"):
+        client, err = daemon._connect_camera({}, state, now=100)(_cam())
+
+    assert client == "CAM"
+    assert state.connect_fails == {}
+    assert "connect c succeeded after 3 failure(s)" in caplog.text
+
+
+def test_connect_camera_api_failure_keeps_exponential_backoff(monkeypatch):
+    from tapo_monitor import camera
+    monkeypatch.setattr(camera, "ping_reachable", lambda host: True)
+    monkeypatch.setattr(camera, "tapo_factory", lambda *a: lambda: None)
+    monkeypatch.setattr(camera, "connect", lambda factory: (None, RuntimeError("bad auth")))
+    state = daemon.MonitorState()
+
+    client, err = daemon._connect_camera({}, state, now=100)(_cam())
+
+    assert client is None
+    assert isinstance(err, RuntimeError)
+    assert state.network_reachable["c"] is True
+    assert state.connect_fails["c"] == 1
+    assert state.connect_backoff_until["c"] == 160
 
 
 # ── resolve_secrets (monkeypatched env) ──────────────────────────────────────
@@ -479,6 +659,27 @@ def test_outage_ok_camera_is_noop():
     ev, _ = daemon.update_outage(state, "a", ok=True, now=1000, threshold=900)
     assert ev is None
     assert state.fail_since == {}
+
+
+def test_outage_tracks_observed_uptime_and_recovery_metrics():
+    state = daemon.MonitorState()
+    daemon.update_outage(state, "a", ok=True, now=100, threshold=900)
+    daemon.update_outage(state, "a", ok=True, now=200, threshold=900)
+    daemon.update_outage(state, "a", ok=False, now=300, threshold=900)
+
+    assert state.online_since["a"] == 100
+    assert state.last_success["a"] == 200
+    assert state.last_observed_uptime["a"] == 200
+    assert state.total_observed_online["a"] == 200
+
+    daemon.update_outage(state, "a", ok=False, now=1200, threshold=900)
+    ev, _ = daemon.update_outage(state, "a", ok=True, now=1300, threshold=900)
+
+    assert ev == "recovered"
+    assert state.online_since["a"] == 1300
+    assert state.last_outage_duration["a"] == 1000
+    assert state.total_observed_offline["a"] == 1000
+    assert state.reconnect_count["a"] == 1
 
 
 # ── detection cooldown wired into run_monitor_pass ────────────────────────────
@@ -809,7 +1010,149 @@ def test_alert_gate_motion_does_not_block_person():
     assert can("motion") is False         # but motion silences motion
 
 
+# ── pan_limit (soft PTZ bound) ────────────────────────────────────────────────
+
+def _raw_cam_dict():
+    return {"name": "camera-a", "host": "203.0.113.10", "pan_limit": {
+        "enabled": True, "margin": 0.01, "poll_interval": 6,
+        "onvif_user_env": "U", "onvif_password_env": "P"}}
+
+
+def _patch_panlimit(monkeypatch, pan_x, gotos):
+    monkeypatch.setattr(daemon.panlimit, "build_ptz", lambda *a, **k: ("PTZ", "tok"))
+    monkeypatch.setattr(daemon.panlimit, "read_preset_bounds",
+                        lambda ptz, tok: (0.39, "1", 0.61, "3"))
+    monkeypatch.setattr(daemon.panlimit, "read_pan_x", lambda ptz, tok: pan_x)
+    monkeypatch.setattr(daemon.panlimit, "goto_preset",
+                        lambda ptz, tok, target: gotos.append(target))
+
+
+def test_pan_guard_recalls_when_past_right_bound(monkeypatch):
+    app = cfg.load_config_from_dict({"cameras": [_raw_cam_dict()]})
+    gotos = []
+    _patch_panlimit(monkeypatch, pan_x=0.63, gotos=gotos)   # past the wall
+    state = daemon.MonitorState()
+    daemon._pan_guard_pass(app, {}, state, now=100, secrets={}, night=True)
+    assert gotos == ["3"]                                    # recalled to Maximalne
+
+
+def test_pan_guard_noop_within_bounds(monkeypatch):
+    app = cfg.load_config_from_dict({"cameras": [_raw_cam_dict()]})
+    gotos = []
+    _patch_panlimit(monkeypatch, pan_x=0.58, gotos=gotos)   # mid-range
+    state = daemon.MonitorState()
+    daemon._pan_guard_pass(app, {}, state, now=100, secrets={}, night=True)
+    assert gotos == []
+
+
+def test_pan_guard_throttles_by_poll_interval(monkeypatch):
+    app = cfg.load_config_from_dict({"cameras": [_raw_cam_dict()]})
+    calls = []
+    monkeypatch.setattr(daemon.panlimit, "build_ptz", lambda *a, **k: ("PTZ", "tok"))
+    monkeypatch.setattr(daemon.panlimit, "read_preset_bounds",
+                        lambda ptz, tok: (0.39, "1", 0.61, "3"))
+    monkeypatch.setattr(daemon.panlimit, "read_pan_x",
+                        lambda ptz, tok: calls.append(1) or 0.58)
+    monkeypatch.setattr(daemon.panlimit, "goto_preset", lambda *a: None)
+    state = daemon.MonitorState()
+    daemon._pan_guard_pass(app, {}, state, now=100, secrets={}, night=True)
+    daemon._pan_guard_pass(app, {}, state, now=103, secrets={}, night=True)  # within 6s
+    daemon._pan_guard_pass(app, {}, state, now=107, secrets={}, night=True)  # past 6s
+    assert len(calls) == 2
+
+
+def test_pan_guard_disabled_does_nothing(monkeypatch):
+    app = cfg.load_config_from_dict({"cameras": [{"name": "c", "host": "203.0.113.10"}]})
+    monkeypatch.setattr(daemon.panlimit, "build_ptz",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not build")))
+    daemon._pan_guard_pass(app, {}, daemon.MonitorState(), now=1, secrets={}, night=True)
+
+
+# ── crop_to_subject (zoom) ────────────────────────────────────────────────────
+
+def test_compute_crop_pads_and_centres_on_box():
+    # small box (100..140 x, 100..200 y) in a 1000x1000 frame -> padded, min-size crop
+    rect = daemon.compute_crop([100, 100, 140, 200], 1000, 1000, pad=0.4, min_frac=0.22)
+    x, y, cw, ch = rect
+    assert cw >= 220 and ch >= 220               # enforced min 22% of frame
+    assert x <= 120 <= x + cw and y <= 150 <= y + ch   # box centre inside the crop
+    assert 0 <= x and x + cw <= 1000 and 0 <= y and y + ch <= 1000
+
+
+def test_compute_crop_none_when_subject_fills_frame():
+    assert daemon.compute_crop([0, 0, 900, 900], 1000, 1000, skip_frac=0.55) is None
+
+
+def test_compute_crop_clamps_to_frame_edges():
+    rect = daemon.compute_crop([0, 0, 30, 40], 1000, 1000)   # box in the corner
+    x, y, cw, ch = rect
+    assert x == 0 and y == 0 and x + cw <= 1000 and y + ch <= 1000
+
+
+def test_crop_for_subject_crops_to_box(tmp_path):
+    cam = _cam(crop_to_subject=True, scorer={"url": "http://x/score", "tiles": 2})
+    src = tmp_path / "frame.jpg"
+    src.write_bytes(b"jpeg")
+    result = {"person": 0.9, "box": [100, 100, 200, 300], "w": 1000, "h": 800}
+    captured = {}
+    def fake_ffmpeg(image, out_path, rect):
+        captured["rect"] = rect
+        open(out_path, "w").write("crop")
+    out = daemon.crop_for_subject(cam, str(src), str(tmp_path),
+                                  score_result=result, run_ffmpeg=fake_ffmpeg)
+    assert out != str(src) and out.endswith(".jpg")
+    assert captured["rect"][2] > 0 and captured["rect"][3] > 0
+
+
+def test_crop_for_subject_returns_original_without_box(tmp_path):
+    cam = _cam(crop_to_subject=True, scorer={"url": "http://x/score"})
+    src = tmp_path / "frame.jpg"
+    src.write_bytes(b"jpeg")
+    out = daemon.crop_for_subject(cam, str(src), str(tmp_path),
+                                  score_result={"person": 0.1, "box": None},
+                                  run_ffmpeg=lambda *a: None)
+    assert out == str(src)
+
+
+def test_crop_for_subject_noop_when_disabled(tmp_path):
+    cam = _cam(scorer={"url": "http://x/score"})     # crop_to_subject defaults False
+    src = tmp_path / "frame.jpg"
+    src.write_bytes(b"jpeg")
+    out = daemon.crop_for_subject(cam, str(src), str(tmp_path),
+                                  score_result={"box": [1, 2, 3, 4], "w": 100, "h": 100})
+    assert out == str(src)
+
+
 # ── process_pending_sd ────────────────────────────────────────────────────────
+
+def test_pending_recording_source_sends_sharpest(monkeypatch):
+    # A recording-source camera: process_pending_sd must route through
+    # _select_recording_frame (score all, pick sharpest above threshold) and send it,
+    # not stop at the first above-threshold frame like the SD path.
+    sent = []
+    app = cfg.load_config_from_dict({"groq": {}, "cameras": [
+        {"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
+         "snapshot_source": "recording",
+         "scorer": {"url": "http://x/score", "threshold": 0.4}}]})
+    state = daemon.MonitorState()
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+    scores = {"/f0.jpg": 0.2, "/f1.jpg": 0.9, "/f2.jpg": 0.7}
+    blur = {"/f1.jpg": 8.0, "/f2.jpg": 3.0}          # f2 sharper than the higher-scoring f1
+    monkeypatch.setattr(daemon, "score_for", lambda cfg_: (lambda f: scores[f]))
+    monkeypatch.setattr(daemon.recclip, "blur_score", lambda f: blur[f])
+    monkeypatch.setattr(daemon, "_caption_describe", lambda *a, **k: "")
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap: sent.append(img) or True)
+    secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
+    daemon.process_pending_sd(
+        app, {"a": object()}, state, now=1075, secrets=secrets,
+        snapshot_for=lambda cfg_: (lambda cam, ev: None), time_str=lambda ev: "T",
+        fetch_frames=lambda c, s, span=None, out_dir=None: ["/f0.jpg", "/f1.jpg", "/f2.jpg"])
+    assert sent == ["/f2.jpg"]
+
+
+
 
 def _pending(cam_clients, sent, *, sd_ok=True, rtsp_ok=True, snapshot_calls=None):
     """Build app+state+collaborators for process_pending_sd tests."""
@@ -830,7 +1173,7 @@ def _pending(cam_clients, sent, *, sd_ok=True, rtsp_ok=True, snapshot_calls=None
 def _run_pending(app, state, cam_clients, now, fetch_frames, snapshot_for, sent, monkeypatch,
                  groq=None):
     monkeypatch.setattr(daemon.notify, "send_photo",
-                        lambda tok, chat, img, cap: sent.append((img, cap)))
+                        lambda tok, chat, img, cap: sent.append((img, cap)) or True)
     monkeypatch.setattr(daemon.enrich, "groq_describe",
                         groq or (lambda *a, **k: "Person at door"))
     secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
@@ -887,6 +1230,25 @@ def test_pending_due_sends_sd_frame(monkeypatch):
     assert len(sent) == 1
     assert sent[0][0] == "/tmp/sd.jpg"    # the SD frame, not RTSP
     assert state.pending_sd == []         # entry consumed
+
+
+def test_pending_failed_delivery_is_requeued_without_cooldown(monkeypatch):
+    app, state, fetch_frames, snapshot_for = _pending({}, [])
+    entry = {"camera": "a", "etype": "person",
+             "event": {"start_time": 1000}, "due_at": 1075, "live_sent": True}
+    state.pending_sd = [entry]
+    monkeypatch.setattr(daemon.notify, "send_photo", lambda *a, **k: False)
+    monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "Person")
+    secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c",
+               "face_names": {}}
+
+    daemon.process_pending_sd(
+        app, {"a": object()}, state, now=1080, secrets=secrets,
+        snapshot_for=snapshot_for, time_str=lambda ev: "T", fetch_frames=fetch_frames)
+
+    assert state.pending_sd == [entry]
+    assert entry["due_at"] == 1140
+    assert ("a", "person") not in state.last_alert
 
 
 def test_pending_falls_back_to_rtsp_when_sd_fails(monkeypatch):
@@ -1296,7 +1658,7 @@ def test_pending_scorer_pick_captions_with_frame_sequence(monkeypatch):
 
     scores = {"/tmp/f0.jpg": 0.1, "/tmp/f1.jpg": 0.9, "/tmp/f2.jpg": 0.8}
     monkeypatch.setattr(daemon.scorer, "score_image",
-                        lambda url, img, timeout=10: {"person": scores[img], "animal": 0.0})
+                        lambda url, img, timeout=10, tiles=1: {"person": scores[img], "animal": 0.0})
     groq_calls = []
     state.pending_sd = [{"camera": "a", "etype": "person",
                          "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
@@ -1348,12 +1710,12 @@ def _group(started=1000, etype="motion", sent=False, frames=0):
 
 
 def _run_sampler(app, state, now, sent, monkeypatch, *, score=0.9, snap="/tmp/f.jpg",
-                 groq="Person"):
+                 groq="Person", delivered=True):
     monkeypatch.setattr(daemon.notify, "send_photo",
-                        lambda tok, chat, img, cap: sent.append((img, cap)))
+                        lambda tok, chat, img, cap: sent.append((img, cap)) or delivered)
     monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: groq)
     monkeypatch.setattr(daemon.scorer, "score_image",
-                        lambda url, img, timeout=10: None if score is None
+                        lambda url, img, timeout=10, tiles=1: None if score is None
                         else {"person": score, "animal": 0.0})
     monkeypatch.setattr(daemon, "_safe_unlink", lambda p: None)
     secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
@@ -1375,6 +1737,19 @@ def test_sampler_due_group_scores_and_sends(monkeypatch):
     assert state.last_alert[("a", "motion")] == 1035   # cooldown recorded
 
 
+def test_sampler_failed_delivery_keeps_group_retryable(monkeypatch):
+    sent = []
+    app = _sampler_app()
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+
+    _run_sampler(app, state, 1035, sent, monkeypatch, score=0.9, delivered=False)
+
+    assert len(sent) == 1
+    assert state.groups["a"]["sent"] is False
+    assert ("a", "motion") not in state.last_alert
+
+
 def test_sampler_below_threshold_keeps_sampling(monkeypatch):
     sent = []
     app = _sampler_app()
@@ -1386,6 +1761,27 @@ def test_sampler_below_threshold_keeps_sampling(monkeypatch):
     assert g["sent"] is False
     assert g["frames"] == 1
     assert g["next_due"] == 1035 + 30
+
+
+def test_sampler_low_scores_close_motion_group_early(monkeypatch):
+    sent = []
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10",
+                                  "sampler": {"enabled": True, "interval": 30,
+                                              "max_frames": 6, "group_gap": 90,
+                                              "low_score_exit": 1, "low_score": 0.15},
+                                  "scorer": {"url": "http://127.0.0.1:1/score",
+                                             "threshold": 0.4}}]})
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+
+    _run_sampler(app, state, 1035, sent, monkeypatch, score=0.05)
+
+    assert sent == []
+    g = state.groups["a"]
+    scfg = app.cameras[0].sampler
+    assert daemon.sampler.due(g, 1035 + 31, scfg) is False   # closed early
+    assert daemon.sampler.expired(g, g["last_event_at"] + 91, scfg) is True
 
 
 def test_sampler_scorer_down_sends_once(monkeypatch):
@@ -1453,9 +1849,9 @@ def test_score_for_maps_result_and_failure(monkeypatch):
     app = _sampler_app(threshold=0.4)
     camera_cfg = app.cameras[0]
     monkeypatch.setattr(daemon.scorer, "score_image",
-                        lambda url, img, timeout=10: {"person": 0.2, "animal": 0.6})
+                        lambda url, img, timeout=10, tiles=1: {"person": 0.2, "animal": 0.6})
     assert daemon.score_for(camera_cfg)("/tmp/x.jpg") == 0.6
-    monkeypatch.setattr(daemon.scorer, "score_image", lambda url, img, timeout=10: None)
+    monkeypatch.setattr(daemon.scorer, "score_image", lambda url, img, timeout=10, tiles=1: None)
     assert daemon.score_for(camera_cfg)("/tmp/x.jpg") is None
 
 
@@ -1479,7 +1875,7 @@ def test_pending_scorer_picks_frame_above_threshold(monkeypatch):
     state = daemon.MonitorState()
     scores = {"/tmp/sd-1.jpg": 0.1, "/tmp/sd-2.jpg": 0.9}
     monkeypatch.setattr(daemon.scorer, "score_image",
-                        lambda url, img, timeout=10: {"person": scores[img], "animal": 0.0})
+                        lambda url, img, timeout=10, tiles=1: {"person": scores[img], "animal": 0.0})
 
     def fetch_frames(cfg_, start_time, span=None, out_dir=None):
         return ["/tmp/sd-1.jpg", "/tmp/sd-2.jpg"]
@@ -1504,7 +1900,7 @@ def test_pending_scorer_all_below_threshold_drops(monkeypatch):
                                                "threshold": 0.4}}]})
     state = daemon.MonitorState()
     monkeypatch.setattr(daemon.scorer, "score_image",
-                        lambda url, img, timeout=10: {"person": 0.05, "animal": 0.0})
+                        lambda url, img, timeout=10, tiles=1: {"person": 0.05, "animal": 0.0})
 
     def fetch_frames(cfg_, start_time, span=None, out_dir=None):
         return ["/tmp/sd-1.jpg"]
@@ -1525,7 +1921,7 @@ def test_pending_scorer_failure_passes_frame_through(monkeypatch):
                                     "scorer": {"url": "http://127.0.0.1:1/score",
                                                "threshold": 0.4}}]})
     state = daemon.MonitorState()
-    monkeypatch.setattr(daemon.scorer, "score_image", lambda url, img, timeout=10: None)
+    monkeypatch.setattr(daemon.scorer, "score_image", lambda url, img, timeout=10, tiles=1: None)
 
     def fetch_frames(cfg_, start_time, span=None, out_dir=None):
         return ["/tmp/sd-1.jpg"]
@@ -1628,7 +2024,8 @@ def test_watchdog_skips_night_only_camera_by_day(monkeypatch):
     app = cfg.load_config_from_dict(
         {"cameras": [{"name": "a", "host": "203.0.113.10", "night_only": True}]})
     sent = []
-    monkeypatch.setattr(daemon.notify, "send_text", lambda tok, chat, msg: sent.append(msg))
+    monkeypatch.setattr(
+        daemon.notify, "send_text", lambda tok, chat, msg: sent.append(msg) or True)
     state = daemon.MonitorState()
     state.fail_since["a"] = 0
     secrets = {"telegram_token": "t", "telegram_chat": "c"}
@@ -1640,12 +2037,126 @@ def test_watchdog_alerts_night_only_camera_at_night(monkeypatch):
     app = cfg.load_config_from_dict(
         {"cameras": [{"name": "a", "host": "203.0.113.10", "night_only": True}]})
     sent = []
-    monkeypatch.setattr(daemon.notify, "send_text", lambda tok, chat, msg: sent.append(msg))
+    monkeypatch.setattr(
+        daemon.notify, "send_text", lambda tok, chat, msg: sent.append(msg) or True)
     state = daemon.MonitorState()
     state.fail_since["a"] = 0
     secrets = {"telegram_token": "t", "telegram_chat": "c"}
     daemon._watchdog_pass(app, {}, state, now=100000, secrets=secrets, night=True)
     assert len(sent) == 1 and "unreachable" in sent[0]
+
+
+def test_watchdog_messages_include_uptime_and_outage_duration(monkeypatch):
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    sent = []
+    monkeypatch.setattr(
+        daemon.notify, "send_text", lambda tok, chat, msg: sent.append(msg) or True)
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "t", "telegram_chat": "c"}
+
+    daemon._watchdog_pass(app, {"a": object()}, state, now=0, secrets=secrets)
+    daemon._watchdog_pass(app, {}, state, now=3600, secrets=secrets)
+    daemon._watchdog_pass(app, {}, state, now=4500, secrets=secrets)
+    daemon._watchdog_pass(app, {"a": object()}, state, now=5400, secrets=secrets)
+
+    assert sent == [
+        "🔴 camera 'a' unreachable after 1h observed uptime",
+        "🟢 camera 'a' back online after 30m outage",
+    ]
+
+
+def test_watchdog_uses_ping_health_independently_from_api_client(monkeypatch):
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    sent = []
+    monkeypatch.setattr(
+        daemon.notify, "send_text", lambda tok, chat, msg: sent.append(msg) or True)
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "t", "telegram_chat": "c"}
+
+    state.network_reachable["a"] = True
+    daemon._watchdog_pass(app, {}, state, now=0, secrets=secrets)
+    assert state.online_since["a"] == 0
+    assert state.fail_since == {}
+
+    state.network_reachable["a"] = False
+    daemon._watchdog_pass(app, {}, state, now=1000, secrets=secrets)
+    daemon._watchdog_pass(app, {}, state, now=1900, secrets=secrets)
+    assert len(sent) == 1 and "unreachable" in sent[0]
+
+    state.network_reachable["a"] = True
+    daemon._watchdog_pass(app, {}, state, now=2000, secrets=secrets)
+    assert len(sent) == 2 and "back online after 16m 40s outage" in sent[1]
+
+
+def test_watchdog_retries_failed_outage_delivery(monkeypatch):
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    state = daemon.MonitorState()
+    state.network_reachable["a"] = False
+    state.fail_since["a"] = 0
+    results = iter((False, True))
+    sent = []
+
+    def send_text(token, chat, message):
+        sent.append(message)
+        return next(results)
+
+    monkeypatch.setattr(daemon.notify, "send_text", send_text)
+    secrets = {"telegram_token": "t", "telegram_chat": "c"}
+
+    daemon._watchdog_pass(app, {}, state, now=1000, secrets=secrets)
+    assert "a" not in state.outage_alerted
+    daemon._watchdog_pass(app, {}, state, now=1001, secrets=secrets)
+
+    assert len(sent) == 2
+    assert state.outage_alerted["a"] is True
+
+
+def test_watchdog_retries_failed_recovery_delivery(monkeypatch):
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    state = daemon.MonitorState()
+    state.network_reachable["a"] = True
+    state.fail_since["a"] = 0
+    state.outage_alerted["a"] = True
+    results = iter((False, True))
+    sent = []
+
+    def send_text(token, chat, message):
+        sent.append(message)
+        return next(results)
+
+    monkeypatch.setattr(daemon.notify, "send_text", send_text)
+    secrets = {"telegram_token": "t", "telegram_chat": "c"}
+
+    daemon._watchdog_pass(app, {}, state, now=1000, secrets=secrets)
+    assert state.recovery_pending["a"] == 1000
+    daemon._watchdog_pass(app, {}, state, now=1001, secrets=secrets)
+
+    assert len(sent) == 2
+    assert "a" not in state.recovery_pending
+
+
+def test_watchdog_persists_only_when_durable_health_changes(monkeypatch, tmp_path):
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    state = daemon.MonitorState()
+    state.health_path = str(tmp_path / "health.json")
+    state.network_reachable["a"] = True
+    saved = []
+    monkeypatch.setattr(
+        daemon.health, "save_state",
+        lambda path, current, logger=None: saved.append((path, daemon.health.snapshot(current))))
+    secrets = {"telegram_token": "t", "telegram_chat": "c"}
+
+    daemon._watchdog_pass(app, {}, state, now=100, secrets=secrets)
+    daemon._watchdog_pass(app, {}, state, now=200, secrets=secrets)
+
+    assert len(saved) == 1
+    assert saved[0][0] == state.health_path
+    assert saved[0][1]["online_since"] == {"a": 100}
 
 
 def test_loop_step_passes_night_to_detection_passes():
@@ -1661,3 +2172,133 @@ def test_loop_step_passes_night_to_detection_passes():
         sample=lambda *a, **k: seen.__setitem__("sample", k.get("night")),
         is_night=lambda: True)
     assert seen == {"mon": True, "sample": True, "drain": True}
+
+
+def _twin_snapshot(*, vehicle=False):
+    def available(value):
+        return {"state": "available", "value": value}
+
+    return {
+        "schema_version": 1,
+        "groups": {
+            "basic": {"info": available({"model": "test"})},
+            "storage": {"sd_card": available({"status": "normal"})},
+            "detection": {
+                "person": available({"enabled": "on"}),
+                "vehicle": available({"enabled": "on" if vehicle else "off"}),
+                "motion": available({"sensitivity": 60}),
+            },
+            "track": {"auto_target": available({"enabled": "on"})},
+        },
+    }
+
+
+def _twin_app(*, drift_alerts=False):
+    return cfg.load_config_from_dict({
+        "observability": {
+            "digital_twin": True,
+            "probe_interval": 60,
+            "drift_alerts": drift_alerts,
+        },
+        "cameras": [{"name": "a", "host": "203.0.113.10"}],
+    })
+
+
+def _twin_state():
+    state = daemon.MonitorState()
+    state.network_reachable["a"] = True
+    state.events_reachable["a"] = True
+    state.rtsp_reachable["a"] = True
+    state.desired_plans["a"] = daemon.CameraPlan(
+        autotrack_on=True,
+        rain_parked=False,
+        motion_sensitivity=60,
+        smarttrack=("person",),
+        preset=None,
+    )
+    return state
+
+
+def test_digital_twin_reuses_client_and_respects_probe_interval():
+    app = _twin_app()
+    state = _twin_state()
+    camera_client = object()
+    seen = []
+
+    def probe(client):
+        seen.append(client)
+        return _twin_snapshot()
+
+    daemon.process_digital_twin(
+        app, {"a": camera_client}, state, now=100, secrets={}, probe=probe)
+    daemon.process_digital_twin(
+        app, {"a": camera_client}, state, now=130, secrets={}, probe=probe)
+
+    assert seen == [camera_client]
+    assert state.twin_fleet["a"]["health"]["status"] == "ok"
+    assert state.twin_fleet["a"]["drift"]["counts"]["drift"] == 0
+
+
+def test_digital_twin_deduplicates_drift_and_reports_recovery(monkeypatch):
+    app = _twin_app(drift_alerts=True)
+    state = _twin_state()
+    messages = []
+    monkeypatch.setattr(
+        daemon.notify, "send_text",
+        lambda token, chat, message: messages.append(message) or True,
+    )
+    snapshots = iter((_twin_snapshot(vehicle=True), _twin_snapshot(vehicle=True),
+                      _twin_snapshot(vehicle=False)))
+    secrets = {"telegram_token": "t", "telegram_chat": "c"}
+
+    for now in (100, 160, 220):
+        daemon.process_digital_twin(
+            app, {"a": object()}, state, now=now, secrets=secrets,
+            probe=lambda client: next(snapshots),
+        )
+
+    assert len(messages) == 2
+    assert "configuration drift" in messages[0]
+    assert "recovered" in messages[1]
+    assert state.twin_alerted["a"] == set()
+
+
+def test_digital_twin_probe_failure_isolated_and_throttled():
+    app = _twin_app()
+    state = _twin_state()
+    calls = []
+
+    def broken_probe(client):
+        calls.append(client)
+        raise RuntimeError("broken probe")
+
+    daemon.process_digital_twin(
+        app, {"a": object()}, state, now=100, secrets={}, probe=broken_probe)
+    daemon.process_digital_twin(
+        app, {"a": object()}, state, now=130, secrets={}, probe=broken_probe)
+
+    assert len(calls) == 1
+    assert state.twin_fleet == {}
+
+
+def test_loop_step_preserves_control_plan_for_digital_twin():
+    app = _twin_app()
+    state = daemon.MonitorState()
+    plan = daemon.CameraPlan(True, False, 60, ("person",), None)
+    seen = []
+
+    daemon.loop_step(
+        app, {}, state, now=100, secrets={}, last_control=None, control_interval=60,
+        run_control=lambda *args, **kwargs: {"a": plan},
+        watchdog=lambda *args, **kwargs: None,
+        monitor=lambda *args, **kwargs: None,
+        drain=lambda *args, **kwargs: None,
+        sample=lambda *args, **kwargs: None,
+        guard=lambda *args, **kwargs: None,
+        inspect=lambda app, clients, current, **kwargs:
+            seen.append(current.desired_plans["a"]),
+        connect_factory=lambda *args: None,
+        is_night=lambda: True,
+    )
+
+    assert seen == [plan]

@@ -113,7 +113,8 @@ def test_run_monitor_sends_empty_live_when_no_sd(monkeypatch):
 
 def test_run_monitor_no_defer_when_live_has_person(monkeypatch):
     sent = []
-    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(
+        monitor.notify, "send_photo", lambda *a, **k: sent.append(a) or True)
     monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "Person at the gate")
     deferred = []
 
@@ -194,7 +195,8 @@ def test_run_monitor_defers_on_live_snapshot_failure(monkeypatch):
 
 def test_run_monitor_defer_leaves_motion_inline(monkeypatch):
     sent = []
-    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(
+        monitor.notify, "send_photo", lambda *a, **k: sent.append(a) or True)
     monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "Person walking")
     deferred = []
 
@@ -429,7 +431,8 @@ def test_run_monitor_raw_mode_sends_motion_without_groq(monkeypatch):
 def test_run_monitor_raw_mode_sends_person_live_directly(monkeypatch):
     # Raw mode: a confirmed person's live frame is never "empty" -> no SD defer detour.
     sent = []
-    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(
+        monitor.notify, "send_photo", lambda *a, **k: sent.append(a) or True)
     monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "empty scene")
     deferred = []
 
@@ -548,7 +551,8 @@ def test_run_monitor_scorer_person_below_threshold_still_defers(monkeypatch):
 
 def test_run_monitor_observe_reports_sent_alert(monkeypatch):
     sent = []
-    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(
+        monitor.notify, "send_photo", lambda *a, **k: sent.append(a) or True)
     monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "Person")
     observed = []
 
@@ -562,6 +566,50 @@ def test_run_monitor_observe_reports_sent_alert(monkeypatch):
         snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
         score=lambda img: 0.9,
         observe=lambda ev, et, s: observed.append(s))
+    assert observed == [True]
+
+
+def test_run_monitor_failed_delivery_does_not_arm_alert_gate(monkeypatch):
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: False)
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "Person")
+    alerted = []
+    observed = []
+
+    class Cam:
+        def getEvents(self):
+            return [_motion_event(100)]
+
+    monitor.run_monitor(
+        Cam(), _cfg_with_scorer(), 0, now=1000, groq_key="k",
+        telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        score=lambda img: 0.9,
+        on_alert=lambda et: alerted.append(et),
+        observe=lambda ev, et, sent: observed.append(sent))
+
+    assert alerted == []
+    assert observed == [False]
+
+
+def test_run_monitor_failed_delivery_queues_sd_retry(monkeypatch):
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: False)
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "Person")
+    deferred = []
+    observed = []
+
+    class Cam:
+        def getEvents(self):
+            return [_motion_event(100)]
+
+    monitor.run_monitor(
+        Cam(), _cfg_with_scorer(), 0, now=1000, groq_key="k",
+        telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        score=lambda img: 0.9,
+        defer=lambda ev, et, live_sent: deferred.append((et, live_sent)),
+        observe=lambda ev, et, sent: observed.append(sent))
+
+    assert deferred == [("motion", False)]
     assert observed == [True]
 
 
@@ -586,3 +634,47 @@ def test_run_monitor_mute_drains_watermark_without_alerting(monkeypatch):
     assert sent == []       # nothing sent
     assert grabbed == []    # never grabbed a frame
     assert wm == 100        # watermark advanced past the day's events
+
+
+def test_run_monitor_reports_event_and_media_health(monkeypatch):
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *args, **kwargs: True)
+    cfg = config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}
+    ).cameras[0]
+    event_health = []
+    media_health = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=1000, groq_key="", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, event: "/tmp/live.jpg", time_str=lambda event: "T",
+        poll_observe=event_health.append, media_observe=media_health.append,
+    )
+
+    assert event_health == [True]
+    assert media_health == [True]
+
+
+def test_run_monitor_reports_failed_event_poll_without_media_probe():
+    cfg = config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}
+    ).cameras[0]
+    event_health = []
+    media_health = []
+
+    class Cam:
+        def getEvents(self):
+            raise RuntimeError("camera API unavailable")
+
+    watermark = monitor.run_monitor(
+        Cam(), cfg, 123, now=1000, groq_key="", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, event: None, time_str=lambda event: "T",
+        poll_observe=event_health.append, media_observe=media_health.append,
+    )
+
+    assert watermark == 123
+    assert event_health == [False]
+    assert media_health == []
