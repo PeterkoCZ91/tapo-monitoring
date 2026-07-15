@@ -84,3 +84,62 @@ def test_expiry_sent_group_dies_after_gap():
     g = groups["a"]
     assert sampler.expired(g, 1010 + 89, CFG) is False
     assert sampler.expired(g, 1010 + 91, CFG) is True
+
+
+# ── low-score early exit (motion-only groups) ────────────────────────────────
+
+EXIT_CFG = SamplerConfig(enabled=True, interval=30, max_frames=6, group_gap=90,
+                         low_score_exit=3, low_score=0.15)
+
+
+def _motion_group(groups=None, etype="motion"):
+    groups = {} if groups is None else groups
+    sampler.observe_event(groups, "a", _ev(1000), etype, False, 1010, EXIT_CFG)
+    return groups["a"]
+
+
+def test_consecutive_low_scores_close_motion_group_early():
+    g = _motion_group()
+    assert sampler.note_score(g, 0.05, EXIT_CFG) is False
+    assert sampler.note_score(g, 0.11, EXIT_CFG) is False
+    assert sampler.note_score(g, 0.07, EXIT_CFG) is True
+    assert sampler.due(g, 1030, EXIT_CFG) is False
+    # closed group only lingers group_gap past the last event, not the full window
+    assert sampler.expired(g, 1010 + 91, EXIT_CFG) is True
+
+
+def test_high_score_resets_low_streak():
+    g = _motion_group()
+    assert sampler.note_score(g, 0.05, EXIT_CFG) is False
+    assert sampler.note_score(g, 0.05, EXIT_CFG) is False
+    assert sampler.note_score(g, 0.20, EXIT_CFG) is False   # resets the streak
+    assert sampler.note_score(g, 0.05, EXIT_CFG) is False
+    assert sampler.note_score(g, 0.05, EXIT_CFG) is False
+    assert sampler.note_score(g, 0.05, EXIT_CFG) is True
+
+
+def test_person_group_keeps_sampling_on_low_scores():
+    g = _motion_group(etype="person")
+    for _ in range(6):
+        assert sampler.note_score(g, 0.01, EXIT_CFG) is False
+    assert sampler.due(g, 1030, EXIT_CFG) is True
+
+
+def test_person_upgrade_reopens_early_exited_group():
+    groups = {}
+    g = _motion_group(groups)
+    for score in (0.05, 0.05, 0.05):
+        sampler.note_score(g, score, EXIT_CFG)
+    assert sampler.due(g, 1030, EXIT_CFG) is False
+    sampler.observe_event(groups, "a", _ev(1040), "person", False, 1050, EXIT_CFG)
+    assert groups["a"] is g                       # same burst, same group
+    assert sampler.due(g, 1060, EXIT_CFG) is True
+
+
+def test_low_score_exit_off_by_default():
+    groups = {}
+    sampler.observe_event(groups, "a", _ev(1000), "motion", False, 1010, CFG)
+    g = groups["a"]
+    for _ in range(10):
+        assert sampler.note_score(g, 0.01, CFG) is False
+    assert sampler.due(g, 1030, CFG) is True

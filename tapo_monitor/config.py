@@ -71,6 +71,10 @@ class SamplerConfig:
     max_frames: int = 6     # follow-up grabs per group (interval*max_frames = window)
     group_gap: int = 90     # events closer than this belong to the same group
     stream: str | None = None  # RTSP stream for follow-up grabs; None = camera default
+    # Close a motion-only group after this many consecutive frames scoring below
+    # low_score (0 = off). Person/PIR-confirmed groups always run the full window.
+    low_score_exit: int = 0
+    low_score: float = 0.15
 
 
 @dataclass
@@ -261,12 +265,23 @@ def _sampler(data, where):
         raise ConfigError(f"{where}: sampler interval/max_frames/group_gap must be integers") from None
     if interval < 1 or max_frames < 1 or group_gap < 1:
         raise ConfigError(f"{where}: sampler interval/max_frames/group_gap must be >= 1")
+    try:
+        low_score_exit = int(d.get("low_score_exit", 0))
+        low_score = float(d.get("low_score", 0.15))
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}: sampler low_score_exit/low_score must be numbers") from None
+    if low_score_exit < 0:
+        raise ConfigError(f"{where}: sampler low_score_exit must be >= 0")
+    if not 0.0 <= low_score <= 1.0:
+        raise ConfigError(f"{where}: sampler low_score must be between 0 and 1")
     return SamplerConfig(
         enabled=bool(d.get("enabled", False)),
         interval=interval,
         max_frames=max_frames,
         group_gap=group_gap,
         stream=d.get("stream"),
+        low_score_exit=low_score_exit,
+        low_score=low_score,
     )
 
 
