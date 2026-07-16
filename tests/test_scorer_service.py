@@ -132,6 +132,41 @@ def test_tile_rects_grid_count_and_bounds():
         assert 0.0 <= x0 < x1 <= 400.0 and 0.0 <= y0 < y1 <= 300.0
 
 
+def _rect(person, animal=0.0, box=None, classes=None):
+    return {"person": person, "animal": animal,
+            "classes": classes or ({"person": person} if person else {}), "box": box}
+
+
+def test_combine_full_frame_score_decides_tile_only_adds_box():
+    # Tile hallucinations must not raise the decision score: person/animal come
+    # from the full frame; the best tile only contributes box + tile_person.
+    combined = scorer_service.combine_rect_scores(
+        [_rect(0.05), _rect(0.55, box=[10, 20, 30, 60]), _rect(0.40, box=[1, 2, 3, 4])])
+    assert combined["person"] == 0.05
+    assert combined["tile_person"] == 0.55
+    assert combined["box"] == [10, 20, 30, 60]     # from the best-person tile
+
+
+def test_combine_prefers_full_frame_box_when_present():
+    combined = scorer_service.combine_rect_scores(
+        [_rect(0.9, box=[100, 100, 200, 300]), _rect(0.95, box=[5, 5, 9, 9])])
+    assert combined["person"] == 0.9
+    assert combined["box"] == [100, 100, 200, 300]
+
+
+def test_combine_animal_also_full_frame_only():
+    combined = scorer_service.combine_rect_scores(
+        [_rect(0.0, animal=0.1), _rect(0.0, animal=0.8)])
+    assert combined["animal"] == 0.1
+
+
+def test_combine_single_rect_has_no_tile_person():
+    combined = scorer_service.combine_rect_scores([_rect(0.7, box=[1, 2, 3, 4])])
+    assert combined["person"] == 0.7
+    assert combined["box"] == [1, 2, 3, 4]
+    assert "tile_person" not in combined
+
+
 def test_scale_box_undoes_ratio_and_adds_tile_offset():
     # tile-input box at ratio 0.5 -> /0.5 = *2, then shift by the tile origin
     assert scorer_service.scale_box((10, 20, 30, 40), 0.5, 100, 200) == \

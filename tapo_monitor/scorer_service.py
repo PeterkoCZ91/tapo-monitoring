@@ -159,13 +159,37 @@ def preprocess(jpeg_bytes, input_size):
     return preprocess_image(img, input_size)
 
 
+def combine_rect_scores(rect_results):
+    """Fold per-rect scores (full frame first, then tiles) into one response. Pure.
+
+    The decision-grade ``person``/``animal``/``classes`` come from the FULL FRAME only:
+    a tile is a blown-up crop, and at night the upscaled IR grain hallucinates 0.3-0.6
+    "person" scores — and taking a max over five crops turns that into a near-certain
+    false alert per event. Tiles still earn their keep for localisation: ``box`` falls
+    back to the best-person tile when the full frame has none (a distant subject the
+    caller wants to crop to), and ``tile_person`` reports the best tile score for
+    diagnostics.
+    """
+    full = rect_results[0]
+    combined = {"person": full["person"], "animal": full["animal"],
+                "classes": full["classes"], "box": full["box"]}
+    tiles = rect_results[1:]
+    if tiles:
+        best_tile = max(tiles, key=lambda r: r["person"])
+        combined["tile_person"] = best_tile["person"]
+        if combined["box"] is None:
+            combined["box"] = best_tile["box"]
+    return combined
+
+
 def build_score_fn(model_path, input_size=416):
     """Load the ONNX model once and return score_fn(jpeg_bytes, tiles=1) -> dict.
 
-    ``tiles > 1`` scores the whole frame plus a tiles×tiles grid (see :func:`tile_rects`)
-    and keeps the highest person score — the way distant subjects get rescued. The
-    response gains a ``box`` (full-image xyxy in original pixels) for the winning person
-    detection, so a caller can crop/zoom to it; ``box`` is ``None`` when no person.
+    ``tiles > 1`` also scores a tiles×tiles grid (see :func:`tile_rects`), but the
+    grid only refines localisation — see :func:`combine_rect_scores` for why the
+    send-decision scores stay full-frame. The response gains a ``box`` (full-image
+    xyxy in original pixels) for the winning person detection, so a caller can
+    crop/zoom to it; ``box`` is ``None`` when no person.
     """
     import io
 
@@ -183,20 +207,18 @@ def build_score_fn(model_path, input_size=416):
     def score_fn(jpeg_bytes, tiles=1):
         img = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
         rects = tile_rects(img.width, img.height, tiles)
-        best = {"person": 0.0, "animal": 0.0, "classes": {}, "box": None,
-                "w": img.width, "h": img.height}
+        results = []
         for (x0, y0, x1, y1) in rects:
             crop = img if len(rects) == 1 else img.crop((int(x0), int(y0), int(x1), int(y1)))
             output, ratio = _run(crop)
             scores = scores_from_output(output)
-            if scores["animal"] > best["animal"]:
-                best["animal"] = scores["animal"]
-            if scores["person"] >= best["person"]:
-                best["person"] = scores["person"]
-                best["classes"] = scores["classes"]
-                box = best_person_box(output, input_size)
-                best["box"] = list(scale_box(box, ratio, x0, y0)) if box else None
-        return best
+            box = best_person_box(output, input_size)
+            results.append({"person": scores["person"], "animal": scores["animal"],
+                            "classes": scores["classes"],
+                            "box": list(scale_box(box, ratio, x0, y0)) if box else None})
+        combined = combine_rect_scores(results)
+        combined["w"], combined["h"] = img.width, img.height
+        return combined
 
     return score_fn
 

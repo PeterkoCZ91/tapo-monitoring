@@ -9,6 +9,12 @@ All notable changes to this project are documented here.
   configuration reference and firmware-aware troubleshooting runbook. Operational,
   opt-in, researched and planned capabilities are now labelled explicitly.
 
+### Fixed
+- Tiled scoring no longer gates alerts: with `scorer.tiles > 1` the send-decision
+  person/animal scores come from the full frame only, while the best tile still supplies
+  the person box for subject crops (plus a diagnostic `tile_person`). Blown-up tile crops
+  of night IR grain hallucinated 0.3–0.6 "person" scores and tripled night false alerts.
+
 ### Added
 - Sampler low-score early exit (`sampler.low_score_exit` / `sampler.low_score`): a
   motion-only event group closes once N consecutive follow-up frames score below the

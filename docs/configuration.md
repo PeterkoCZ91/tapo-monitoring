@@ -287,6 +287,15 @@ scorer:
 crop_to_subject: true
 ```
 
+With `tiles > 1` the service also scores a tiles×tiles grid, but the grid only refines
+*localisation*: the send-decision `person`/`animal` scores always come from the full
+frame, and the best tile contributes the person `box` (for `crop_to_subject`) plus a
+diagnostic `tile_person` score. Blown-up tile crops of night IR grain routinely
+hallucinate 0.3–0.6 "person" scores, so tile scores never gate alerts.
+
+```yaml
+```
+
 - `threshold` is a confidence from 0 to 1.
 - `tiles: 1` scores only the whole frame; larger values also score a grid.
 - `crop_to_subject` uses the best returned person box and safely falls back to the full
