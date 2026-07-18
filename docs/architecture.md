@@ -156,6 +156,35 @@ The optional scorer evaluates candidate frames. For local-recorder candidates, t
 can select the sharpest frame above threshold rather than the first hit. Groq is downstream
 caption enrichment when the scorer is configured, not the primary detection authority.
 
+## Scoring topology — why inference is centralized
+
+Subject scoring is deliberately **not** run on the monitor host itself. The YOLO model
+(`yolox_m`, 640 input) is served once, out of process, over a small HTTP contract
+(`POST /score` → `{"person","animal","classes"}`, `GET /health`) by
+`scorer_service.py`. Every monitor host — including low-power edge boxes such as a
+Raspberry Pi capturing a single camera — is a **thin client** that POSTs a JPEG and reads
+back a confidence, via `scorer.py`. Other projects on the same account (e.g. an ESP32
+camera system) consume the exact same service over the same contract.
+
+This is a design choice, not an accident of deployment:
+
+- **Compute placement.** A mid-size YOLO model is too heavy to run at usable frame rates
+  on a Raspberry-class device. Concentrating inference on one capable host keeps every
+  edge node cheap and lets them all share a stronger model than any of them could run
+  locally.
+- **One model, one calibration.** A single loaded model means a single confidence
+  threshold to tune. Running detection independently per device would duplicate the
+  inference stack and split threshold calibration across models with different score
+  baselines (a nano model and `yolox_m` do not score the same scene alike).
+- **Low coupling.** The link between consumers and the scorer is only the HTTP/JSON
+  contract — no shared package, no import across projects. Consumers configure the URL;
+  the service binds a port and owns the model.
+
+The trade-off is an external dependency on the event path, which is contained by the
+fail-open rule below: a client that cannot reach the scorer degrades to raw passthrough
+(`score_image` returns `None` → the frame is sent unfiltered), so a scoring outage adds
+noise but never silently drops a person. See the alert reliability invariants above.
+
 ## Health and observability
 
 Network uptime and the Digital Twin answer different questions:
