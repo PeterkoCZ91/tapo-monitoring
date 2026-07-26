@@ -57,3 +57,7 @@ docs/production-readiness-review-*.md
 *tapo_api_probe*.json
 *discovery*.json
 .superpowers/
+
+# Local drafts and patch backups
+ha-forum-post.md
+*.orig
