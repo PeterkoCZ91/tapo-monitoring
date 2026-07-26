@@ -227,6 +227,7 @@ during rain. Weather needs top-level location coordinates.
 sd_snapshot: true
 snapshot_source: sd
 sd_span_cap: 120
+sd_motion_span_cap: 48
 sd_motion: false
 sd_jobs_per_tick: 1
 ```
@@ -237,6 +238,8 @@ sd_jobs_per_tick: 1
 - `snapshot_source: recording` reads a local continuous recorder and requires
   `sd_snapshot: true`.
 - `sd_span_cap` bounds the event window downloaded/scanned.
+- `sd_motion_span_cap` bounds the first window for unconfirmed motion/PIR; one empty
+  result retries with `sd_span_cap`. Confirmed person events use the full window directly.
 - `sd_motion` also gives PIR-backed bare motion a second chance; it can be expensive.
 - `sd_jobs_per_tick` adds per-camera backpressure for slow hosts.
 
@@ -288,15 +291,17 @@ crop_to_subject: true
 ```
 
 With `tiles > 1` the service also scores a tiles×tiles grid, but the grid only refines
-*localisation*: the send-decision `person`/`animal` scores always come from the full
-frame, and the best tile contributes the person `box` (for `crop_to_subject`) plus a
+*localisation*: the send-decision `person` score always comes from the full frame; the
+returned `animal` score is audit telemetry only. The best tile contributes the person
+`box` (for `crop_to_subject`) plus a
 diagnostic `tile_person` score. Blown-up tile crops of night IR grain routinely
 hallucinate 0.3–0.6 "person" scores, so tile scores never gate alerts.
 
 ```yaml
 ```
 
-- `threshold` is a confidence from 0 to 1.
+- `threshold` is the minimum **person** confidence from 0 to 1; animal confidence never
+  triggers an alert.
 - `tiles: 1` scores only the whole frame; larger values also score a grid.
 - `crop_to_subject` uses the best returned person box and safely falls back to the full
   frame.

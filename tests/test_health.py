@@ -25,6 +25,7 @@ def test_default_state_path_honors_override_and_xdg():
 def test_health_state_round_trip_is_secret_free_and_private(tmp_path):
     path = tmp_path / "nested" / "health.json"
     original = _state(
+        last_seen={"front": 99.0},
         online_since={"front": 100.0},
         fail_since={"back": 200.0},
         outage_alerted={"back": True},

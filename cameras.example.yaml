@@ -94,6 +94,8 @@ cameras:
     #                          # sd_snapshot: true (it reuses the SD follow-up queue); falls
     #                          # back to the SD/live path when no segment or RECORDING_ROOT.
     # sd_span_cap: 120         # optional; max seconds of SD recording to scan per event.
+    # sd_motion_span_cap: 48   # optional; initial window for unconfirmed motion/PIR.
+    #                          # If empty, one retry expands to sd_span_cap.
     #                          # Default (48) fits a Pi Zero download budget; events run
     #                          # ~2 min, so hosts with faster I/O (Pi 4) may raise this
     #                          # to scan the whole event. Frame count stays ~8 regardless.

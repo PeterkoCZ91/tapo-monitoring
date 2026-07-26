@@ -60,6 +60,12 @@ def test_plan_night_vision_auto_reasserts():
     assert daemon.plan_camera(cam, night=False, rain_active=False).night_vision == "auto"
 
 
+def test_effective_night_honours_per_camera_schedule():
+    assert daemon.effective_night(_cam(schedule="always_day"), True) is False
+    assert daemon.effective_night(_cam(schedule="always_night"), False) is True
+    assert daemon.effective_night(_cam(schedule="astral"), True) is True
+
+
 # ── run_once (injected deps) ─────────────────────────────────────────────────
 
 def test_run_once_plans_each_camera():
@@ -1850,7 +1856,7 @@ def test_score_for_maps_result_and_failure(monkeypatch):
     camera_cfg = app.cameras[0]
     monkeypatch.setattr(daemon.scorer, "score_image",
                         lambda url, img, timeout=10, tiles=1: {"person": 0.2, "animal": 0.6})
-    assert daemon.score_for(camera_cfg)("/tmp/x.jpg") == 0.6
+    assert daemon.score_for(camera_cfg)("/tmp/x.jpg") == 0.2
     monkeypatch.setattr(daemon.scorer, "score_image", lambda url, img, timeout=10, tiles=1: None)
     assert daemon.score_for(camera_cfg)("/tmp/x.jpg") is None
 
@@ -2302,3 +2308,32 @@ def test_loop_step_preserves_control_plan_for_digital_twin():
     )
 
     assert seen == [plan]
+
+
+def test_motion_sd_short_window_retries_full_span(monkeypatch):
+    app = cfg.load_config_from_dict({
+        "groq": {},
+        "cameras": [{"name": "a", "host": "203.0.113.10",
+                     "sd_snapshot": True, "sd_motion": True,
+                     "sd_span_cap": 120, "sd_motion_span_cap": 48,
+                     "scorer": {"url": "http://scorer"}}],
+    })
+    assert daemon.sd_followup_spans(
+        app.cameras[0], {"start_time": 1000, "end_time": 1120}, "motion") == (48, 120)
+    state = daemon.MonitorState()
+    state.pending_sd = [{"camera": "a", "etype": "motion",
+                         "event": {"start_time": 1000, "end_time": 1120},
+                         "due_at": 0, "live_sent": False,
+                         "span": 48, "full_span": 120}]
+    calls = []
+    monkeypatch.setattr(daemon, "score_for", lambda _cfg: lambda _path: 0.01)
+
+    def fetch_frames(_cfg, _start, span=None, out_dir=None):
+        calls.append(span)
+        return ["/tmp/sd.jpg"]
+
+    secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c",
+               "face_names": {}}
+    daemon.process_pending_sd(app, {"a": object()}, state, now=1200,
+                              secrets=secrets, fetch_frames=fetch_frames)
+    assert calls == [48]

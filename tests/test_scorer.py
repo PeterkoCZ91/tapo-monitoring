@@ -52,10 +52,20 @@ def test_score_image_none_on_missing_file(tmp_path):
     assert scorer.score_image("http://127.0.0.1:8765/score", str(tmp_path / "gone.jpg")) is None
 
 
-def test_subject_score_takes_max():
-    assert scorer.subject_score({"person": 0.3, "animal": 0.7}) == 0.7
+def test_subject_score_uses_person_and_keeps_animal_telemetry():
+    score = scorer.subject_score({"person": 0.3, "animal": 0.7})
+    assert score == 0.3
+    assert score.person == 0.3
+    assert score.animal == 0.7
     assert scorer.subject_score({"person": 0.5}) == 0.5
     assert scorer.subject_score({}) == 0.0
+
+
+def test_subject_score_rejects_malformed_or_nonfinite_values():
+    assert scorer.subject_score([0.2]) is None
+    assert scorer.subject_score({"person": "nope"}) is None
+    assert scorer.subject_score({"person": float("nan")}) is None
+    assert scorer.subject_score({"person": 1.1}) is None
 
 
 def test_score_image_appends_tiles_query(monkeypatch, tmp_path):

@@ -125,6 +125,18 @@ def test_person_group_keeps_sampling_on_low_scores():
     assert sampler.due(g, 1030, EXIT_CFG) is True
 
 
+def test_pir_backed_motion_group_keeps_sampling_on_low_scores():
+    groups = {}
+    event = _ev(1000)
+    event["events_1"] = sampler.PIR_BIT
+    sampler.observe_event(groups, "a", event, "motion", False, 1010, EXIT_CFG)
+    g = groups["a"]
+    for _ in range(6):
+        assert sampler.note_score(g, 0.01, EXIT_CFG) is False
+    assert g["pir_backed"] is True
+    assert sampler.due(g, 1030, EXIT_CFG) is True
+
+
 def test_person_upgrade_reopens_early_exited_group():
     groups = {}
     g = _motion_group(groups)

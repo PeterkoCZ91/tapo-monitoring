@@ -15,6 +15,8 @@ yes/no decision and is skipped entirely.
 import argparse
 import json
 import logging
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 log = logging.getLogger(__name__)
@@ -36,6 +38,51 @@ COCO_NAMES = (
     "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier",
     "toothbrush",
 )
+
+
+class ScorerMetrics:
+    """Thread-safe, aggregate-only runtime metrics; never records image data."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.started = time.monotonic()
+        self.requests = self.completed = self.failed = 0
+        self.inference_runs = self.in_flight = self.max_in_flight = 0
+        self.request_seconds_total = self.request_seconds_max = 0.0
+        self.score_seconds_total = self.score_seconds_max = 0.0
+
+    def begin(self, tiles):
+        with self._lock:
+            self.requests += 1
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+            self.inference_runs += 1 + (tiles * tiles if tiles > 1 else 0)
+
+    def finish(self, request_seconds, score_seconds, ok):
+        with self._lock:
+            self.in_flight -= 1
+            self.completed += 1
+            self.failed += int(not ok)
+            self.request_seconds_total += request_seconds
+            self.request_seconds_max = max(self.request_seconds_max, request_seconds)
+            self.score_seconds_total += score_seconds
+            self.score_seconds_max = max(self.score_seconds_max, score_seconds)
+
+    def snapshot(self):
+        with self._lock:
+            return {
+                "uptime_seconds": round(time.monotonic() - self.started, 3),
+                "requests": self.requests,
+                "completed": self.completed,
+                "failed": self.failed,
+                "inference_runs": self.inference_runs,
+                "in_flight": self.in_flight,
+                "max_in_flight": self.max_in_flight,
+                "request_seconds_total": round(self.request_seconds_total, 6),
+                "request_seconds_max": round(self.request_seconds_max, 6),
+                "score_seconds_total": round(self.score_seconds_total, 6),
+                "score_seconds_max": round(self.score_seconds_max, 6),
+            }
 
 
 def scores_from_output(output, num_classes=80, floor=0.01):
@@ -225,6 +272,7 @@ def build_score_fn(model_path, input_size=416):
 
 def make_server(score_fn, port=8765):
     """HTTP server: POST /score (JPEG body) -> JSON scores; GET /health -> ok."""
+    metrics = ScorerMetrics()
 
     class Handler(BaseHTTPRequestHandler):
         def _reply(self, code, payload):
@@ -238,6 +286,8 @@ def make_server(score_fn, port=8765):
         def do_GET(self):
             if self.path == "/health":
                 self._reply(200, {"ok": True})
+            elif self.path == "/metrics":
+                self._reply(200, metrics.snapshot())
             else:
                 self._reply(404, {"error": "not found"})
 
@@ -254,11 +304,19 @@ def make_server(score_fn, port=8765):
                 tiles = 1
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)
+            metrics.begin(tiles)
+            request_started = time.monotonic()
+            score_started = time.monotonic()
+            ok = False
             try:
                 self._reply(200, score_fn(body, tiles))
+                ok = True
             except Exception as e:  # noqa: BLE001 - report, don't kill the server
                 log.warning("scoring failed: %s", e)
                 self._reply(500, {"error": str(e)})
+            finally:
+                score_seconds = time.monotonic() - score_started
+                metrics.finish(time.monotonic() - request_started, score_seconds, ok)
 
         def log_message(self, fmt, *args):  # route http.server chatter to logging
             log.debug(fmt, *args)

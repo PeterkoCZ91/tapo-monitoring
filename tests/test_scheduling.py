@@ -52,3 +52,14 @@ def test_is_night_falls_back_to_hhmm_without_coords(monkeypatch):
     monkeypatch.setenv("NIGHT_END", "6")
     # no coords -> astral raises -> HH:MM fallback; 15:00 is day
     assert scheduling.is_night(datetime(2026, 1, 1, 15, 0)) is False
+
+
+def test_is_night_uses_config_location_before_environment(monkeypatch):
+    from tapo_monitor.config import Location
+
+    monkeypatch.delenv("NIGHT_FORCE_HHMM", raising=False)
+    monkeypatch.setenv("NIGHT_LAT", "0")
+    monkeypatch.setenv("NIGHT_LON", "0")
+    monkeypatch.setenv("NIGHT_TZ", "UTC")
+    location = Location(lat=50.0, lon=14.0, tz="Europe/Prague")
+    assert scheduling.is_night(datetime(2026, 7, 26, 12, 0), location=location) is False

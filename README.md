@@ -146,7 +146,10 @@ python -m tapo_monitor.scorer_service --model /path/to/model.onnx --port 8766
 
 Then set the camera's `scorer.url`. If the scorer is unavailable, the alert pipeline
 degrades to unfiltered passthrough rather than silently dropping camera-confirmed people.
-Tiled inference and optional subject cropping help with distant subjects in wide views.
+The configured threshold gates on **person** confidence; animal confidence remains in the
+audit record for calibration and never sends a person alert. Tiled inference and optional
+subject cropping help with distant subjects in wide views. The scorer also exposes
+aggregate-only runtime counters at `/metrics` for operational monitoring.
 
 ## Safety and privacy
 

@@ -37,6 +37,19 @@ def test_health(server):
         assert json.load(resp) == {"ok": True}
 
 
+def test_metrics_are_aggregate_only_and_count_tile_inference(server):
+    req = urllib.request.Request(f"{server}/score?tiles=2", data=b"jpegbytes")
+    with urllib.request.urlopen(req, timeout=5):
+        pass
+    with urllib.request.urlopen(f"{server}/metrics", timeout=5) as resp:
+        metrics = json.load(resp)
+    assert metrics["requests"] == 1
+    assert metrics["completed"] == 1
+    assert metrics["inference_runs"] == 5
+    assert metrics["failed"] == 0
+    assert metrics["score_seconds_max"] >= 0
+
+
 def test_unknown_path_404(server):
     with pytest.raises(urllib.error.HTTPError) as e:
         urllib.request.urlopen(f"{server}/nope", timeout=5)
@@ -55,6 +68,13 @@ def test_score_fn_error_500():
         with pytest.raises(urllib.error.HTTPError) as e:
             urllib.request.urlopen(req, timeout=5)
         assert e.value.code == 500
+        with urllib.request.urlopen(f"http://127.0.0.1:{srv.server_address[1]}/metrics",
+                                    timeout=5) as response:
+            metrics = json.load(response)
+        assert metrics["requests"] == 1
+        assert metrics["completed"] == 1
+        assert metrics["failed"] == 1
+        assert metrics["in_flight"] == 0
     finally:
         srv.shutdown()
 
@@ -182,4 +202,3 @@ def test_scores_from_output_uses_darknet_coco_names():
 
     assert scores["classes"]["motorbike"] == pytest.approx(0.4, abs=1e-4)
     assert "motorcycle" not in scores["classes"]
-

@@ -9,6 +9,17 @@ seen. All functions here are pure; the daemon owns the I/O.
 """
 
 
+PIR_BIT = 32
+
+
+def _is_pir_backed(event):
+    """True when a getEvents event carries the camera's hardware-PIR flag."""
+    try:
+        return bool(int(event.get("events_1", 0)) & PIR_BIT)
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
 def observe_event(groups, name, event, etype, sent, now, scfg):
     """Fold one alertable event into the camera's group (create/extend). Mutates groups.
 
@@ -28,10 +39,12 @@ def observe_event(groups, name, event, etype, sent, now, scfg):
             "frames": 0,
             "next_due": started + scfg.interval,
             "sent": bool(sent),
+            "pir_backed": _is_pir_backed(event),
         }
         return
     g["last_event_at"] = now
     g["sent"] = g["sent"] or bool(sent)
+    g["pir_backed"] = g.get("pir_backed", False) or _is_pir_backed(event)
     if etype != "motion":
         g["etype"] = etype        # camera-confirmed detection outranks bare motion
         g["event"] = event
@@ -63,7 +76,7 @@ def note_score(group, score, scfg):
         return False
     streak = group.get("low_streak", 0) + 1
     group["low_streak"] = streak
-    if (scfg.low_score_exit > 0 and group["etype"] == "motion"
+    if (scfg.low_score_exit > 0 and group["etype"] == "motion" and not group.get("pir_backed")
             and streak >= scfg.low_score_exit and not group.get("early_exit")):
         group["early_exit"] = True
         return True

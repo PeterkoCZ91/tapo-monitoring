@@ -9,6 +9,7 @@ with their side-effecting pieces injected so the orchestration stays testable.
 import logging
 import os
 import shlex
+import time as _time
 
 from . import camera, detection, enrich, notify
 
@@ -71,8 +72,17 @@ def audit_event(cfg, event, etype, path, action, *, score=None, threshold=None,
         f"etype={_fmt_audit_value(etype)}",
         f"start={_fmt_audit_value(event.get('start_time', 0))}",
     ]
+    try:
+        event_age_s = max(0.0, _time.time() - float(event.get("start_time")))
+    except (TypeError, ValueError):
+        event_age_s = None
+    if event_age_s is not None:
+        parts.append(f"event_age_s={event_age_s:.3f}")
     if score is not None:
         parts.append(f"score={_fmt_score(score)}")
+        if hasattr(score, "person"):
+            parts.append(f"person_score={_fmt_score(score.person)}")
+            parts.append(f"animal_score={_fmt_score(score.animal)}")
     if threshold is not None:
         parts.append(f"threshold={_fmt_score(threshold)}")
     if telegram is not None:
@@ -173,7 +183,6 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         defer_motion = (
             etype == "motion"
             and cfg.sd_motion
-            and event_flags["motion"]
             and event_flags["pir"]
             and defer is not None
         )

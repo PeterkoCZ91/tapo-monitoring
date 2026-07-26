@@ -48,10 +48,10 @@ documented below as *available* but intentionally **not implemented** — see "A
   detection runs on stream2, and it sends the sharpest above-threshold frame (ffmpeg
   `blurdetect`) rather than the first. It requires `sd_snapshot: true` (it reuses the SD
   follow-up queue) and falls back to the SD/live path when no segment is available.
-- **Local YOLO scorer (optional)** — a stateless HTTP scorer can decide whether a
-  frame actually contains a person/animal before Telegram is sent. Groq then captions
-  only frames that already passed the scorer. Optional tiled inference scores the whole
-  image plus a grid to rescue distant subjects in wide views; `crop_to_subject` uses the
+- **Local YOLO scorer (optional)** — a stateless HTTP scorer gates person alerts by
+  person confidence; animal confidence remains audit evidence and cannot trigger Telegram.
+  Groq then captions only frames that already passed the scorer. Optional tiled inference
+  scores the whole image plus a grid to rescue distant subjects in wide views; `crop_to_subject` uses the
   winning person box for a padded alert-photo zoom and safely falls back to the full frame.
 - **Event-window sampler (optional)** — for long camera events, follow-up RTSP grabs
   across the event window catch people who enter frame after the first live grab.

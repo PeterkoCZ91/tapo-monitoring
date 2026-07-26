@@ -160,11 +160,16 @@ caption enrichment when the scorer is configured, not the primary detection auth
 
 Subject scoring is deliberately **not** run on the monitor host itself. The YOLO model
 (`yolox_m`, 640 input) is served once, out of process, over a small HTTP contract
-(`POST /score` → `{"person","animal","classes"}`, `GET /health`) by
+(`POST /score` → `{"person","animal","classes"}`, `GET /health`, `GET /metrics`) by
 `scorer_service.py`. Every monitor host — including low-power edge boxes such as a
 Raspberry Pi capturing a single camera — is a **thin client** that POSTs a JPEG and reads
 back a confidence, via `scorer.py`. Other projects on the same account (e.g. an ESP32
 camera system) consume the exact same service over the same contract.
+
+For this monitor, only `person` confidence is an alert-gating signal. `animal` and
+per-class values are retained as audit evidence for calibration, not as an alternate way
+to trigger a person alert. `/metrics` exposes aggregate runtime counters only and never
+stores request media or client identifiers.
 
 This is a design choice, not an accident of deployment:
 

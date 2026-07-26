@@ -12,6 +12,7 @@ import tempfile
 
 SCHEMA_VERSION = 1
 PERSISTED_FIELDS = (
+    "last_seen",
     "online_since",
     "fail_since",
     "outage_alerted",

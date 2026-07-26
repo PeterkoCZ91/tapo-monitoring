@@ -15,7 +15,15 @@ All notable changes to this project are documented here.
   the person box for subject crops (plus a diagnostic `tile_person`). Blown-up tile crops
   of night IR grain hallucinated 0.3–0.6 "person" scores and tripled night false alerts.
 
+- Local scorer alert gating now uses only `person` confidence. Returned animal confidence
+  remains audit telemetry, so an animal cannot trigger a person notification.
+
 ### Added
+- The scorer's `GET /metrics` endpoint exposes aggregate request, inference and latency
+  counters without retaining image, camera or client data.
+- Per-camera `always_day` and `always_night` schedules now override the shared astral
+  decision consistently; astral calculation prefers the configured location over legacy
+  environment variables.
 - Sampler low-score early exit (`sampler.low_score_exit` / `sampler.low_score`): a
   motion-only event group closes once N consecutive follow-up frames score below the
   "nothing there" mark, instead of grabbing the full window on empty bursts.

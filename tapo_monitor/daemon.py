@@ -111,6 +111,15 @@ def plan_camera(cfg: CameraConfig, night: bool, rain_active: bool) -> CameraPlan
     )
 
 
+def effective_night(cfg: CameraConfig, astronomical_night: bool) -> bool:
+    """Apply the camera's explicit schedule to the shared astronomical decision."""
+    if cfg.schedule == "always_day":
+        return False
+    if cfg.schedule == "always_night":
+        return True
+    return astronomical_night
+
+
 def apply_plan(cam, plan: CameraPlan):
     """Apply a CameraPlan to a connected camera in firmware-safe order.
 
@@ -129,8 +138,8 @@ def apply_plan(cam, plan: CameraPlan):
     if plan.night_vision is not None:
         try:
             cam.setDayNightMode(plan.night_vision)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - a camera control failure must not stop polling
+            log.warning("failed to set day/night mode %s: %s", plan.night_vision, exc)
     # Self-heal AI person detection (events_1 bit 19). It silently went 'off'
     # after a daemon restart (2026-06-15), demoting people to bare motion that the
     # funnel then dropped. Re-assert ON every tick. When a per-camera
@@ -178,7 +187,7 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
     is_night = is_night or scheduling.is_night
     is_raining = is_raining or weather.is_raining_now
 
-    night = is_night()
+    night = is_night() if is_night is not scheduling.is_night else scheduling.is_night(location=app.location)
     plans = {}
     for cfg in app.cameras:
         rain_active = False
@@ -188,7 +197,7 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
                 threshold=cfg.weather.precip_threshold,
                 poll_interval=cfg.weather.poll_interval,
             )
-        plan = plan_camera(cfg, night, rain_active)
+        plan = plan_camera(cfg, effective_night(cfg, night), rain_active)
         plans[cfg.name] = plan
         if connect is not None:
             cam, _err = connect(cfg)
@@ -511,6 +520,19 @@ def _caption_describe(cfg, groq_key, images):
     return "" if notify.is_empty_scene(desc) else desc
 
 
+def sd_followup_spans(cfg, event, etype):
+    """Return the initial and maximum SD windows for a follow-up."""
+    full_span = sdclip.event_span(event, cap=cfg.sd_span_cap)
+    if etype != "motion" or not cfg.sd_motion:
+        return full_span, full_span
+    first_cap = cfg.sd_motion_span_cap
+    if first_cap is None:
+        first_cap = min(cfg.sd_span_cap or sdclip.SD_SPAN_CAP, sdclip.SD_SPAN_CAP)
+    if cfg.sd_span_cap is not None:
+        first_cap = min(first_cap, cfg.sd_span_cap)
+
+    return sdclip.event_span(event, cap=first_cap), full_span
+
 def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
                      snapshot_for=None, time_str=None, night=True):
     """Poll the detection pipeline once per camera that uses ``getevents``.
@@ -536,9 +558,10 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
 
         can_alert, on_alert = alert_gate(state, name, cooldown, now)
 
-        def defer(event, etype, live_sent, _name=name, _cap=cfg.sd_span_cap,
+        def defer(event, etype, live_sent, _name=name, _cfg=cfg,
                   _source=cfg.snapshot_source):
             key = "motion" if etype == "motion" else "confirmed"
+            first_span, full_span = sd_followup_spans(_cfg, event, etype)
             try:
                 start = float(event.get("start_time"))
             except (TypeError, ValueError):
@@ -567,14 +590,16 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                 "camera": _name,
                 "etype": etype,
                 "event": event,
+                "span": first_span,
+                "full_span": full_span,
                 # Window and due time follow the camera's own event seconds (end_time),
                 # bounded by the camera's hardware budget (sd_span_cap): a longer event
                 # needs a wider window AND a later fetch, or the window end is still
                 # inside pytapo's freshness guard and downloads empty.
                 "due_at": (event.get("start_time") or now)
-                          + (recclip.fresh_delay(sdclip.event_span(event, cap=_cap))
+                          + (recclip.fresh_delay(first_span)
                              if _source == "recording"
-                             else sdclip.fresh_delay(sdclip.event_span(event, cap=_cap))),
+                             else sdclip.fresh_delay(first_span)),
                 "live_sent": live_sent,
             })
         defer_fn = defer if cfg.sd_snapshot else None
@@ -713,9 +738,11 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
             fetch = recclip.fetch_recording_frames   # reads RECORDING_ROOT for the tree
         else:
             fetch = sdclip.fetch_sd_frames_subprocess
-        frames = fetch(cfg, start_time,
-                       span=sdclip.event_span(event, cap=cfg.sd_span_cap),
-                       out_dir=job_dir)
+        span = entry.get("span")
+        if span is None:  # backwards-compatible with entries queued by older daemons
+            span = sdclip.event_span(event, cap=cfg.sd_span_cap)
+        full_span = entry.get("full_span", sdclip.event_span(event, cap=cfg.sd_span_cap))
+        frames = fetch(cfg, start_time, span=span, out_dir=job_dir)
         image, description, fallback_image = None, "", None
         selected_score = None
         score = score_for(cfg)
@@ -747,6 +774,19 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
                     break
             if image is None:
                 if frames:
+                    if (etype == "motion" and span < full_span
+                            and not entry.get("extended_retry")):
+                        entry["span"] = full_span
+                        entry["extended_retry"] = True
+                        entry["due_at"] = now
+                        remaining.append(entry)
+                        monitor.audit_event(
+                            cfg, event, etype, "sd", "retry",
+                            reason=f"extend_span={span}->{full_span}",
+                        )
+                        log.info("retry %s: no subject in %ss SD window; extending to %ss",
+                                 etype, span, full_span)
+                        continue
                     # Groq saw nobody in any frame spanning the whole event. Live
                     # 2026-07-02..06 every such case was a false positive (passing car
                     # at night), so a blank photo helps nobody — drop, keep the trace.

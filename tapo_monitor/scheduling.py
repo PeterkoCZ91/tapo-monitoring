@@ -41,15 +41,18 @@ def _is_night_hhmm(now=None):
     return cur >= start or cur < end
 
 
-def _is_night_astral(now=None):
+def _is_night_astral(now=None, location=None):
     from zoneinfo import ZoneInfo
 
     from astral import LocationInfo
     from astral.sun import sun
 
-    lat_env = os.getenv("NIGHT_LAT")
-    lon_env = os.getenv("NIGHT_LON")
-    tz_name = os.getenv("NIGHT_TZ")
+    lat_env = getattr(location, "lat", None) if location is not None else None
+    lon_env = getattr(location, "lon", None) if location is not None else None
+    tz_name = getattr(location, "tz", None) if location is not None else None
+    lat_env = lat_env if lat_env is not None else os.getenv("NIGHT_LAT")
+    lon_env = lon_env if lon_env is not None else os.getenv("NIGHT_LON")
+    tz_name = tz_name or os.getenv("NIGHT_TZ")
     if not (lat_env and lon_env and tz_name):
         raise RuntimeError("NIGHT_LAT/NIGHT_LON/NIGHT_TZ not set")
     lat = float(lat_env)
@@ -74,11 +77,11 @@ def _is_night_astral(now=None):
     return True
 
 
-def is_night(now=None):
+def is_night(now=None, location=None):
     if os.getenv("NIGHT_FORCE_HHMM", "").strip() in ("1", "true", "yes"):
         return _is_night_hhmm(now)
     try:
-        return _is_night_astral(now)
+        return _is_night_astral(now, location)
     except Exception as e:
         print(f"[scheduling] astral failed ({e}), falling back to HH:MM", flush=True)
         return _is_night_hhmm(now)

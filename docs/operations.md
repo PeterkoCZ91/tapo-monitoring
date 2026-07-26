@@ -23,7 +23,14 @@ only shared contract is HTTP:
 
 ```text
 POST /score  JPEG bytes -> {"person": float, "animal": float, "classes": {...}}
+GET /health              -> {"ok": true}
+GET /metrics             -> aggregate request, inference and latency counters
 ```
+
+The monitor gates person alerts on `person` only. `animal` is returned for audit and
+calibration, but an animal score can never pass a person-alert threshold. `/metrics`
+contains aggregate counts and durations only: it does not retain JPEGs, URLs, camera names
+or client addresses.
 
 ## Monitor instances
 
@@ -84,6 +91,7 @@ sudo cp systemd/tapo-scorer@.service /etc/systemd/system/tapo-scorer@.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now tapo-scorer@tapo
 curl -s http://127.0.0.1:8766/health   # -> {"ok": true}
+curl -s http://127.0.0.1:8766/metrics  # request/inference/latency counters
 ```
 
 Point each camera's `scorer.url` at the service:

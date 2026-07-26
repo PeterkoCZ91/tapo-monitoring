@@ -176,6 +176,10 @@ Health check:
 curl -s http://127.0.0.1:8766/health
 ```
 
+`/metrics` reports aggregate request, inference and latency counters without recording
+frames. A rising `failed` count indicates scorer errors; it does not mean the monitor
+dropped the corresponding alert, because scorer failures fail open.
+
 If the scorer is unreachable, the monitor fails open. This can increase false positives
 but should not hide camera-confirmed people.
 

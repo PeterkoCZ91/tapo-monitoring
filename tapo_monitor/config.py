@@ -127,6 +127,10 @@ class CameraConfig:
     # package default (Pi Zero-safe). Camera events run ~2 min; hardware that can afford
     # the download (Pi 4) may raise this to scan the whole event for the subject.
     sd_span_cap: int | None = None
+    # Optional shorter first window for unconfirmed motion/PIR. A second pass can
+    # expand to sd_span_cap when the short window contains no subject.
+    sd_motion_span_cap: int | None = None
+
     # Opt-in SD follow-up for PIR-backed bare motion whose live frame was empty (people
     # the camera never confirmed as person). Costs an SD download per motion burst, so
     # keep it off on weak hardware; never sends without a subject-bearing frame.
@@ -405,6 +409,7 @@ def _camera(data, index):
         rtsp_user_env=data.get("rtsp_user_env"),
         rtsp_password_env=data.get("rtsp_password_env"),
         rtsp_port=rtsp_port,
+        sd_motion_span_cap=int(data["sd_motion_span_cap"]) if data.get("sd_motion_span_cap") is not None else None,
         rtsp_stream=data.get("rtsp_stream", "stream1"),
         rtsp_timeout=rtsp_timeout,
         sd_snapshot=bool(data.get("sd_snapshot", False)),
