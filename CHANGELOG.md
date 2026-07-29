@@ -8,6 +8,8 @@ All notable changes to this project are documented here.
 - Reworked the GitHub landing page and added a documentation index, architecture guide,
   configuration reference and firmware-aware troubleshooting runbook. Operational,
   opt-in, researched and planned capabilities are now labelled explicitly.
+- Operations runbook now documents the frame-level calibration aids (sent-frame archive and
+  the `scene_probe` on-demand scorer).
 
 ### Fixed
 - Tiled scoring no longer gates alerts: with `scorer.tiles > 1` the send-decision
@@ -19,6 +21,14 @@ All notable changes to this project are documented here.
   remains audit telemetry, so an animal cannot trigger a person notification.
 
 ### Added
+- Opt-in sent-frame archive (`TAPO_SENT_LOG_DIR`): every photo delivered to Telegram is
+  copied to a timestamped JPEG with an index line and pruned after
+  `TAPO_SENT_LOG_RETENTION_DAYS` (default 2 days), so false positives can be reviewed as
+  images. Inert when the variable is unset and never blocks a send.
+- `scene_probe` diagnostic (`python -m tapo_monitor.scene_probe cameras.yaml <cameras>`):
+  grabs a live frame from named cameras and scores it internally — full-frame person/animal
+  plus the best-tile score — without sending anything to Telegram, for calibrating scorer
+  sensitivity on demand.
 - The scorer's `GET /metrics` endpoint exposes aggregate request, inference and latency
   counters without retaining image, camera or client data.
 - Per-camera `always_day` and `always_night` schedules now override the shared astral

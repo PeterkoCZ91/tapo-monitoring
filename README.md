@@ -151,6 +151,11 @@ audit record for calibration and never sends a person alert. Tiled inference and
 subject cropping help with distant subjects in wide views. The scorer also exposes
 aggregate-only runtime counters at `/metrics` for operational monitoring.
 
+Two opt-in calibration aids help tune thresholds by frame rather than by guesswork: an
+archive of every photo sent to Telegram (`TAPO_SENT_LOG_DIR`, self-pruning) and
+`python -m tapo_monitor.scene_probe`, which scores a live frame internally without alerting.
+See [Operations](docs/operations.md#inspecting-alert-frames).
+
 ## Safety and privacy
 
 - No credentials, coordinates, camera addresses or face mappings belong in the repository.

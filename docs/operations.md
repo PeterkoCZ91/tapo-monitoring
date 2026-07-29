@@ -172,6 +172,38 @@ For rotating night cameras, parked cars should show up as motion/PIR events foll
 low scorer scores and no Telegram send. If they produce sends, inspect the frame before
 touching thresholds.
 
+## Inspecting alert frames
+
+Threshold tuning is easier when you can see the exact frame behind a score. Two opt-in aids
+capture frames for review without changing alert behaviour.
+
+**Archive what was sent.** Set `TAPO_SENT_LOG_DIR` and every photo delivered to Telegram is
+also copied there as a timestamped JPEG beside an `index.jsonl` line (caption and delivery
+flag). Files older than `TAPO_SENT_LOG_RETENTION_DAYS` (default 2) are pruned on each write,
+so the archive self-limits to a couple of days. It is inert when the variable is unset and
+never raises into the send path — a full disk degrades to "no archive", never a lost alert.
+
+```bash
+export TAPO_SENT_LOG_DIR=~/tapo-monitor/sent-log
+export TAPO_SENT_LOG_RETENTION_DAYS=2   # optional, default 2
+```
+
+**Score a frame on demand.** The daemon only scores frames behind camera events, and
+`night_only` cameras only at night, so there is otherwise no way to see how the scorer reads
+a scene right now. `scene_probe` grabs a current RTSP frame from named cameras and scores it
+through the same service — without sending anything to Telegram:
+
+```bash
+python -m tapo_monitor.scene_probe cameras.yaml front yard
+# front   person=0.26  animal=0.06  tile2=0.28  top=[horse:0.06]  box=[...]
+```
+
+It prints the full-frame `person`/`animal` scores plus the best-tile score (`--tiles`,
+default 2, mirrors what tiled inference would see) and saves each frame with its scores in
+the filename under `--archive-dir` (default `~/tapo-monitor/probe-log`; `--no-archive`
+prints only). It reuses the daemon's snapshot and scorer helpers and does not touch a
+running daemon, so it is safe to run against production cameras.
+
 ## Debugging checklist
 
 1. Decide which process owns the symptom: monitor, scorer or recorder.
