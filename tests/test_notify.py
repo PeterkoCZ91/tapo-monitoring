@@ -78,3 +78,46 @@ def test_alert_at_cooldown_boundary_allowed():
 
 def test_alert_after_cooldown_allowed():
     assert notify.should_send_alert(1000.0, 2000.0, cooldown=120) is True
+
+
+# ── send_photo archiving (opt-in sent-frame log) ─────────────────────────────
+
+class _FakeResp:
+    status = 200
+
+    def __init__(self, body):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_send_photo_archives_sent_frame_when_configured(monkeypatch, tmp_path):
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: _FakeResp(b'{"ok":true}'))
+    archive = tmp_path / "sent"
+    monkeypatch.setenv("TAPO_SENT_LOG_DIR", str(archive))
+    img = tmp_path / "snap.jpg"
+    img.write_bytes(b"\xff\xd8IMG")
+
+    assert notify.send_photo("tok", "chat", str(img), "\U0001f464 23:14") is True
+
+    saved = list(archive.glob("*.jpg"))
+    assert len(saved) == 1
+    assert saved[0].read_bytes() == b"\xff\xd8IMG"
+
+
+def test_send_photo_does_not_archive_when_not_configured(monkeypatch, tmp_path):
+    monkeypatch.delenv("TAPO_SENT_LOG_DIR", raising=False)
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: _FakeResp(b'{"ok":true}'))
+    img = tmp_path / "snap.jpg"
+    img.write_bytes(b"x")
+
+    assert notify.send_photo("tok", "chat", str(img), "c") is True

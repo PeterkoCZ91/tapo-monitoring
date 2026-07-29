@@ -9,6 +9,8 @@ import json
 import urllib.parse
 import urllib.request
 
+from . import sentlog
+
 _API = "https://api.telegram.org"
 
 # Marker the vision model returns for a frame with nothing of interest.
@@ -114,7 +116,10 @@ def send_photo(token, chat_id, image_path, caption):
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return resp.status < 300 and '"ok":true' in resp.read().decode(errors="replace")
+            ok = resp.status < 300 and '"ok":true' in resp.read().decode(errors="replace")
+        # Best-effort diagnostic copy of the exact frame we pushed (opt-in via env).
+        sentlog.archive_if_configured(image, caption, delivered=ok)
+        return ok
     except Exception:
         return False
 
