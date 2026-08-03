@@ -155,3 +155,33 @@ def test_low_score_exit_off_by_default():
     for _ in range(10):
         assert sampler.note_score(g, 0.01, CFG) is False
     assert sampler.due(g, 1030, CFG) is True
+
+
+# ── multi-frame corroboration (non-PIR bare motion) ──────────────────────────
+
+def test_corroborate_sends_high_score_immediately():
+    g = {"motion_candidates": 0}
+    assert sampler.corroborate_motion(g, 0.7, 0.3, 0.6) == "send"
+    assert g["motion_candidates"] == 0          # high score doesn't need a candidate
+
+
+def test_corroborate_holds_first_marginal_then_sends_second():
+    g = {}
+    assert sampler.corroborate_motion(g, 0.35, 0.3, 0.6) == "hold"
+    assert g["motion_candidates"] == 1
+    assert sampler.corroborate_motion(g, 0.42, 0.3, 0.6) == "send"
+    assert g["motion_candidates"] == 2
+
+
+def test_corroborate_drops_below_confirm():
+    g = {"motion_candidates": 1}
+    assert sampler.corroborate_motion(g, 0.2, 0.3, 0.6) == "drop"
+    assert g["motion_candidates"] == 1          # a low frame does not reset the count
+
+
+def test_ensure_group_creates_then_returns_same():
+    groups = {}
+    g1 = sampler.ensure_group(groups, "a", _ev(1000), "motion", 1010, CFG)
+    g2 = sampler.ensure_group(groups, "a", _ev(1020), "motion", 1030, CFG)
+    assert g1 is g2
+    assert g1["started"] == 1000 and g1["sent"] is False

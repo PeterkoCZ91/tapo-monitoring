@@ -11,6 +11,10 @@ seen. All functions here are pure; the daemon owns the I/O.
 
 PIR_BIT = 32
 
+# A single marginal bare-motion frame is held until this many frames in the
+# [threshold, motion_send_threshold) band accumulate within the group's window.
+MOTION_CONFIRM_FRAMES = 2
+
 
 def _is_pir_backed(event):
     """True when a getEvents event carries the camera's hardware-PIR flag."""
@@ -20,17 +24,17 @@ def _is_pir_backed(event):
         return False
 
 
-def observe_event(groups, name, event, etype, sent, now, scfg):
-    """Fold one alertable event into the camera's group (create/extend). Mutates groups.
+def ensure_group(groups, name, event, etype, now, scfg):
+    """Return the camera's open group, creating a fresh (unsent) one if none is open.
 
-    ``sent`` means an alert already went out (or was handed to the SD follow-up) for
-    this event — a sent group stops sampling but keeps absorbing the rest of the burst
-    so trailing events don't spawn a fresh group.
+    Mutates ``groups``. A group is "open" while the last event is within ``group_gap``;
+    past that the burst is over and a new group starts. Shared by :func:`observe_event`
+    and the corroboration wiring so the group exists as soon as the first frame scores.
     """
-    started = event.get("start_time") or now
     g = groups.get(name)
     if g is None or (now - g["last_event_at"]) > scfg.group_gap:
-        groups[name] = {
+        started = event.get("start_time") or now
+        g = {
             "camera": name,
             "etype": etype,
             "event": event,
@@ -38,10 +42,21 @@ def observe_event(groups, name, event, etype, sent, now, scfg):
             "last_event_at": now,
             "frames": 0,
             "next_due": started + scfg.interval,
-            "sent": bool(sent),
+            "sent": False,
             "pir_backed": _is_pir_backed(event),
         }
-        return
+        groups[name] = g
+    return g
+
+
+def observe_event(groups, name, event, etype, sent, now, scfg):
+    """Fold one alertable event into the camera's group (create/extend). Mutates groups.
+
+    ``sent`` means an alert already went out (or was handed to the SD follow-up) for
+    this event — a sent group stops sampling but keeps absorbing the rest of the burst
+    so trailing events don't spawn a fresh group.
+    """
+    g = ensure_group(groups, name, event, etype, now, scfg)
     g["last_event_at"] = now
     g["sent"] = g["sent"] or bool(sent)
     g["pir_backed"] = g.get("pir_backed", False) or _is_pir_backed(event)
@@ -81,6 +96,23 @@ def note_score(group, score, scfg):
         group["early_exit"] = True
         return True
     return False
+
+
+def corroborate_motion(group, score, confirm, send_now):
+    """Decide a non-PIR bare-motion frame; mutate the group's candidate counter.
+
+    An empty IR scene hallucinates "person" on one frame and not the next, while a
+    real subject persists — so a single marginal frame is held for corroboration.
+      score >= send_now            -> "send"  (a clear single frame; no wait)
+      confirm <= score < send_now  -> candidate; "send" once MOTION_CONFIRM_FRAMES reached
+      score < confirm              -> "drop"  (does not reset the candidate count)
+    """
+    if score >= send_now:
+        return "send"
+    if score >= confirm:
+        group["motion_candidates"] = group.get("motion_candidates", 0) + 1
+        return "send" if group["motion_candidates"] >= MOTION_CONFIRM_FRAMES else "hold"
+    return "drop"
 
 
 def record_grab(group, now, scfg):
