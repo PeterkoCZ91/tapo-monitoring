@@ -286,6 +286,7 @@ scorer:
   threshold: 0.40
   timeout: 10
   tiles: 2
+  motion_send_threshold: 0.60
 
 crop_to_subject: true
 ```
@@ -297,15 +298,25 @@ returned `animal` score is audit telemetry only. The best tile contributes the p
 diagnostic `tile_person` score. Blown-up tile crops of night IR grain routinely
 hallucinate 0.3–0.6 "person" scores, so tile scores never gate alerts.
 
-```yaml
-```
+`motion_send_threshold` adds multi-frame corroboration for **bare (non-PIR) motion**.
+An empty IR scene hallucinates a 0.3–0.6 "person" score on one frame and not the next,
+while a real subject persists across frames. So, for non-PIR motion:
+
+- a frame `>= motion_send_threshold` sends immediately (a clear single frame);
+- a frame in `[threshold, motion_send_threshold)` is *held* until a second frame in that
+  band corroborates it within the sampler window (needs `sampler.enabled`), otherwise it
+  is dropped when the group closes;
+- camera-confirmed people and PIR-backed motion are unaffected — they keep the immediate
+  path, so a confirmed person is never delayed or dropped.
+
+Unset (the default) keeps the legacy behaviour: any motion frame `>= threshold` sends.
 
 - `threshold` is the minimum **person** confidence from 0 to 1; animal confidence never
   triggers an alert.
 - `tiles: 1` scores only the whole frame; larger values also score a grid.
 - `crop_to_subject` uses the best returned person box and safely falls back to the full
   frame.
-- Scorer errors fail open.
+- Scorer errors fail open (one automatic retry, then raw passthrough — never a silent drop).
 
 `enrich.groq` controls optional captions:
 

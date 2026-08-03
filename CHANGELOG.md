@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+- Multi-frame corroboration for bare (non-PIR) motion (`scorer.motion_send_threshold`):
+  a single marginal frame (`[threshold, motion_send_threshold)`) is held until a second
+  frame corroborates it within the sampler window, cutting empty-scene night false
+  positives without delaying camera-confirmed people or PIR-backed motion. Default off.
+
+### Changed
+- The scorer client now retries once before degrading to raw passthrough, so a single
+  transient timeout no longer flips a whole event burst to unfiltered sends. Telegram
+  photo sends also retry once before being reported as undelivered.
+
 ### Documentation
 - Reworked the GitHub landing page and added a documentation index, architecture guide,
   configuration reference and firmware-aware troubleshooting runbook. Operational,
