@@ -1902,6 +1902,19 @@ def test_process_sampler_holds_first_marginal_motion(monkeypatch):
     assert g["frames"] == 1                    # still sampling
 
 
+def test_process_sampler_hold_archives_review_frame(monkeypatch):
+    reviews = []
+    monkeypatch.setattr(daemon.sentlog, "archive_review_if_configured",
+                        lambda path, meta, **k: reviews.append(meta))
+    sent = []
+    app = _sampler_app(threshold=0.3, motion_send=0.6)
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    _run_sampler(app, state, 1035, sent, monkeypatch, score=0.4)
+    assert sent == []
+    assert len(reviews) == 1 and reviews[0]["verdict"] == "hold"
+
+
 def test_process_sampler_sends_second_marginal_motion(monkeypatch):
     sent = []
     app = _sampler_app(threshold=0.3, motion_send=0.6)

@@ -40,6 +40,7 @@ from . import (
     scheduling,
     scorer,
     sdclip,
+    sentlog,
     snapshot,
     tracking,
     twin,
@@ -919,6 +920,10 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                     monitor.audit_event(cfg, group["event"], etype, "sampler", "hold", score=s,
                                         threshold=cfg.scorer.threshold,
                                         reason="awaiting_corroboration")
+                    sentlog.archive_review_if_configured(image, {
+                        "camera": cfg.name, "verdict": "hold", "etype": etype,
+                        "person": float(getattr(s, "person", s)),
+                        "animal": float(getattr(s, "animal", 0.0))})
                     continue
                 # verdict == "send": fall through to the send block
             elif score is not None and s is not None and s < cfg.scorer.threshold:

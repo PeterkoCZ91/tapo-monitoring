@@ -14,6 +14,9 @@ All notable changes to this project are documented here.
 - The scorer client now retries once before degrading to raw passthrough, so a single
   transient timeout no longer flips a whole event burst to unfiltered sends. Telegram
   photo sends also retry once before being reported as undelivered.
+- Opt-in review log (`TAPO_REVIEW_LOG_DIR`) archives the frames motion corroboration
+  *held* (never sent), so a hold can be verified as an animal/empty scene rather than a
+  missed person. Weekly retention by default (`TAPO_REVIEW_LOG_RETENTION_DAYS`, default 7).
 
 ### Documentation
 - Reworked the GitHub landing page and added a documentation index, architecture guide,

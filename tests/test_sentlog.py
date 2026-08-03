@@ -99,3 +99,36 @@ def test_archive_if_configured_writes_when_dir_set(tmp_path):
     path = sentlog.archive_if_configured(b"x", "c", delivered=True, now=1785200000.0, env=env)
     assert path is not None
     assert (tmp_path / os.path.basename(path)).exists()
+
+
+# ── review log: suppressed (held) frames for visual FP verification ───────────
+
+def test_archive_review_noop_when_dir_unset(tmp_path):
+    img = tmp_path / "f.jpg"
+    img.write_bytes(b"\xff\xd8IMG")
+    assert sentlog.archive_review_if_configured(str(img), {"camera": "a"}, env={}) is None
+
+
+def test_archive_review_writes_frame_and_index(tmp_path):
+    src = tmp_path / "f.jpg"
+    src.write_bytes(b"\xff\xd8IMG")
+    out = tmp_path / "review"
+    env = {sentlog.ENV_REVIEW_DIR: str(out)}
+    meta = {"camera": "yard", "verdict": "hold", "person": 0.42, "animal": 0.01,
+            "etype": "motion"}
+    path = sentlog.archive_review_if_configured(str(src), meta, now=1785200000.5, env=env)
+    assert path is not None
+    saved = out / os.path.basename(path)
+    assert saved.read_bytes() == b"\xff\xd8IMG"
+    assert "yard" in saved.name and "hold" in saved.name
+    rec = json.loads((out / "index.jsonl").read_text().strip())
+    assert rec["camera"] == "yard" and rec["verdict"] == "hold" and rec["person"] == 0.42
+
+
+def test_archive_review_best_effort_on_missing_source(tmp_path):
+    env = {sentlog.ENV_REVIEW_DIR: str(tmp_path / "review")}
+    assert sentlog.archive_review_if_configured("/no/such/frame.jpg", {}, env=env) is None
+
+
+def test_archive_review_default_retention_is_weekly():
+    assert sentlog.DEFAULT_REVIEW_RETENTION_DAYS == 7.0

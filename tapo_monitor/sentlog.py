@@ -23,6 +23,13 @@ ENV_RETENTION = "TAPO_SENT_LOG_RETENTION_DAYS"
 DEFAULT_RETENTION_DAYS = 2.0
 INDEX_NAME = "index.jsonl"
 
+# Review log: the frames corroboration *suppressed* (held, never sent). The sent log only
+# keeps what went out, so it can't show whether a hold correctly dropped an animal/empty
+# scene or wrongly dropped a person. Opt-in, best-effort, defaults to a week of retention.
+ENV_REVIEW_DIR = "TAPO_REVIEW_LOG_DIR"
+ENV_REVIEW_RETENTION = "TAPO_REVIEW_LOG_RETENTION_DAYS"
+DEFAULT_REVIEW_RETENTION_DAYS = 7.0
+
 
 def archive_dir_from_env(env=None):
     """Configured archive directory, or None when the feature is off. Pure."""
@@ -97,3 +104,56 @@ def archive_if_configured(image_bytes, caption, *, delivered=True, now=None, env
     now = time.time() if now is None else now
     return archive_sent(archive_dir, image_bytes, caption, now=now,
                         retention_days=retention_days_from_env(env), delivered=delivered)
+
+
+def _review_score_tag(meta):
+    person = meta.get("person")
+    return f"_p{person:.2f}" if isinstance(person, (int, float)) else ""
+
+
+def archive_review_frame(archive_dir, image_bytes, meta, *, now, retention_days):
+    """Copy one suppressed frame + index line into ``archive_dir``; prune stale files.
+
+    The filename carries the camera, verdict and person score so the archive is skimmable
+    without opening the index. Returns the saved path, or None on any failure (never raises).
+    """
+    try:
+        os.makedirs(archive_dir, exist_ok=True)
+        cam = str(meta.get("camera", "cam"))
+        verdict = str(meta.get("verdict", "hold"))
+        name = f"{cam}_{verdict}{_review_score_tag(meta)}_{_stamp(now)}.jpg"
+        path = os.path.join(archive_dir, name)
+        with open(path, "wb") as f:
+            f.write(image_bytes)
+        record = {"ts": now, "file": name, **meta}
+        with open(os.path.join(archive_dir, INDEX_NAME), "a", encoding="utf-8") as idx:
+            idx.write(json.dumps(record, ensure_ascii=False) + "\n")
+        prune_old(archive_dir, now, retention_days)
+        return path
+    except OSError:
+        log.debug("sentlog: review archiving failed", exc_info=True)
+        return None
+
+
+def archive_review_if_configured(image_path, meta, *, now=None, env=None):
+    """Archive a suppressed frame when ``TAPO_REVIEW_LOG_DIR`` is set; otherwise a no-op.
+
+    Reads the frame from ``image_path`` (the daemon still owns/unlinks it). Best-effort:
+    a missing file, unset env or write error degrades to None, never into the alert path.
+    """
+    env = os.environ if env is None else env
+    archive_dir = (env.get(ENV_REVIEW_DIR) or "").strip() or None
+    if archive_dir is None:
+        return None
+    try:
+        with open(image_path, "rb") as f:
+            image_bytes = f.read()
+    except OSError:
+        return None
+    now = time.time() if now is None else now
+    try:
+        retention_days = float(env[ENV_REVIEW_RETENTION])
+    except (KeyError, TypeError, ValueError):
+        retention_days = DEFAULT_REVIEW_RETENTION_DAYS
+    return archive_review_frame(archive_dir, image_bytes, meta, now=now,
+                                retention_days=retention_days)

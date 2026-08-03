@@ -188,6 +188,18 @@ export TAPO_SENT_LOG_DIR=~/tapo-monitor/sent-log
 export TAPO_SENT_LOG_RETENTION_DAYS=2   # optional, default 2
 ```
 
+**Archive what was suppressed.** With motion corroboration on (`scorer.motion_send_threshold`),
+borderline non-PIR motion is *held* rather than sent. The sent log can't show those, so set
+`TAPO_REVIEW_LOG_DIR` to also archive every held frame (filename carries camera, verdict and
+person score; `index.jsonl` records the rest). This is the ground truth for confirming a hold
+suppressed an animal/empty scene rather than a person. Pruned by `TAPO_REVIEW_LOG_RETENTION_DAYS`
+(default 7); inert when unset; never raises into the alert path.
+
+```bash
+export TAPO_REVIEW_LOG_DIR=~/tapo-monitor/review-log
+export TAPO_REVIEW_LOG_RETENTION_DAYS=7   # optional, default 7
+```
+
 **Score a frame on demand.** The daemon only scores frames behind camera events, and
 `night_only` cameras only at night, so there is otherwise no way to see how the scorer reads
 a scene right now. `scene_probe` grabs a current RTSP frame from named cameras and scores it
