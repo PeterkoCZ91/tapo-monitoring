@@ -1701,12 +1701,15 @@ def test_pending_raw_mode_sends_sd_frame_without_groq(monkeypatch):
 
 # -- process_sampler ----------------------------------------------------------
 
-def _sampler_app(threshold=0.4, url="http://127.0.0.1:1/score"):
+def _sampler_app(threshold=0.4, url="http://127.0.0.1:1/score", motion_send=None):
+    scorer = {"url": url, "threshold": threshold}
+    if motion_send is not None:
+        scorer["motion_send_threshold"] = motion_send
     return cfg.load_config_from_dict(
         {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10",
                                     "sampler": {"enabled": True, "interval": 30,
                                                 "max_frames": 6, "group_gap": 90},
-                                    "scorer": {"url": url, "threshold": threshold}}]})
+                                    "scorer": scorer}]})
 
 
 def _group(started=1000, etype="motion", sent=False, frames=0):
@@ -1811,6 +1814,46 @@ def test_sampler_not_due_or_sent_group_untouched(monkeypatch):
     _run_sampler(app, state, 1010, sent, monkeypatch)   # before next_due
     assert sent == []
     assert state.groups["a"]["frames"] == 0
+
+
+def test_process_sampler_holds_first_marginal_motion(monkeypatch):
+    # A single marginal follow-up frame (threshold <= score < motion_send_threshold)
+    # must be held for corroboration, not sent.
+    sent = []
+    app = _sampler_app(threshold=0.3, motion_send=0.6)
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    _run_sampler(app, state, 1035, sent, monkeypatch, score=0.4)
+    assert sent == []
+    g = state.groups["a"]
+    assert g["sent"] is False
+    assert g["motion_candidates"] == 1
+    assert g["frames"] == 1                    # still sampling
+
+
+def test_process_sampler_sends_second_marginal_motion(monkeypatch):
+    sent = []
+    app = _sampler_app(threshold=0.3, motion_send=0.6)
+    state = daemon.MonitorState()
+    g = _group()
+    g["motion_candidates"] = 1                 # one candidate already seen
+    state.groups["a"] = g
+    _run_sampler(app, state, 1035, sent, monkeypatch, score=0.4)
+    assert len(sent) == 1                       # corroborated -> send
+    assert state.groups["a"]["sent"] is True
+
+
+def test_process_sampler_pir_group_unaffected_by_corroboration(monkeypatch):
+    # PIR-backed motion keeps the legacy immediate path: 0.4 >= threshold -> send.
+    sent = []
+    app = _sampler_app(threshold=0.3, motion_send=0.6)
+    state = daemon.MonitorState()
+    g = _group()
+    g["pir_backed"] = True
+    state.groups["a"] = g
+    _run_sampler(app, state, 1035, sent, monkeypatch, score=0.4)
+    assert len(sent) == 1
+    assert state.groups["a"]["sent"] is True
 
 
 def test_sampler_expired_group_removed(monkeypatch):

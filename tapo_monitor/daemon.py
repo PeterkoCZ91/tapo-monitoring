@@ -879,7 +879,32 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
             etype = group["etype"]
             score = score_for(cfg)
             s = score(image) if score is not None else None
-            if score is not None and s is not None and s < cfg.scorer.threshold:
+            motion_corr = (cfg.scorer.motion_send_threshold is not None
+                           and etype == "motion" and not group.get("pir_backed"))
+            if score is not None and s is not None and motion_corr:
+                verdict = sampler.corroborate_motion(
+                    group, s, cfg.scorer.threshold, cfg.scorer.motion_send_threshold)
+                if verdict == "drop":
+                    log.info("sampler %s frame %d/%d: score %.2f below threshold %.2f",
+                             cfg.name, group["frames"], scfg.max_frames, s, cfg.scorer.threshold)
+                    monitor.audit_event(cfg, group["event"], etype, "sampler", "drop", score=s,
+                                        threshold=cfg.scorer.threshold, reason="below_threshold")
+                    if sampler.note_score(group, s, scfg):
+                        log.info("sampler %s: early exit after %d consecutive low frames",
+                                 cfg.name, group["low_streak"])
+                        monitor.audit_event(cfg, group["event"], etype, "sampler", "early_exit",
+                                            score=s, threshold=scfg.low_score,
+                                            reason="low_score_streak")
+                    continue
+                if verdict == "hold":
+                    log.info("sampler %s frame %d/%d: score %.2f awaiting corroboration",
+                             cfg.name, group["frames"], scfg.max_frames, s)
+                    monitor.audit_event(cfg, group["event"], etype, "sampler", "hold", score=s,
+                                        threshold=cfg.scorer.threshold,
+                                        reason="awaiting_corroboration")
+                    continue
+                # verdict == "send": fall through to the send block
+            elif score is not None and s is not None and s < cfg.scorer.threshold:
                 log.info("sampler %s frame %d/%d: score %.2f below threshold %.2f",
                          cfg.name, group["frames"], scfg.max_frames, s, cfg.scorer.threshold)
                 monitor.audit_event(cfg, group["event"], etype, "sampler", "drop", score=s,
