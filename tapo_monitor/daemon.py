@@ -58,6 +58,10 @@ log = logging.getLogger(__name__)
 # queue if a camera stays offline so it can never grow without limit.
 PENDING_MAX_AGE = 600
 
+# A single transient scorer timeout would otherwise flip the whole frame to passthrough
+# (unfiltered spam). Retry once after this delay before degrading.
+SCORER_RETRY_DELAY = 0.5
+
 
 def _safe_unlink(path):
     if not path:
@@ -437,6 +441,11 @@ def score_for(cfg: CameraConfig):
     def score(image_path):
         result = scorer.score_image(cfg.scorer.url, image_path, timeout=cfg.scorer.timeout,
                                     tiles=cfg.scorer.tiles)
+        if result is None:
+            # One transient timeout/blip shouldn't spam a whole burst through passthrough.
+            _time.sleep(SCORER_RETRY_DELAY)
+            result = scorer.score_image(cfg.scorer.url, image_path, timeout=cfg.scorer.timeout,
+                                        tiles=cfg.scorer.tiles)
         return None if result is None else scorer.subject_score(result)
 
     return score

@@ -846,6 +846,37 @@ def test_run_monitor_pass_sends_marginal_when_feature_off(monkeypatch):
     assert photos == 1                                   # legacy: 0.4 >= threshold -> send
 
 
+# ── scorer retry before passthrough ──────────────────────────────────────────
+
+def test_score_for_retries_once_before_passthrough(monkeypatch):
+    cam_cfg = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10",
+                      "scorer": {"url": "http://x/score", "threshold": 0.3}}]}).cameras[0]
+    calls = []
+
+    def fake_score_image(url, path, timeout=10, tiles=1):
+        calls.append(1)
+        return None if len(calls) == 1 else {"person": 0.9, "animal": 0.0}
+
+    monkeypatch.setattr(daemon.scorer, "score_image", fake_score_image)
+    monkeypatch.setattr(daemon._time, "sleep", lambda *_: None)
+    s = daemon.score_for(cam_cfg)("/tmp/x.jpg")
+    assert len(calls) == 2           # retried once
+    assert float(s) == 0.9           # second attempt's value used
+
+
+def test_score_for_returns_none_after_two_failures(monkeypatch):
+    cam_cfg = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10",
+                      "scorer": {"url": "http://x/score"}}]}).cameras[0]
+    calls = []
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda *a, **k: calls.append(1) or None)
+    monkeypatch.setattr(daemon._time, "sleep", lambda *_: None)
+    assert daemon.score_for(cam_cfg)("/tmp/x.jpg") is None
+    assert len(calls) == 2           # tried twice, then gave up
+
+
 def test_confirmed_person_sent_even_when_groq_empty(monkeypatch):
     # The 08:49 miss: camera confirmed a person but the (stale) RTSP frame looked empty
     # to Groq, so we dropped a real person. Trust the camera: send anyway.
