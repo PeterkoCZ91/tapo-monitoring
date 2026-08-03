@@ -611,6 +611,84 @@ def test_run_monitor_failed_delivery_queues_sd_retry(monkeypatch):
     assert observed == [True]
 
 
+# ── multi-frame corroboration wiring (non-PIR bare motion) ───────────────────
+
+def test_run_monitor_motion_holds_on_corroborate_hold(monkeypatch):
+    sent = []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "x")
+    observed = []
+
+    class Cam:
+        def getEvents(self):
+            return [_motion_event(100)]
+
+    monitor.run_monitor(
+        Cam(), _cfg_with_scorer(threshold=0.3), 0, now=1000, groq_key="k",
+        telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        score=lambda img: 0.4, corroborate=lambda ev, s: "hold",
+        observe=lambda ev, et, s: observed.append((et, s)))
+    assert sent == []                         # held, not sent
+    assert observed == [("motion", False)]    # group stays open to keep sampling
+
+
+def test_run_monitor_motion_sends_on_corroborate_send(monkeypatch):
+    sent = []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a) or True)
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "Person")
+
+    class Cam:
+        def getEvents(self):
+            return [_motion_event(100)]
+
+    monitor.run_monitor(
+        Cam(), _cfg_with_scorer(threshold=0.3), 0, now=1000, groq_key="k",
+        telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        score=lambda img: 0.4, corroborate=lambda ev, s: "send")
+    assert len(sent) == 1
+
+
+def test_run_monitor_pir_motion_ignores_corroborate(monkeypatch):
+    # PIR-backed motion is a stronger signal: corroboration must not gate it.
+    sent = []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a) or True)
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "Person")
+    called = []
+
+    class Cam:
+        def getEvents(self):
+            return [_pir_motion_event(100)]
+
+    monitor.run_monitor(
+        Cam(), _cfg_with_scorer(threshold=0.3), 0, now=1000, groq_key="k",
+        telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        score=lambda img: 0.9, corroborate=lambda ev, s: called.append(s) or "hold")
+    assert called == []      # corroborate never consulted for PIR motion
+    assert len(sent) == 1    # sent on the normal path (0.9 >= threshold)
+
+
+def test_run_monitor_person_ignores_corroborate(monkeypatch):
+    sent = []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a) or True)
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "Person")
+    called = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    monitor.run_monitor(
+        Cam(), _cfg_with_scorer(threshold=0.3), 0, now=1000, groq_key="k",
+        telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        score=lambda img: 0.9, corroborate=lambda ev, s: called.append(s) or "hold")
+    assert called == []
+    assert len(sent) == 1
+
+
 
 def test_run_monitor_mute_drains_watermark_without_alerting(monkeypatch):
     # night_only during the day: still poll + advance the watermark (so the day's

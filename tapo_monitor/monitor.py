@@ -145,7 +145,7 @@ TYPE_EMOJI = {"person": "👤", "vehicle": "🚗", "pet": "🐾", "tamper": "⚠
 def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_chat,
                 snapshot, time_str, can_alert=None, on_alert=None, face_names=None,
                 defer=None, score=None, observe=None, poll_observe=None,
-                media_observe=None, mute=False):
+                media_observe=None, mute=False, corroborate=None):
     """Poll one camera once and alert on new detections. Returns the new watermark.
 
     ``mute`` polls and advances the watermark but skips all grabbing/scoring/alerting.
@@ -244,6 +244,27 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 # Groq disabled = raw mode: there is no arbiter to declare a scene
                 # empty, so nothing is — every live frame goes straight out.
                 empty = False
+            if (etype == "motion" and s is not None and corroborate is not None
+                    and not event_flags["pir"]):
+                # Non-PIR bare motion: don't alert on a single marginal frame — an empty
+                # IR scene hallucinates "person" once and not the next, while a real
+                # subject persists across the sampler window. Camera-confirmed person and
+                # PIR-backed motion keep the immediate path above.
+                verdict = corroborate(event, s)
+                if verdict == "hold":
+                    log.info("hold %s: score %.2f awaiting corroboration", etype, s)
+                    audit_event(cfg, event, etype, "live", "hold", score=s,
+                                threshold=cfg.scorer.threshold, reason="awaiting_corroboration")
+                    _observe(observe, event, etype, False)
+                    continue
+                if verdict == "drop":
+                    log.info("drop %s: score %.2f below threshold %.2f",
+                             etype, s, cfg.scorer.threshold)
+                    audit_event(cfg, event, etype, "live", "drop", score=s,
+                                threshold=cfg.scorer.threshold, reason="below_threshold")
+                    _observe(observe, event, etype, False)
+                    continue
+                empty = False   # verdict == "send": fall through to the send block
             if etype == "motion":
                 if empty:
                     if defer_motion:
