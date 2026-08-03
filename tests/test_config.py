@@ -520,3 +520,22 @@ def test_night_only_parsed():
     app = cfg.load_config_from_dict(
         {"cameras": [{"name": "a", "host": "203.0.113.10", "night_only": True}]})
     assert app.cameras[0].night_only is True
+
+
+def test_scorer_motion_send_threshold_defaults_none():
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    assert app.cameras[0].scorer.motion_send_threshold is None
+
+
+def test_scorer_motion_send_threshold_parsed():
+    data = {"cameras": [{"name": "a", "host": "203.0.113.10",
+                         "scorer": {"url": "http://x/score", "threshold": 0.3,
+                                    "motion_send_threshold": 0.6}}]}
+    assert cfg.load_config_from_dict(data).cameras[0].scorer.motion_send_threshold == 0.6
+
+
+def test_scorer_motion_send_threshold_must_exceed_threshold():
+    data = {"cameras": [{"name": "a", "host": "203.0.113.10",
+                         "scorer": {"threshold": 0.6, "motion_send_threshold": 0.5}}]}
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config_from_dict(data)

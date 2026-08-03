@@ -86,6 +86,10 @@ class ScorerConfig:
     # Score the whole frame plus a tiles×tiles grid and keep the best. >1 rescues distant
     # subjects that vanish once a wide frame is downscaled to the model input. 1 = off.
     tiles: int = 1
+    # Bare (non-PIR) motion is not alerted on a single marginal frame: a frame >= this
+    # sends immediately, a frame in [threshold, motion_send_threshold) needs a second
+    # corroborating frame within the sampler window. None = feature off (legacy behaviour).
+    motion_send_threshold: float | None = None
 
 
 @dataclass
@@ -341,7 +345,17 @@ def _scorer(data, where):
         raise ConfigError(f"{where}: scorer threshold must be between 0 and 1")
     if tiles < 1:
         raise ConfigError(f"{where}: scorer tiles must be >= 1")
-    return ScorerConfig(url=d.get("url"), threshold=threshold, timeout=timeout, tiles=tiles)
+    motion_send_threshold = d.get("motion_send_threshold")
+    if motion_send_threshold is not None:
+        try:
+            motion_send_threshold = float(motion_send_threshold)
+        except (TypeError, ValueError):
+            raise ConfigError(f"{where}: scorer motion_send_threshold must be a number") from None
+        if not threshold < motion_send_threshold <= 1.0:
+            raise ConfigError(
+                f"{where}: scorer motion_send_threshold must be > threshold and <= 1.0")
+    return ScorerConfig(url=d.get("url"), threshold=threshold, timeout=timeout, tiles=tiles,
+                        motion_send_threshold=motion_send_threshold)
 
 
 def _pan_limit(data, where):
