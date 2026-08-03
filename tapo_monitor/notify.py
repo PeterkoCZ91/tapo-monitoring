@@ -6,12 +6,16 @@ pure and tested.
 """
 
 import json
+import time
 import urllib.parse
 import urllib.request
 
 from . import sentlog
 
 _API = "https://api.telegram.org"
+
+# A transient Telegram/network failure would otherwise lose a real alert; retry once.
+TELEGRAM_RETRY_DELAY = 1.0
 
 # Marker the vision model returns for a frame with nothing of interest.
 EMPTY_MARKER = "empty"
@@ -98,11 +102,9 @@ def send_text(token, chat_id, text):
         return False
 
 
-def send_photo(token, chat_id, image_path, caption):
-    """Send a photo with a caption via multipart/form-data. Returns True on success."""
+def _post_photo(token, chat_id, image, caption):
+    """POST one photo to Telegram. Returns True on success, False on any failure."""
     try:
-        with open(image_path, "rb") as f:
-            image = f.read()
         boundary = "tapoMonitorBoundary"
         body = (
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{chat_id}\r\n"
@@ -116,12 +118,26 @@ def send_photo(token, chat_id, image_path, caption):
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
-            ok = resp.status < 300 and '"ok":true' in resp.read().decode(errors="replace")
-        # Best-effort diagnostic copy of the exact frame we pushed (opt-in via env).
-        sentlog.archive_if_configured(image, caption, delivered=ok)
-        return ok
+            return resp.status < 300 and '"ok":true' in resp.read().decode(errors="replace")
     except Exception:
         return False
+
+
+def send_photo(token, chat_id, image_path, caption):
+    """Send a photo with a caption via multipart/form-data. Returns True on success."""
+    try:
+        with open(image_path, "rb") as f:
+            image = f.read()
+    except OSError:
+        return False
+    ok = _post_photo(token, chat_id, image, caption)
+    if not ok:
+        # A transient Telegram/network failure would otherwise lose a real alert.
+        time.sleep(TELEGRAM_RETRY_DELAY)
+        ok = _post_photo(token, chat_id, image, caption)
+    # Best-effort diagnostic copy of the exact frame we pushed (opt-in via env).
+    sentlog.archive_if_configured(image, caption, delivered=ok)
+    return ok
 
 
 # Re-export for callers that just want JSON building (kept tiny on purpose).

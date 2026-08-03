@@ -121,3 +121,20 @@ def test_send_photo_does_not_archive_when_not_configured(monkeypatch, tmp_path):
     img.write_bytes(b"x")
 
     assert notify.send_photo("tok", "chat", str(img), "c") is True
+
+
+def test_send_photo_retries_once_on_failure(monkeypatch, tmp_path):
+    calls = []
+
+    def flaky(req, timeout=None):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("boom")
+        return _FakeResp(b'{"ok":true}')
+
+    monkeypatch.setattr(notify.urllib.request, "urlopen", flaky)
+    monkeypatch.setattr(notify.time, "sleep", lambda *_: None)
+    img = tmp_path / "snap.jpg"
+    img.write_bytes(b"\xff\xd8IMG")
+    assert notify.send_photo("tok", "chat", str(img), "c") is True
+    assert len(calls) == 2       # retried once, then succeeded
