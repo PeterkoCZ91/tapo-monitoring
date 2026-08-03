@@ -605,6 +605,13 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
         defer_fn = defer if cfg.sd_snapshot else None
         score = score_for(cfg)
 
+        corroborate = None
+        if cfg.sampler.enabled and cfg.scorer.motion_send_threshold is not None:
+            def corroborate(event, s, _name=name, _cfg=cfg):
+                g = sampler.ensure_group(state.groups, _name, event, "motion", now, _cfg.sampler)
+                return sampler.corroborate_motion(
+                    g, s, _cfg.scorer.threshold, _cfg.scorer.motion_send_threshold)
+
         def observe(event, etype, sent, _name=name, _cfg=cfg):
             if _cfg.sampler.enabled:
                 sampler.observe_event(state.groups, _name, event, etype, sent, now, _cfg.sampler)
@@ -629,6 +636,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             face_names=secrets.get("face_names"),
             defer=defer_fn,
             score=score,
+            corroborate=corroborate,
             observe=observe,
             poll_observe=poll_observe,
             media_observe=media_observe,

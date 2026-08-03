@@ -806,6 +806,46 @@ def _run_person_once(monkeypatch, groq_reply):
     return counter.photos
 
 
+# ── corroboration wired into the live monitor pass ───────────────────────────
+
+def _corroboration_app(motion_send=0.6):
+    scorer = {"url": "http://127.0.0.1:1/score", "threshold": 0.3}
+    if motion_send is not None:
+        scorer["motion_send_threshold"] = motion_send
+    return cfg.load_config_from_dict({"groq": {}, "cameras": [{
+        "name": "a", "host": "203.0.113.10",
+        "sampler": {"enabled": True, "interval": 30, "max_frames": 6, "group_gap": 90},
+        "scorer": scorer}]})
+
+
+def _run_marginal_motion_pass(monkeypatch, motion_send):
+    from tapo_monitor import monitor as mon
+    counter = _CountingNotify()
+    monkeypatch.setattr(mon.notify, "send_photo", counter.send_photo)
+    monkeypatch.setattr(mon.enrich, "groq_describe", lambda *a, **k: "x")
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, img, timeout=10, tiles=1: {"person": 0.4, "animal": 0.0})
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": "k"}
+    cam = _FakeEventCam([[{"start_time": 100, "events_1": 2}]])   # bare non-PIR motion
+    daemon.run_monitor_pass(_corroboration_app(motion_send), {"a": cam}, state,
+                            now=1000, secrets=secrets,
+                            snapshot_for=lambda c: (lambda cam, ev: "/tmp/x.jpg"),
+                            time_str=lambda e: "t")
+    return counter.photos, state
+
+
+def test_run_monitor_pass_holds_first_marginal_motion(monkeypatch):
+    photos, state = _run_marginal_motion_pass(monkeypatch, motion_send=0.6)
+    assert photos == 0                                   # held, not sent
+    assert state.groups["a"]["motion_candidates"] == 1   # candidate recorded
+
+
+def test_run_monitor_pass_sends_marginal_when_feature_off(monkeypatch):
+    photos, _ = _run_marginal_motion_pass(monkeypatch, motion_send=None)
+    assert photos == 1                                   # legacy: 0.4 >= threshold -> send
+
+
 def test_confirmed_person_sent_even_when_groq_empty(monkeypatch):
     # The 08:49 miss: camera confirmed a person but the (stale) RTSP frame looked empty
     # to Groq, so we dropped a real person. Trust the camera: send anyway.
