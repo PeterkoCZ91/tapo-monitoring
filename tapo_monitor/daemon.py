@@ -361,12 +361,13 @@ def _default_snapshot(cfg: CameraConfig, stream=None, recorder_fallback=False):
         url = snapshot.rtsp_url(
             cfg.host, user, password, stream=stream or cfg.rtsp_stream, port=cfg.rtsp_port
         )
-        image = snapshot.capture_rtsp(url, timeout=cfg.rtsp_timeout)
+        image = snapshot.capture_rtsp(url, timeout=cfg.rtsp_timeout, rotate=cfg.rotate)
         if image:
             return image
         if not recorder_fallback:
             return None
-        image = snapshot.latest_recording_frame(cfg.host, timeout=cfg.rtsp_timeout)
+        image = snapshot.latest_recording_frame(cfg.host, timeout=cfg.rtsp_timeout,
+                                                rotate=cfg.rotate)
         if image:
             log.info("snapshot %s: live RTSP failed, using recorder fallback", cfg.name)
         return image

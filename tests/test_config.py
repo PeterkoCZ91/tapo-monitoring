@@ -539,3 +539,16 @@ def test_scorer_motion_send_threshold_must_exceed_threshold():
                          "scorer": {"threshold": 0.6, "motion_send_threshold": 0.5}}]}
     with pytest.raises(cfg.ConfigError):
         cfg.load_config_from_dict(data)
+
+
+def test_camera_rotate_defaults_zero_and_parses():
+    assert cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0].rotate == 0
+    data = {"cameras": [{"name": "a", "host": "203.0.113.10", "rotate": 180}]}
+    assert cfg.load_config_from_dict(data).cameras[0].rotate == 180
+
+
+def test_camera_rotate_rejects_non_quarter_turn():
+    data = {"cameras": [{"name": "a", "host": "203.0.113.10", "rotate": 45}]}
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config_from_dict(data)

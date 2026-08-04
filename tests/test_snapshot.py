@@ -58,6 +58,23 @@ def test_ffmpeg_args_single_image_update():
     assert args[args.index("-update") + 1] == "1"
 
 
+def test_rotate_filter_maps_quarter_turns():
+    assert snapshot.rotate_filter(0) == ""
+    assert snapshot.rotate_filter(90) == "transpose=1"
+    assert snapshot.rotate_filter(180) == "hflip,vflip"
+    assert snapshot.rotate_filter(270) == "transpose=2"
+
+
+def test_ffmpeg_args_applies_rotation_before_scale():
+    args = snapshot.ffmpeg_args("rtsp://x", "/tmp/out.jpg", rotate=180)
+    assert args[args.index("-vf") + 1] == "hflip,vflip,scale=1280:-1"
+
+
+def test_ffmpeg_args_no_rotation_when_zero():
+    args = snapshot.ffmpeg_args("rtsp://x", "/tmp/out.jpg", rotate=0)
+    assert args[args.index("-vf") + 1] == "scale=1280:-1"
+
+
 def test_capture_rtsp_returns_path_on_success(tmp_path):
     # A real grab writes a non-empty JPEG; we return its path and keep the file.
     def fake_run(args, **kwargs):

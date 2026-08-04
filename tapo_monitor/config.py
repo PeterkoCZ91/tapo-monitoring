@@ -126,6 +126,10 @@ class CameraConfig:
     rtsp_port: int = 554
     rtsp_stream: str = "stream1"
     rtsp_timeout: int = 15  # seconds; slow cameras/Pis need >8s for the first keyframe
+    # Clockwise rotation (0/90/180/270) applied at frame capture across all sources when the
+    # camera is physically mounted rotated. 0 = off. Fixes the frame for the scorer, crop and
+    # Telegram alike (the C560WS firmware does not expose a flip setting over the local API).
+    rotate: int = 0
     sd_snapshot: bool = False  # pull the event-time frame from SD instead of live RTSP
     # Optional per-camera ceiling (seconds) for the SD follow-up window. None uses the
     # package default (Pi Zero-safe). Camera events run ~2 min; hardware that can afford
@@ -407,6 +411,12 @@ def _camera(data, index):
     night_vision = data.get("night_vision")
     if night_vision is not None and night_vision not in ("ir", "auto"):
         raise ConfigError(f"{where}: 'night_vision' must be 'ir' or 'auto'")
+    try:
+        rotate = int(data.get("rotate", 0))
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}: 'rotate' must be an integer") from None
+    if rotate not in (0, 90, 180, 270):
+        raise ConfigError(f"{where}: 'rotate' must be one of 0, 90, 180, 270")
     snapshot_source = data.get("snapshot_source", "sd")
     if snapshot_source not in ("sd", "recording"):
         raise ConfigError(f"{where}: 'snapshot_source' must be 'sd' or 'recording'")
@@ -426,6 +436,7 @@ def _camera(data, index):
         sd_motion_span_cap=int(data["sd_motion_span_cap"]) if data.get("sd_motion_span_cap") is not None else None,
         rtsp_stream=data.get("rtsp_stream", "stream1"),
         rtsp_timeout=rtsp_timeout,
+        rotate=rotate,
         sd_snapshot=bool(data.get("sd_snapshot", False)),
         sd_span_cap=int(data["sd_span_cap"]) if data.get("sd_span_cap") is not None else None,
         sd_motion=bool(data.get("sd_motion", False)),

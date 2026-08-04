@@ -23,6 +23,8 @@ import sys
 import time as _time
 from datetime import datetime
 
+from . import snapshot
+
 SEGMENT_SECONDS = 900
 RECORDING_FRAME_EVERY = 4
 # The recorder flushes continuously, but wait past the event's window so its trailing
@@ -126,11 +128,13 @@ def _run_ffmpeg(args):  # pragma: no cover - subprocess I/O
                    timeout=30, check=True)
 
 
-def extract_frames(mkv, seg_start, event_start, span, every, out_dir, base, runner=None):
+def extract_frames(mkv, seg_start, event_start, span, every, out_dir, base, runner=None,
+                   rotate=0):
     """One JPEG every ``every`` sec across ``span``, seeking from the event's offset in
     the segment. Returns paths (oldest first); clips the window to the segment end."""
     runner = runner or _run_ffmpeg
     out_dir = out_dir.rstrip("/")
+    vf = snapshot.scaled_vf(rotate)
     base_offset = max(int(event_start - seg_start), 0)
     limit = min(base_offset + max(int(span), 1), SEGMENT_SECONDS)
     paths = []
@@ -138,7 +142,7 @@ def extract_frames(mkv, seg_start, event_start, span, every, out_dir, base, runn
         out_path = os.path.join(out_dir, f"{base}_{k:02d}.jpg")
         try:
             runner(["ffmpeg", "-y", "-ss", str(offset), "-i", mkv, "-frames:v", "1",
-                    "-vf", "scale=1280:-1", "-q:v", "2", "-update", "1", out_path])
+                    "-vf", vf, "-q:v", "2", "-update", "1", out_path])
         except Exception:
             continue
         if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
@@ -170,4 +174,5 @@ def fetch_recording_frames(cfg, event_start, span, out_dir,
         return []
     mkv, seg_start = seg
     base = f"rec_{int(event_start)}_{int(_time.time() * 1000)}"
-    return extract(mkv, seg_start, event_start, span, RECORDING_FRAME_EVERY, out_dir, base)
+    return extract(mkv, seg_start, event_start, span, RECORDING_FRAME_EVERY, out_dir, base,
+                   rotate=getattr(cfg, "rotate", 0))

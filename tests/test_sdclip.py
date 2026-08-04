@@ -90,6 +90,33 @@ def test_fetch_subprocess_empty_on_nonzero_exit():
     assert sdclip.fetch_sd_frames_subprocess(_cfg(), 1000, run=run, python="PY") == []
 
 
+def test_fetch_subprocess_passes_camera_rotation():
+    captured = {}
+
+    def run(argv, **kw):
+        captured["argv"] = argv
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    sdclip.fetch_sd_frames_subprocess(_cfg(rotate=180), 1000, span=12, every=6,
+                                      run=run, python="PY")
+    assert captured["argv"][-1] == "180"   # rotate reaches the download subprocess
+
+
+def test_fetch_sd_frames_threads_rotate_to_extractor():
+    seen = {}
+
+    def extract_frames(mp4, out_dir, base, span, every, rotate=0):
+        seen["rotate"] = rotate
+        return ["/tmp/x_00.jpg"]
+
+    sdclip.fetch_sd_frames(
+        _Cam(), 1000, span=12, every=6,
+        download=lambda *a, **k: "/tmp/seg.mp4",
+        segment_bounds=lambda *a, **k: None,
+        extract_frames=extract_frames, rotate=270)
+    assert seen["rotate"] == 270
+
+
 def test_fetch_subprocess_empty_when_run_raises():
     def run(argv, **kw):
         raise OSError("spawn failed")
@@ -159,7 +186,7 @@ def test_fetch_frames_returns_candidates_on_success():
         calls["window"] = (start, end)
         calls["tc"] = tc
         return "/tmp/clip.mp4"
-    def extract_frames(mp4, out_dir, base, span, every):
+    def extract_frames(mp4, out_dir, base, span, every, rotate=0):
         calls["mp4"] = mp4
         calls["span"] = span
         calls["every"] = every
@@ -176,7 +203,7 @@ def test_fetch_frames_returns_candidates_on_success():
 def test_fetch_frames_returns_empty_when_download_fails():
     def download(client, start, end, tc, out_dir):
         return None
-    def extract_frames(mp4, out_dir, base, span, every):
+    def extract_frames(mp4, out_dir, base, span, every, rotate=0):
         raise AssertionError("extract must not run when download failed")
     assert sdclip.fetch_sd_frames(_Cam(), 1000, download=download,
                                   extract_frames=extract_frames) == []
@@ -189,7 +216,7 @@ def test_fetch_frames_removes_downloaded_mp4(tmp_path):
         mp4.write_bytes(b"mp4")
         return str(mp4)
 
-    def extract_frames(mp4_path, out_dir, base, span, every):
+    def extract_frames(mp4_path, out_dir, base, span, every, rotate=0):
         assert mp4_path == str(mp4)
         return [str(tmp_path / "frame.jpg")]
 
@@ -202,7 +229,7 @@ def test_fetch_frames_removes_downloaded_mp4(tmp_path):
 def test_fetch_frames_empty_when_no_frames_extracted():
     def download(client, start, end, tc, out_dir):
         return "/tmp/clip.mp4"
-    def extract_frames(mp4, out_dir, base, span, every):
+    def extract_frames(mp4, out_dir, base, span, every, rotate=0):
         return []
     assert sdclip.fetch_sd_frames(_Cam(), 1000, download=download,
                                   extract_frames=extract_frames) == []
@@ -216,7 +243,7 @@ def test_fetch_frames_tolerates_time_correction_error():
     def download(client, start, end, tc, out_dir):
         seen["tc"] = tc
         return "/tmp/clip.mp4"
-    def extract_frames(mp4, out_dir, base, span, every):
+    def extract_frames(mp4, out_dir, base, span, every, rotate=0):
         return ["/tmp/x_00.jpg"]
     assert sdclip.fetch_sd_frames(BadCam(), 1000, download=download,
                                   extract_frames=extract_frames) == ["/tmp/x_00.jpg"]
@@ -230,7 +257,7 @@ def test_fetch_frames_uses_real_segment_bounds():
     def download(client, start, end, tc, out_dir):
         calls["window"] = (start, end)
         return "/tmp/clip.mp4"
-    def extract_frames(mp4, out_dir, base, span, every):
+    def extract_frames(mp4, out_dir, base, span, every, rotate=0):
         calls["span"] = span
         return ["/tmp/a_00.jpg"]
     out = sdclip.fetch_sd_frames(
@@ -248,7 +275,7 @@ def test_fetch_frames_caps_long_segment_to_span():
         return "/tmp/clip.mp4"
     sdclip.fetch_sd_frames(
         _Cam(), 1000, span=12, download=download,
-        extract_frames=lambda *a: ["/tmp/a.jpg"],
+        extract_frames=lambda *a, **k: ["/tmp/a.jpg"],
         segment_bounds=lambda c, s: (2000, 9999))   # very long segment
     assert calls["window"] == (2000, 2012)   # capped at start + span
 
@@ -266,7 +293,7 @@ def test_fetch_frames_default_span_covers_mid_clip_subject():
         return "/tmp/clip.mp4"
     sdclip.fetch_sd_frames(
         _Cam(), 1000, download=download,               # no span= -> exercise the default
-        extract_frames=lambda *a: ["/tmp/a.jpg"],
+        extract_frames=lambda *a, **k: ["/tmp/a.jpg"],
         segment_bounds=lambda c, s: (2000, 2100))      # 100 s recorded segment
     dl_start, dl_end = calls["window"]
     assert dl_end - dl_start >= 30    # cover >= 30 s so a subject appearing ~20 s in is caught
@@ -279,7 +306,7 @@ def test_fetch_frames_falls_back_to_guess_when_no_segment():
         return "/tmp/clip.mp4"
     sdclip.fetch_sd_frames(
         _Cam(), 1000, span=12, download=download,
-        extract_frames=lambda *a: ["/tmp/a.jpg"],
+        extract_frames=lambda *a, **k: ["/tmp/a.jpg"],
         segment_bounds=lambda c, s: None)        # lookup failed
     assert calls["window"] == (1000, 1012)   # guessed window
 
@@ -328,4 +355,4 @@ def test_fetch_subprocess_derives_every_from_span():
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     sdclip.fetch_sd_frames_subprocess(_cfg(), 1000, span=120, run=run, python="PY")
-    assert captured["argv"][-2:] == ["120", "15"]   # every derived, not the default 6
+    assert captured["argv"][-3:] == ["120", "15", "0"]   # span, every (derived), rotate

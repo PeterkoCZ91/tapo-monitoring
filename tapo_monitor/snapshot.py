@@ -18,14 +18,26 @@ def rtsp_url(host, user, password, stream="stream1", port=554):
     return f"rtsp://{u}:{p}@{host}:{port}/{stream}"
 
 
-def ffmpeg_args(rtsp_url, out_path):
+def rotate_filter(degrees):
+    """ffmpeg video-filter fragment for a clockwise rotation; "" for 0/unknown. Pure."""
+    return {0: "", 90: "transpose=1", 180: "hflip,vflip", 270: "transpose=2"}.get(
+        int(degrees), "")
+
+
+def scaled_vf(rotate=0):
+    """The ``-vf`` chain used by every frame extractor: rotate (if any) then scale. Pure."""
+    rot = rotate_filter(rotate)
+    return f"{rot},scale=1280:-1" if rot else "scale=1280:-1"
+
+
+def ffmpeg_args(rtsp_url, out_path, rotate=0):
     """Return the ffmpeg argv to grab a single high-quality JPEG frame. Pure."""
     return [
         "ffmpeg",
         "-rtsp_transport", "tcp",
         "-i", rtsp_url,
         "-frames:v", "1",
-        "-vf", "scale=1280:-1",
+        "-vf", scaled_vf(rotate),
         "-q:v", "2",
         "-update", "1",
         "-y", out_path,
@@ -39,7 +51,7 @@ def _safe_unlink(path):
         pass
 
 
-def capture_rtsp(rtsp_url, out_dir="/tmp", timeout=15, _run=subprocess.run):
+def capture_rtsp(rtsp_url, out_dir="/tmp", timeout=15, _run=subprocess.run, rotate=0):
     """Grab one frame from an RTSP stream. Returns the image path or None.
 
     On a slow camera (e.g. Pi Zero) ffmpeg can time out *after* partially writing
@@ -50,7 +62,7 @@ def capture_rtsp(rtsp_url, out_dir="/tmp", timeout=15, _run=subprocess.run):
     out_path = os.path.join(out_dir, f"snap_{int(_time.time() * 1000)}.jpg")
     try:
         _run(
-            ffmpeg_args(rtsp_url, out_path),
+            ffmpeg_args(rtsp_url, out_path, rotate=rotate),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=timeout,
@@ -76,7 +88,8 @@ def _env_float(name, default):
 
 
 def latest_recording_frame(
-    host, root=None, out_dir="/tmp", timeout=20, max_age=None, now=None, _run=subprocess.run
+    host, root=None, out_dir="/tmp", timeout=20, max_age=None, now=None,
+    _run=subprocess.run, rotate=0
 ):
     """Extract one JPEG from the newest local recorder segment for a camera host.
 
@@ -114,6 +127,7 @@ def latest_recording_frame(
     if max_age is not None and now - latest_mtime > max_age:
         return None
     out_path = os.path.join(out_dir, f"snaprec_{host.replace('.', '_')}_{int(now * 1000)}.jpg")
+    rot = rotate_filter(rotate)
     try:
         _run(
             [
@@ -127,6 +141,7 @@ def latest_recording_frame(
                 latest,
                 "-frames:v",
                 "1",
+                *(["-vf", rot] if rot else []),
                 "-q:v",
                 "2",
                 "-y",

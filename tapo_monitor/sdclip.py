@@ -26,6 +26,8 @@ import sys
 import threading
 import time as _time
 
+from . import snapshot
+
 log = logging.getLogger(__name__)
 
 # How long to wait for the download thread before giving up (live-RTSP fallback then).
@@ -203,16 +205,17 @@ def _download_segment(client, start, end, time_correction, out_dir):  # pragma: 
     return out_path if exists else None
 
 
-def _extract_frames(mp4_path, out_dir, base, span, every):  # pragma: no cover - subprocess I/O
+def _extract_frames(mp4_path, out_dir, base, span, every, rotate=0):  # pragma: no cover - subprocess I/O
     """Extract one JPEG every ``every`` seconds across ``span``. Returns paths (in order)."""
     out_dir = out_dir.rstrip("/")
+    vf = snapshot.scaled_vf(rotate)
     paths = []
     for offset in range(0, max(span, 1), every):
         out_path = os.path.join(out_dir, f"{base}_{offset:02d}.jpg")
         try:
             subprocess.run(
                 ["ffmpeg", "-y", "-ss", str(offset), "-i", mp4_path, "-frames:v", "1",
-                 "-vf", "scale=1280:-1", "-q:v", "2", "-update", "1", out_path],
+                 "-vf", vf, "-q:v", "2", "-update", "1", out_path],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, check=True,
             )
         except Exception:
@@ -259,7 +262,7 @@ def _segment_bounds(client, event_start, lookback=SD_SEG_LOOKBACK, lookahead=SD_
 
 def fetch_sd_frames(client, start_time, out_dir="/tmp", span=SD_SPAN, every=SD_FRAME_EVERY,
                     download=_download_segment, extract_frames=_extract_frames,
-                    segment_bounds=_segment_bounds):
+                    segment_bounds=_segment_bounds, rotate=0):
     """Return candidate JPEG paths spanning the event, oldest first (empty list on failure).
 
     ``client`` should be a dedicated, freshly-connected pytapo client (see
@@ -286,7 +289,7 @@ def fetch_sd_frames(client, start_time, out_dir="/tmp", span=SD_SPAN, every=SD_F
         return []
     try:
         base = f"sdf_{int(start_time)}_{int(_time.time() * 1000)}"
-        frames = extract_frames(mp4, out_dir, base, dl_span, every)
+        frames = extract_frames(mp4, out_dir, base, dl_span, every, rotate=rotate)
         if not frames:
             print(f"SD fetch: extracted 0 frames from {mp4}", file=sys.stderr)
         return frames
@@ -320,7 +323,7 @@ def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
     argv = [python, "-m", "tapo_monitor.sdclip", "download",
             cfg.host, cfg.user_env or "", cfg.password_env or "",
             cfg.cloud_password_env or "", str(int(start_time)), out_dir,
-            str(int(span)), str(int(every))]
+            str(int(span)), str(int(every)), str(int(getattr(cfg, "rotate", 0)))]
     try:
         proc = run(argv, capture_output=True, text=True, timeout=SD_DOWNLOAD_TIMEOUT)
     except Exception as exc:
@@ -345,11 +348,12 @@ def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
 def download_main(argv):  # pragma: no cover - subprocess entry, real camera I/O
     """Entry for the download subprocess: build a fresh client, fetch frames, print paths.
 
-    argv: host user_env password_env cloud_env start out_dir span every
+    argv: host user_env password_env cloud_env start out_dir span every [rotate]
     """
     from . import camera
 
     host, user_env, pass_env, cloud_env, start, out_dir, span, every = argv[:8]
+    rotate = int(argv[8]) if len(argv) > 8 else 0
     user = os.environ.get(user_env, "") if user_env else ""
     password = os.environ.get(pass_env, "") if pass_env else ""
     cloud = (os.environ.get(cloud_env, "") if cloud_env else "") or password
@@ -359,7 +363,7 @@ def download_main(argv):  # pragma: no cover - subprocess entry, real camera I/O
         print(f"SD connect failed: {_err}", file=sys.stderr)
         return 4
     frames = fetch_sd_frames(client, int(start), out_dir=out_dir,
-                             span=int(span), every=int(every))
+                             span=int(span), every=int(every), rotate=rotate)
     for path in frames:
         print(f"{_FRAME_MARKER}{path}")
     return 0

@@ -88,6 +88,18 @@ def test_extract_frames_seeks_from_event_offset(tmp_path):
     ss_values = [a[a.index("-ss") + 1] for a in calls]
     assert ss_values == ["30", "34", "38"]   # offset 30 (=1030-1000), +every up to span
     assert len(out) == 3
+    assert all(a[a.index("-vf") + 1] == "scale=1280:-1" for a in calls)   # no rotation
+
+
+def test_extract_frames_applies_rotation(tmp_path):
+    calls = []
+    def runner(args):
+        calls.append(args)
+        open(args[-1], "w").write("x")
+    recclip.extract_frames("/seg.mkv", seg_start=1000.0, event_start=1000.0,
+                           span=4, every=4, out_dir=str(tmp_path), base="rec_r",
+                           runner=runner, rotate=180)
+    assert calls[0][calls[0].index("-vf") + 1] == "hflip,vflip,scale=1280:-1"
 
 
 def test_fetch_recording_frames_empty_when_no_segment():
