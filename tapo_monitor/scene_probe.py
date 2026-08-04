@@ -151,8 +151,10 @@ def run(config, names, *, capture, score, archive_dir=None, now=None,
 def _real_capture(cfg):
     user, password = resolve_rtsp_credentials(cfg)
     url = snapshot.rtsp_url(cfg.host, user, password, stream=cfg.rtsp_stream, port=cfg.rtsp_port)
-    return (snapshot.capture_rtsp(url, timeout=cfg.rtsp_timeout)
-            or snapshot.capture_rtsp(url, timeout=cfg.rtsp_timeout))
+    # Same rotation as the detection pipeline: a probe of a mis-mounted camera must score
+    # the upright frame the daemon would score, not an upside-down one.
+    return (snapshot.capture_rtsp(url, timeout=cfg.rtsp_timeout, rotate=cfg.rotate)
+            or snapshot.capture_rtsp(url, timeout=cfg.rtsp_timeout, rotate=cfg.rotate))
 
 
 def _real_score(tiles):

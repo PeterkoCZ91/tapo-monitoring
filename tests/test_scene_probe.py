@@ -114,6 +114,30 @@ def test_run_records_grab_failure_without_crashing(tmp_path):
     assert not archive.exists() or not list(archive.glob("*.jpg"))
 
 
+def test_real_capture_rotates_like_production_frames(monkeypatch):
+    # The probe is the scorer calibration tool: on a mis-mounted (rotated) camera it must
+    # grab the same upright frame the detection pipeline scores, not an upside-down one.
+    conf = config.load_config_from_dict(
+        {"cameras": [{"name": "front", "host": "203.0.113.10", "rotate": 180}]})
+    calls = []
+    monkeypatch.setattr(scene_probe.snapshot, "capture_rtsp",
+                        lambda url, **kw: calls.append(kw) or "/tmp/probe.jpg")
+
+    assert scene_probe._real_capture(conf.cameras[0]) == "/tmp/probe.jpg"
+    assert [kw.get("rotate") for kw in calls] == [180]
+
+
+def test_real_capture_retry_also_rotates(monkeypatch):
+    conf = config.load_config_from_dict(
+        {"cameras": [{"name": "front", "host": "203.0.113.10", "rotate": 90}]})
+    calls = []
+    monkeypatch.setattr(scene_probe.snapshot, "capture_rtsp",
+                        lambda url, **kw: calls.append(kw) or None)
+
+    assert scene_probe._real_capture(conf.cameras[0]) is None
+    assert [kw.get("rotate") for kw in calls] == [90, 90]   # retry keeps the rotation
+
+
 def test_run_records_scorer_unavailable(tmp_path):
     conf = _conf("front")
     src = tmp_path / "g.jpg"
