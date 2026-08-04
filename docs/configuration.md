@@ -162,12 +162,16 @@ rtsp_password_env: CAM_RTSP_PASSWORD
 rtsp_port: 554
 rtsp_stream: stream1
 rtsp_timeout: 15
+rotate: 0
 ```
 
 - `cloud_password_env` is optional and falls back to the camera password. Some SD download
   paths need the TP-Link account password rather than the local camera account.
 - `rtsp_stream` is normally `stream1` (HD) or `stream2` (SD).
 - Raise `rtsp_timeout` on slow hardware or streams with a long keyframe interval.
+- `rotate` (0/90/180/270, clockwise) straightens a physically mis-mounted camera at frame
+  capture across every source (RTSP, local recording, SD), so the scorer, subject crop and
+  Telegram all see an upright frame. Use it when the camera's own flip setting is unavailable.
 
 ### Detection
 

@@ -5,6 +5,9 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Per-camera `rotate` (0/90/180/270) straightens a physically mis-mounted camera at frame
+  capture across all sources (RTSP, local recording, SD), so the scorer, crop and Telegram
+  all see an upright frame — for cameras whose firmware doesn't expose a flip setting.
 - Multi-frame corroboration for bare (non-PIR) motion (`scorer.motion_send_threshold`):
   a single marginal frame (`[threshold, motion_send_threshold)`) is held until a second
   frame corroborates it within the sampler window, cutting empty-scene night false
