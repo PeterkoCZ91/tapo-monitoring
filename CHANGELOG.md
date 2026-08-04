@@ -13,10 +13,20 @@ All notable changes to this project are documented here.
   frame corroborates it within the sampler window, cutting empty-scene night false
   positives without delaying camera-confirmed people or PIR-backed motion. Default off.
 
+- Expired corroboration holds now leave an audit trail (`action=drop reason=hold_expired`
+  with the last held score), so threshold tuning can count discarded holds like any other
+  outcome instead of inferring them from unsent group closures.
+
 ### Changed
 - The scorer client now retries once before degrading to raw passthrough, so a single
-  transient timeout no longer flips a whole event burst to unfiltered sends. Telegram
-  photo sends also retry once before being reported as undelivered.
+  transient timeout no longer flips a whole event burst to unfiltered sends — but only
+  when the first attempt failed fast; a hung scorer is not retried, so a sick service
+  cannot double every frame's stall. Telegram photo sends also retry once before being
+  reported as undelivered.
+- A confirmed detection whose live frame is empty no longer queues an SD follow-up when
+  the same event burst already delivered an alert, removing the duplicate second photo
+  of one passage. Only actual deliveries count: a queued follow-up or a failed send never
+  suppresses the person safety net.
 - Opt-in review log (`TAPO_REVIEW_LOG_DIR`) archives the frames motion corroboration
   *held* (never sent), so a hold can be verified as an animal/empty scene rather than a
   missed person. Weekly retention by default (`TAPO_REVIEW_LOG_RETENTION_DAYS`, default 7).
@@ -29,6 +39,8 @@ All notable changes to this project are documented here.
   the `scene_probe` on-demand scorer).
 
 ### Fixed
+- `scene_probe` now applies the camera's `rotate` at capture, so calibration scores are
+  measured on the same upright frames production scores.
 - Tiled scoring no longer gates alerts: with `scorer.tiles > 1` the send-decision
   person/animal scores come from the full frame only, while the best tile still supplies
   the person box for subject crops (plus a diagnostic `tile_person`). Blown-up tile crops
