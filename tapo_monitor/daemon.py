@@ -441,10 +441,20 @@ def score_for(cfg: CameraConfig):
         return None
 
     def score(image_path):
+        started = _time.monotonic()
         result = scorer.score_image(cfg.scorer.url, image_path, timeout=cfg.scorer.timeout,
                                     tiles=cfg.scorer.tiles)
         if result is None:
-            # One transient timeout/blip shouldn't spam a whole burst through passthrough.
+            elapsed = _time.monotonic() - started
+            if elapsed >= cfg.scorer.timeout:
+                # The service hung rather than refused: a retry costs another full timeout
+                # for every scored frame of every tick, which stalls the whole pass. Give
+                # up now and let the caller degrade to passthrough.
+                log.warning("scorer for %s hung (%.1fs); skipping retry", cfg.name, elapsed)
+                return None
+            # A fast failure is a blip (connection refused, restart) — one retry keeps a
+            # whole burst from being spammed through passthrough.
+            log.info("scorer retry for %s after %.2fs failure", cfg.name, elapsed)
             _time.sleep(SCORER_RETRY_DELAY)
             result = scorer.score_image(cfg.scorer.url, image_path, timeout=cfg.scorer.timeout,
                                         tiles=cfg.scorer.tiles)

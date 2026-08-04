@@ -949,6 +949,46 @@ def test_score_for_retries_once_before_passthrough(monkeypatch):
     assert float(s) == 0.9           # second attempt's value used
 
 
+def _fake_clock(monkeypatch, values):
+    """Feed ``daemon._time.monotonic`` fixed readings (no real sleeping/waiting)."""
+    clock = iter(values)
+    real = daemon._time.monotonic
+    monkeypatch.setattr(daemon._time, "monotonic", lambda: next(clock, real()))
+
+
+def test_score_for_skips_retry_when_first_attempt_hung(monkeypatch):
+    # A hung scorer already cost a full timeout; retrying doubles that for every scored
+    # frame of every tick, so only a fast (connection-refused-style) failure is retried.
+    cam_cfg = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10",
+                      "scorer": {"url": "http://x/score", "timeout": 10}}]}).cameras[0]
+    calls, slept = [], []
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda *a, **k: calls.append(1) or None)
+    monkeypatch.setattr(daemon._time, "sleep", lambda d: slept.append(d))
+    _fake_clock(monkeypatch, [0.0, 10.5])       # first attempt ran past the timeout
+
+    assert daemon.score_for(cam_cfg)("/tmp/x.jpg") is None
+    assert len(calls) == 1                      # no second full-timeout attempt
+    assert slept == []
+
+
+def test_score_for_logs_retry_after_fast_failure(monkeypatch, caplog):
+    cam_cfg = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10",
+                      "scorer": {"url": "http://x/score", "timeout": 10}}]}).cameras[0]
+    calls = []
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda *a, **k: calls.append(1) or None)
+    monkeypatch.setattr(daemon._time, "sleep", lambda *_: None)
+    _fake_clock(monkeypatch, [0.0, 0.2])        # refused instantly -> a blip, retry it
+
+    with caplog.at_level("INFO", logger="tapo_monitor.daemon"):
+        assert daemon.score_for(cam_cfg)("/tmp/x.jpg") is None
+    assert len(calls) == 2
+    assert "scorer retry" in caplog.text        # a flaky scorer stays visible
+
+
 def test_score_for_returns_none_after_two_failures(monkeypatch):
     cam_cfg = cfg.load_config_from_dict(
         {"cameras": [{"name": "a", "host": "203.0.113.10",
