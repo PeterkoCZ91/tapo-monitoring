@@ -850,6 +850,39 @@ def test_run_monitor_pass_sends_marginal_when_feature_off(monkeypatch):
     assert photos == 1                                   # legacy: 0.4 >= threshold -> send
 
 
+def test_corroborated_motion_sends_on_the_next_sampler_frame(monkeypatch):
+    # End to end across two ticks: the live pass holds a marginal non-PIR motion frame and
+    # the candidate survives on the group, so the sampler's next marginal frame corroborates
+    # it and the alert goes out. Unit tests cover the two halves separately; this ties the
+    # shared group state together.
+    from tapo_monitor import monitor as mon
+    counter = _CountingNotify()
+    monkeypatch.setattr(mon.notify, "send_photo", counter.send_photo)
+    monkeypatch.setattr(mon.enrich, "groq_describe", lambda *a, **k: "x")
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, img, timeout=10, tiles=1: {"person": 0.4, "animal": 0.0})
+    monkeypatch.setattr(daemon, "_safe_unlink", lambda p: None)
+    app = _corroboration_app(motion_send=0.6)
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": "k", "face_names": {}}
+    cam = _FakeEventCam([[{"start_time": 1000, "events_1": 2}]])   # bare non-PIR motion
+
+    def snap(_cfg):
+        return lambda cam_, ev: "/tmp/x.jpg"
+
+    daemon.run_monitor_pass(app, {"a": cam}, state, now=1005, secrets=secrets,
+                            snapshot_for=snap, time_str=lambda e: "t")
+    assert counter.photos == 0                          # tick 1: single frame is held
+    assert state.groups["a"]["motion_candidates"] == 1
+
+    daemon.process_sampler(app, {"a": cam}, state, now=1040, secrets=secrets,
+                           snapshot_for=snap, time_str=lambda e: "t")
+    assert counter.photos == 1                          # tick 2: corroborated -> sent
+    g = state.groups["a"]
+    assert g["motion_candidates"] == 2
+    assert g["sent"] is True and g["delivered"] is True
+
+
 def _run_confirmed_person_with_open_group(monkeypatch, sent, delivered=False,
                                           last_event_at=995):
     """One confirmed-person event, empty-scoring live frame, on an sd_snapshot camera
