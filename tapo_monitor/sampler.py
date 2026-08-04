@@ -43,22 +43,26 @@ def ensure_group(groups, name, event, etype, now, scfg):
             "frames": 0,
             "next_due": started + scfg.interval,
             "sent": False,
+            "delivered": False,
             "pir_backed": _is_pir_backed(event),
         }
         groups[name] = g
     return g
 
 
-def observe_event(groups, name, event, etype, sent, now, scfg):
+def observe_event(groups, name, event, etype, sent, now, scfg, delivered=False):
     """Fold one alertable event into the camera's group (create/extend). Mutates groups.
 
     ``sent`` means an alert already went out (or was handed to the SD follow-up) for
     this event — a sent group stops sampling but keeps absorbing the rest of the burst
-    so trailing events don't spawn a fresh group.
+    so trailing events don't spawn a fresh group. ``delivered`` is the narrower fact: a
+    photo of this burst actually reached Telegram. Both are sticky for the group's life;
+    a queued follow-up or a refused send never sets ``delivered``.
     """
     g = ensure_group(groups, name, event, etype, now, scfg)
     g["last_event_at"] = now
     g["sent"] = g["sent"] or bool(sent)
+    g["delivered"] = g.get("delivered", False) or bool(delivered)
     g["pir_backed"] = g.get("pir_backed", False) or _is_pir_backed(event)
     if etype != "motion":
         g["etype"] = etype        # camera-confirmed detection outranks bare motion

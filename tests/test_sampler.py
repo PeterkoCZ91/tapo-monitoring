@@ -24,6 +24,25 @@ def test_observe_creates_group():
     assert g["sent"] is False
 
 
+def test_observe_records_delivered_and_never_clears_it():
+    # ``sent`` also covers "queued for the SD follow-up"; only ``delivered`` means a
+    # photo actually reached Telegram, and that fact must survive later events.
+    groups = {}
+    sampler.observe_event(groups, "a", _ev(1000), "motion", True, 1010, CFG)
+    assert groups["a"]["delivered"] is False        # sent-but-not-delivered
+    sampler.observe_event(groups, "a", _ev(1020), "motion", True, 1030, CFG,
+                          delivered=True)
+    assert groups["a"]["delivered"] is True
+    sampler.observe_event(groups, "a", _ev(1040), "motion", True, 1050, CFG)
+    assert groups["a"]["delivered"] is True         # once delivered, stays delivered
+
+
+def test_ensure_group_starts_undelivered():
+    groups = {}
+    g = sampler.ensure_group(groups, "a", _ev(1000), "motion", 1010, CFG)
+    assert g["delivered"] is False
+
+
 def test_observe_extends_group_and_upgrades_type():
     groups = {}
     sampler.observe_event(groups, "a", _ev(1000), "motion", False, 1010, CFG)

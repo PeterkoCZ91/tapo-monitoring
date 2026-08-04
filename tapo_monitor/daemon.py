@@ -623,13 +623,17 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                 return sampler.corroborate_motion(
                     g, s, _cfg.scorer.threshold, _cfg.scorer.motion_send_threshold)
 
-        def observe(event, etype, sent, _name=name, _cfg=cfg):
+        def observe(event, etype, sent, delivered=False, _name=name, _cfg=cfg):
             if _cfg.sampler.enabled:
-                sampler.observe_event(state.groups, _name, event, etype, sent, now, _cfg.sampler)
+                sampler.observe_event(state.groups, _name, event, etype, sent, now,
+                                      _cfg.sampler, delivered=delivered)
 
         def burst_sent(_name=name, _cfg=cfg):
+            # Only a real delivery suppresses a follow-up: "sent" also means "queued for
+            # SD" or "Telegram refused it", and dropping a confirmed person on either
+            # would lose it for good.
             g = state.groups.get(_name)
-            return bool(g and g["sent"]
+            return bool(g and g.get("delivered")
                         and (now - g["last_event_at"]) <= _cfg.sampler.group_gap)
 
         def poll_observe(ok, _name=name):
@@ -849,6 +853,11 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
             if ok:
                 log.info("alert %s sent (faces=%r, desc=%r) [sd]", etype, label, description)
                 on_alert(etype, event)
+                open_group = state.groups.get(entry["camera"])
+                if open_group is not None:
+                    # This burst has now really been alerted on: a later empty-live frame
+                    # of the same passage may skip its duplicate follow-up.
+                    open_group["delivered"] = True
             else:
                 log.warning("alert %s Telegram delivery failed [sd]; retry queued", etype)
                 entry["due_at"] = now + 60
@@ -978,6 +987,7 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                          etype, label, description, f"{s:.2f}" if s is not None else "n/a")
                 on_alert(etype)
                 group["sent"] = True
+                group["delivered"] = True
             else:
                 log.warning("alert %s Telegram delivery failed [sampler]", etype)
         finally:

@@ -27,8 +27,12 @@ def _safe_unlink(path):
         log.debug("failed to remove temp file %s", path, exc_info=True)
 
 
-def _observe(observe, event, etype, sent):
-    if observe is not None:
+def _observe(observe, event, etype, sent, delivered=False):
+    if observe is None:
+        return
+    try:
+        observe(event, etype, sent, delivered)
+    except TypeError:
         observe(event, etype, sent)
 
 
@@ -164,11 +168,13 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
       score(image_path) -> float|None — local scorer subject confidence; when passed it
         replaces Groq as the send/drop arbiter (Groq only captions what already passed)
         and None (scorer unreachable) degrades to raw passthrough, never a drop.
-      observe(event, etype, sent) -> feeds the sampler's event grouping; ``sent`` is
-        True when this event produced an alert or was handed to the SD follow-up.
+      observe(event, etype, sent, delivered) -> feeds the sampler's event grouping;
+        ``sent`` is True when this event produced an alert or was handed to the SD
+        follow-up, ``delivered`` only when a photo actually reached Telegram.
       burst_sent() -> bool — True when the camera's current event burst already
-        produced a delivered alert; lets the empty-live defer skip queueing a
-        duplicate SD follow-up.
+        produced a *delivered* alert; lets the empty-live defer skip queueing a
+        duplicate SD follow-up. A queued follow-up or a failed send is not a delivery,
+        so it never suppresses one.
     """
     try:
         events = cam.getEvents() or []
@@ -338,7 +344,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             if ok:
                 log.info("alert %s sent (faces=%r, desc=%r)", etype, label, description)
                 _on_alert(on_alert, etype, event)
-                _observe(observe, event, etype, True)
+                _observe(observe, event, etype, True, delivered=True)
             else:
                 # The event watermark has already advanced, so the live poll cannot
                 # simply see this event again. Hand it to an available SD follow-up;

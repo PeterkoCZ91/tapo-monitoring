@@ -614,6 +614,66 @@ def test_run_monitor_observe_reports_sent_alert(monkeypatch):
     assert observed == [True]
 
 
+def test_run_monitor_observe_reports_delivered_send(monkeypatch):
+    # ``sent`` only means "handled"; the sampler's dedupe guard needs to know whether
+    # a photo actually reached Telegram, so a real delivery also reports delivered.
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: True)
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "Person")
+    observed = []
+
+    class Cam:
+        def getEvents(self):
+            return [_motion_event(100)]
+
+    monitor.run_monitor(
+        Cam(), _cfg_with_scorer(), 0, now=1000, groq_key="k",
+        telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        score=lambda img: 0.9,
+        observe=lambda ev, et, sent, delivered=False: observed.append((sent, delivered)))
+    assert observed == [(True, True)]
+
+
+def test_run_monitor_observe_reports_queued_followup_as_undelivered(monkeypatch):
+    # Handed to the SD follow-up: nothing has been delivered yet, so a later frame of
+    # the same burst must still be allowed its own follow-up.
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: True)
+    observed = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    monitor.run_monitor(
+        Cam(), _cfg_with_scorer(), 0, now=1000, groq_key="k",
+        telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        score=lambda img: 0.1,
+        defer=lambda ev, et, live_sent: None,
+        observe=lambda ev, et, sent, delivered=False: observed.append((sent, delivered)))
+    assert observed == [(True, False)]
+
+
+def test_run_monitor_observe_reports_failed_send_as_undelivered(monkeypatch):
+    # Telegram refused the photo and the SD retry is queued: handled, not delivered.
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: False)
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "Person")
+    observed = []
+
+    class Cam:
+        def getEvents(self):
+            return [_motion_event(100)]
+
+    monitor.run_monitor(
+        Cam(), _cfg_with_scorer(), 0, now=1000, groq_key="k",
+        telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        score=lambda img: 0.9,
+        defer=lambda ev, et, live_sent: None,
+        observe=lambda ev, et, sent, delivered=False: observed.append((sent, delivered)))
+    assert observed == [(True, False)]
+
+
 def test_run_monitor_failed_delivery_does_not_arm_alert_gate(monkeypatch):
     monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: False)
     monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "Person")

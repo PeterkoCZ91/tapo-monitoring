@@ -850,7 +850,8 @@ def test_run_monitor_pass_sends_marginal_when_feature_off(monkeypatch):
     assert photos == 1                                   # legacy: 0.4 >= threshold -> send
 
 
-def _run_confirmed_person_with_open_group(monkeypatch, sent):
+def _run_confirmed_person_with_open_group(monkeypatch, sent, delivered=False,
+                                          last_event_at=995):
     """One confirmed-person event, empty-scoring live frame, on an sd_snapshot camera
     with an open group for "a" already marked ``sent``. Returns (photos, state)."""
     from tapo_monitor import monitor as mon
@@ -862,8 +863,8 @@ def _run_confirmed_person_with_open_group(monkeypatch, sent):
     state = daemon.MonitorState()
     state.groups["a"] = {
         "camera": "a", "etype": "motion", "event": {"start_time": 90},
-        "started": 90, "last_event_at": 995, "frames": 0,
-        "next_due": 10**9, "sent": sent,
+        "started": 90, "last_event_at": last_event_at, "frames": 0,
+        "next_due": 10**9, "sent": sent, "delivered": delivered,
     }
     secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": "k"}
     cam = _FakeEventCam([[{"start_time": 100, "events_1": 524288}]])
@@ -873,10 +874,11 @@ def _run_confirmed_person_with_open_group(monkeypatch, sent):
     return counter.photos, state
 
 
-def test_run_monitor_pass_skips_sd_followup_when_burst_sent(monkeypatch):
+def test_run_monitor_pass_skips_sd_followup_when_burst_delivered(monkeypatch):
     # A bare-motion frame of the same passage already alerted seconds earlier: the
     # confirmed-but-empty-live person must not queue a duplicate SD follow-up.
-    photos, state = _run_confirmed_person_with_open_group(monkeypatch, sent=True)
+    photos, state = _run_confirmed_person_with_open_group(monkeypatch, sent=True,
+                                                          delivered=True)
     assert photos == 0
     assert state.pending_sd == []
 
@@ -886,6 +888,46 @@ def test_run_monitor_pass_defers_when_burst_unsent(monkeypatch):
     photos, state = _run_confirmed_person_with_open_group(monkeypatch, sent=False)
     assert photos == 0
     assert len(state.pending_sd) == 1
+
+
+def test_run_monitor_pass_defers_when_burst_sent_but_undelivered(monkeypatch):
+    # ``sent`` also covers "queued for the SD follow-up" and "Telegram refused the
+    # photo" — neither delivered anything, so a camera-confirmed person must still get
+    # its own follow-up instead of being silently dropped.
+    photos, state = _run_confirmed_person_with_open_group(monkeypatch, sent=True,
+                                                          delivered=False)
+    assert photos == 0
+    assert len(state.pending_sd) == 1
+
+
+def test_run_monitor_pass_defers_when_delivered_group_is_stale(monkeypatch):
+    # The delivered alert belongs to an older burst (last event past group_gap=90):
+    # this person is new information, not a duplicate.
+    photos, state = _run_confirmed_person_with_open_group(monkeypatch, sent=True,
+                                                          delivered=True,
+                                                          last_event_at=880)
+    assert photos == 0
+    assert len(state.pending_sd) == 1
+
+
+def test_run_monitor_pass_marks_group_delivered_on_live_send(monkeypatch):
+    # Wiring: a delivered live alert records ``delivered`` on the group, which is what
+    # the SD-follow-up dedupe guard reads.
+    from tapo_monitor import monitor as mon
+    counter = _CountingNotify()
+    monkeypatch.setattr(mon.notify, "send_photo", counter.send_photo)
+    monkeypatch.setattr(mon.enrich, "groq_describe", lambda *a, **k: "Person")
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, img, timeout=10, tiles=1: {"person": 0.9, "animal": 0.0})
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": "k"}
+    cam = _FakeEventCam([[{"start_time": 100, "events_1": 524288}]])
+    daemon.run_monitor_pass(_corroboration_app(), {"a": cam}, state, now=1000,
+                            secrets=secrets,
+                            snapshot_for=lambda c: (lambda cam, ev: "/tmp/x.jpg"),
+                            time_str=lambda e: "t")
+    assert counter.photos == 1
+    assert state.groups["a"]["delivered"] is True
 
 
 # ── scorer retry before passthrough ──────────────────────────────────────────
@@ -1789,6 +1831,31 @@ def test_pending_scorer_pick_captions_with_frame_sequence(monkeypatch):
     assert groq_calls == [frames]               # caption sees the whole sequence, in order
 
 
+def test_pending_send_marks_open_group_delivered(monkeypatch):
+    # The SD follow-up is the alert the burst was waiting for: mark the group delivered
+    # so the dedupe guard can suppress a duplicate follow-up for the same passage.
+    sent = []
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
+                                  "sampler": {"enabled": True, "interval": 30,
+                                              "max_frames": 6, "group_gap": 90},
+                                  "scorer": {"url": "http://127.0.0.1:1/score",
+                                             "threshold": 0.4}}]})
+    state = daemon.MonitorState()
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, img, timeout=10, tiles=1: {"person": 0.9, "animal": 0.0})
+    state.groups["a"] = {"camera": "a", "etype": "person", "event": {"start_time": 1000},
+                         "started": 1000, "last_event_at": 1010, "frames": 0,
+                         "next_due": 10**9, "sent": True, "delivered": False}
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+    _run_pending(app, state, {"a": object()}, 1080,
+                 lambda cfg_, start, span=None, out_dir=None: ["/tmp/sd.jpg"],
+                 lambda cfg_: (lambda cam, ev: None), sent, monkeypatch)
+    assert len(sent) == 1
+    assert state.groups["a"]["delivered"] is True
+
+
 def test_pending_raw_mode_sends_sd_frame_without_groq(monkeypatch):
     # enrich.groq=false = raw mode: the SD follow-up must not require Groq to see a
     # subject (blank desc would read as "no subject" and drop everything) — send the
@@ -1857,6 +1924,26 @@ def test_sampler_due_group_scores_and_sends(monkeypatch):
     assert g["sent"] is True
     assert g["frames"] == 1
     assert state.last_alert[("a", "motion")] == 1035   # cooldown recorded
+
+
+def test_sampler_send_marks_group_delivered(monkeypatch):
+    # The sampler's own alert is a real delivery: a later confirmed-but-empty person of
+    # the same burst may then skip its duplicate SD follow-up.
+    sent = []
+    app = _sampler_app()
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    _run_sampler(app, state, 1035, sent, monkeypatch, score=0.9)
+    assert state.groups["a"]["delivered"] is True
+
+
+def test_sampler_failed_delivery_leaves_group_undelivered(monkeypatch):
+    sent = []
+    app = _sampler_app()
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    _run_sampler(app, state, 1035, sent, monkeypatch, score=0.9, delivered=False)
+    assert state.groups["a"].get("delivered") is not True
 
 
 def test_sampler_failed_delivery_keeps_group_retryable(monkeypatch):
