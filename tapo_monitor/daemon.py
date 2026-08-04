@@ -883,6 +883,32 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
 
 
 
+def _suppress_sampler_frame(cfg, group, etype, s, scfg, image, verdict):
+    """Log/audit one sampler frame that will not be sent and fold it into the group.
+
+    ``verdict`` is "drop" (below threshold) or "hold" (marginal, awaiting corroboration);
+    a held frame is archived for review. Either way the score updates the low-score
+    streak, so a marginal frame keeps a motion-only group alive exactly like a good one.
+    """
+    if verdict == "hold":
+        log.info("sampler %s frame %d/%d: score %.2f awaiting corroboration",
+                 cfg.name, group["frames"], scfg.max_frames, s)
+        monitor.audit_event(cfg, group["event"], etype, "sampler", "hold", score=s,
+                            threshold=cfg.scorer.threshold, reason="awaiting_corroboration")
+        sentlog.archive_review_if_configured(
+            image, sentlog.review_meta(cfg.name, "hold", etype, s))
+    else:
+        log.info("sampler %s frame %d/%d: score %.2f below threshold %.2f",
+                 cfg.name, group["frames"], scfg.max_frames, s, cfg.scorer.threshold)
+        monitor.audit_event(cfg, group["event"], etype, "sampler", "drop", score=s,
+                            threshold=cfg.scorer.threshold, reason="below_threshold")
+    if sampler.note_score(group, s, scfg):
+        log.info("sampler %s: early exit after %d consecutive low frames",
+                 cfg.name, group["low_streak"])
+        monitor.audit_event(cfg, group["event"], etype, "sampler", "early_exit",
+                            score=s, threshold=scfg.low_score, reason="low_score_streak")
+
+
 def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                     time_str=None, night=True):
     """Advance sampler groups: follow-up grabs across each open event window.
@@ -931,44 +957,14 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
             s = score(image) if score is not None else None
             motion_corr = (cfg.scorer.motion_send_threshold is not None
                            and etype == "motion" and not group.get("pir_backed"))
-            if score is not None and s is not None and motion_corr:
-                verdict = sampler.corroborate_motion(
-                    group, s, cfg.scorer.threshold, cfg.scorer.motion_send_threshold)
-                if verdict == "drop":
-                    log.info("sampler %s frame %d/%d: score %.2f below threshold %.2f",
-                             cfg.name, group["frames"], scfg.max_frames, s, cfg.scorer.threshold)
-                    monitor.audit_event(cfg, group["event"], etype, "sampler", "drop", score=s,
-                                        threshold=cfg.scorer.threshold, reason="below_threshold")
-                    if sampler.note_score(group, s, scfg):
-                        log.info("sampler %s: early exit after %d consecutive low frames",
-                                 cfg.name, group["low_streak"])
-                        monitor.audit_event(cfg, group["event"], etype, "sampler", "early_exit",
-                                            score=s, threshold=scfg.low_score,
-                                            reason="low_score_streak")
-                    continue
-                if verdict == "hold":
-                    log.info("sampler %s frame %d/%d: score %.2f awaiting corroboration",
-                             cfg.name, group["frames"], scfg.max_frames, s)
-                    monitor.audit_event(cfg, group["event"], etype, "sampler", "hold", score=s,
-                                        threshold=cfg.scorer.threshold,
-                                        reason="awaiting_corroboration")
-                    sentlog.archive_review_if_configured(image, {
-                        "camera": cfg.name, "verdict": "hold", "etype": etype,
-                        "person": float(getattr(s, "person", s)),
-                        "animal": float(getattr(s, "animal", 0.0))})
-                    continue
-                # verdict == "send": fall through to the send block
-            elif score is not None and s is not None and s < cfg.scorer.threshold:
-                log.info("sampler %s frame %d/%d: score %.2f below threshold %.2f",
-                         cfg.name, group["frames"], scfg.max_frames, s, cfg.scorer.threshold)
-                monitor.audit_event(cfg, group["event"], etype, "sampler", "drop", score=s,
-                                    threshold=cfg.scorer.threshold, reason="below_threshold")
-                if sampler.note_score(group, s, scfg):
-                    log.info("sampler %s: early exit after %d consecutive low frames",
-                             cfg.name, group["low_streak"])
-                    monitor.audit_event(cfg, group["event"], etype, "sampler", "early_exit",
-                                        score=s, threshold=scfg.low_score,
-                                        reason="low_score_streak")
+            verdict = "send"
+            if score is not None and s is not None:
+                verdict = (sampler.corroborate_motion(
+                               group, s, cfg.scorer.threshold, cfg.scorer.motion_send_threshold)
+                           if motion_corr
+                           else ("drop" if s < cfg.scorer.threshold else "send"))
+            if verdict != "send":
+                _suppress_sampler_frame(cfg, group, etype, s, scfg, image, verdict)
                 continue
             if score is not None and s is None:
                 log.warning("scorer unavailable; sampler passes %s frame through", cfg.name)

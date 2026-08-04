@@ -130,5 +130,17 @@ def test_archive_review_best_effort_on_missing_source(tmp_path):
     assert sentlog.archive_review_if_configured("/no/such/frame.jpg", {}, env=env) is None
 
 
+def test_review_meta_shape_for_plain_and_structured_scores():
+    # One shape for both writers (live pass and sampler), from a float or a scorer result.
+    assert sentlog.review_meta("a", "hold", "motion", 0.42) == {
+        "camera": "a", "verdict": "hold", "etype": "motion", "person": 0.42, "animal": 0.0}
+
+    class Score(float):
+        person = 0.42
+        animal = 0.31
+
+    assert sentlog.review_meta("a", "hold", "motion", Score(0.42))["animal"] == 0.31
+
+
 def test_archive_review_default_retention_is_weekly():
     assert sentlog.DEFAULT_REVIEW_RETENTION_DAYS == 7.0

@@ -2084,6 +2084,31 @@ def test_process_sampler_hold_archives_review_frame(monkeypatch):
     assert len(reviews) == 1 and reviews[0]["verdict"] == "hold"
 
 
+def test_process_sampler_hold_clears_low_score_streak(monkeypatch):
+    # A marginal (held) frame is evidence the group is not empty, so it must clear the
+    # low-score streak like any other above-low frame — otherwise low/low/hold/low closes
+    # a group that is still holding a candidate.
+    sent = []
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10",
+                                  "sampler": {"enabled": True, "interval": 30,
+                                              "max_frames": 6, "group_gap": 90,
+                                              "low_score_exit": 2, "low_score": 0.15},
+                                  "scorer": {"url": "http://127.0.0.1:1/score",
+                                             "threshold": 0.3,
+                                             "motion_send_threshold": 0.6}}]})
+    state = daemon.MonitorState()
+    g = _group()
+    g["low_streak"] = 1                       # one low frame short of the early exit
+    state.groups["a"] = g
+    _run_sampler(app, state, 1035, sent, monkeypatch, score=0.4)   # marginal -> hold
+    assert sent == []
+    assert g["motion_candidates"] == 1
+    assert "low_streak" not in g              # the hold cleared the streak
+    assert g.get("early_exit") is None
+    assert daemon.sampler.due(g, 1066, app.cameras[0].sampler) is True   # still sampling
+
+
 def test_process_sampler_sends_second_marginal_motion(monkeypatch):
     sent = []
     app = _sampler_app(threshold=0.3, motion_send=0.6)

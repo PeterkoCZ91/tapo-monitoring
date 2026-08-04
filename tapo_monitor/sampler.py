@@ -110,6 +110,9 @@ def corroborate_motion(group, score, confirm, send_now):
       score >= send_now            -> "send"  (a clear single frame; no wait)
       confirm <= score < send_now  -> candidate; "send" once MOTION_CONFIRM_FRAMES reached
       score < confirm              -> "drop"  (does not reset the candidate count)
+
+    A held frame also stashes its score as ``last_hold_score`` on the group, so an
+    expiring hold can be audited with the score it was holding.
     """
     if score >= send_now:
         return "send"

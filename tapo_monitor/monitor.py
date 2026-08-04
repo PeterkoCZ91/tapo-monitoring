@@ -264,10 +264,8 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                     log.info("hold %s: score %.2f awaiting corroboration", etype, s)
                     audit_event(cfg, event, etype, "live", "hold", score=s,
                                 threshold=cfg.scorer.threshold, reason="awaiting_corroboration")
-                    sentlog.archive_review_if_configured(image, {
-                        "camera": cfg.name, "verdict": "hold", "etype": etype,
-                        "person": float(getattr(s, "person", s)),
-                        "animal": float(getattr(s, "animal", 0.0))})
+                    sentlog.archive_review_if_configured(
+                        image, sentlog.review_meta(cfg.name, "hold", etype, s))
                     _observe(observe, event, etype, False)
                     continue
                 if verdict == "drop":

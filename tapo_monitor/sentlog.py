@@ -106,6 +106,17 @@ def archive_if_configured(image_bytes, caption, *, delivered=True, now=None, env
                         retention_days=retention_days_from_env(env), delivered=delivered)
 
 
+def review_meta(camera, verdict, etype, score):
+    """Index metadata for one suppressed frame (camera, verdict, event type, scores). Pure.
+
+    Shared by the live pass and the sampler so both write the same review-log shape.
+    ``score`` may be a plain float or a scorer result exposing ``person``/``animal``.
+    """
+    return {"camera": camera, "verdict": verdict, "etype": etype,
+            "person": float(getattr(score, "person", score)),
+            "animal": float(getattr(score, "animal", 0.0))}
+
+
 def _review_score_tag(meta):
     person = meta.get("person")
     return f"_p{person:.2f}" if isinstance(person, (int, float)) else ""
