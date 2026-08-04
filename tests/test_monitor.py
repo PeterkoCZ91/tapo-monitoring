@@ -91,6 +91,53 @@ def test_run_monitor_defers_without_live_send_when_empty(monkeypatch):
     assert wm == 100
 
 
+def test_run_monitor_drops_empty_person_when_burst_already_sent(monkeypatch):
+    # A frame of this same passage already alerted (e.g. bare motion scored above
+    # motion_send_threshold seconds earlier): an SD follow-up would just repeat it.
+    sent = []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "empty scene")
+    deferred = []
+    alerted = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    cfg = config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0]
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        on_alert=lambda et: alerted.append(et),
+        defer=lambda ev, et, live_sent: deferred.append((ev["start_time"], et, live_sent)),
+        burst_sent=lambda: True)
+    assert sent == []                 # no empty live ping
+    assert deferred == []             # no duplicate SD follow-up queued
+    assert alerted == []              # nothing delivered -> nothing recorded for cooldown
+
+
+def test_run_monitor_defers_empty_person_when_burst_unsent(monkeypatch):
+    # Existing defer behavior preserved when nothing from this burst has gone out yet.
+    sent = []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "empty scene")
+    deferred = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    cfg = config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0]
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        defer=lambda ev, et, live_sent: deferred.append((ev["start_time"], et, live_sent)),
+        burst_sent=lambda: False)
+    assert deferred == [(100, "person", False)]
+
+
 def test_run_monitor_sends_empty_live_when_no_sd(monkeypatch):
     # With SD disabled (defer=None, e.g. the Pi Zero), keep the always-send safety net:
     # a confirmed person with an empty live frame still goes out so we never miss it.

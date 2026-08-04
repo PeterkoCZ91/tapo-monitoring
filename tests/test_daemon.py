@@ -808,14 +808,18 @@ def _run_person_once(monkeypatch, groq_reply):
 
 # ── corroboration wired into the live monitor pass ───────────────────────────
 
-def _corroboration_app(motion_send=0.6):
+def _corroboration_app(motion_send=0.6, sd_snapshot=False):
     scorer = {"url": "http://127.0.0.1:1/score", "threshold": 0.3}
     if motion_send is not None:
         scorer["motion_send_threshold"] = motion_send
-    return cfg.load_config_from_dict({"groq": {}, "cameras": [{
+    camera = {
         "name": "a", "host": "203.0.113.10",
         "sampler": {"enabled": True, "interval": 30, "max_frames": 6, "group_gap": 90},
-        "scorer": scorer}]})
+        "scorer": scorer,
+    }
+    if sd_snapshot:
+        camera["sd_snapshot"] = True
+    return cfg.load_config_from_dict({"groq": {}, "cameras": [camera]})
 
 
 def _run_marginal_motion_pass(monkeypatch, motion_send):
@@ -844,6 +848,44 @@ def test_run_monitor_pass_holds_first_marginal_motion(monkeypatch):
 def test_run_monitor_pass_sends_marginal_when_feature_off(monkeypatch):
     photos, _ = _run_marginal_motion_pass(monkeypatch, motion_send=None)
     assert photos == 1                                   # legacy: 0.4 >= threshold -> send
+
+
+def _run_confirmed_person_with_open_group(monkeypatch, sent):
+    """One confirmed-person event, empty-scoring live frame, on an sd_snapshot camera
+    with an open group for "a" already marked ``sent``. Returns (photos, state)."""
+    from tapo_monitor import monitor as mon
+    counter = _CountingNotify()
+    monkeypatch.setattr(mon.notify, "send_photo", counter.send_photo)
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, img, timeout=10, tiles=1: {"person": 0.1, "animal": 0.0})
+    app = _corroboration_app(sd_snapshot=True)
+    state = daemon.MonitorState()
+    state.groups["a"] = {
+        "camera": "a", "etype": "motion", "event": {"start_time": 90},
+        "started": 90, "last_event_at": 995, "frames": 0,
+        "next_due": 10**9, "sent": sent,
+    }
+    secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": "k"}
+    cam = _FakeEventCam([[{"start_time": 100, "events_1": 524288}]])
+    daemon.run_monitor_pass(app, {"a": cam}, state, now=1000, secrets=secrets,
+                            snapshot_for=lambda c: (lambda cam, ev: "/tmp/x.jpg"),
+                            time_str=lambda e: "t")
+    return counter.photos, state
+
+
+def test_run_monitor_pass_skips_sd_followup_when_burst_sent(monkeypatch):
+    # A bare-motion frame of the same passage already alerted seconds earlier: the
+    # confirmed-but-empty-live person must not queue a duplicate SD follow-up.
+    photos, state = _run_confirmed_person_with_open_group(monkeypatch, sent=True)
+    assert photos == 0
+    assert state.pending_sd == []
+
+
+def test_run_monitor_pass_defers_when_burst_unsent(monkeypatch):
+    # No prior alert for this burst: the SD follow-up is still queued as before.
+    photos, state = _run_confirmed_person_with_open_group(monkeypatch, sent=False)
+    assert photos == 0
+    assert len(state.pending_sd) == 1
 
 
 # ── scorer retry before passthrough ──────────────────────────────────────────

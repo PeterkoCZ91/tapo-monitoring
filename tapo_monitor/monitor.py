@@ -145,7 +145,7 @@ TYPE_EMOJI = {"person": "👤", "vehicle": "🚗", "pet": "🐾", "tamper": "⚠
 def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_chat,
                 snapshot, time_str, can_alert=None, on_alert=None, face_names=None,
                 defer=None, score=None, observe=None, poll_observe=None,
-                media_observe=None, mute=False, corroborate=None):
+                media_observe=None, mute=False, corroborate=None, burst_sent=None):
     """Poll one camera once and alert on new detections. Returns the new watermark.
 
     ``mute`` polls and advances the watermark but skips all grabbing/scoring/alerting.
@@ -166,6 +166,9 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         and None (scorer unreachable) degrades to raw passthrough, never a drop.
       observe(event, etype, sent) -> feeds the sampler's event grouping; ``sent`` is
         True when this event produced an alert or was handed to the SD follow-up.
+      burst_sent() -> bool — True when the camera's current event burst already
+        produced a delivered alert; lets the empty-live defer skip queueing a
+        duplicate SD follow-up.
     """
     try:
         events = cam.getEvents() or []
@@ -291,6 +294,16 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                     _observe(observe, event, etype, False)
                     continue
             elif empty and defer is not None:
+                if burst_sent is not None and burst_sent():
+                    # A frame of this same passage already went out (e.g. a bare-motion
+                    # frame seconds earlier scored as the subject); an SD follow-up
+                    # would repeat it.
+                    log.info("drop %s: live empty, burst already alerted", etype)
+                    audit_event(cfg, event, etype, "live", "drop", score=s,
+                                threshold=cfg.scorer.threshold if score is not None else None,
+                                reason="burst_already_sent")
+                    _observe(observe, event, etype, False)
+                    continue
                 # Camera confirmed a person but the frame shows nothing — hand it to
                 # the SD follow-up (live_sent=False) instead of pinging a blank photo.
                 # Still record the alert so the per-type cooldown sees this person.

@@ -627,6 +627,11 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             if _cfg.sampler.enabled:
                 sampler.observe_event(state.groups, _name, event, etype, sent, now, _cfg.sampler)
 
+        def burst_sent(_name=name, _cfg=cfg):
+            g = state.groups.get(_name)
+            return bool(g and g["sent"]
+                        and (now - g["last_event_at"]) <= _cfg.sampler.group_gap)
+
         def poll_observe(ok, _name=name):
             state.events_reachable[_name] = bool(ok)
 
@@ -649,6 +654,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             score=score,
             corroborate=corroborate,
             observe=observe,
+            burst_sent=burst_sent,
             poll_observe=poll_observe,
             media_observe=media_observe,
             mute=cfg.night_only and not night,
