@@ -1950,6 +1950,36 @@ def test_sampler_expired_group_removed(monkeypatch):
     assert sent == []
 
 
+def test_sampler_expired_unconfirmed_hold_audited(monkeypatch, caplog):
+    sent = []
+    app = _sampler_app(threshold=0.3, motion_send=0.6)
+    state = daemon.MonitorState()
+    g = _group()
+    g["motion_candidates"] = 1
+    g["last_hold_score"] = 0.41
+    state.groups["a"] = g
+    with caplog.at_level("INFO", logger="tapo_monitor.monitor"):
+        _run_sampler(app, state, 1000 + 30 * 6 + 91, sent, monkeypatch)  # past window+gap
+    assert "a" not in state.groups
+    assert sent == []
+    assert "action=drop" in caplog.text
+    assert "reason=hold_expired" in caplog.text
+    assert "score=0.4100" in caplog.text
+
+
+def test_sampler_expired_group_without_candidates_not_audited(monkeypatch, caplog):
+    sent = []
+    app = _sampler_app(threshold=0.3, motion_send=0.6)
+    state = daemon.MonitorState()
+    g = _group()
+    state.groups["a"] = g
+    with caplog.at_level("INFO", logger="tapo_monitor.monitor"):
+        _run_sampler(app, state, 1000 + 30 * 6 + 91, sent, monkeypatch)  # past window+gap
+    assert "a" not in state.groups
+    assert sent == []
+    assert "hold_expired" not in caplog.text
+
+
 def test_sampler_grab_failure_counts_attempt(monkeypatch):
     sent = []
     app = _sampler_app()

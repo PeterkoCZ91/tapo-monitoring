@@ -880,6 +880,12 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
             continue                          # night_only by day: leave the group alone
         scfg = cfg.sampler
         if sampler.expired(group, now, scfg):
+            if group.get("motion_candidates") and not group["sent"]:
+                # A held marginal motion never got its corroborating frame: make the discard
+                # visible so threshold tuning can count expired holds like any other outcome.
+                monitor.audit_event(cfg, group["event"], "motion", "sampler", "drop",
+                                    score=group.get("last_hold_score"),
+                                    threshold=cfg.scorer.threshold, reason="hold_expired")
             log.info("close group %s: %d follow-up frame(s), sent=%s",
                      cfg.name, group["frames"], group["sent"])
             del state.groups[cfg.name]

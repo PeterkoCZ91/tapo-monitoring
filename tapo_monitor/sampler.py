@@ -110,6 +110,7 @@ def corroborate_motion(group, score, confirm, send_now):
     if score >= send_now:
         return "send"
     if score >= confirm:
+        group["last_hold_score"] = score
         group["motion_candidates"] = group.get("motion_candidates", 0) + 1
         return "send" if group["motion_candidates"] >= MOTION_CONFIRM_FRAMES else "hold"
     return "drop"

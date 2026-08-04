@@ -179,6 +179,12 @@ def test_corroborate_drops_below_confirm():
     assert g["motion_candidates"] == 1          # a low frame does not reset the count
 
 
+def test_corroborate_hold_records_score_for_expiry_audit():
+    g = {}
+    assert sampler.corroborate_motion(g, 0.41, 0.3, 0.6) == "hold"
+    assert g["last_hold_score"] == 0.41
+
+
 def test_ensure_group_creates_then_returns_same():
     groups = {}
     g1 = sampler.ensure_group(groups, "a", _ev(1000), "motion", 1010, CFG)
