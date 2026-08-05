@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-05
+
 ### Added
 - Per-camera `rotate` (0/90/180/270) straightens a physically mis-mounted camera at frame
   capture across all sources (RTSP, local recording, SD), so the scorer, crop and Telegram
