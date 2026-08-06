@@ -123,6 +123,7 @@ faces:
 alerts:
   cooldown: 120
   outage_threshold: 900
+  stall_threshold: 900
 
 loop:
   event_interval: 4
@@ -131,6 +132,10 @@ loop:
 
 - `cooldown` gates repeated alerts per camera/event class after confirmed delivery.
 - `outage_threshold` avoids alerting on brief network gaps.
+- `stall_threshold` guards the daemon itself: if every tick has raised for this long, a
+  🔴 goes out. The camera watchdog runs inside the tick, so when the tick is what broke,
+  only this one is left to notice — without it a wedged daemon looks exactly like a quiet
+  night.
 - `event_interval` controls `getEvents` latency on the existing client.
 - `control_interval` controls ping/reconnect and camera plan re-application.
 

@@ -618,6 +618,112 @@ def test_loop_step_decouples_control_from_event_poll():
     assert calls == {"control": 2, "watchdog": 2, "monitor": 3, "drain": 3}
 
 
+# ── update_stall (the daemon's own dead-man's switch) ────────────────────────
+
+def test_stall_no_alert_before_threshold():
+    state = daemon.MonitorState()
+    ev, _ = daemon.update_stall(state, ok=False, now=1000, threshold=900)
+    assert ev is None
+    ev, _ = daemon.update_stall(state, ok=False, now=1500, threshold=900)
+    assert ev is None  # 500s < 900s
+
+
+def test_stall_one_alert_at_threshold():
+    state = daemon.MonitorState()
+    daemon.update_stall(state, ok=False, now=1000, threshold=900)
+    ev, _ = daemon.update_stall(state, ok=False, now=1900, threshold=900)
+    assert ev == "alert"
+
+
+def test_stall_no_duplicate_alerts():
+    state = daemon.MonitorState()
+    daemon.update_stall(state, ok=False, now=1000, threshold=900)
+    daemon.update_stall(state, ok=False, now=1900, threshold=900)   # alert
+    ev, _ = daemon.update_stall(state, ok=False, now=3000, threshold=900)
+    assert ev is None
+
+
+def test_stall_recovery_after_alert():
+    state = daemon.MonitorState()
+    daemon.update_stall(state, ok=False, now=1000, threshold=900)
+    daemon.update_stall(state, ok=False, now=1900, threshold=900)   # alert
+    ev, _ = daemon.update_stall(state, ok=True, now=2000, threshold=900)
+    assert ev == "recovered"
+
+
+def test_stall_recovery_without_prior_alert_is_silent():
+    state = daemon.MonitorState()
+    daemon.update_stall(state, ok=False, now=1000, threshold=900)   # below threshold
+    ev, _ = daemon.update_stall(state, ok=True, now=1100, threshold=900)
+    assert ev is None
+
+
+def test_stall_healthy_tick_is_noop():
+    state = daemon.MonitorState()
+    ev, _ = daemon.update_stall(state, ok=True, now=1000, threshold=900)
+    assert ev is None
+
+
+# ── stall_watchdog (outer-loop notification) ─────────────────────────────────
+
+def _app_with_stall_threshold(seconds):
+    return cfg.load_config_from_dict({
+        "cameras": [{"name": "c", "host": "203.0.113.10"}],
+        "alerts": {"stall_threshold": seconds},
+    })
+
+
+def test_stall_watchdog_alerts_once_then_recovers(monkeypatch):
+    # The failure this exists for: loop_step raises every tick, so the per-camera
+    # watchdog inside it never runs. This one is in the outer loop and must still speak.
+    app = _app_with_stall_threshold(900)
+    state = daemon.MonitorState()
+    sent = []
+    monkeypatch.setattr(daemon.notify, "send_text",
+                        lambda tok, chat, text: (sent.append(text), True)[1])
+    secrets = {"telegram_token": "t", "telegram_chat": "c"}
+
+    daemon.stall_watchdog(app, state, secrets, ok=False, now=1000)
+    daemon.stall_watchdog(app, state, secrets, ok=False, now=1500)
+    assert sent == []
+    daemon.stall_watchdog(app, state, secrets, ok=False, now=1900)
+    daemon.stall_watchdog(app, state, secrets, ok=False, now=2500)
+    assert len(sent) == 1 and sent[0].startswith("🔴")
+
+    daemon.stall_watchdog(app, state, secrets, ok=True, now=2600)
+    assert len(sent) == 2 and sent[1].startswith("🟢")
+
+
+def test_stall_watchdog_retries_undelivered_alert(monkeypatch):
+    # A swallowed Telegram message must not permanently mute an outage whose whole
+    # symptom is silence — the alert is due again on the next tick.
+    app = _app_with_stall_threshold(900)
+    state = daemon.MonitorState()
+    attempts = []
+    monkeypatch.setattr(daemon.notify, "send_text",
+                        lambda tok, chat, text: (attempts.append(text), False)[1])
+    secrets = {"telegram_token": "t", "telegram_chat": "c"}
+
+    daemon.stall_watchdog(app, state, secrets, ok=False, now=1000)
+    daemon.stall_watchdog(app, state, secrets, ok=False, now=1900)   # undelivered
+    daemon.stall_watchdog(app, state, secrets, ok=False, now=2000)   # must try again
+    assert len(attempts) == 2
+
+
+def test_stall_watchdog_never_raises_into_the_loop(monkeypatch):
+    # It runs in the one place that survives a broken tick; it must not become the
+    # reason that loop dies.
+    app = _app_with_stall_threshold(900)
+    state = daemon.MonitorState()
+    monkeypatch.setattr(daemon.notify, "send_text",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("telegram down")))
+
+    daemon.stall_watchdog(app, state, {"telegram_token": "t", "telegram_chat": "c"},
+                          ok=False, now=1000)
+    daemon.stall_watchdog(app, state, {"telegram_token": "t", "telegram_chat": "c"},
+                          ok=False, now=1900)   # would raise if unguarded
+
+
 # ── update_outage (pure transitions) ─────────────────────────────────────────
 
 def test_outage_no_alert_before_threshold():

@@ -261,6 +261,13 @@ def test_alerts_override():
     assert app.alerts.outage_threshold == 60
 
 
+def test_stall_threshold_defaults_and_overrides():
+    assert cfg.load_config_from_dict(_minimal()).alerts.stall_threshold == 900
+    data = {"alerts": {"stall_threshold": 300},
+            "cameras": [{"name": "front", "host": "192.0.2.50"}]}
+    assert cfg.load_config_from_dict(data).alerts.stall_threshold == 300
+
+
 def test_observability_defaults_are_safe_and_opt_in():
     obs = cfg.load_config_from_dict(_minimal()).observability
     assert obs.digital_twin is False

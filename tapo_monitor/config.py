@@ -181,6 +181,7 @@ class CameraConfig:
 class AlertsConfig:
     cooldown: int = 120         # min seconds between detection alerts per camera
     outage_threshold: int = 900  # seconds a camera must be unreachable before alerting
+    stall_threshold: int = 900  # seconds of failing daemon ticks before alerting
 
 
 @dataclass
@@ -483,6 +484,7 @@ def load_config_from_dict(data) -> AppConfig:
     alerts = AlertsConfig(
         cooldown=int(alerts_raw.get("cooldown", 120)),
         outage_threshold=int(alerts_raw.get("outage_threshold", 900)),
+        stall_threshold=int(alerts_raw.get("stall_threshold", 900)),
     )
 
     loop_raw = data.get("loop") or {}

@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+- A dead-man's switch for the daemon itself (`alerts.stall_threshold`, default 900s):
+  when every loop iteration has raised for that long, a 🔴 goes out and a later healthy
+  tick sends 🟢. The per-camera outage watchdog runs inside the tick, so a fault in the
+  tick suppresses the very alerting meant to report it — the daemon then keeps logging
+  errors while Telegram stays silent, which is indistinguishable from a calm night.
+
+### Changed
+- `crop_to_subject` cameras now archive the uncropped frame in the sent log while still
+  sending the zoom to Telegram, so a false positive can be reviewed against the whole
+  scene instead of a close-up. The alert send path also unlinks the crop it creates,
+  which previously leaked one temp file per cropped alert.
+
 ## [0.2.0] - 2026-08-05
 
 ### Added

@@ -282,6 +282,8 @@ class MonitorState:
     twin_alerted: dict = field(default_factory=dict)
     twin_path: str | None = None
     event_ledger: object | None = None
+    tick_fail_since: float | None = None
+    stall_alerted: bool = False
     ledger_handler: object | None = None
     pending_sd: list = field(default_factory=list)
     groups: dict = field(default_factory=dict)
@@ -298,6 +300,55 @@ def backoff_seconds(fails, base=60, cap=1800):
     if fails < 1:
         return 0
     return min(base * (2 ** (fails - 1)), cap)
+
+
+def update_stall(state: "MonitorState", ok, now, threshold):
+    """Pure transition for the daemon's own liveness. Returns ("alert"|"recovered"|None, state).
+
+    ``ok`` is whether the last tick completed. Emits "alert" once when ticks have been
+    failing continuously for ``threshold`` seconds, "recovered" once when one succeeds
+    after that alert.
+    """
+    if ok:
+        was_alerted = state.stall_alerted
+        state.tick_fail_since = None
+        state.stall_alerted = False
+        return ("recovered", state) if was_alerted else (None, state)
+
+    if state.tick_fail_since is None:
+        state.tick_fail_since = now
+        return None, state
+    if not state.stall_alerted and now - state.tick_fail_since >= threshold:
+        state.stall_alerted = True
+        return "alert", state
+    return None, state
+
+
+def stall_watchdog(app: AppConfig, state: "MonitorState", secrets, *, ok, now):
+    """Alert when the daemon's own loop has been failing for too long.
+
+    The per-camera outage watchdog runs inside ``loop_step``; when that call is what
+    breaks, it never runs at all — the daemon just logs a tick error every poll and goes
+    quiet, which is indistinguishable from a calm night. This one lives in the outer
+    loop, so a daemon throwing on every tick still says so out loud.
+
+    Best-effort by construction: it must never be the reason the surviving loop dies.
+    """
+    try:
+        event, _ = update_stall(state, ok, now, app.alerts.stall_threshold)
+        if event == "alert":
+            down = notify.format_duration(max(0, now - (state.tick_fail_since or now)))
+            if not notify.send_text(secrets["telegram_token"], secrets["telegram_chat"],
+                                    f"🔴 monitor stalled: no successful tick for {down}"):
+                # Delivery is part of the transition; an outage whose symptom is silence
+                # must not be muted by a swallowed message.
+                state.stall_alerted = False
+                log.warning("stall notification delivery failed")
+        elif event == "recovered":
+            notify.send_text(secrets["telegram_token"], secrets["telegram_chat"],
+                             "🟢 monitor recovered: ticks completing again")
+    except Exception:  # noqa: BLE001 - the watchdog may never kill the loop it guards
+        log.debug("stall watchdog failed", exc_info=True)
 
 
 def update_outage(state: "MonitorState", name, ok, now, threshold):
@@ -1224,13 +1275,16 @@ def main(argv=None):  # pragma: no cover - thin entry point
     last_control = None
     while True:
         now = _time.time()
+        tick_ok = True
         try:
             last_control = loop_step(
                 app, cam_clients, state, now=now, secrets=secrets,
                 last_control=last_control, control_interval=control_interval,
             )
         except Exception as e:  # noqa: BLE001
+            tick_ok = False
             log.exception("tick error: %s", e)
+        stall_watchdog(app, state, secrets, ok=tick_ok, now=now)
         _time.sleep(poll_interval)
 
 
