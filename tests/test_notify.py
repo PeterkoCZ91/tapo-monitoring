@@ -113,6 +113,44 @@ def test_send_photo_archives_sent_frame_when_configured(monkeypatch, tmp_path):
     assert saved[0].read_bytes() == b"\xff\xd8IMG"
 
 
+def test_send_photo_archives_uncropped_frame_when_given(monkeypatch, tmp_path):
+    # crop_to_subject cameras send a zoom; the archive is only useful for judging a false
+    # positive if it keeps the whole scene, so the pre-crop frame wins over the sent one.
+    posted = []
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: (posted.append(req.data), _FakeResp(b'{"ok":true}'))[1])
+    archive = tmp_path / "sent"
+    monkeypatch.setenv("TAPO_SENT_LOG_DIR", str(archive))
+    crop = tmp_path / "crop.jpg"
+    crop.write_bytes(b"\xff\xd8CROP")
+    full = tmp_path / "full.jpg"
+    full.write_bytes(b"\xff\xd8FULL")
+
+    assert notify.send_photo("tok", "chat", str(crop), "c", archive_path=str(full)) is True
+
+    assert b"CROP" in posted[0] and b"FULL" not in posted[0]
+    saved = list(archive.glob("*.jpg"))
+    assert len(saved) == 1
+    assert saved[0].read_bytes() == b"\xff\xd8FULL"
+
+
+def test_send_photo_archives_sent_frame_when_uncropped_unreadable(monkeypatch, tmp_path):
+    # A vanished pre-crop temp file must degrade to archiving the crop, never to no archive.
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: _FakeResp(b'{"ok":true}'))
+    archive = tmp_path / "sent"
+    monkeypatch.setenv("TAPO_SENT_LOG_DIR", str(archive))
+    crop = tmp_path / "crop.jpg"
+    crop.write_bytes(b"\xff\xd8CROP")
+
+    assert notify.send_photo("tok", "chat", str(crop), "c",
+                             archive_path=str(tmp_path / "gone.jpg")) is True
+
+    saved = list(archive.glob("*.jpg"))
+    assert len(saved) == 1
+    assert saved[0].read_bytes() == b"\xff\xd8CROP"
+
+
 def test_send_photo_does_not_archive_when_not_configured(monkeypatch, tmp_path):
     monkeypatch.delenv("TAPO_SENT_LOG_DIR", raising=False)
     monkeypatch.setattr(notify.urllib.request, "urlopen",

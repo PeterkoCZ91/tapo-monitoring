@@ -4,7 +4,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tapo_monitor import config as cfg
-from tapo_monitor import daemon
+from tapo_monitor import daemon, notify
 
 
 def _cam(**overrides):
@@ -1355,6 +1355,87 @@ def test_crop_for_subject_noop_when_disabled(tmp_path):
     out = daemon.crop_for_subject(cam, str(src), str(tmp_path),
                                   score_result={"box": [1, 2, 3, 4], "w": 100, "h": 100})
     assert out == str(src)
+
+
+# ── send_alert_photo (crop goes out, whole scene is archived) ────────────────
+
+class _Resp:
+    status = 200
+
+    def __init__(self, body):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_send_alert_photo_archives_uncropped_scene(monkeypatch, tmp_path):
+    # The zoom is what the user wants in Telegram; the sent log needs the scene, or a
+    # false positive on an empty yard is unreviewable — it archives a blurry close-up.
+    cam = _cam(crop_to_subject=True, scorer={"url": "http://x/score", "tiles": 2})
+    full = tmp_path / "frame.jpg"
+    full.write_bytes(b"\xff\xd8WHOLE-SCENE")
+    crop = tmp_path / "crop.jpg"
+    crop.write_bytes(b"\xff\xd8ZOOM")
+    monkeypatch.setattr(daemon, "crop_for_subject", lambda *a, **k: str(crop))
+    posted = []
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: (posted.append(req.data), _Resp(b'{"ok":true}'))[1])
+    archive = tmp_path / "sent"
+    monkeypatch.setenv("TAPO_SENT_LOG_DIR", str(archive))
+
+    ok = daemon.send_alert_photo(cam, {"telegram_token": "t", "telegram_chat": "c"},
+                                 str(full), "caption")
+
+    assert ok is True
+    assert b"ZOOM" in posted[0]                     # Telegram got the zoom
+    saved = list(archive.glob("*.jpg"))
+    assert len(saved) == 1
+    assert saved[0].read_bytes() == b"\xff\xd8WHOLE-SCENE"
+
+
+def test_send_alert_photo_removes_the_crop_it_created(monkeypatch, tmp_path):
+    # The crop is this function's own temp file. The caller unlinks the frame it passed in,
+    # so an unremoved crop leaks one file per alert — that is how the Pi tmpfs filled up.
+    cam = _cam(crop_to_subject=True, scorer={"url": "http://x/score", "tiles": 2})
+    full = tmp_path / "frame.jpg"
+    full.write_bytes(b"\xff\xd8WHOLE")
+    crop = tmp_path / "crop_123.jpg"
+    crop.write_bytes(b"\xff\xd8ZOOM")
+    monkeypatch.setattr(daemon, "crop_for_subject", lambda *a, **k: str(crop))
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: _Resp(b'{"ok":true}'))
+    monkeypatch.delenv("TAPO_SENT_LOG_DIR", raising=False)
+
+    daemon.send_alert_photo(cam, {"telegram_token": "t", "telegram_chat": "c"},
+                            str(full), "caption")
+
+    assert not crop.exists()        # the zoom we made is gone
+    assert full.exists()            # the frame we were handed is still the caller's
+
+
+def test_send_alert_photo_archives_sent_frame_without_crop(monkeypatch, tmp_path):
+    # No crop configured: sent and archived frame are the same, as before.
+    cam = _cam(scorer={"url": "http://x/score"})
+    src = tmp_path / "frame.jpg"
+    src.write_bytes(b"\xff\xd8PLAIN")
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: _Resp(b'{"ok":true}'))
+    archive = tmp_path / "sent"
+    monkeypatch.setenv("TAPO_SENT_LOG_DIR", str(archive))
+
+    assert daemon.send_alert_photo(cam, {"telegram_token": "t", "telegram_chat": "c"},
+                                   str(src), "caption") is True
+
+    saved = list(archive.glob("*.jpg"))
+    assert len(saved) == 1
+    assert saved[0].read_bytes() == b"\xff\xd8PLAIN"
 
 
 # ── process_pending_sd ────────────────────────────────────────────────────────

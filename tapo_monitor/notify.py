@@ -123,8 +123,24 @@ def _post_photo(token, chat_id, image, caption):
         return False
 
 
-def send_photo(token, chat_id, image_path, caption):
-    """Send a photo with a caption via multipart/form-data. Returns True on success."""
+def _archive_bytes(archive_path, sent_image):
+    """Frame to keep in the sent log: the pre-crop one when readable, else what we sent."""
+    if not archive_path:
+        return sent_image
+    try:
+        with open(archive_path, "rb") as f:
+            return f.read()
+    except OSError:
+        return sent_image
+
+
+def send_photo(token, chat_id, image_path, caption, archive_path=None):
+    """Send a photo with a caption via multipart/form-data. Returns True on success.
+
+    ``archive_path`` names a different frame to keep in the sent log: ``crop_to_subject``
+    cameras push a zoom, and only the uncropped scene shows whether the alert was a false
+    positive. Unreadable? The sent frame is archived instead — never nothing.
+    """
     try:
         with open(image_path, "rb") as f:
             image = f.read()
@@ -135,8 +151,8 @@ def send_photo(token, chat_id, image_path, caption):
         # A transient Telegram/network failure would otherwise lose a real alert.
         time.sleep(TELEGRAM_RETRY_DELAY)
         ok = _post_photo(token, chat_id, image, caption)
-    # Best-effort diagnostic copy of the exact frame we pushed (opt-in via env).
-    sentlog.archive_if_configured(image, caption, delivered=ok)
+    # Best-effort diagnostic copy of the frame (opt-in via env).
+    sentlog.archive_if_configured(_archive_bytes(archive_path, image), caption, delivered=ok)
     return ok
 
 

@@ -529,6 +529,23 @@ def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_f
     return image
 
 
+def send_alert_photo(cfg, secrets, image, caption):
+    """Send one alert frame: the zoom goes to Telegram, the whole scene to the sent log.
+
+    ``crop_to_subject`` cameras push a close-up, which is what the user wants to look at
+    but useless for reviewing a false positive later — a cropped empty yard is just a
+    blurry patch. So the archive keeps the frame as it was before cropping.
+    """
+    cropped = crop_for_subject(cfg, image, os.path.dirname(image), secrets)
+    args = (secrets["telegram_token"], secrets["telegram_chat"], cropped, caption)
+    if cropped == image:            # nothing was cropped away, nothing extra to keep
+        return notify.send_photo(*args)
+    try:
+        return notify.send_photo(*args, archive_path=image)
+    finally:
+        _safe_unlink(cropped)       # our own temp zoom; ``image`` stays the caller's
+
+
 def _caption_describe(cfg, groq_key, images):
     """Caption-only Groq for already-approved frame(s); never blocks a send.
 
@@ -854,8 +871,7 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
                 monitor.TYPE_EMOJI.get(etype, "👤"), time_str(event),
                 description=description or None, detail=label or None,
             )
-            image = crop_for_subject(cfg, image, os.path.dirname(image), secrets)
-            ok = notify.send_photo(secrets["telegram_token"], secrets["telegram_chat"], image, caption)
+            ok = send_alert_photo(cfg, secrets, image, caption)
             # SD follow-up is a real user-visible alert. Record it in the same gate as
             # live sends, otherwise a person rescued from SD can be followed minutes
             # later by a duplicate motion SD alert from the same passage.
@@ -983,8 +999,7 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                 monitor.TYPE_EMOJI.get(etype, "👁"), time_str(group["event"]),
                 description=description or None, detail=label or None,
             )
-            image = crop_for_subject(cfg, image, os.path.dirname(image), secrets)
-            ok = notify.send_photo(secrets["telegram_token"], secrets["telegram_chat"], image, caption)
+            ok = send_alert_photo(cfg, secrets, image, caption)
             monitor.audit_event(cfg, group["event"], etype, "sampler", "send", score=s,
                                 threshold=cfg.scorer.threshold if score is not None else None,
                                 telegram=ok)
