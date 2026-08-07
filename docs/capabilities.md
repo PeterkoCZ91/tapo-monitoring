@@ -53,6 +53,12 @@ documented below as *available* but intentionally **not implemented** — see "A
   Groq then captions only frames that already passed the scorer. Optional tiled inference
   scores the whole image plus a grid to rescue distant subjects in wide views; `crop_to_subject` uses the
   winning person box for a padded alert-photo zoom and safely falls back to the full frame.
+  With `crop_from_native` that zoom is cut from a native-resolution grab rather than the
+  already-downscaled frame — a figure spanning 5% of the width is ~64px across at 1280 and
+  ~190px at 4K. The frame is reduced where it is captured and the native original travels
+  with it, so the scorer, the captioner and Telegram keep receiving delivery-width images
+  and only the crop spends the detail. Off by default; the extra grab is free on a Pi 4 and
+  2.5–3.5x on a Pi Zero 2 W.
 - **Event-window sampler (optional)** — for long camera events, follow-up RTSP grabs
   across the event window catch people who enter frame after the first live grab.
 - **AI description** — Groq vision model returns a short scene description for approved
@@ -86,6 +92,11 @@ Rain makes auto-tracking cameras chase raindrops and IR reflections. Using open-
 ## 6. Operations
 
 - Camera-down watchdog with de-duplicated Telegram alerts.
+- Daemon dead-man's switch (`alerts.stall_threshold`): the camera watchdog runs inside the
+  tick, so a fault in the tick suppresses the alerting meant to report it. A second
+  watchdog in the outer loop sends 🔴 once every tick has raised for the threshold and 🟢
+  when one completes again. It shares the process it guards, so it covers a *raising*
+  tick — not a hung one, and not a crash loop, which reset the timer on restart.
 - Reconnect handling and lockout-aware sessions (see below).
 - Structured audit logs plus `tapo-monitor audit-log` for threshold calibration.
 - systemd templates for the monitor daemon and shared scorer service.

@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-07
+
 ### Added
 - `crop_from_native` takes the `crop_to_subject` zoom from a native-resolution grab
   instead of cropping a frame that was already reduced to 1280 wide — a distant figure is

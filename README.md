@@ -41,11 +41,15 @@ recorder and scorer can complement the daemon, but neither is required for the b
 - **Firmware-safe camera control** — day/night policy, people-only SmartTrack, presets,
   rain gating, sensitivity control and optional ONVIF soft pan limits.
 - **Reliable event media** — live RTSP first, then an event-time SD-card or local-recorder
-  follow-up when the first frame misses the subject.
+  follow-up when the first frame misses the subject; the subject zoom can be cropped from
+  a native-resolution grab so a distant figure stays legible.
 - **Optional local scorer** — a small HTTP YOLO service can gate frames and return subject
   boxes; Groq remains optional caption enrichment.
 - **Confirmed Telegram semantics** — failed sends do not arm cooldowns; recovery, SD and
   sampler paths remain retryable.
+- **It tells you when it stops working** — a dead-man's switch outside the main loop
+  reports a daemon whose every tick is failing, because silence otherwise looks exactly
+  like a quiet night.
 - **Camera Digital Twin** — redacted safe-getter snapshots, desired/actual drift and
   layered health without a second login loop.
 - **Shadow Detection Auditor** — a private, media-free SQLite ledger correlates camera
