@@ -327,6 +327,44 @@ Unset (the default) keeps the legacy behaviour: any motion frame `>= threshold` 
   frame.
 - Scorer errors fail open (one automatic retry, then raw passthrough — never a silent drop).
 
+### Cropping at native resolution
+
+Frames are normally downscaled to 1280 wide at capture, which is where it is cheapest. A
+crop taken from such a frame is exactly as coarse as the frame it came from: a figure
+occupying 5% of the width is ~64px across at 1280, but ~190px at 4K.
+
+`crop_from_native: true` grabs the frame at the camera's own resolution, crops it, and
+reduces only the result. Full-resolution bytes never leave the device — both the zoom sent
+to Telegram and the whole-scene copy kept in the sent log are downscaled after the crop.
+
+Scoring still happens on the reduced copy, not the native one. The service resizes every
+request to its own input size regardless, so a 4K frame buys no accuracy while costing the
+*shared* scorer 2–3x per request (measured 4.7–7.0 s versus 2.4 s, against a default
+`scorer.timeout` of 10 s — a timeout degrades that frame to unfiltered passthrough). Only
+the crop needs the pixels. Both frames come from a single grab, so nothing moves between
+where the subject is scored and where it is cropped.
+
+It is off by default because the grab is the expensive part, and the cost depends entirely
+on the hardware. Measured on two live cameras, both offering 3840×2160 on `stream1` and
+1280×720 on `stream2`, three grabs each:
+
+| Device | Stream grabbed | Time per grab |
+| --- | --- | --- |
+| Pi 4 Model B | `stream1`, 4K, downscaled | 2.3–2.5 s |
+| Pi 4 Model B | `stream1`, 4K, native | 2.46–2.49 s |
+| Pi Zero 2 W | `stream2`, 720p, downscaled | 3.1–3.4 s |
+| Pi Zero 2 W | `stream1`, 4K, native | 7.6–11.5 s |
+
+On top of the grab the flag adds one local reduction and one dimension probe, measured at
+0.8 s per alert on the Pi 4, and leaves the scorer's own cost unchanged.
+
+Two things follow. The decode dominates and the downscale is free — on the Pi 4 a native
+4K grab costs the same as a downscaled one, so there the detail is available for nothing.
+On the Pi Zero the same grab costs 2.5–3.5× more and its worst case lands close to the
+15 s `rtsp_timeout`, which would turn a slow moment into a lost frame. Check what a grab
+costs on your hardware before enabling it; `rtsp_stream` decides which stream is grabbed,
+and a camera pointed at `stream2` gains nothing from this flag.
+
 `enrich.groq` controls optional captions:
 
 ```yaml

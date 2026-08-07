@@ -169,6 +169,10 @@ cameras:
                              # distant subject is not lost when the wide view is resized
     # crop_to_subject: true   # optional padded zoom around the scorer's best person box;
                              # safely keeps the full frame if no usable box is available
+    # crop_from_native: true  # crop before the downscale, so the zoom keeps the camera's
+                             # detail. Costs a native-resolution grab: free on a Pi 4,
+                             # ~3x on a Pi Zero 2 W. Measure first — see
+                             # docs/configuration.md#cropping-at-native-resolution
 
     # Reserved for the planned multi-camera handoff coordinator; parsed but not yet
     # executed by the daemon. Leave empty in production configs.

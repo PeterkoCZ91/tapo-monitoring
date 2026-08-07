@@ -167,6 +167,10 @@ class CameraConfig:
     # Crop the alert photo to the detected person (a zoom) before sending. Needs a scorer
     # that returns a box (scorer.tiles>1 also rescues distant subjects). Off = full frame.
     crop_to_subject: bool = False
+    # Take that crop from a native-resolution grab instead of the downscaled one. Off by
+    # default: the grab costs ~3x on a slow Pi (measured ~8-11s vs ~3s against a 15s
+    # timeout), so the detail is only worth it where the hardware has the headroom.
+    crop_from_native: bool = False
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
@@ -447,6 +451,7 @@ def _camera(data, index):
         night_vision=night_vision,
         snapshot_source=snapshot_source,
         crop_to_subject=bool(data.get("crop_to_subject", False)),
+        crop_from_native=bool(data.get("crop_from_native", False)),
         detection=_detection(data.get("detection"), where),
         tracking=_tracking(data.get("tracking"), where),
         weather=_weather(data.get("weather"), where),

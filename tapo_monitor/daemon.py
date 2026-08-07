@@ -412,7 +412,11 @@ def _default_snapshot(cfg: CameraConfig, stream=None, recorder_fallback=False):
         url = snapshot.rtsp_url(
             cfg.host, user, password, stream=stream or cfg.rtsp_stream, port=cfg.rtsp_port
         )
-        image = snapshot.capture_rtsp(url, timeout=cfg.rtsp_timeout, rotate=cfg.rotate)
+        # crop_to_subject needs the detail: a crop from an already-downscaled frame is
+        # exactly as coarse as the frame it came from. Everyone else downscales at
+        # capture, which is where it is cheapest.
+        image = snapshot.capture_rtsp(url, timeout=cfg.rtsp_timeout, rotate=cfg.rotate,
+                                      scale=not getattr(cfg, "crop_from_native", False))
         if image:
             return image
         if not recorder_fallback:
@@ -545,13 +549,21 @@ def _run_crop_ffmpeg(image, out_path, rect):  # pragma: no cover - subprocess I/
     )
 
 
-def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_ffmpeg=None):
+def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_ffmpeg=None,
+                     source=None, source_width=None):
     """Crop ``image`` to the detected person (a zoom) for ``crop_to_subject`` cameras.
 
     Re-scores the chosen frame with tiling to get the person box + frame dims, then
     ffmpeg-crops to a padded box. Returns the crop path, or ``image`` unchanged when
     cropping is off, there is no box, the subject already fills the frame, or ffmpeg fails
     — the alert always goes out with *some* image.
+
+    ``source`` (with its ``source_width``) crops a higher-resolution copy of the same
+    frame instead of the scored one, scaling the rect into its coordinate space. Scoring
+    stays on the small frame: the service resizes to its input size regardless, so a 4K
+    frame buys no accuracy and costs the *shared* scorer 2-3x per request. Only the crop
+    needs the pixels. Both frames come from one grab, so there is no time skew between
+    where the subject was scored and where it is cropped.
     """
     if not getattr(cfg, "crop_to_subject", False) or not cfg.scorer.url:
         return image
@@ -568,11 +580,17 @@ def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_f
     rect = compute_crop(box, w, h)
     if rect is None:
         return image
+    crop_target = image
+    if source and source_width and w:
+        factor = source_width / w
+        if factor > 1:
+            rect = tuple(round(v * factor) for v in rect)
+            crop_target = source
     out_path = os.path.join(out_dir or "/tmp", f"crop_{int(_time.time() * 1000)}.jpg")
     try:
-        (run_ffmpeg or _run_crop_ffmpeg)(image, out_path, rect)
+        (run_ffmpeg or _run_crop_ffmpeg)(crop_target, out_path, rect)
     except Exception:
-        log.debug("crop_to_subject: ffmpeg failed for %s", image, exc_info=True)
+        log.debug("crop_to_subject: ffmpeg failed for %s", crop_target, exc_info=True)
         return image
     if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
         log.info("crop_to_subject %s: zoomed to %s", cfg.name, rect)
@@ -580,21 +598,59 @@ def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_f
     return image
 
 
-def send_alert_photo(cfg, secrets, image, caption):
+def _run_downscale(src, out_path):  # pragma: no cover - subprocess I/O
+    subprocess.run(snapshot.downscale_args(src, out_path),
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   timeout=20, check=True)
+
+
+def _reduced(src, out_dir, run):
+    """Downscaled copy of ``src`` for delivery, or None if it could not be made."""
+    out_path = os.path.join(out_dir or "/tmp", f"small_{int(_time.time() * 1000000)}.jpg")
+    try:
+        (run or _run_downscale)(src, out_path)
+    except Exception:
+        log.debug("downscale failed for %s", src, exc_info=True)
+        return None
+    return out_path if os.path.exists(out_path) and os.path.getsize(out_path) > 0 else None
+
+
+def send_alert_photo(cfg, secrets, image, caption, downscale=None):
     """Send one alert frame: the zoom goes to Telegram, the whole scene to the sent log.
 
     ``crop_to_subject`` cameras push a close-up, which is what the user wants to look at
     but useless for reviewing a false positive later — a cropped empty yard is just a
     blurry patch. So the archive keeps the frame as it was before cropping.
+
+    Those cameras are also handed a *native-resolution* frame (see ``_default_snapshot``),
+    so the reduction to delivery width happens here instead: once on the crop, once on the
+    scene, after there is something worth cropping. Full-resolution bytes never leave.
     """
-    cropped = crop_for_subject(cfg, image, os.path.dirname(image), secrets)
-    args = (secrets["telegram_token"], secrets["telegram_chat"], cropped, caption)
-    if cropped == image:            # nothing was cropped away, nothing extra to keep
-        return notify.send_photo(*args)
+    token, chat = secrets["telegram_token"], secrets["telegram_chat"]
+    out_dir = os.path.dirname(image)
+    if not getattr(cfg, "crop_from_native", False):
+        cropped = crop_for_subject(cfg, image, out_dir, secrets)
+        args = (token, chat, cropped, caption)
+        if cropped == image:        # nothing was cropped away, nothing extra to keep
+            return notify.send_photo(*args)
+        try:
+            return notify.send_photo(*args, archive_path=image)
+        finally:
+            _safe_unlink(cropped)   # our own temp zoom; ``image`` stays the caller's
+
+    # Native frame in: reduce once, then score that copy but crop the full-detail one.
+    scene = _reduced(image, out_dir, downscale) or image
+    native = image if scene != image else None
+    cropped = crop_for_subject(cfg, scene, out_dir, secrets, source=native,
+                               source_width=snapshot.image_width(native) if native else None)
+    to_send = scene if cropped == scene else (_reduced(cropped, out_dir, downscale) or cropped)
     try:
-        return notify.send_photo(*args, archive_path=image)
+        return notify.send_photo(token, chat, to_send, caption, archive_path=scene)
     finally:
-        _safe_unlink(cropped)       # our own temp zoom; ``image`` stays the caller's
+        for temp in (cropped if cropped != scene else None,
+                     to_send if to_send not in (scene, cropped) else None,
+                     scene if scene != image else None):
+            _safe_unlink(temp)
 
 
 def _caption_describe(cfg, groq_key, images):

@@ -58,6 +58,31 @@ def test_ffmpeg_args_single_image_update():
     assert args[args.index("-update") + 1] == "1"
 
 
+def test_ffmpeg_args_keeps_native_resolution_when_asked():
+    # Cropping to a subject from an already-downscaled frame throws away the detail the
+    # zoom exists to show: a distant figure is ~64px wide at 1280 but ~200px at 4K.
+    args = snapshot.ffmpeg_args("rtsp://x", "/tmp/out.jpg", scale=False)
+    assert "scale=1280:-1" not in args
+
+
+def test_ffmpeg_args_native_still_rotates():
+    args = snapshot.ffmpeg_args("rtsp://x", "/tmp/out.jpg", rotate=180, scale=False)
+    assert args[args.index("-vf") + 1] == "hflip,vflip"
+
+
+def test_ffmpeg_args_native_unrotated_passes_no_filter():
+    # An empty -vf value makes ffmpeg fail; with nothing to do the flag must be absent.
+    args = snapshot.ffmpeg_args("rtsp://x", "/tmp/out.jpg", rotate=0, scale=False)
+    assert "-vf" not in args
+
+
+def test_downscale_args_shape():
+    args = snapshot.downscale_args("/tmp/in.jpg", "/tmp/out.jpg")
+    assert args[args.index("-vf") + 1] == "scale=1280:-1"
+    assert args[args.index("-i") + 1] == "/tmp/in.jpg"
+    assert args[-1] == "/tmp/out.jpg"
+
+
 def test_rotate_filter_maps_quarter_turns():
     assert snapshot.rotate_filter(0) == ""
     assert snapshot.rotate_filter(90) == "transpose=1"

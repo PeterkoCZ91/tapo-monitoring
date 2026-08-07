@@ -24,23 +24,49 @@ def rotate_filter(degrees):
         int(degrees), "")
 
 
-def scaled_vf(rotate=0):
-    """The ``-vf`` chain used by every frame extractor: rotate (if any) then scale. Pure."""
-    rot = rotate_filter(rotate)
-    return f"{rot},scale=1280:-1" if rot else "scale=1280:-1"
+SCALE_VF = "scale=1280:-1"
 
 
-def ffmpeg_args(rtsp_url, out_path, rotate=0):
+def scaled_vf(rotate=0, scale=True):
+    """The ``-vf`` chain used by every frame extractor: rotate (if any) then scale. Pure.
+
+    ``scale=False`` keeps the camera's native resolution, for the one case that needs it:
+    cropping to a subject. A crop taken from an already-downscaled frame throws away the
+    very detail the zoom exists to show. Returns "" when there is nothing to do — the
+    caller must then omit ``-vf`` entirely, since ffmpeg rejects an empty filter value.
+    """
+    parts = [p for p in (rotate_filter(rotate), SCALE_VF if scale else "") if p]
+    return ",".join(parts)
+
+
+def ffmpeg_args(rtsp_url, out_path, rotate=0, scale=True):
     """Return the ffmpeg argv to grab a single high-quality JPEG frame. Pure."""
+    vf = scaled_vf(rotate, scale)
     return [
         "ffmpeg",
         "-rtsp_transport", "tcp",
         "-i", rtsp_url,
         "-frames:v", "1",
-        "-vf", scaled_vf(rotate),
+        *(("-vf", vf) if vf else ()),
         "-q:v", "2",
         "-update", "1",
         "-y", out_path,
+    ]
+
+
+def downscale_args(src_path, out_path):
+    """Return the ffmpeg argv to scale an existing image down to the delivery width. Pure.
+
+    Used after a native-resolution crop: the zoom is cropped at full detail, then reduced
+    once for Telegram, instead of the frame being reduced before there is anything to crop.
+    """
+    return [
+        "ffmpeg", "-y",
+        "-i", src_path,
+        "-vf", SCALE_VF,
+        "-q:v", "2",
+        "-update", "1",
+        out_path,
     ]
 
 
@@ -51,7 +77,20 @@ def _safe_unlink(path):
         pass
 
 
-def capture_rtsp(rtsp_url, out_dir="/tmp", timeout=15, _run=subprocess.run, rotate=0):
+def image_width(path):  # pragma: no cover - subprocess I/O
+    """Pixel width of an image, or None. Used to map a box scored on a downscaled copy."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+        return int(out.split(",")[0]) or None
+    except Exception:
+        return None
+
+
+def capture_rtsp(rtsp_url, out_dir="/tmp", timeout=15, _run=subprocess.run, rotate=0,
+                 scale=True):
     """Grab one frame from an RTSP stream. Returns the image path or None.
 
     On a slow camera (e.g. Pi Zero) ffmpeg can time out *after* partially writing
@@ -62,7 +101,7 @@ def capture_rtsp(rtsp_url, out_dir="/tmp", timeout=15, _run=subprocess.run, rota
     out_path = os.path.join(out_dir, f"snap_{int(_time.time() * 1000)}.jpg")
     try:
         _run(
-            ffmpeg_args(rtsp_url, out_path, rotate=rotate),
+            ffmpeg_args(rtsp_url, out_path, rotate=rotate, scale=scale),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=timeout,

@@ -1506,6 +1506,100 @@ def test_send_alert_photo_archives_uncropped_scene(monkeypatch, tmp_path):
     assert saved[0].read_bytes() == b"\xff\xd8WHOLE-SCENE"
 
 
+def test_default_snapshot_keeps_native_resolution_for_crop_cameras(monkeypatch, tmp_path):
+    # The crop is only worth taking from a frame that still has the detail in it.
+    seen = {}
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp",
+                        lambda url, **kw: seen.update(kw) or str(tmp_path / "f.jpg"))
+    monkeypatch.setattr(daemon, "resolve_rtsp_credentials", lambda cfg: ("u", "p"))
+
+    daemon._default_snapshot(_cam(crop_to_subject=True, crop_from_native=True))(None, None)
+    assert seen["scale"] is False
+
+
+def test_default_snapshot_scales_for_crop_camera_without_native_opt_in(monkeypatch, tmp_path):
+    # A native grab costs 3x on a Pi Zero (~8-11s vs ~3s, against a 15s timeout), so
+    # cropping alone must not silently switch a weak machine onto the expensive path.
+    seen = {}
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp",
+                        lambda url, **kw: seen.update(kw) or str(tmp_path / "f.jpg"))
+    monkeypatch.setattr(daemon, "resolve_rtsp_credentials", lambda cfg: ("u", "p"))
+
+    daemon._default_snapshot(_cam(crop_to_subject=True))(None, None)
+    assert seen["scale"] is True
+
+
+def test_default_snapshot_scales_when_not_cropping(monkeypatch, tmp_path):
+    # Every other camera keeps paying the cheap downscale at capture, as before.
+    seen = {}
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp",
+                        lambda url, **kw: seen.update(kw) or str(tmp_path / "f.jpg"))
+    monkeypatch.setattr(daemon, "resolve_rtsp_credentials", lambda cfg: ("u", "p"))
+
+    daemon._default_snapshot(_cam())(None, None)
+    assert seen["scale"] is True
+
+
+def test_crop_for_subject_scales_box_into_source_frame(tmp_path):
+    # Scoring a 4K frame costs the shared scorer 2-3x (measured 4.7-7.0s vs 2.4s) for a
+    # decision it makes at 640px anyway. So the box is found on the downscaled copy and
+    # scaled back up to crop the native frame — same grab, so no time skew between them.
+    cam = _cam(crop_to_subject=True, crop_from_native=True,
+               scorer={"url": "http://x/score", "tiles": 2})
+    small = tmp_path / "small.jpg"
+    small.write_bytes(b"jpeg-1280")
+    native = tmp_path / "native.jpg"
+    native.write_bytes(b"jpeg-3840")
+    scored = {"person": 0.9, "box": [100, 100, 200, 300], "w": 1280, "h": 720}
+    captured = {}
+
+    def fake_ffmpeg(image, out_path, rect):
+        captured["image"] = image
+        captured["rect"] = rect
+        open(out_path, "w").write("crop")
+
+    out = daemon.crop_for_subject(cam, str(small), str(tmp_path), score_result=scored,
+                                  run_ffmpeg=fake_ffmpeg, source=str(native),
+                                  source_width=3840)
+
+    assert out != str(small)
+    assert captured["image"] == str(native)          # the native frame is what gets cropped
+    plain = daemon.compute_crop(scored["box"], 1280, 720)
+    assert captured["rect"] == tuple(round(v * 3.0) for v in plain)   # 3840/1280
+
+
+def test_send_alert_photo_downscales_native_crop_before_sending(monkeypatch, tmp_path):
+    # Native frame in: Telegram gets the crop reduced once, the archive the whole scene
+    # reduced once. Neither may go out at 4K.
+    cam = _cam(crop_to_subject=True, crop_from_native=True,
+               scorer={"url": "http://x/score", "tiles": 2})
+    native = tmp_path / "frame.jpg"
+    native.write_bytes(b"\xff\xd8NATIVE-SCENE")
+    crop = tmp_path / "crop.jpg"
+    crop.write_bytes(b"\xff\xd8NATIVE-CROP")
+    monkeypatch.setattr(daemon, "crop_for_subject", lambda *a, **k: str(crop))
+
+    def fake_downscale(src, out_path):
+        small = {str(crop): b"\xff\xd8SMALL-CROP", str(native): b"\xff\xd8SMALL-SCENE"}
+        open(out_path, "wb").write(small[src])
+
+    posted = []
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: (posted.append(req.data), _Resp(b'{"ok":true}'))[1])
+    archive = tmp_path / "sent"
+    monkeypatch.setenv("TAPO_SENT_LOG_DIR", str(archive))
+
+    ok = daemon.send_alert_photo(cam, {"telegram_token": "t", "telegram_chat": "c"},
+                                 str(native), "caption", downscale=fake_downscale)
+
+    assert ok is True
+    assert b"SMALL-CROP" in posted[0]
+    assert b"NATIVE" not in posted[0]              # the 4K bytes never leave the Pi
+    saved = list(archive.glob("*.jpg"))
+    assert len(saved) == 1
+    assert saved[0].read_bytes() == b"\xff\xd8SMALL-SCENE"
+
+
 def test_send_alert_photo_removes_the_crop_it_created(monkeypatch, tmp_path):
     # The crop is this function's own temp file. The caller unlinks the frame it passed in,
     # so an unremoved crop leaks one file per alert — that is how the Pi tmpfs filled up.
