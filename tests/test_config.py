@@ -261,6 +261,13 @@ def test_alerts_override():
     assert app.alerts.outage_threshold == 60
 
 
+def test_crop_from_native_requires_crop_to_subject():
+    # On its own the flag buys a multi-second native grab per frame and crops nothing.
+    data = {"cameras": [{"name": "front", "host": "192.0.2.50", "crop_from_native": True}]}
+    with pytest.raises(cfg.ConfigError, match="crop_from_native"):
+        cfg.load_config_from_dict(data)
+
+
 def test_stall_threshold_defaults_and_overrides():
     assert cfg.load_config_from_dict(_minimal()).alerts.stall_threshold == 900
     data = {"alerts": {"stall_threshold": 300},

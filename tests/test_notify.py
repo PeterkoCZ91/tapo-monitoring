@@ -4,6 +4,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tapo_monitor import notify
+from tests.conftest import FakeResponse as _FakeResp
 
 # ── is_empty_scene ───────────────────────────────────────────────────────────
 
@@ -81,22 +82,6 @@ def test_alert_after_cooldown_allowed():
 
 
 # ── send_photo archiving (opt-in sent-frame log) ─────────────────────────────
-
-class _FakeResp:
-    status = 200
-
-    def __init__(self, body):
-        self._body = body
-
-    def read(self):
-        return self._body
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
 
 def test_send_photo_archives_sent_frame_when_configured(monkeypatch, tmp_path):
     monkeypatch.setattr(notify.urllib.request, "urlopen",

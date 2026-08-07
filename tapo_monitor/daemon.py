@@ -67,6 +67,9 @@ SCORER_RETRY_DELAY = 0.5
 def _safe_unlink(path):
     if not path:
         return
+    twin = getattr(path, "native", None)   # a reduced frame owns its native original
+    if twin:
+        _safe_unlink(twin)
     try:
         os.unlink(path)
     except FileNotFoundError:
@@ -317,8 +320,8 @@ def update_stall(state: "MonitorState", ok, now, threshold):
 
     if state.tick_fail_since is None:
         state.tick_fail_since = now
-        return None, state
-    if not state.stall_alerted and now - state.tick_fail_since >= threshold:
+    # Same debounce as the per-camera outage watchdog: once per outage, not per tick.
+    if notify.outage_alert_due(state.tick_fail_since, now, state.stall_alerted, threshold):
         state.stall_alerted = True
         return "alert", state
     return None, state
@@ -412,11 +415,19 @@ def _default_snapshot(cfg: CameraConfig, stream=None, recorder_fallback=False):
         url = snapshot.rtsp_url(
             cfg.host, user, password, stream=stream or cfg.rtsp_stream, port=cfg.rtsp_port
         )
-        # crop_to_subject needs the detail: a crop from an already-downscaled frame is
-        # exactly as coarse as the frame it came from. Everyone else downscales at
-        # capture, which is where it is cheapest.
+        native_grab = cfg.crop_to_subject and cfg.crop_from_native
         image = snapshot.capture_rtsp(url, timeout=cfg.rtsp_timeout, rotate=cfg.rotate,
-                                      scale=not getattr(cfg, "crop_from_native", False))
+                                      scale=not native_grab)
+        if image and native_grab:
+            # The crop needs the detail, but nothing else does: a native frame reaching the
+            # scorer, the captioner or Telegram costs all three for no gain. So reduce here,
+            # once, and hand the original along only for the crop to use.
+            width = snapshot.image_width(image)
+            reduced = _reduced(image, os.path.dirname(image), width=width)
+            if reduced:
+                return snapshot.Frame(reduced, native=image, native_width=width)
+            log.debug("crop_from_native %s: reduction failed, sending the native frame",
+                      cfg.name)
         if image:
             return image
         if not recorder_fallback:
@@ -541,12 +552,17 @@ def compute_crop(box, w, h, pad=0.4, min_frac=0.22, skip_frac=0.55):
     return (int(x), int(y), int(cw), int(ch))
 
 
-def _run_crop_ffmpeg(image, out_path, rect):  # pragma: no cover - subprocess I/O
+def _run_ffmpeg(argv, timeout=20):  # pragma: no cover - subprocess I/O
+    """Run one silent ffmpeg conversion, raising on failure. The single place to add
+    logging or flags for every still-image transform the daemon makes."""
+    subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   timeout=timeout, check=True)
+
+
+def _run_crop_ffmpeg(image, out_path, rect):
     x, y, cw, ch = rect
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", image, "-vf", f"crop={cw}:{ch}:{x}:{y}", "-q:v", "2", out_path],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20, check=True,
-    )
+    _run_ffmpeg(["ffmpeg", "-y", "-i", image, "-vf", f"crop={cw}:{ch}:{x}:{y}",
+                 "-q:v", "2", out_path])
 
 
 def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_ffmpeg=None,
@@ -598,20 +614,20 @@ def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_f
     return image
 
 
-def _run_downscale(src, out_path):  # pragma: no cover - subprocess I/O
-    subprocess.run(snapshot.downscale_args(src, out_path),
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                   timeout=20, check=True)
+def _run_downscale(src, out_path):
+    _run_ffmpeg(snapshot.downscale_args(src, out_path))
 
 
-def _reduced(src, out_dir, run):
+def _reduced(src, out_dir, run=None, width=None):
     """Downscaled copy of ``src`` for delivery, or None if it is not needed or failed.
 
     A crop is usually already narrower than the delivery width; scaling it up adds no
     detail and only inflates the upload, so an image that is small enough is left alone.
+    ``width`` skips the probe for a caller that already measured it.
     """
-    width = snapshot.image_width(src)
-    if width and width <= 1280:
+    if width is None:
+        width = snapshot.image_width(src)
+    if width and width <= snapshot.DELIVERY_WIDTH:
         return None
     out_path = os.path.join(out_dir or "/tmp", f"small_{int(_time.time() * 1000000)}.jpg")
     try:
@@ -629,34 +645,25 @@ def send_alert_photo(cfg, secrets, image, caption, downscale=None):
     but useless for reviewing a false positive later — a cropped empty yard is just a
     blurry patch. So the archive keeps the frame as it was before cropping.
 
-    Those cameras are also handed a *native-resolution* frame (see ``_default_snapshot``),
-    so the reduction to delivery width happens here instead: once on the crop, once on the
-    scene, after there is something worth cropping. Full-resolution bytes never leave.
+    ``image`` is already at delivery width. When it carries a native original (see
+    :class:`snapshot.Frame`) the crop is taken from that instead, so the zoom keeps the
+    camera's detail while everything sent stays small. No config flag is read here: the
+    frame either brought the detail along or it did not.
     """
     token, chat = secrets["telegram_token"], secrets["telegram_chat"]
     out_dir = os.path.dirname(image)
-    if not getattr(cfg, "crop_from_native", False):
-        cropped = crop_for_subject(cfg, image, out_dir, secrets)
-        args = (token, chat, cropped, caption)
-        if cropped == image:        # nothing was cropped away, nothing extra to keep
-            return notify.send_photo(*args)
-        try:
-            return notify.send_photo(*args, archive_path=image)
-        finally:
-            _safe_unlink(cropped)   # our own temp zoom; ``image`` stays the caller's
-
-    # Native frame in: reduce once, then score that copy but crop the full-detail one.
-    scene = _reduced(image, out_dir, downscale) or image
-    native = image if scene != image else None
-    cropped = crop_for_subject(cfg, scene, out_dir, secrets, source=native,
-                               source_width=snapshot.image_width(native) if native else None)
-    to_send = scene if cropped == scene else (_reduced(cropped, out_dir, downscale) or cropped)
+    cropped = crop_for_subject(cfg, image, out_dir, secrets,
+                               source=getattr(image, "native", None),
+                               source_width=getattr(image, "native_width", None))
+    crop_temp = cropped if cropped != image else None      # crop_for_subject has no None
+    small_crop = _reduced(cropped, out_dir, downscale) if crop_temp else None
+    to_send = small_crop or cropped
     try:
-        return notify.send_photo(token, chat, to_send, caption, archive_path=scene)
+        if to_send == image:        # nothing replaced the frame, nothing extra to archive
+            return notify.send_photo(token, chat, to_send, caption)
+        return notify.send_photo(token, chat, to_send, caption, archive_path=image)
     finally:
-        for temp in (cropped if cropped != scene else None,
-                     to_send if to_send not in (scene, cropped) else None,
-                     scene if scene != image else None):
+        for temp in (small_crop, crop_temp):
             _safe_unlink(temp)
 
 
@@ -1337,18 +1344,30 @@ def main(argv=None):  # pragma: no cover - thin entry point
     cam_clients = {}
     last_control = None
     while True:
-        now = _time.time()
-        tick_ok = True
-        try:
-            last_control = loop_step(
-                app, cam_clients, state, now=now, secrets=secrets,
-                last_control=last_control, control_interval=control_interval,
-            )
-        except Exception as e:  # noqa: BLE001
-            tick_ok = False
-            log.exception("tick error: %s", e)
-        stall_watchdog(app, state, secrets, ok=tick_ok, now=now)
+        last_control = tick(app, cam_clients, state, now=_time.time(), secrets=secrets,
+                            last_control=last_control, control_interval=control_interval)
         _time.sleep(poll_interval)
+
+
+def tick(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
+         last_control, control_interval):
+    """Run one loop iteration and report its outcome to the stall watchdog.
+
+    Deliberately outside ``loop_step``: when the tick itself is what breaks, this is the
+    only code left running, so it is what has to notice. Returns the new ``last_control``
+    (unchanged when the tick failed, so the control pass stays due).
+    """
+    try:
+        last_control = loop_step(
+            app, cam_clients, state, now=now, secrets=secrets,
+            last_control=last_control, control_interval=control_interval,
+        )
+        tick_ok = True
+    except Exception as e:  # noqa: BLE001 - one bad tick must not end the daemon
+        tick_ok = False
+        log.exception("tick error: %s", e)
+    stall_watchdog(app, state, secrets, ok=tick_ok, now=now)
+    return last_control
 
 
 def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets, night=True):

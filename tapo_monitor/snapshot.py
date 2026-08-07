@@ -24,7 +24,26 @@ def rotate_filter(degrees):
         int(degrees), "")
 
 
-SCALE_VF = "scale=1280:-1"
+DELIVERY_WIDTH = 1280
+SCALE_VF = f"scale={DELIVERY_WIDTH}:-1"
+
+
+class Frame(str):
+    """A frame path that may carry the native-resolution original it was reduced from.
+
+    It *is* the path string, so every consumer (scorer, captioner, Telegram, cleanup)
+    keeps working unchanged and sees the delivery-width frame. Only the subject crop asks
+    for ``native``, and only the cleanup helpers know to remove it — which is what stops a
+    sampler that discards five of six frames from leaking five native originals.
+    """
+
+    __slots__ = ("native", "native_width")
+
+    def __new__(cls, path, native=None, native_width=None):
+        self = super().__new__(cls, path)
+        self.native = native
+        self.native_width = native_width
+        return self
 
 
 def scaled_vf(rotate=0, scale=True):

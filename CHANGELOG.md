@@ -5,11 +5,15 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
-- `crop_from_native` takes the `crop_to_subject` zoom from a native-resolution grab and
-  downscales only the result, instead of cropping a frame that was already reduced to
-  1280 wide — a distant figure is ~64px across at 1280 and ~190px at 4K. Off by default:
-  the grab costs nothing extra on a Pi 4 but 2.5–3.5× on a Pi Zero 2 W, where the worst
-  case approaches `rtsp_timeout`. Measurements in `docs/configuration.md`.
+- `crop_from_native` takes the `crop_to_subject` zoom from a native-resolution grab
+  instead of cropping a frame that was already reduced to 1280 wide — a distant figure is
+  ~64px across at 1280 and ~190px at 4K. The frame is reduced at the grab and the native
+  original rides along with it, so the scorer, the captioner and Telegram keep receiving
+  delivery-width images and only the crop spends the detail; the cleanup helper removes
+  both, so a sampler that discards most of its frames leaks nothing. Off by default: the
+  grab costs nothing extra on a Pi 4 but 2.5–3.5× on a Pi Zero 2 W, where the worst case
+  approaches `rtsp_timeout`. Requires `crop_to_subject`. Measurements in
+  `docs/configuration.md`.
 - A dead-man's switch for the daemon itself (`alerts.stall_threshold`, default 900s):
   when every loop iteration has raised for that long, a 🔴 goes out and a later healthy
   tick sends 🟢. The per-camera outage watchdog runs inside the tick, so a fault in the

@@ -4,7 +4,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tapo_monitor import config as cfg
-from tapo_monitor import daemon, notify
+from tapo_monitor import daemon, notify, snapshot
+from tests.conftest import FakeResponse as _Resp
 
 
 def _cam(**overrides):
@@ -1465,22 +1466,6 @@ def test_crop_for_subject_noop_when_disabled(tmp_path):
 
 # ── send_alert_photo (crop goes out, whole scene is archived) ────────────────
 
-class _Resp:
-    status = 200
-
-    def __init__(self, body):
-        self._body = body
-
-    def read(self):
-        return self._body
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
 def test_send_alert_photo_archives_uncropped_scene(monkeypatch, tmp_path):
     # The zoom is what the user wants in Telegram; the sent log needs the scene, or a
     # false positive on an empty yard is unreviewable — it archives a blurry close-up.
@@ -1504,6 +1489,104 @@ def test_send_alert_photo_archives_uncropped_scene(monkeypatch, tmp_path):
     saved = list(archive.glob("*.jpg"))
     assert len(saved) == 1
     assert saved[0].read_bytes() == b"\xff\xd8WHOLE-SCENE"
+
+
+def test_default_snapshot_returns_delivery_frame_carrying_its_native_twin(monkeypatch, tmp_path):
+    # The snapshot factory feeds *every* consumer (live scorer, sampler, Groq, Telegram).
+    # Handing them a native frame made all of them pay 4K; only the crop wants it. So the
+    # frame handed out is delivery width, with the native original riding along for the crop.
+    native = tmp_path / "native.jpg"
+    native.write_bytes(b"4k")
+    scene = tmp_path / "scene.jpg"
+    scene.write_bytes(b"1280")
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp", lambda url, **kw: str(native))
+    monkeypatch.setattr(daemon.snapshot, "image_width", lambda p: 3840)
+    monkeypatch.setattr(daemon, "_reduced", lambda src, out_dir, run=None, width=None: str(scene))
+    monkeypatch.setattr(daemon, "resolve_rtsp_credentials", lambda cfg: ("u", "p"))
+
+    out = daemon._default_snapshot(_cam(crop_to_subject=True, crop_from_native=True))(None, None)
+
+    assert str(out) == str(scene)              # consumers see the delivery-width frame
+    assert out.native == str(native)           # the crop can still reach the full detail
+    assert out.native_width == 3840
+
+
+def test_tick_reports_a_failing_loop_step_to_the_watchdog(monkeypatch):
+    # The wiring this whole feature rests on: a raising loop_step must be what feeds the
+    # stall watchdog. Isolated tests of update_stall cannot catch this being mis-wired.
+    app = _app_with_stall_threshold(900)
+    state = daemon.MonitorState()
+    sent = []
+    monkeypatch.setattr(daemon.notify, "send_text",
+                        lambda tok, chat, text: (sent.append(text), True)[1])
+    monkeypatch.setattr(daemon, "loop_step",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("broken tick")))
+    secrets = {"telegram_token": "t", "telegram_chat": "c"}
+
+    for now in (1000, 1500, 1900, 2500):
+        daemon.tick(app, {}, state, now=now, secrets=secrets,
+                    last_control=None, control_interval=60)
+
+    assert len(sent) == 1 and sent[0].startswith("🔴")
+
+
+def test_tick_returns_last_control_from_a_healthy_loop_step(monkeypatch):
+    app = _app_with_stall_threshold(900)
+    state = daemon.MonitorState()
+    monkeypatch.setattr(daemon, "loop_step", lambda *a, **k: 4242)
+
+    out = daemon.tick(app, {}, state, now=1000, secrets={"telegram_token": "t",
+                                                         "telegram_chat": "c"},
+                      last_control=None, control_interval=60)
+
+    assert out == 4242
+    assert state.tick_fail_since is None
+
+
+def test_safe_unlink_removes_the_native_twin_too(tmp_path):
+    # Every consumer already funnels its frame through _safe_unlink; carrying the twin
+    # there is what keeps a sampler that drops 5 of 6 frames from leaking 5 native files.
+    native = tmp_path / "native.jpg"
+    native.write_bytes(b"4k")
+    scene = tmp_path / "scene.jpg"
+    scene.write_bytes(b"1280")
+
+    daemon._safe_unlink(snapshot.Frame(str(scene), native=str(native)))
+
+    assert not scene.exists() and not native.exists()
+
+
+def test_send_alert_photo_crops_from_the_native_twin(monkeypatch, tmp_path):
+    # No config flag is consulted here: the frame either carries a native original or not.
+    cam = _cam(crop_to_subject=True, scorer={"url": "http://x/score", "tiles": 2})
+    native = tmp_path / "native.jpg"
+    native.write_bytes(b"\xff\xd8NATIVE")
+    scene = tmp_path / "scene.jpg"
+    scene.write_bytes(b"\xff\xd8SCENE")
+    seen = {}
+
+    def fake_crop(cfg, image, out_dir, secrets=None, **kw):
+        seen.update(image=image, source=kw.get("source"), width=kw.get("source_width"))
+        crop = tmp_path / "crop.jpg"
+        crop.write_bytes(b"\xff\xd8CROP")
+        return str(crop)
+
+    monkeypatch.setattr(daemon, "crop_for_subject", fake_crop)
+    monkeypatch.setattr(daemon, "_reduced", lambda *a, **k: None)   # crop already narrow
+    posted = []
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: (posted.append(req.data), _Resp(b'{"ok":true}'))[1])
+    archive = tmp_path / "sent"
+    monkeypatch.setenv("TAPO_SENT_LOG_DIR", str(archive))
+
+    frame = snapshot.Frame(str(scene), native=str(native), native_width=3840)
+    ok = daemon.send_alert_photo(cam, {"telegram_token": "t", "telegram_chat": "c"},
+                                 frame, "caption")
+
+    assert ok is True
+    assert seen == {"image": str(scene), "source": str(native), "width": 3840}
+    assert b"CROP" in posted[0]
+    assert list(archive.glob("*.jpg"))[0].read_bytes() == b"\xff\xd8SCENE"
 
 
 def test_default_snapshot_keeps_native_resolution_for_crop_cameras(monkeypatch, tmp_path):
@@ -1587,38 +1670,6 @@ def test_crop_for_subject_scales_box_into_source_frame(tmp_path):
     assert captured["image"] == str(native)          # the native frame is what gets cropped
     plain = daemon.compute_crop(scored["box"], 1280, 720)
     assert captured["rect"] == tuple(round(v * 3.0) for v in plain)   # 3840/1280
-
-
-def test_send_alert_photo_downscales_native_crop_before_sending(monkeypatch, tmp_path):
-    # Native frame in: Telegram gets the crop reduced once, the archive the whole scene
-    # reduced once. Neither may go out at 4K.
-    cam = _cam(crop_to_subject=True, crop_from_native=True,
-               scorer={"url": "http://x/score", "tiles": 2})
-    native = tmp_path / "frame.jpg"
-    native.write_bytes(b"\xff\xd8NATIVE-SCENE")
-    crop = tmp_path / "crop.jpg"
-    crop.write_bytes(b"\xff\xd8NATIVE-CROP")
-    monkeypatch.setattr(daemon, "crop_for_subject", lambda *a, **k: str(crop))
-
-    def fake_downscale(src, out_path):
-        small = {str(crop): b"\xff\xd8SMALL-CROP", str(native): b"\xff\xd8SMALL-SCENE"}
-        open(out_path, "wb").write(small[src])
-
-    posted = []
-    monkeypatch.setattr(notify.urllib.request, "urlopen",
-                        lambda req, timeout=None: (posted.append(req.data), _Resp(b'{"ok":true}'))[1])
-    archive = tmp_path / "sent"
-    monkeypatch.setenv("TAPO_SENT_LOG_DIR", str(archive))
-
-    ok = daemon.send_alert_photo(cam, {"telegram_token": "t", "telegram_chat": "c"},
-                                 str(native), "caption", downscale=fake_downscale)
-
-    assert ok is True
-    assert b"SMALL-CROP" in posted[0]
-    assert b"NATIVE" not in posted[0]              # the 4K bytes never leave the Pi
-    saved = list(archive.glob("*.jpg"))
-    assert len(saved) == 1
-    assert saved[0].read_bytes() == b"\xff\xd8SMALL-SCENE"
 
 
 def test_send_alert_photo_removes_the_crop_it_created(monkeypatch, tmp_path):

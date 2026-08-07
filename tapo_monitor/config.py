@@ -427,6 +427,10 @@ def _camera(data, index):
         raise ConfigError(f"{where}: 'snapshot_source' must be 'sd' or 'recording'")
     if snapshot_source == "recording" and not bool(data.get("sd_snapshot", False)):
         raise ConfigError(f"{where}: snapshot_source 'recording' requires sd_snapshot: true")
+    # Without a crop to spend it on, a native grab is pure cost — several seconds per frame
+    # on a slow Pi — and nothing would ever use the detail.
+    if bool(data.get("crop_from_native", False)) and not bool(data.get("crop_to_subject", False)):
+        raise ConfigError(f"{where}: crop_from_native requires crop_to_subject: true")
     return CameraConfig(
         name=name,
         host=host,
