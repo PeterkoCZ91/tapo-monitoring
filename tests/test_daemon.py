@@ -1540,6 +1540,27 @@ def test_default_snapshot_scales_when_not_cropping(monkeypatch, tmp_path):
     assert seen["scale"] is True
 
 
+def test_reduced_skips_images_already_within_delivery_width(monkeypatch, tmp_path):
+    # A crop is usually narrower than the delivery width; running it through the scaler
+    # would upscale it, adding no detail and inflating the file (measured 74kB -> 122kB).
+    src = tmp_path / "crop.jpg"
+    src.write_bytes(b"jpeg")
+    monkeypatch.setattr(daemon.snapshot, "image_width", lambda p: 842)
+    ran = []
+
+    assert daemon._reduced(str(src), str(tmp_path), lambda s, o: ran.append(s)) is None
+    assert ran == []
+
+
+def test_reduced_still_scales_a_wide_image(monkeypatch, tmp_path):
+    src = tmp_path / "native.jpg"
+    src.write_bytes(b"jpeg")
+    monkeypatch.setattr(daemon.snapshot, "image_width", lambda p: 3840)
+
+    out = daemon._reduced(str(src), str(tmp_path), lambda s, o: open(o, "w").write("small"))
+    assert out and out != str(src)
+
+
 def test_crop_for_subject_scales_box_into_source_frame(tmp_path):
     # Scoring a 4K frame costs the shared scorer 2-3x (measured 4.7-7.0s vs 2.4s) for a
     # decision it makes at 640px anyway. So the box is found on the downscaled copy and

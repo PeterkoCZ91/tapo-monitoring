@@ -605,7 +605,14 @@ def _run_downscale(src, out_path):  # pragma: no cover - subprocess I/O
 
 
 def _reduced(src, out_dir, run):
-    """Downscaled copy of ``src`` for delivery, or None if it could not be made."""
+    """Downscaled copy of ``src`` for delivery, or None if it is not needed or failed.
+
+    A crop is usually already narrower than the delivery width; scaling it up adds no
+    detail and only inflates the upload, so an image that is small enough is left alone.
+    """
+    width = snapshot.image_width(src)
+    if width and width <= 1280:
+        return None
     out_path = os.path.join(out_dir or "/tmp", f"small_{int(_time.time() * 1000000)}.jpg")
     try:
         (run or _run_downscale)(src, out_path)
