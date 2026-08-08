@@ -168,8 +168,9 @@ class CameraConfig:
     # that returns a box (scorer.tiles>1 also rescues distant subjects). Off = full frame.
     crop_to_subject: bool = False
     # Take that crop from a native-resolution grab instead of the downscaled one. Off by
-    # default: the grab costs ~3x on a slow Pi (measured ~8-11s vs ~3s against a 15s
-    # timeout), so the detail is only worth it where the hardware has the headroom.
+    # default: measured within one stream it costs about +0.5s on a slow Pi, plus a size
+    # probe and a reduction per frame, so it is opt-in per camera. A stream already at
+    # delivery width is detected after the grab and keeps no native original.
     crop_from_native: bool = False
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)

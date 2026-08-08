@@ -49,7 +49,8 @@ documented below as *available* but intentionally **not implemented** — see "A
   `blurdetect`) rather than the first. It requires `sd_snapshot: true` (it reuses the SD
   follow-up queue) and falls back to the SD/live path when no segment is available.
 - **Local YOLO scorer (optional)** — a stateless HTTP scorer gates person alerts by
-  person confidence; animal confidence remains audit evidence and cannot trigger Telegram.
+  person confidence; animal confidence never triggers an alert, but a confident animal
+  score does add a paw to the caption of an alert that was already going out.
   Groq then captions only frames that already passed the scorer. Optional tiled inference
   scores the whole image plus a grid to rescue distant subjects in wide views; `crop_to_subject` uses the
   winning person box for a padded alert-photo zoom and safely falls back to the full frame.
@@ -57,8 +58,10 @@ documented below as *available* but intentionally **not implemented** — see "A
   already-downscaled frame — a figure spanning 5% of the width is ~64px across at 1280 and
   ~190px at 4K. The frame is reduced where it is captured and the native original travels
   with it, so the scorer, the captioner and Telegram keep receiving delivery-width images
-  and only the crop spends the detail. Off by default; the extra grab is free on a Pi 4 and
-  2.5–3.5x on a Pi Zero 2 W.
+  and only the crop spends the detail. Off by default; measured within one stream the extra
+  grab is free on a Pi 4 and about +0.5 s on a Pi Zero 2 W, and a stream already at delivery
+  width skips the native original altogether. The zoom is widened towards the scene's
+  aspect ratio so a standing figure does not arrive as a vertical sliver.
 - **Event-window sampler (optional)** — for long camera events, follow-up RTSP grabs
   across the event window catch people who enter frame after the first live grab.
 - **AI description** — Groq vision model returns a short scene description for approved
