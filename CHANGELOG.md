@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-08
+
 ### Fixed
 - The live alert pass dropped its frame through a cleanup helper that knew nothing about
   the native original a `crop_from_native` camera carries, leaking one full-resolution
