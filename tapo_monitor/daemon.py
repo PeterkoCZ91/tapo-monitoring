@@ -524,14 +524,41 @@ def score_for(cfg: CameraConfig):
     return score
 
 
-def compute_crop(box, w, h, pad=0.4, min_frac=0.22, skip_frac=0.55):
+def _widen_to_scene_ratio(cw, ch, w, h, widen_frac, min_ratio):
+    """Widen a too-tall crop towards the scene's own aspect ratio. Never narrows. Pure.
+
+    Sizing each axis on its own can yield a vertical sliver — a standing figure comes out
+    around 1:2 — which Telegram shows as a strip and :func:`_reduced` never resamples,
+    because it is already narrower than the delivery width. The scene ratio is the natural
+    target: every other alert in the chat already has it.
+
+    Reaching it exactly can cost the whole zoom (a tall box would need 85% of the frame
+    width), so widening stops at ``widen_frac`` of the frame and settles for ``min_ratio``
+    — enough to kill the sliver while keeping the subject large. Narrowing is never an
+    option: it would cut the subject's own box.
+    """
+    target = w / h
+    want = ch * target
+    if cw >= want:
+        return cw                                   # already at or past the scene ratio
+    if want <= widen_frac * w and want <= w:
+        return want                                 # the scene ratio fits within the cap
+    return max(cw, min(ch * min_ratio, float(w)))   # capped: just avoid the sliver
+
+
+def compute_crop(box, w, h, pad=0.4, min_frac=0.22, skip_frac=0.55,
+                 widen_frac=0.60, min_ratio=2 / 3):
     """Padded, clamped integer crop rect ``(x, y, cw, ch)`` around a person box, or None.
 
     Returns None when the subject already fills >= ``skip_frac`` of the frame (nothing to
-    zoom to). Otherwise pads the box by ``pad`` on each side and enforces a minimum size
+    zoom to). Otherwise pads the box by ``pad`` on each side, enforces a minimum size
     (``min_frac`` of the frame) so a distant, tiny box still yields a readable photo with
-    context rather than a postage stamp; the rect is centred on the box and clamped inside
-    the frame. Pure.
+    context rather than a postage stamp, and widens a too-tall result towards the scene
+    ratio (see :func:`_widen_to_scene_ratio`). Pure.
+
+    The rect is centred on the box where the frame allows it, and clamped inside the frame
+    otherwise — a subject standing at the edge of the scene sits at the edge of its crop,
+    which is the best any rect containing it can do.
     """
     x1, y1, x2, y2 = box
     bw, bh = max(0.0, x2 - x1), max(0.0, y2 - y1)
@@ -541,10 +568,11 @@ def compute_crop(box, w, h, pad=0.4, min_frac=0.22, skip_frac=0.55):
         return None
     cw = min(max(bw * (1 + 2 * pad), min_frac * w), float(w))
     ch = min(max(bh * (1 + 2 * pad), min_frac * h), float(h))
+    cw = _widen_to_scene_ratio(cw, ch, w, h, widen_frac, min_ratio)
     ccx, ccy = (x1 + x2) / 2, (y1 + y2) / 2
     x = min(max(0.0, ccx - cw / 2), w - cw)
     y = min(max(0.0, ccy - ch / 2), h - ch)
-    return (int(x), int(y), int(cw), int(ch))
+    return (round(x), round(y), round(cw), round(ch))
 
 
 def _run_ffmpeg(argv, timeout=20):  # pragma: no cover - subprocess I/O

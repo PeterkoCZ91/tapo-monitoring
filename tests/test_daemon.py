@@ -3117,3 +3117,36 @@ def test_default_snapshot_carries_native_height_on_the_twin(monkeypatch, tmp_pat
     assert out.native == str(native)
     assert out.native_width == 3840
     assert out.native_height == 2160
+
+
+def test_compute_crop_widens_a_tall_box_towards_the_scene_ratio():
+    # A standing figure sized per-axis comes out at roughly 1.2:1; every other alert in
+    # the chat is 16:9, and the odd one out reads as a glitch.
+    _, _, cw, ch = daemon.compute_crop([953, 192, 1000, 321], 1280, 720)
+    assert abs(cw / ch - 1280 / 720) < 0.02, f"expected ~16:9, got {cw}x{ch}"
+
+
+def test_compute_crop_caps_widening_and_never_returns_a_noodle():
+    # Reaching 16:9 here would need 1095px of a 1280 frame — the zoom would vanish. The
+    # widen stops at the minimum ratio instead, which is enough to kill the sliver.
+    _, _, cw, ch = daemon.compute_crop([0, 185, 60, 527], 1280, 720)
+    assert cw / ch >= 2 / 3 - 0.01, f"noodle: {cw}x{ch}"
+    assert cw <= 0.60 * 1280, f"widen cap exceeded: {cw}"
+
+
+def test_compute_crop_never_narrows_an_already_wide_crop():
+    _, _, cw, _ = daemon.compute_crop([972, 25, 1026, 117], 1280, 720)
+    assert cw >= 281, "widening must never shrink the existing width"
+
+
+def test_compute_crop_rounds_instead_of_truncating():
+    # 0.22 * 1280 = 281.6 -> 282. Truncation quietly shaved a pixel off every crop.
+    _, _, cw, _ = daemon.compute_crop([600, 300, 610, 320], 1280, 720)
+    assert cw == 282
+
+
+def test_compute_crop_keeps_the_rect_inside_the_frame_after_widening():
+    # A tall box hard against the right edge: widening must not push the rect out.
+    x, y, cw, ch = daemon.compute_crop([1240, 100, 1275, 600], 1280, 720)
+    assert 0 <= x and x + cw <= 1280
+    assert 0 <= y and y + ch <= 720
