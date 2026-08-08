@@ -5,7 +5,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tapo_monitor import sentlog
+from tapo_monitor import scorer, sentlog
 
 # ── archive_sent: writing ────────────────────────────────────────────────────
 
@@ -144,3 +144,48 @@ def test_review_meta_shape_for_plain_and_structured_scores():
 
 def test_archive_review_default_retention_is_weekly():
     assert sentlog.DEFAULT_REVIEW_RETENTION_DAYS == 7.0
+
+
+# ── camera and scores in the index ───────────────────────────────────────────
+
+def test_archive_sent_records_camera_and_scores(tmp_path):
+    # A host running two cameras could not tell from the index which one sent a frame.
+    sentlog.archive_sent(str(tmp_path), b"jpeg", "cap", now=1785200000.0,
+                         camera="yard", score=scorer.SubjectScore(0.87, 0.12))
+    rec = json.loads((tmp_path / "index.jsonl").read_text().strip())
+    assert rec["camera"] == "yard"
+    assert rec["person"] == 0.87
+    assert rec["animal"] == 0.12
+
+
+def test_archive_sent_omits_absent_camera_and_score(tmp_path):
+    sentlog.archive_sent(str(tmp_path), b"jpeg", "cap", now=1785200000.0)
+    rec = json.loads((tmp_path / "index.jsonl").read_text().strip())
+    assert set(rec) == {"ts", "file", "caption", "delivered"}
+
+
+def test_archive_sent_omits_scores_for_a_plain_float(tmp_path):
+    sentlog.archive_sent(str(tmp_path), b"jpeg", "cap", now=1785200000.0,
+                         camera="yard", score=0.8)
+    rec = json.loads((tmp_path / "index.jsonl").read_text().strip())
+    assert rec["camera"] == "yard"
+    assert "person" not in rec
+
+
+def test_prune_old_rotates_an_index_that_outlived_its_frames(tmp_path):
+    # prune_old only ever removed .jpg files, so the index grew without bound and kept
+    # pointing at frames deleted nights ago.
+    index = tmp_path / "index.jsonl"
+    index.write_text('{"ts": 1, "file": "a.jpg"}\n' * 5)
+    os.utime(index, (0, 0))
+
+    sentlog.prune_old(str(tmp_path), now=1785200000.0, retention_days=2.0)
+
+    assert not index.exists()
+
+
+def test_prune_old_keeps_a_fresh_index(tmp_path):
+    index = tmp_path / "index.jsonl"
+    index.write_text('{"ts": 1}\n')
+    sentlog.prune_old(str(tmp_path), now=1785200000.0, retention_days=2.0)
+    assert index.exists()

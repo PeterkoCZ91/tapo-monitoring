@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 
@@ -1730,7 +1731,7 @@ def test_pending_recording_source_sends_sharpest(monkeypatch):
     monkeypatch.setattr(daemon.recclip, "blur_score", lambda f: blur[f])
     monkeypatch.setattr(daemon, "_caption_describe", lambda *a, **k: "")
     monkeypatch.setattr(daemon.notify, "send_photo",
-                        lambda tok, chat, img, cap: sent.append(img) or True)
+                        lambda tok, chat, img, cap, **k: sent.append(img) or True)
     secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
     daemon.process_pending_sd(
         app, {"a": object()}, state, now=1075, secrets=secrets,
@@ -1760,7 +1761,7 @@ def _pending(cam_clients, sent, *, sd_ok=True, rtsp_ok=True, snapshot_calls=None
 def _run_pending(app, state, cam_clients, now, fetch_frames, snapshot_for, sent, monkeypatch,
                  groq=None):
     monkeypatch.setattr(daemon.notify, "send_photo",
-                        lambda tok, chat, img, cap: sent.append((img, cap)) or True)
+                        lambda tok, chat, img, cap, **k: sent.append((img, cap)) or True)
     monkeypatch.setattr(daemon.enrich, "groq_describe",
                         groq or (lambda *a, **k: "Person at door"))
     secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
@@ -2042,7 +2043,7 @@ def test_run_monitor_pass_enqueues_sd_without_live_send_when_empty(monkeypatch):
     # real event-time frame (or an event-time fallback) instead of a duplicate empty.
     sent = []
     monkeypatch.setattr(daemon.notify, "send_photo",
-                        lambda tok, chat, img, cap: sent.append(img))
+                        lambda tok, chat, img, cap, **k: sent.append(img))
     monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "empty scene")
     app = cfg.load_config_from_dict(
         {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True}]})
@@ -2095,7 +2096,7 @@ def test_defer_due_at_follows_camera_event_end_time(monkeypatch):
     # download window end is still inside pytapo's freshness guard when the fetch fires.
     sent = []
     monkeypatch.setattr(daemon.notify, "send_photo",
-                        lambda tok, chat, img, cap: sent.append(img))
+                        lambda tok, chat, img, cap, **k: sent.append(img))
     monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "empty scene")
     app = cfg.load_config_from_dict(
         {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True}]})
@@ -2139,7 +2140,7 @@ def test_defer_and_fetch_honor_camera_sd_span_cap(monkeypatch):
     # window from its own cap, not the package default.
     sent = []
     monkeypatch.setattr(daemon.notify, "send_photo",
-                        lambda tok, chat, img, cap: sent.append(img))
+                        lambda tok, chat, img, cap, **k: sent.append(img))
     monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "empty scene")
     app = cfg.load_config_from_dict(
         {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
@@ -2327,7 +2328,7 @@ def _group(started=1000, etype="motion", sent=False, frames=0):
 def _run_sampler(app, state, now, sent, monkeypatch, *, score=0.9, snap="/tmp/f.jpg",
                  groq="Person", delivered=True):
     monkeypatch.setattr(daemon.notify, "send_photo",
-                        lambda tok, chat, img, cap: sent.append((img, cap)) or delivered)
+                        lambda tok, chat, img, cap, **k: sent.append((img, cap)) or delivered)
     monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: groq)
     monkeypatch.setattr(daemon.scorer, "score_image",
                         lambda url, img, timeout=10, tiles=1: None if score is None
@@ -3227,3 +3228,24 @@ def test_run_monitor_pass_live_alert_goes_through_the_cropping_sender(monkeypatc
                             time_str=lambda e: "t")
 
     assert cropped == [str(frame)], "live alert never reached crop_for_subject"
+
+
+def test_send_alert_photo_records_camera_and_score_in_the_index(monkeypatch, tmp_path):
+    # End to end through the real send path: the index line must name the camera, so a
+    # two-camera host can tell from the archive which one fired.
+    cam = _cam(name="yard")
+    frame = tmp_path / "scene.jpg"
+    frame.write_bytes(b"\xff\xd8SCENE")
+    archive = tmp_path / "sent"
+    monkeypatch.setenv("TAPO_SENT_LOG_DIR", str(archive))
+    monkeypatch.setattr(daemon.notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: _Resp(b'{"ok":true}'))
+
+    daemon.send_alert_photo(cam, {"telegram_token": "t", "telegram_chat": "c"},
+                            str(frame), "caption",
+                            score=daemon.scorer.SubjectScore(0.77, 0.31))
+
+    rec = json.loads((archive / "index.jsonl").read_text().strip())
+    assert rec["camera"] == "yard"
+    assert rec["person"] == 0.77
+    assert rec["animal"] == 0.31

@@ -143,7 +143,8 @@ def _archive_bytes(archive_path, sent_image):
         return sent_image
 
 
-def send_photo(token, chat_id, image_path, caption, archive_path=None):
+def send_photo(token, chat_id, image_path, caption, archive_path=None,
+               camera=None, score=None):
     """Send a photo with a caption via multipart/form-data. Returns True on success.
 
     ``archive_path`` names a different frame to keep in the sent log: ``crop_to_subject``
@@ -161,7 +162,8 @@ def send_photo(token, chat_id, image_path, caption, archive_path=None):
         time.sleep(TELEGRAM_RETRY_DELAY)
         ok = _post_photo(token, chat_id, image, caption)
     # Best-effort diagnostic copy of the frame (opt-in via env).
-    sentlog.archive_if_configured(_archive_bytes(archive_path, image), caption, delivered=ok)
+    sentlog.archive_if_configured(_archive_bytes(archive_path, image), caption,
+                                  delivered=ok, camera=camera, score=score)
     return ok
 
 

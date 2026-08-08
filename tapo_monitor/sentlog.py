@@ -70,12 +70,25 @@ def prune_old(archive_dir, now, retention_days):
                 removed += 1
         except OSError:
             log.debug("sentlog: could not prune %s", path, exc_info=True)
+    index = os.path.join(archive_dir, INDEX_NAME)
+    try:
+        if os.path.exists(index) and os.path.getmtime(index) < cutoff:
+            # The index only ever grew: once it is older than the window, every line in
+            # it points at a JPEG that was pruned nights ago.
+            os.unlink(index)
+    except OSError:
+        log.debug("sentlog: could not rotate %s", index, exc_info=True)
     return removed
 
 
 def archive_sent(archive_dir, image_bytes, caption, *, now,
-                 retention_days=DEFAULT_RETENTION_DAYS, delivered=True):
+                 retention_days=DEFAULT_RETENTION_DAYS, delivered=True,
+                 camera=None, score=None):
     """Copy one sent frame + index line into ``archive_dir``; prune stale files.
+
+    ``camera`` and ``score`` are optional: a host running two cameras cannot otherwise
+    tell from the index which one sent what. Absent values are left out rather than
+    written as null, so a reader of the old shape sees exactly what it always saw.
 
     Returns the saved JPEG path, or None on any failure — it never raises, so a full
     disk or a bad path degrades to "no archive", never a lost alert.
@@ -87,6 +100,11 @@ def archive_sent(archive_dir, image_bytes, caption, *, now,
         with open(path, "wb") as f:
             f.write(image_bytes)
         record = {"ts": now, "file": name, "caption": caption, "delivered": bool(delivered)}
+        if camera:
+            record["camera"] = camera
+        if score is not None and hasattr(score, "person"):
+            record["person"] = float(score.person)
+            record["animal"] = float(score.animal)
         with open(os.path.join(archive_dir, INDEX_NAME), "a", encoding="utf-8") as idx:
             idx.write(json.dumps(record, ensure_ascii=False) + "\n")
         prune_old(archive_dir, now, retention_days)
@@ -96,14 +114,16 @@ def archive_sent(archive_dir, image_bytes, caption, *, now,
         return None
 
 
-def archive_if_configured(image_bytes, caption, *, delivered=True, now=None, env=None):
+def archive_if_configured(image_bytes, caption, *, delivered=True, now=None, env=None,
+                          camera=None, score=None):
     """Archive a sent frame when ``TAPO_SENT_LOG_DIR`` is set; otherwise a no-op."""
     archive_dir = archive_dir_from_env(env)
     if archive_dir is None:
         return None
     now = time.time() if now is None else now
     return archive_sent(archive_dir, image_bytes, caption, now=now,
-                        retention_days=retention_days_from_env(env), delivered=delivered)
+                        retention_days=retention_days_from_env(env), delivered=delivered,
+                        camera=camera, score=score)
 
 
 def review_meta(camera, verdict, etype, score):

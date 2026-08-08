@@ -671,7 +671,7 @@ def _reduced(src, out_dir, run=None, width=None):
     return out_path if os.path.exists(out_path) and os.path.getsize(out_path) > 0 else None
 
 
-def send_alert_photo(cfg, secrets, image, caption, downscale=None):
+def send_alert_photo(cfg, secrets, image, caption, downscale=None, score=None):
     """Send one alert frame: the zoom goes to Telegram, the whole scene to the sent log.
 
     ``crop_to_subject`` cameras push a close-up, which is what the user wants to look at
@@ -694,8 +694,10 @@ def send_alert_photo(cfg, secrets, image, caption, downscale=None):
     to_send = small_crop or cropped
     try:
         if to_send == image:        # nothing replaced the frame, nothing extra to archive
-            return notify.send_photo(token, chat, to_send, caption)
-        return notify.send_photo(token, chat, to_send, caption, archive_path=image)
+            return notify.send_photo(token, chat, to_send, caption,
+                                     camera=cfg.name, score=score)
+        return notify.send_photo(token, chat, to_send, caption, archive_path=image,
+                                 camera=cfg.name, score=score)
     finally:
         for temp in (small_crop, crop_temp):
             _safe_unlink(temp)
@@ -827,7 +829,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
         def send_alert(image, caption, score, _cfg=cfg):
             # The live pass takes the same crop+archive route as the sampler and the SD
             # follow-up: a zoom to Telegram, the whole scene to the sent log.
-            return send_alert_photo(_cfg, secrets, image, caption)
+            return send_alert_photo(_cfg, secrets, image, caption, score=score)
 
         # night_only camera during the day: mute (drain the watermark, alert nothing).
         watermark = monitor.run_monitor(
@@ -1033,7 +1035,7 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
                 description=description or None, detail=label or None,
                 score=selected_score,
             )
-            ok = send_alert_photo(cfg, secrets, image, caption)
+            ok = send_alert_photo(cfg, secrets, image, caption, score=selected_score)
             # SD follow-up is a real user-visible alert. Record it in the same gate as
             # live sends, otherwise a person rescued from SD can be followed minutes
             # later by a duplicate motion SD alert from the same passage.
@@ -1161,7 +1163,7 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                 monitor.TYPE_EMOJI.get(etype, "👁"), time_str(group["event"]),
                 description=description or None, detail=label or None, score=s,
             )
-            ok = send_alert_photo(cfg, secrets, image, caption)
+            ok = send_alert_photo(cfg, secrets, image, caption, score=s)
             monitor.audit_event(cfg, group["event"], etype, "sampler", "send", score=s,
                                 threshold=cfg.scorer.threshold if score is not None else None,
                                 telegram=ok)
