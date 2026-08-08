@@ -23,8 +23,10 @@ All notable changes to this project are documented here.
   width, so enabling it on a camera whose hot path is a 720p substream costs only the
   dimension probe. The documented cost is corrected: measured within one stream, a native
   grab is ~+0.5 s on a Pi Zero 2 W, not 3x.
-- Alert captions mark the subject with a paw when the scorer's animal confidence beats its
-  person confidence. Gating is unchanged — the threshold still reads person alone.
+- Alert captions mark the subject with a paw when the scorer's animal confidence clears
+  0.6. A dog walker scores high on *both* person and animal (measured 0.91/0.80), so the
+  animal score is read on its own rather than compared against the person one. Gating is
+  unchanged — the threshold still reads person alone.
 - The sent log records the camera name and both scores, and its index is rotated on the
   same retention window as the frames instead of growing without bound.
 

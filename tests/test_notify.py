@@ -165,15 +165,28 @@ def test_send_photo_retries_once_on_failure(monkeypatch, tmp_path):
 
 # ── animal in the caption ────────────────────────────────────────────────────
 
-def test_caption_flags_an_animal_when_it_outscores_the_person():
-    # A dog walker and a lone figure both arrived as a bare person emoji.
-    cap = notify.build_caption("👤", "23:14", score=scorer.SubjectScore(0.61, 0.88))
+def test_caption_flags_a_dog_walker_who_scores_high_on_both():
+    # Measured on a real frame: person 0.91, animal 0.80. Comparing the two scores would
+    # miss this, which is exactly the case the paw exists for.
+    cap = notify.build_caption("👤", "23:14", score=scorer.SubjectScore(0.91, 0.80))
     assert cap.startswith("👤🐾 23:14")
 
 
+def test_caption_flags_an_animal_on_its_own():
+    cap = notify.build_caption("👁", "23:14", score=scorer.SubjectScore(0.10, 0.88))
+    assert cap.startswith("👁🐾 23:14")
+
+
 def test_caption_leaves_a_person_alone():
+    # Real negatives sit at 0.00-0.13 animal; a lone figure must stay a bare person.
     assert notify.build_caption(
-        "👤", "23:14", score=scorer.SubjectScore(0.91, 0.20)) == "👤 23:14"
+        "👤", "23:14", score=scorer.SubjectScore(0.91, 0.13)) == "👤 23:14"
+
+
+def test_caption_ignores_a_marginal_animal_score():
+    # 0.47 was measured on a frame with no animal in it at all.
+    assert notify.build_caption(
+        "👤", "23:14", score=scorer.SubjectScore(0.88, 0.47)) == "👤 23:14"
 
 
 def test_caption_ignores_a_plain_float_score():

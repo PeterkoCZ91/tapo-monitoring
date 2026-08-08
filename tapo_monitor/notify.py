@@ -20,6 +20,12 @@ TELEGRAM_RETRY_DELAY = 1.0
 # Marker the vision model returns for a frame with nothing of interest.
 EMPTY_MARKER = "empty"
 
+# Animal confidence at which the caption is worth marking. Deliberately well above the
+# noise floor seen on empty scenes (0.00-0.13 on real negatives) and below what a real
+# dog scores next to its owner (0.80-0.86 measured), so a person walking a dog reads as
+# one. Captions only — the send decision never looks at this.
+ANIMAL_CAPTION_MIN = 0.6
+
 
 def is_empty_scene(description, marker=EMPTY_MARKER):
     """True if the AI description marks an empty scene, or is blank.
@@ -40,12 +46,16 @@ def build_caption(emoji, time_str, description=None, detail=None, count=None,
     """Assemble an alert caption. Pure — no I/O.
 
     ``score`` may carry the scorer's animal confidence alongside the person one; when the
-    animal wins, the caption says so. A dog walker and a lone figure are indistinguishable
-    as a bare person emoji. This never changes *whether* an alert goes out — the threshold
-    gates on person confidence alone.
+    scorer is confident an animal is present the caption says so. A dog walker and a lone
+    figure are indistinguishable as a bare person emoji — and comparing the two scores
+    would not separate them, because a dog walker scores high on *both* (measured 0.91
+    person / 0.80 animal). So the animal score is read on its own.
+
+    This never changes *whether* an alert goes out — the threshold gates on person
+    confidence alone.
     """
-    person, animal = getattr(score, "person", None), getattr(score, "animal", None)
-    if person is not None and animal is not None and animal > person:
+    animal = getattr(score, "animal", None)
+    if animal is not None and animal >= ANIMAL_CAPTION_MIN:
         emoji = f"{emoji}🐾"
     headline = f"{emoji} {detail} {time_str}".strip() if detail else f"{emoji} {time_str}"
     lines = [headline]
