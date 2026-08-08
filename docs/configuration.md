@@ -356,19 +356,28 @@ on the hardware. Measured on two live cameras, both offering 3840×2160 on `stre
 | --- | --- | --- |
 | Pi 4 Model B | `stream1`, 4K, downscaled | 2.3–2.5 s |
 | Pi 4 Model B | `stream1`, 4K, native | 2.46–2.49 s |
-| Pi Zero 2 W | `stream2`, 720p, downscaled | 3.1–3.4 s |
-| Pi Zero 2 W | `stream1`, 4K, native | 7.6–11.5 s |
+| Pi Zero 2 W | `stream1`, 4K, downscaled | 4.5–9.7 s (median 5.4) |
+| Pi Zero 2 W | `stream1`, 4K, native | 5.3–6.0 s (median 5.9) |
+| Pi Zero 2 W | `stream2`, 720p, downscaled | 3.3 s |
+| Pi Zero 2 W | `stream2`, 720p, native | 3.3 s |
+
+Compare within a stream, not across streams: the flag changes whether the grab is scaled,
+never which stream is grabbed. On the same 4K stream the native grab costs about +0.5 s on
+a Pi Zero — and is the *steadier* of the two, the scaled variant having produced the single
+worst sample of the run (9.7 s). The much larger gap between `stream2` and `stream1` is the
+price of the higher-resolution stream itself, which a camera sampling `stream1` pays either
+way.
 
 On top of the grab the flag adds one local reduction and one dimension probe per frame
-(~0.8 s on the Pi 4), and leaves the scorer's own cost unchanged. Note this is per *frame*,
-not per alert: the sampler grabs several per event.
+(~0.8 s on the Pi 4, ~1.0 s and ~1.3 s on the Pi Zero), and leaves the scorer's own cost
+unchanged. Note this is per *frame*, not per alert: the sampler grabs several per event.
 
-Two things follow. The decode dominates and the downscale is free — on the Pi 4 a native
-4K grab costs the same as a downscaled one, so there the detail is available for nothing.
-On the Pi Zero the same grab costs 2.5–3.5× more and its worst case lands close to the
-15 s `rtsp_timeout`, which would turn a slow moment into a lost frame. Check what a grab
-costs on your hardware before enabling it; `rtsp_stream` decides which stream is grabbed,
-and a camera pointed at `stream2` gains nothing from this flag.
+The decode dominates and the downscale is nearly free, so wherever the stream really is
+higher-resolution, the detail costs little. A stream that is already at or below the
+delivery width is detected right after the grab and skips the twin altogether — enabling
+the flag on a camera whose hot path is a 720p substream therefore costs only the probe,
+not a second encode. Still worth measuring on your own hardware: the grab runs under
+`rtsp_timeout` (default 15 s), and the reduction under its own 20 s cap.
 
 `enrich.groq` controls optional captions:
 

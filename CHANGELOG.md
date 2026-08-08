@@ -4,6 +4,30 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- The live alert pass dropped its frame through a cleanup helper that knew nothing about
+  the native original a `crop_from_native` camera carries, leaking one full-resolution
+  JPEG per event. All four cleanup sites now share one twin-aware helper.
+- A crop rect scaled into the native frame's coordinates could overflow it when the two
+  frames did not share an aspect ratio (a rotated or letterboxed stream). That surfaced
+  only as a failed ffmpeg and an alert quietly missing its zoom; the rect is now clamped.
+
+### Changed
+- Live alerts take the same route as the sampler and the SD follow-up: cropped to the
+  subject for Telegram, whole scene to the sent log. Previously the live pass posted the
+  frame as-is, so it never zoomed and discarded the native grab it had just paid for.
+- A too-tall crop is widened towards the scene's aspect ratio, so a standing figure no
+  longer arrives as a vertical sliver. Widening stops at 60% of the frame width, keeping
+  the zoom on tall subjects; the rect now rounds instead of truncating.
+- `crop_from_native` skips the native twin when the grabbed stream is already at delivery
+  width, so enabling it on a camera whose hot path is a 720p substream costs only the
+  dimension probe. The documented cost is corrected: measured within one stream, a native
+  grab is ~+0.5 s on a Pi Zero 2 W, not 3x.
+- Alert captions mark the subject with a paw when the scorer's animal confidence beats its
+  person confidence. Gating is unchanged — the threshold still reads person alone.
+- The sent log records the camera name and both scores, and its index is rotated on the
+  same retention window as the frames instead of growing without bound.
+
 ## [0.3.0] - 2026-08-07
 
 ### Added

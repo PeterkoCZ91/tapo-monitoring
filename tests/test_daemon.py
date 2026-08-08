@@ -1602,8 +1602,8 @@ def test_default_snapshot_keeps_native_resolution_for_crop_cameras(monkeypatch, 
 
 
 def test_default_snapshot_scales_for_crop_camera_without_native_opt_in(monkeypatch, tmp_path):
-    # A native grab costs 3x on a Pi Zero (~8-11s vs ~3s, against a 15s timeout), so
-    # cropping alone must not silently switch a weak machine onto the expensive path.
+    # A native grab is measurably slower on a weak machine (~+0.5s on a Pi Zero, plus a
+    # probe and a reduction), so cropping alone must not opt a camera into it.
     seen = {}
     monkeypatch.setattr(daemon.snapshot, "capture_rtsp",
                         lambda url, **kw: seen.update(kw) or str(tmp_path / "f.jpg"))

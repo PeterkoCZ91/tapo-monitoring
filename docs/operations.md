@@ -178,10 +178,16 @@ Threshold tuning is easier when you can see the exact frame behind a score. Two 
 capture frames for review without changing alert behaviour.
 
 **Archive what was sent.** Set `TAPO_SENT_LOG_DIR` and every photo delivered to Telegram is
-also copied there as a timestamped JPEG beside an `index.jsonl` line (caption and delivery
-flag). Files older than `TAPO_SENT_LOG_RETENTION_DAYS` (default 2) are pruned on each write,
-so the archive self-limits to a couple of days. It is inert when the variable is unset and
-never raises into the send path — a full disk degrades to "no archive", never a lost alert.
+also copied there as a timestamped JPEG beside an `index.jsonl` line: timestamp, filename,
+caption and delivery flag, plus the camera name and the scorer's `person`/`animal`
+confidences when they are known. The camera name is what lets a host running two cameras
+tell from the archive which one fired. Files older than `TAPO_SENT_LOG_RETENTION_DAYS`
+(default 2) are pruned on each write, and the index is rotated on the same window so it
+cannot outlive the frames it points at. It is inert when the variable is unset and never
+raises into the send path — a full disk degrades to "no archive", never a lost alert.
+
+A `crop_to_subject` camera sends the zoom to Telegram but archives the **uncropped** scene:
+a cropped empty yard tells you nothing about a false positive.
 
 ```bash
 export TAPO_SENT_LOG_DIR=~/tapo-monitor/sent-log
