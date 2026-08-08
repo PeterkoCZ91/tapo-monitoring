@@ -589,7 +589,7 @@ def _run_crop_ffmpeg(image, out_path, rect):
 
 
 def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_ffmpeg=None,
-                     source=None, source_width=None):
+                     source=None, source_width=None, source_height=None):
     """Crop ``image`` to the detected person (a zoom) for ``crop_to_subject`` cameras.
 
     Re-scores the chosen frame with tiling to get the person box + frame dims, then
@@ -603,6 +603,11 @@ def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_f
     frame buys no accuracy and costs the *shared* scorer 2-3x per request. Only the crop
     needs the pixels. Both frames come from one grab, so there is no time skew between
     where the subject was scored and where it is cropped.
+
+    ``source_height`` bounds the scaled rect. Without it the rect is clamped against a
+    height inferred from the scale factor, which is right whenever the aspect ratio is
+    preserved — but the real value is preferred, because a rotated or letterboxed stream
+    breaks that assumption and an overflowing rect costs the alert its zoom.
     """
     if not getattr(cfg, "crop_to_subject", False) or not cfg.scorer.url:
         return image
@@ -623,7 +628,12 @@ def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_f
     if source and source_width and w:
         factor = source_width / w
         if factor > 1:
-            rect = tuple(round(v * factor) for v in rect)
+            x, y, cw, ch = (round(v * factor) for v in rect)
+            max_w, max_h = source_width, source_height or round(h * factor)
+            cw, ch = min(cw, max_w), min(ch, max_h)
+            x = min(max(0, x), max_w - cw)
+            y = min(max(0, y), max_h - ch)
+            rect = (x, y, cw, ch)
             crop_target = source
     out_path = os.path.join(out_dir or "/tmp", f"crop_{int(_time.time() * 1000)}.jpg")
     try:
@@ -677,7 +687,8 @@ def send_alert_photo(cfg, secrets, image, caption, downscale=None):
     out_dir = os.path.dirname(image)
     cropped = crop_for_subject(cfg, image, out_dir, secrets,
                                source=getattr(image, "native", None),
-                               source_width=getattr(image, "native_width", None))
+                               source_width=getattr(image, "native_width", None),
+                               source_height=getattr(image, "native_height", None))
     crop_temp = cropped if cropped != image else None      # crop_for_subject has no None
     small_crop = _reduced(cropped, out_dir, downscale) if crop_temp else None
     to_send = small_crop or cropped

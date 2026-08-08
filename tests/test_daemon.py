@@ -3150,3 +3150,54 @@ def test_compute_crop_keeps_the_rect_inside_the_frame_after_widening():
     x, y, cw, ch = daemon.compute_crop([1240, 100, 1275, 600], 1280, 720)
     assert 0 <= x and x + cw <= 1280
     assert 0 <= y and y + ch <= 720
+
+
+def test_crop_for_subject_clamps_the_scaled_rect_inside_the_native_frame(tmp_path):
+    # Scaling assumes the native frame has the scored frame's aspect ratio. A rotation or
+    # a letterboxed stream breaks that, and an overflowing rect only shows up as a failed
+    # ffmpeg and an alert quietly missing its zoom — so clamp instead.
+    cam = _cam(crop_to_subject=True, crop_from_native=True,
+               scorer={"url": "http://x/score", "tiles": 2})
+    small = tmp_path / "small.jpg"
+    small.write_bytes(b"jpeg-1280")
+    native = tmp_path / "native.jpg"
+    native.write_bytes(b"jpeg-native")
+    scored = {"person": 0.9, "box": [1200, 600, 1270, 715], "w": 1280, "h": 720}
+    captured = {}
+
+    def fake_ffmpeg(image, out_path, rect):
+        captured["rect"] = rect
+        open(out_path, "w").write("crop")
+
+    out = daemon.crop_for_subject(cam, str(small), str(tmp_path), score_result=scored,
+                                  run_ffmpeg=fake_ffmpeg, source=str(native),
+                                  source_width=3840, source_height=2000)
+
+    x, y, cw, ch = captured["rect"]
+    assert x >= 0 and y >= 0
+    assert x + cw <= 3840, f"rect overflows native width: {captured['rect']}"
+    assert y + ch <= 2000, f"rect overflows native height: {captured['rect']}"
+    assert out != str(small)
+
+
+def test_crop_for_subject_infers_native_height_when_not_given(tmp_path):
+    # Older callers pass only the width; the scale factor then implies the height, which
+    # is right whenever the aspect ratio is preserved.
+    cam = _cam(crop_to_subject=True, crop_from_native=True,
+               scorer={"url": "http://x/score", "tiles": 2})
+    small = tmp_path / "small.jpg"
+    small.write_bytes(b"jpeg-1280")
+    native = tmp_path / "native.jpg"
+    native.write_bytes(b"jpeg-3840")
+    scored = {"person": 0.9, "box": [100, 100, 200, 300], "w": 1280, "h": 720}
+    captured = {}
+
+    def fake_ffmpeg(image, out_path, rect):
+        captured["rect"] = rect
+        open(out_path, "w").write("crop")
+
+    daemon.crop_for_subject(cam, str(small), str(tmp_path), score_result=scored,
+                            run_ffmpeg=fake_ffmpeg, source=str(native), source_width=3840)
+
+    plain = daemon.compute_crop(scored["box"], 1280, 720)
+    assert captured["rect"] == tuple(round(v * 3.0) for v in plain)
