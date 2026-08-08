@@ -1,6 +1,8 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tapo_monitor import config, detection, monitor, snapshot
@@ -894,3 +896,48 @@ def test_monitor_safe_unlink_removes_the_native_twin(tmp_path):
 
     assert not reduced.exists()
     assert not native.exists(), "live path leaks the native original"
+
+
+def test_live_pass_sends_through_the_injected_alert_sender(monkeypatch):
+    # The live pass posted straight to Telegram, so it never zoomed to the subject and
+    # threw away the native grab it had just paid for. It must take the same route as
+    # the sampler and the SD follow-up.
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "Person at the gate")
+    monkeypatch.setattr(monitor.notify, "send_photo",
+                        lambda *a, **k: pytest.fail("live pass bypassed send_alert"))
+    calls = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    cfg = config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0]
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        send_alert=lambda image, caption, score: calls.append((image, caption, score)) or True)
+
+    assert len(calls) == 1, "live alert did not go through send_alert"
+    assert calls[0][0] == "/tmp/live.jpg"
+    assert calls[0][1].startswith("👤")
+
+
+def test_live_pass_without_sender_still_posts_directly(monkeypatch):
+    # Default stays notify.send_photo, so a caller that does not care is unaffected.
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "Person at the gate")
+    posted = []
+    monkeypatch.setattr(monitor.notify, "send_photo",
+                        lambda *a, **k: posted.append(a) or True)
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    cfg = config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0]
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T")
+
+    assert len(posted) == 1

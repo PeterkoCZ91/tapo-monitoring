@@ -3201,3 +3201,29 @@ def test_crop_for_subject_infers_native_height_when_not_given(tmp_path):
 
     plain = daemon.compute_crop(scored["box"], 1280, 720)
     assert captured["rect"] == tuple(round(v * 3.0) for v in plain)
+
+
+def test_run_monitor_pass_live_alert_goes_through_the_cropping_sender(monkeypatch, tmp_path):
+    # The wiring, not the pieces: the live pass must reach send_alert_photo, so a
+    # crop_to_subject camera zooms on the live path too and the sent log keeps the scene.
+    app = cfg.load_config_from_dict({"cameras": [{
+        "name": "a", "host": "203.0.113.10", "crop_to_subject": True,
+        "scorer": {"url": "http://x/score"},
+    }]})
+    cam = _FakeEventCam([[{"start_time": 100, "events_1": 524290, "alarm_type": 2}]])
+    frame = tmp_path / "live.jpg"
+    frame.write_bytes(b"\xff\xd8LIVE")
+    cropped = []
+
+    monkeypatch.setattr(daemon, "crop_for_subject",
+                        lambda *a, **k: cropped.append(a[1]) or a[1])
+    monkeypatch.setattr(daemon.notify, "send_photo", lambda *a, **k: True)
+    monkeypatch.setattr(daemon.monitor.enrich, "groq_describe", lambda *a, **k: "a person")
+
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": "k"}
+    daemon.run_monitor_pass(app, {"a": cam}, state, now=1, secrets=secrets,
+                            snapshot_for=lambda c: (lambda _cam, _ev: str(frame)),
+                            time_str=lambda e: "t")
+
+    assert cropped == [str(frame)], "live alert never reached crop_for_subject"

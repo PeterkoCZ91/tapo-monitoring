@@ -139,7 +139,8 @@ TYPE_EMOJI = {"person": "👤", "vehicle": "🚗", "pet": "🐾", "tamper": "⚠
 def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_chat,
                 snapshot, time_str, can_alert=None, on_alert=None, face_names=None,
                 defer=None, score=None, observe=None, poll_observe=None,
-                media_observe=None, mute=False, corroborate=None, burst_sent=None):
+                media_observe=None, mute=False, corroborate=None, burst_sent=None,
+                send_alert=None):
     """Poll one camera once and alert on new detections. Returns the new watermark.
 
     ``mute`` polls and advances the watermark but skips all grabbing/scoring/alerting.
@@ -165,6 +166,10 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         produced a *delivered* alert; lets the empty-live defer skip queueing a
         duplicate SD follow-up. A queued follow-up or a failed send is not a delivery,
         so it never suppresses one.
+      send_alert(image, caption, score) -> bool — delivers one alert frame. The daemon
+        passes a sender that crops to the subject and archives the uncropped scene, the
+        same route the sampler and the SD follow-up already take. The default posts the
+        frame as-is, so a caller that does not care keeps the old behaviour.
     """
     try:
         events = cam.getEvents() or []
@@ -325,7 +330,8 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 TYPE_EMOJI.get(etype, "👁"), time_str(event),
                 description=description or None, detail=label or None,
             )
-            ok = notify.send_photo(telegram_token, telegram_chat, image, caption)
+            ok = (send_alert(image, caption, s) if send_alert is not None
+                  else notify.send_photo(telegram_token, telegram_chat, image, caption))
             audit_event(cfg, event, etype, "live", "send", score=s,
                         threshold=cfg.scorer.threshold if score is not None else None,
                         telegram=ok)

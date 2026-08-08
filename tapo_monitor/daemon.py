@@ -824,6 +824,11 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
         def media_observe(ok, _name=name):
             state.rtsp_reachable[_name] = bool(ok)
 
+        def send_alert(image, caption, score, _cfg=cfg):
+            # The live pass takes the same crop+archive route as the sampler and the SD
+            # follow-up: a zoom to Telegram, the whole scene to the sent log.
+            return send_alert_photo(_cfg, secrets, image, caption)
+
         # night_only camera during the day: mute (drain the watermark, alert nothing).
         watermark = monitor.run_monitor(
             cam, cfg, last_seen,
@@ -841,6 +846,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             corroborate=corroborate,
             observe=observe,
             burst_sent=burst_sent,
+            send_alert=send_alert,
             poll_observe=poll_observe,
             media_observe=media_observe,
             mute=cfg.night_only and not night,
