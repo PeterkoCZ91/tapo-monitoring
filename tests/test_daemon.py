@@ -1500,7 +1500,7 @@ def test_default_snapshot_returns_delivery_frame_carrying_its_native_twin(monkey
     scene = tmp_path / "scene.jpg"
     scene.write_bytes(b"1280")
     monkeypatch.setattr(daemon.snapshot, "capture_rtsp", lambda url, **kw: str(native))
-    monkeypatch.setattr(daemon.snapshot, "image_width", lambda p: 3840)
+    monkeypatch.setattr(daemon.snapshot, "image_size", lambda p: (3840, 2160))
     monkeypatch.setattr(daemon, "_reduced", lambda src, out_dir, run=None, width=None: str(scene))
     monkeypatch.setattr(daemon, "resolve_rtsp_credentials", lambda cfg: ("u", "p"))
 
@@ -3074,3 +3074,46 @@ def test_motion_sd_short_window_retries_full_span(monkeypatch):
     daemon.process_pending_sd(app, {"a": object()}, state, now=1200,
                               secrets=secrets, fetch_frames=fetch_frames)
     assert calls == [48]
+
+
+def test_default_snapshot_skips_the_twin_when_grab_is_already_delivery_width(
+        monkeypatch, tmp_path):
+    # A substream that is natively 1280 wide has no detail to gain: the "native" grab
+    # returned the same frame, so there is nothing to reduce and no twin to carry.
+    grabbed = tmp_path / "snap.jpg"
+    grabbed.write_bytes(b"jpeg")
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp", lambda url, **kw: str(grabbed))
+    monkeypatch.setattr(daemon.snapshot, "image_size", lambda p: (1280, 720))
+    monkeypatch.setattr(daemon, "resolve_rtsp_credentials", lambda cfg: ("u", "p"))
+
+    def _no_downscale(*a, **k):
+        raise AssertionError("must not downscale a frame already at delivery width")
+
+    monkeypatch.setattr(daemon, "_reduced", _no_downscale)
+
+    out = daemon._default_snapshot(_cam(crop_to_subject=True, crop_from_native=True))(
+        None, None)
+
+    assert str(out) == str(grabbed)
+    assert getattr(out, "native", None) is None
+
+
+def test_default_snapshot_carries_native_height_on_the_twin(monkeypatch, tmp_path):
+    # The crop clamps its scaled rect against the original's bounds, so the height has
+    # to travel with the width.
+    native = tmp_path / "native.jpg"
+    native.write_bytes(b"4k")
+    scene = tmp_path / "scene.jpg"
+    scene.write_bytes(b"1280")
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp", lambda url, **kw: str(native))
+    monkeypatch.setattr(daemon.snapshot, "image_size", lambda p: (3840, 2160))
+    monkeypatch.setattr(daemon, "_reduced",
+                        lambda src, out_dir, run=None, width=None: str(scene))
+    monkeypatch.setattr(daemon, "resolve_rtsp_credentials", lambda cfg: ("u", "p"))
+
+    out = daemon._default_snapshot(_cam(crop_to_subject=True, crop_from_native=True))(
+        None, None)
+
+    assert out.native == str(native)
+    assert out.native_width == 3840
+    assert out.native_height == 2160

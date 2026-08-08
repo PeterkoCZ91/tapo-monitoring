@@ -223,3 +223,17 @@ def test_safe_unlink_removes_the_native_twin(tmp_path):
 def test_safe_unlink_tolerates_missing_and_empty(tmp_path):
     snapshot.safe_unlink(None)
     snapshot.safe_unlink(str(tmp_path / "gone.jpg"))
+
+
+def test_frame_carries_native_height():
+    frame = snapshot.Frame("small.jpg", native="big.jpg", native_width=3840,
+                           native_height=2160)
+    assert frame == "small.jpg"
+    assert (frame.native_width, frame.native_height) == (3840, 2160)
+
+
+def test_frame_defaults_have_no_twin():
+    frame = snapshot.Frame("only.jpg")
+    assert frame.native is None
+    assert frame.native_width is None
+    assert frame.native_height is None

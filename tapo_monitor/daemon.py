@@ -411,10 +411,16 @@ def _default_snapshot(cfg: CameraConfig, stream=None, recorder_fallback=False):
             # The crop needs the detail, but nothing else does: a native frame reaching the
             # scorer, the captioner or Telegram costs all three for no gain. So reduce here,
             # once, and hand the original along only for the crop to use.
-            width = snapshot.image_width(image)
+            width, height = snapshot.image_size(image)
+            if width and width <= snapshot.DELIVERY_WIDTH:
+                # This stream is already at (or below) delivery width — the native grab
+                # returned the same frame, so there is no twin to carry and nothing to
+                # reduce. Measured: the low-res substream of a C560WS is 1280x720.
+                return image
             reduced = _reduced(image, os.path.dirname(image), width=width)
             if reduced:
-                return snapshot.Frame(reduced, native=image, native_width=width)
+                return snapshot.Frame(reduced, native=image, native_width=width,
+                                      native_height=height)
             log.debug("crop_from_native %s: reduction failed, sending the native frame",
                       cfg.name)
         if image:

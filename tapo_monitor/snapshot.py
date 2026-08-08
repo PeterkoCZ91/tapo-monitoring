@@ -36,16 +36,20 @@ class Frame(str):
 
     It *is* the path string, so every consumer (scorer, captioner, Telegram, cleanup)
     keeps working unchanged and sees the delivery-width frame. Only the subject crop asks
-    for ``native``, and only the cleanup helpers know to remove it — which is what stops a
-    sampler that discards five of six frames from leaking five native originals.
+    for ``native``, and only :func:`safe_unlink` knows to remove it — which is what stops
+    a sampler that discards five of six frames from leaking five native originals.
+
+    ``native_height`` exists so the crop can clamp a scaled rect inside the original;
+    without it an overflowing rect kills ffmpeg and the alert silently loses its zoom.
     """
 
-    __slots__ = ("native", "native_width")
+    __slots__ = ("native", "native_width", "native_height")
 
-    def __new__(cls, path, native=None, native_width=None):
+    def __new__(cls, path, native=None, native_width=None, native_height=None):
         self = super().__new__(cls, path)
         self.native = native
         self.native_width = native_width
+        self.native_height = native_height
         return self
 
 
@@ -124,6 +128,19 @@ def image_width(path):  # pragma: no cover - subprocess I/O
         return int(out.split(",")[0]) or None
     except Exception:
         return None
+
+
+def image_size(path):  # pragma: no cover - subprocess I/O
+    """``(width, height)`` of an image via ffprobe, or ``(None, None)`` on any failure."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", path],
+            capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+        width, height = out.split("x")[:2]
+        return int(width) or None, int(height) or None
+    except Exception:
+        return None, None
 
 
 def capture_rtsp(rtsp_url, out_dir="/tmp", timeout=15, _run=subprocess.run, rotate=0,
