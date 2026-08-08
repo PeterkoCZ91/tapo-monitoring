@@ -64,18 +64,7 @@ PENDING_MAX_AGE = 600
 SCORER_RETRY_DELAY = 0.5
 
 
-def _safe_unlink(path):
-    if not path:
-        return
-    twin = getattr(path, "native", None)   # a reduced frame owns its native original
-    if twin:
-        _safe_unlink(twin)
-    try:
-        os.unlink(path)
-    except FileNotFoundError:
-        pass
-    except OSError:
-        log.debug("failed to remove temp file %s", path, exc_info=True)
+_safe_unlink = snapshot.safe_unlink
 
 
 @dataclass

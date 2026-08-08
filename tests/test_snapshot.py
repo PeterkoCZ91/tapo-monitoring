@@ -205,3 +205,21 @@ def test_latest_recording_frame_uses_env_max_age(tmp_path, monkeypatch):
     )
 
     assert path is None
+
+
+def test_safe_unlink_removes_the_native_twin(tmp_path):
+    native = tmp_path / "native.jpg"
+    reduced = tmp_path / "reduced.jpg"
+    native.write_bytes(b"big")
+    reduced.write_bytes(b"small")
+    frame = snapshot.Frame(str(reduced), native=str(native), native_width=3840)
+
+    snapshot.safe_unlink(frame)
+
+    assert not reduced.exists()
+    assert not native.exists()
+
+
+def test_safe_unlink_tolerates_missing_and_empty(tmp_path):
+    snapshot.safe_unlink(None)
+    snapshot.safe_unlink(str(tmp_path / "gone.jpg"))

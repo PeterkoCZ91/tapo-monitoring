@@ -5,10 +5,13 @@ The pure pieces — :func:`rtsp_url` (URL building with credential quoting) and
 subprocess in :func:`capture_rtsp` is a thin I/O wrapper kept deliberately untested.
 """
 
+import logging
 import os
 import subprocess
 import time as _time
 import urllib.parse
+
+log = logging.getLogger(__name__)
 
 
 def rtsp_url(host, user, password, stream="stream1", port=554):
@@ -89,11 +92,26 @@ def downscale_args(src_path, out_path):
     ]
 
 
-def _safe_unlink(path):
+def safe_unlink(path):
+    """Remove a temp frame and the native original it may carry. Never raises.
+
+    :class:`Frame` hands the full-resolution twin along for the crop to use; whoever
+    drops the delivery frame must drop that twin too, or every alert leaks a native JPEG.
+    """
+    if not path:
+        return
+    twin = getattr(path, "native", None)
+    if twin:
+        safe_unlink(twin)
     try:
         os.unlink(path)
-    except OSError:
+    except FileNotFoundError:
         pass
+    except OSError:
+        log.debug("failed to remove temp file %s", path, exc_info=True)
+
+
+_safe_unlink = safe_unlink      # historical name, still used inside this module
 
 
 def image_width(path):  # pragma: no cover - subprocess I/O

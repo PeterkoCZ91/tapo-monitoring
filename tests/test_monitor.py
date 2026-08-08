@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tapo_monitor import config, detection, monitor
+from tapo_monitor import config, detection, monitor, snapshot
 
 
 def test_collect_detections_basic():
@@ -881,3 +881,16 @@ def test_run_monitor_reports_failed_event_poll_without_media_probe():
     assert watermark == 123
     assert event_health == [False]
     assert media_health == []
+
+
+def test_monitor_safe_unlink_removes_the_native_twin(tmp_path):
+    native = tmp_path / "native.jpg"
+    reduced = tmp_path / "reduced.jpg"
+    native.write_bytes(b"big")
+    reduced.write_bytes(b"small")
+    frame = snapshot.Frame(str(reduced), native=str(native), native_width=3840)
+
+    monitor._safe_unlink(frame)
+
+    assert not reduced.exists()
+    assert not native.exists(), "live path leaks the native original"

@@ -7,24 +7,14 @@ with their side-effecting pieces injected so the orchestration stays testable.
 """
 
 import logging
-import os
 import shlex
 import time as _time
 
-from . import camera, detection, enrich, notify, sentlog
+from . import camera, detection, enrich, notify, sentlog, snapshot
 
 log = logging.getLogger(__name__)
 
-
-def _safe_unlink(path):
-    if not path:
-        return
-    try:
-        os.unlink(path)
-    except FileNotFoundError:
-        pass
-    except OSError:
-        log.debug("failed to remove temp file %s", path, exc_info=True)
+_safe_unlink = snapshot.safe_unlink
 
 
 def _observe(observe, event, etype, sent, delivered=False):

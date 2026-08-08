@@ -99,15 +99,7 @@ def frame_every(span):
     return max(SD_FRAME_EVERY, int(span) // 8)
 
 
-def _safe_unlink(path):
-    if not path:
-        return
-    try:
-        os.unlink(path)
-    except FileNotFoundError:
-        pass
-    except OSError:
-        log.debug("failed to remove temp file %s", path, exc_info=True)
+_safe_unlink = snapshot.safe_unlink
 
 
 def build_client(host, user, password, cloud_password):  # pragma: no cover - network I/O
