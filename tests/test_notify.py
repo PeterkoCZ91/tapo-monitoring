@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tapo_monitor import notify
+from tapo_monitor import notify, scorer
 from tests.conftest import FakeResponse as _FakeResp
 
 # ── is_empty_scene ───────────────────────────────────────────────────────────
@@ -161,3 +161,31 @@ def test_send_photo_retries_once_on_failure(monkeypatch, tmp_path):
     img.write_bytes(b"\xff\xd8IMG")
     assert notify.send_photo("tok", "chat", str(img), "c") is True
     assert len(calls) == 2       # retried once, then succeeded
+
+
+# ── animal in the caption ────────────────────────────────────────────────────
+
+def test_caption_flags_an_animal_when_it_outscores_the_person():
+    # A dog walker and a lone figure both arrived as a bare person emoji.
+    cap = notify.build_caption("👤", "23:14", score=scorer.SubjectScore(0.61, 0.88))
+    assert cap.startswith("👤🐾 23:14")
+
+
+def test_caption_leaves_a_person_alone():
+    assert notify.build_caption(
+        "👤", "23:14", score=scorer.SubjectScore(0.91, 0.20)) == "👤 23:14"
+
+
+def test_caption_ignores_a_plain_float_score():
+    assert notify.build_caption("👁", "23:14", score=0.8) == "👁 23:14"
+
+
+def test_caption_without_score_is_unchanged():
+    assert notify.build_caption("👤", "23:14") == "👤 23:14"
+
+
+def test_caption_keeps_detail_and_description_with_an_animal():
+    cap = notify.build_caption("👤", "23:14", description="a dog on a lead",
+                               detail="Jana", score=scorer.SubjectScore(0.3, 0.9))
+    assert cap.startswith("👤🐾 Jana 23:14")
+    assert '"a dog on a lead"' in cap

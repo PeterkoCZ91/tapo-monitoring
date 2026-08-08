@@ -36,8 +36,17 @@ def is_empty_scene(description, marker=EMPTY_MARKER):
 
 
 def build_caption(emoji, time_str, description=None, detail=None, count=None,
-                  minutes_since_last=None):
-    """Assemble an alert caption. Pure — no I/O."""
+                  minutes_since_last=None, score=None):
+    """Assemble an alert caption. Pure — no I/O.
+
+    ``score`` may carry the scorer's animal confidence alongside the person one; when the
+    animal wins, the caption says so. A dog walker and a lone figure are indistinguishable
+    as a bare person emoji. This never changes *whether* an alert goes out — the threshold
+    gates on person confidence alone.
+    """
+    person, animal = getattr(score, "person", None), getattr(score, "animal", None)
+    if person is not None and animal is not None and animal > person:
+        emoji = f"{emoji}🐾"
     headline = f"{emoji} {detail} {time_str}".strip() if detail else f"{emoji} {time_str}"
     lines = [headline]
     if description:

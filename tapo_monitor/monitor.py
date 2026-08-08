@@ -328,7 +328,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             label = enrich.face_label(face_ids(event), face_names)
             caption = notify.build_caption(
                 TYPE_EMOJI.get(etype, "👁"), time_str(event),
-                description=description or None, detail=label or None,
+                description=description or None, detail=label or None, score=s,
             )
             ok = (send_alert(image, caption, s) if send_alert is not None
                   else notify.send_photo(telegram_token, telegram_chat, image, caption))

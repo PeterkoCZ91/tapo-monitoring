@@ -1031,6 +1031,7 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
             caption = notify.build_caption(
                 monitor.TYPE_EMOJI.get(etype, "👤"), time_str(event),
                 description=description or None, detail=label or None,
+                score=selected_score,
             )
             ok = send_alert_photo(cfg, secrets, image, caption)
             # SD follow-up is a real user-visible alert. Record it in the same gate as
@@ -1158,7 +1159,7 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
             label = enrich.face_label(monitor.face_ids(group["event"]), secrets.get("face_names"))
             caption = notify.build_caption(
                 monitor.TYPE_EMOJI.get(etype, "👁"), time_str(group["event"]),
-                description=description or None, detail=label or None,
+                description=description or None, detail=label or None, score=s,
             )
             ok = send_alert_photo(cfg, secrets, image, caption)
             monitor.audit_event(cfg, group["event"], etype, "sampler", "send", score=s,
