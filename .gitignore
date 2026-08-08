@@ -59,5 +59,4 @@ docs/production-readiness-review-*.md
 .superpowers/
 
 # Local drafts and patch backups
-ha-forum-post.md
 *.orig
