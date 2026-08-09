@@ -248,12 +248,12 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 # Groq disabled = raw mode: there is no arbiter to declare a scene
                 # empty, so nothing is — every live frame goes straight out.
                 empty = False
-            if (etype == "motion" and s is not None and corroborate is not None
-                    and not event_flags["pir"]):
-                # Non-PIR bare motion: don't alert on a single marginal frame — an empty
-                # IR scene hallucinates "person" once and not the next, while a real
-                # subject persists across the sampler window. Camera-confirmed person and
-                # PIR-backed motion keep the immediate path above.
+            if etype == "motion" and s is not None and corroborate is not None:
+                # Do not alert on a single marginal motion frame — an empty IR scene can
+                # hallucinate a person once and not on the next, while a real subject
+                # persists across the sampler window. PIR means the motion was physically
+                # near, but it is not visual person confirmation and must not bypass this
+                # gate. Camera-confirmed person events keep the immediate path above.
                 verdict = corroborate(event, s)
                 if verdict == "hold":
                     log.info("hold %s: score %.2f awaiting corroboration", etype, s)

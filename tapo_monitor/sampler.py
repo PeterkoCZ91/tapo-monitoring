@@ -103,7 +103,7 @@ def note_score(group, score, scfg):
 
 
 def corroborate_motion(group, score, confirm, send_now):
-    """Decide a non-PIR bare-motion frame; mutate the group's candidate counter.
+    """Decide a motion frame; mutate the group's candidate counter.
 
     An empty IR scene hallucinates "person" on one frame and not the next, while a
     real subject persists — so a single marginal frame is held for corroboration.

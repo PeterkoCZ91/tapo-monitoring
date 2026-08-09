@@ -720,7 +720,7 @@ def test_run_monitor_failed_delivery_queues_sd_retry(monkeypatch):
     assert observed == [True]
 
 
-# ── multi-frame corroboration wiring (non-PIR bare motion) ───────────────────
+# ── multi-frame corroboration wiring for motion ──────────────────────────────
 
 def test_run_monitor_motion_holds_on_corroborate_hold(monkeypatch):
     sent = []
@@ -779,8 +779,9 @@ def test_run_monitor_motion_sends_on_corroborate_send(monkeypatch):
     assert len(sent) == 1
 
 
-def test_run_monitor_pir_motion_ignores_corroborate(monkeypatch):
-    # PIR-backed motion is a stronger signal: corroboration must not gate it.
+def test_run_monitor_pir_motion_honors_corroborate(monkeypatch):
+    # PIR says the motion was physically near, not that the frame contains a person.
+    # A marginal PIR-backed score must therefore wait for a second visual confirmation.
     sent = []
     monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a) or True)
     monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "Person")
@@ -794,9 +795,9 @@ def test_run_monitor_pir_motion_ignores_corroborate(monkeypatch):
         Cam(), _cfg_with_scorer(threshold=0.3), 0, now=1000, groq_key="k",
         telegram_token="t", telegram_chat="c",
         snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
-        score=lambda img: 0.9, corroborate=lambda ev, s: called.append(s) or "hold")
-    assert called == []      # corroborate never consulted for PIR motion
-    assert len(sent) == 1    # sent on the normal path (0.9 >= threshold)
+        score=lambda img: 0.4, corroborate=lambda ev, s: called.append(s) or "hold")
+    assert called == [0.4]
+    assert sent == []
 
 
 def test_run_monitor_person_ignores_corroborate(monkeypatch):
