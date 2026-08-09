@@ -18,6 +18,7 @@ per-camera watermark held in :class:`MonitorState` and fires the enrich/notify s
 """
 
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -525,25 +526,20 @@ def score_for(cfg: CameraConfig):
 
 
 def _widen_to_scene_ratio(cw, ch, w, h, widen_frac, min_ratio):
-    """Widen a too-tall crop towards the scene's own aspect ratio. Never narrows. Pure.
+    """Widen only a vertical sliver to the minimum useful aspect ratio. Pure.
 
-    Sizing each axis on its own can yield a vertical sliver — a standing figure comes out
-    around 1:2 — which Telegram shows as a strip and :func:`_reduced` never resamples,
-    because it is already narrower than the delivery width. The scene ratio is the natural
-    target: every other alert in the chat already has it.
+    Sizing each axis on its own can yield a vertical sliver — which Telegram shows as a
+    strip and :func:`_reduced` never resamples, because it is already narrower than the
+    delivery width. A standing person is naturally taller than the scene, however, so
+    forcing every portrait crop to the scene ratio throws away too much of the zoom.
 
-    Reaching it exactly can cost the whole zoom (a tall box would need 85% of the frame
-    width), so widening stops at ``widen_frac`` of the frame and settles for ``min_ratio``
-    — enough to kill the sliver while keeping the subject large. Narrowing is never an
-    option: it would cut the subject's own box.
+    Widen only until ``min_ratio`` is reached, and never beyond ``widen_frac`` of the
+    frame. Narrowing is never an option: it would cut the subject's own box.
     """
-    target = w / h
-    want = ch * target
+    want = ch * min_ratio
     if cw >= want:
-        return cw                                   # already at or past the scene ratio
-    if want <= widen_frac * w and want <= w:
-        return want                                 # the scene ratio fits within the cap
-    return max(cw, min(ch * min_ratio, float(w)))   # capped: just avoid the sliver
+        return cw                                   # already wide enough
+    return max(cw, min(want, widen_frac * w, float(w)))
 
 
 def compute_crop(box, w, h, pad=0.4, min_frac=0.22, skip_frac=0.55,
@@ -560,9 +556,21 @@ def compute_crop(box, w, h, pad=0.4, min_frac=0.22, skip_frac=0.55,
     otherwise — a subject standing at the edge of the scene sits at the edge of its crop,
     which is the best any rect containing it can do.
     """
-    x1, y1, x2, y2 = box
-    bw, bh = max(0.0, x2 - x1), max(0.0, y2 - y1)
-    if bw <= 0 or bh <= 0 or w <= 0 or h <= 0:
+    if w <= 0 or h <= 0:
+        return None
+    try:
+        x1, y1, x2, y2 = (float(v) for v in box)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(v) for v in (x1, y1, x2, y2)):
+        return None
+    # YOLO boxes can overshoot an input edge, particularly on a tiled inference pass.
+    # Measure and centre the crop on their visible part; an entirely off-frame result is
+    # not a useful subject crop.
+    x1, x2 = max(0.0, x1), min(float(w), x2)
+    y1, y2 = max(0.0, y1), min(float(h), y2)
+    bw, bh = x2 - x1, y2 - y1
+    if bw <= 0 or bh <= 0:
         return None
     if bw * bh >= skip_frac * w * h:
         return None
@@ -625,11 +633,13 @@ def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_f
     if rect is None:
         return image
     crop_target = image
-    if source and source_width and w:
-        factor = source_width / w
-        if factor > 1:
-            x, y, cw, ch = (round(v * factor) for v in rect)
-            max_w, max_h = source_width, source_height or round(h * factor)
+    if source and source_width and w and h:
+        factor_x = source_width / w
+        factor_y = (source_height / h) if source_height else factor_x
+        if factor_x >= 1 and factor_y >= 1 and (factor_x > 1 or factor_y > 1):
+            x, cw = (round(v * factor_x) for v in (rect[0], rect[2]))
+            y, ch = (round(v * factor_y) for v in (rect[1], rect[3]))
+            max_w, max_h = source_width, source_height or round(h * factor_y)
             cw, ch = min(cw, max_w), min(ch, max_h)
             x = min(max(0, x), max_w - cw)
             y = min(max(0, y), max_h - ch)

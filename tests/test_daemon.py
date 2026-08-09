@@ -3120,11 +3120,11 @@ def test_default_snapshot_carries_native_height_on_the_twin(monkeypatch, tmp_pat
     assert out.native_height == 2160
 
 
-def test_compute_crop_widens_a_tall_box_towards_the_scene_ratio():
-    # A standing figure sized per-axis comes out at roughly 1.2:1; every other alert in
-    # the chat is 16:9, and the odd one out reads as a glitch.
+def test_compute_crop_keeps_a_usefully_wide_portrait_zoom():
+    # A standing figure is naturally taller than the scene. It needs to remain a zoom,
+    # not expand all the way to 16:9 just to match neighbouring photos in the chat.
     _, _, cw, ch = daemon.compute_crop([953, 192, 1000, 321], 1280, 720)
-    assert abs(cw / ch - 1280 / 720) < 0.02, f"expected ~16:9, got {cw}x{ch}"
+    assert cw / ch >= 1.2, f"portrait zoom widened too much: {cw}x{ch}"
 
 
 def test_compute_crop_caps_widening_and_never_returns_a_noodle():
@@ -3151,6 +3151,17 @@ def test_compute_crop_keeps_the_rect_inside_the_frame_after_widening():
     x, y, cw, ch = daemon.compute_crop([1240, 100, 1275, 600], 1280, 720)
     assert 0 <= x and x + cw <= 1280
     assert 0 <= y and y + ch <= 720
+
+
+def test_compute_crop_clips_an_overflowing_detector_box():
+    # Detector coordinates may run past an edge; only the visible subject should guide
+    # the crop, otherwise the centre can be pulled outside the actual image.
+    x, y, cw, ch = daemon.compute_crop([-50, 100, 40, 300], 1280, 720)
+    assert x == 0 and y >= 0 and x + cw <= 1280 and y + ch <= 720
+
+
+def test_compute_crop_rejects_a_box_outside_the_frame():
+    assert daemon.compute_crop([-80, 100, -10, 300], 1280, 720) is None
 
 
 def test_crop_for_subject_clamps_the_scaled_rect_inside_the_native_frame(tmp_path):
@@ -3202,6 +3213,28 @@ def test_crop_for_subject_infers_native_height_when_not_given(tmp_path):
 
     plain = daemon.compute_crop(scored["box"], 1280, 720)
     assert captured["rect"] == tuple(round(v * 3.0) for v in plain)
+
+
+def test_crop_for_subject_scales_native_coordinates_per_axis(tmp_path):
+    cam = _cam(crop_to_subject=True, crop_from_native=True,
+               scorer={"url": "http://x/score", "tiles": 2})
+    small, native = tmp_path / "small.jpg", tmp_path / "native.jpg"
+    small.write_bytes(b"jpeg-small")
+    native.write_bytes(b"jpeg-native")
+    scored = {"person": 0.9, "box": [100, 100, 200, 300], "w": 1280, "h": 720}
+    captured = {}
+
+    def fake_ffmpeg(image, out_path, rect):
+        captured["rect"] = rect
+        open(out_path, "w").write("crop")
+
+    daemon.crop_for_subject(cam, str(small), str(tmp_path), score_result=scored,
+                            run_ffmpeg=fake_ffmpeg, source=str(native),
+                            source_width=2560, source_height=2160)
+
+    plain = daemon.compute_crop(scored["box"], 1280, 720)
+    assert captured["rect"] == (plain[0] * 2, plain[1] * 3,
+                                plain[2] * 2, plain[3] * 3)
 
 
 def test_run_monitor_pass_live_alert_goes_through_the_cropping_sender(monkeypatch, tmp_path):

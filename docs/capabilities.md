@@ -60,8 +60,9 @@ documented below as *available* but intentionally **not implemented** — see "A
   with it, so the scorer, the captioner and Telegram keep receiving delivery-width images
   and only the crop spends the detail. Off by default; measured within one stream the extra
   grab is free on a Pi 4 and about +0.5 s on a Pi Zero 2 W, and a stream already at delivery
-  width skips the native original altogether. The zoom is widened towards the scene's
-  aspect ratio so a standing figure does not arrive as a vertical sliver.
+  width skips the native original altogether. A too-tall zoom is widened just enough to
+  stop being a vertical sliver — a standing figure is naturally taller than the scene, so
+  widening all the way to the scene's own ratio would spend the zoom on empty margin.
 - **Event-window sampler (optional)** — for long camera events, follow-up RTSP grabs
   across the event window catch people who enter frame after the first live grab.
 - **AI description** — Groq vision model returns a short scene description for approved
