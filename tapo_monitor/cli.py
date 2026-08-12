@@ -5,6 +5,7 @@ Usage:
   tapo-monitor check [cameras.yaml]     # validate the config and print a summary
   tapo-monitor status [health.json]     # show observed camera uptime/outages
   tapo-monitor twin-status [twin.json]  # show layered health and configuration drift
+  tapo-monitor probe [cameras.yaml]     # one-shot camera probe (own authenticated session)
   tapo-monitor shadow-record ...        # ingest an independent local observation
   tapo-monitor shadow-report ...        # compare camera and shadow observations
   tapo-monitor audit-log [logfile|-]    # summarize scorer/Telegram audit lines
@@ -103,6 +104,92 @@ def _twin_status(path=None, *, json_output=False):
         ))
     _print_table(headers, rendered)
     return 0
+
+
+def _probe_camera(cfg, night):
+    """Open ONE explicit session to a camera and return its twin evaluation.
+
+    Separate from the daemon on purpose: this is the only path that creates an extra
+    authenticated session, and the C560WS locks out a source IP after failed logins, so it
+    has to be something an operator asks for rather than a background behaviour.
+    """
+    from . import camera as camera_mod
+    from . import capabilities, daemon, twin
+
+    factory = camera_mod.tapo_factory(
+        cfg.host,
+        os.environ.get(cfg.user_env or "", ""),
+        os.environ.get(cfg.password_env or "", ""),
+        os.environ.get(cfg.cloud_password_env or "", "") or None,
+    )
+    client, error = camera_mod.connect(factory, retries=1)
+    if client is None:
+        raise RuntimeError(f"connect failed: {type(error).__name__ if error else 'unknown'}")
+    snapshot = capabilities.collect_snapshot(client)
+    plan = daemon.plan_camera(cfg, daemon.effective_night(cfg, night), False)
+    evaluation = twin.evaluate_snapshot(cfg.name, plan, snapshot)
+    return twin.fleet_entry(
+        captured_at=time.time(),
+        snapshot=snapshot,
+        health=capabilities.derive_health(snapshot),
+        evaluation=evaluation,
+    )
+
+
+def _probe(argv):
+    from . import scheduling, twin
+    from .config import load_config
+
+    parser = argparse.ArgumentParser(
+        prog="tapo-monitor probe",
+        description="One-shot explicit camera probe (opens its own authenticated session)",
+    )
+    parser.add_argument("config", nargs="?", default="cameras.yaml")
+    parser.add_argument("--camera", dest="camera")
+    parser.add_argument("--json", action="store_true", dest="json_output")
+    args = parser.parse_args(argv)
+
+    app = load_config(args.config)
+    cameras = app.cameras
+    if args.camera:
+        cameras = [cam for cam in cameras if cam.name == args.camera]
+        if not cameras:
+            print(f"No camera named {args.camera!r} in {args.config}", file=sys.stderr)
+            return 2
+    print(f"Probing {len(cameras)} camera(s); each opens one additional "
+          f"authenticated session.", file=sys.stderr)
+
+    night = scheduling.is_night(location=app.location)
+    fleet, failed = {}, []
+    for cam in cameras:
+        try:
+            fleet[cam.name] = _probe_camera(cam, night)
+        except Exception as exc:  # noqa: BLE001 - one unreachable camera must not hide the rest
+            failed.append(cam.name)
+            print(f"{cam.name}: probe failed: {exc}", file=sys.stderr)
+
+    if args.json_output:
+        print(json.dumps({"version": twin.SCHEMA_VERSION, "cameras": fleet},
+                         sort_keys=True, separators=(",", ":")))
+        return 1 if failed and not fleet else 0
+    if fleet:
+        headers = ("camera", "health", "network", "api", "events", "rtsp", "storage",
+                   "drift", "unknown")
+        rows = []
+        for name in sorted(fleet):
+            entry = fleet[name]
+            layers = entry.get("health", {}).get("layers", {})
+            counts = entry.get("drift", {}).get("counts", {})
+            rows.append((
+                name,
+                str(entry.get("health", {}).get("status", "unknown")),
+                *(str(layers.get(layer, "unknown"))
+                  for layer in ("network", "api", "events", "rtsp", "storage")),
+                str(counts.get("drift", 0)),
+                str(counts.get("unknown", 0)),
+            ))
+        _print_table(headers, rows)
+    return 1 if failed and not fleet else 0
 
 
 def _shadow_record(argv):
@@ -219,6 +306,8 @@ def main(argv=None):
             print(__doc__)
             return 2
         return _twin_status(args[0] if args else None, json_output=json_output)
+    if cmd == "probe":
+        return _probe(argv[1:])
     if cmd == "shadow-record":
         return _shadow_record(argv[1:])
     if cmd == "shadow-report":

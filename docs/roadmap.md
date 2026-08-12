@@ -50,7 +50,7 @@ observations.
 
 ## Phase 1 — Camera Digital Twin foundation
 
-Status: **in progress**
+Status: **complete**
 
 - [x] Build a redacted, JSON-serializable snapshot from safe camera getters.
 - [x] Record each probe as `available`, `unknown` or `error`; normalize missing methods to
@@ -58,10 +58,10 @@ Status: **in progress**
 - [x] Derive independent health layers: network, local API, events, RTSP and storage.
 - [x] Compare normalized actual state with desired configuration using stable drift keys.
 - [x] Persist the latest fleet snapshot atomically on local disk.
-- [ ] Persist a bounded transition history; the current file intentionally holds only the
-  latest state and alert-deduplication keys.
+- [x] Persist a bounded transition history alongside the latest state and
+  alert-deduplication keys.
 - [x] Add read-only human and JSON CLI output for fleet status.
-- [ ] Add a one-shot explicit camera probe; it must be clearly separate from the daemon so
+- [x] Add a one-shot explicit camera probe; it must be clearly separate from the daemon so
   an operator knowingly accepts the additional authenticated session.
 - [x] Deduplicate drift alerts and send only new/recovered transitions when opted in.
 
@@ -74,7 +74,7 @@ Acceptance criteria:
 
 ## Phase 2 — Shadow Detection Auditor foundation
 
-Status: **in progress**
+Status: **complete**; the independent worker that feeds it is Phase 3.
 
 - [x] Create a local SQLite ledger with deterministic schema initialization and retention.
 - [x] Ingest camera events and their send/drop/scorer decisions from the existing audit

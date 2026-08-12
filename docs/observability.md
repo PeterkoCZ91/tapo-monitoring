@@ -80,8 +80,31 @@ tapo-monitor twin-status --json
 tapo-monitor twin-status /path/to/twin.json
 ```
 
-The file contains only the latest fleet view and alert-deduplication keys. Bounded
-transition history and an explicit one-shot probe remain roadmap items.
+Alongside the latest fleet view and alert-deduplication keys, each camera carries a
+**bounded transition history**: the aggregate health status changing, and each drift path
+opening or clearing, with the timestamp it happened. A snapshot answers "what is wrong
+now"; only the history answers "since when", which is what reconstructing an incident
+needs. It keeps the newest 50 transitions per camera, so a flapping camera cannot grow the
+file without limit, and a camera's first observation records nothing — there is no previous
+state to have moved away from.
+
+### One-shot probe
+
+`twin-status` reads the state file and never contacts a camera. When the daemon is not
+running, or a camera's state must be checked right now, the probe reads it directly:
+
+```bash
+tapo-monitor probe                       # every camera in cameras.yaml
+tapo-monitor probe --camera front        # just one
+tapo-monitor probe --json
+```
+
+It is deliberately a separate command rather than a daemon behaviour, because it opens an
+**additional authenticated session** per camera, and the C560WS locks out a source IP for
+about 30 minutes after failed logins. The command says so on stderr before connecting, so
+`--json` on stdout stays machine-readable. An unreachable camera is reported and the
+remaining cameras are still probed; the exit status is non-zero only when no camera could
+be probed at all.
 
 ## Shadow ledger and commands
 

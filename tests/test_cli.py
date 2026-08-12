@@ -109,3 +109,58 @@ def test_shadow_record_and_report_commands(tmp_path, capsys):
     assert report["matched"] == 1
     assert report["camera_only"] == 0
     assert report["shadow_only"] == 0
+
+
+def _probe_config(tmp_path):
+    path = tmp_path / "cameras.yaml"
+    path.write_text(
+        "cameras:\n"
+        "  - name: front\n"
+        "    host: 192.0.2.50\n"
+    )
+    return path
+
+
+def test_probe_reports_layered_health_for_one_camera(tmp_path, capsys, monkeypatch):
+    # The probe opens its own authenticated session, so it must be explicit about that
+    # and must never be reachable by accident from the daemon path.
+    monkeypatch.setattr(cli, "_probe_camera",
+                        lambda cfg, night: {"health": {"status": "degraded",
+                                                       "layers": {"network": "ok",
+                                                                  "api": "down"}},
+                                            "drift": {"counts": {"drift": 1, "unknown": 2}}})
+    rc = cli.main(["probe", str(_probe_config(tmp_path))])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "front" in out.out and "degraded" in out.out
+    assert "authenticated session" in out.err      # the operator is told what it costs
+
+
+def test_probe_json_is_machine_readable(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(cli, "_probe_camera",
+                        lambda cfg, night: {"health": {"status": "ok", "layers": {}},
+                                            "drift": {"counts": {}}})
+    rc = cli.main(["probe", str(_probe_config(tmp_path)), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["cameras"]["front"]["health"]["status"] == "ok"
+
+
+def test_probe_can_select_a_single_camera(tmp_path, capsys, monkeypatch):
+    path = tmp_path / "cameras.yaml"
+    path.write_text(
+        "cameras:\n"
+        "  - name: front\n    host: 192.0.2.50\n"
+        "  - name: yard\n    host: 192.0.2.51\n"
+    )
+    seen = []
+    monkeypatch.setattr(cli, "_probe_camera",
+                        lambda cfg, night: seen.append(cfg.name) or
+                        {"health": {"status": "ok", "layers": {}}, "drift": {"counts": {}}})
+    assert cli.main(["probe", str(path), "--camera", "yard"]) == 0
+    assert seen == ["yard"]
+
+
+def test_probe_rejects_an_unknown_camera(tmp_path, capsys):
+    assert cli.main(["probe", str(_probe_config(tmp_path)), "--camera", "nope"]) == 2
+    assert "nope" in capsys.readouterr().err

@@ -135,6 +135,7 @@ available frame contains the subject.
 | `tapo-monitor status [health.json]` | Inspect observed uptime, outages and reconnects offline. |
 | `tapo-monitor audit-log [logfile\|-]` | Summarize event/scorer/Telegram audit records. |
 | `tapo-monitor twin-status [twin.json] [--json]` | Inspect layered health and config drift offline. |
+| `tapo-monitor probe [cameras.yaml] [--camera N] [--json]` | Probe cameras now; opens its own authenticated session. |
 | `tapo-monitor shadow-record ...` | Ingest one independent media-free observation. |
 | `tapo-monitor shadow-report ...` | Correlate camera and shadow observations. |
 

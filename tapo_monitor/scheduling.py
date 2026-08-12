@@ -17,6 +17,7 @@ the fixed HH:MM window from NIGHT_START/NIGHT_END is used. No coordinates are ha
 """
 
 import os
+import sys
 from datetime import datetime, timedelta
 
 DEFAULT_SUNSET_OFFSET = 30
@@ -83,7 +84,10 @@ def is_night(now=None, location=None):
     try:
         return _is_night_astral(now, location)
     except Exception as e:
-        print(f"[scheduling] astral failed ({e}), falling back to HH:MM", flush=True)
+        # stderr, not stdout: this is a diagnostic, and stdout carries the CLI's
+        # machine-readable output — a warning mixed into it breaks any --json consumer.
+        print(f"[scheduling] astral failed ({e}), falling back to HH:MM",
+              file=sys.stderr, flush=True)
         return _is_night_hhmm(now)
 
 

@@ -79,3 +79,56 @@ def test_default_state_path_honors_override_and_xdg():
         "/tmp/twin.json")
     assert twin.default_state_path({"XDG_STATE_HOME": "/tmp/state"}) == (
         "/tmp/state/tapo-monitor/twin.json")
+
+
+def test_transitions_records_a_health_status_change():
+    previous = {"health": {"status": "ok"}, "drift": {"results": []}}
+    current = {"health": {"status": "degraded"}, "drift": {"results": []}}
+    changes = twin.transitions(previous, current, at=100.0)
+    assert changes == ({"at": 100.0, "kind": "health", "from": "ok", "to": "degraded"},)
+
+
+def test_transitions_is_silent_when_nothing_changed():
+    entry = {"health": {"status": "ok"}, "drift": {"results": []}}
+    assert twin.transitions(entry, entry, at=1.0) == ()
+
+
+def test_transitions_records_drift_opening_and_clearing():
+    drifted = {"health": {"status": "ok"}, "drift": {"results": [
+        {"key": "drift:abc", "path": "tracking.auto.enabled", "alertable": True}]}}
+    clean = {"health": {"status": "ok"}, "drift": {"results": [
+        {"key": "drift:abc", "path": "tracking.auto.enabled", "alertable": False}]}}
+    opened = twin.transitions(clean, drifted, at=5.0)
+    assert opened == ({"at": 5.0, "kind": "drift", "event": "opened",
+                       "path": "tracking.auto.enabled"},)
+    cleared = twin.transitions(drifted, clean, at=6.0)
+    assert cleared == ({"at": 6.0, "kind": "drift", "event": "cleared",
+                        "path": "tracking.auto.enabled"},)
+
+
+def test_transitions_treats_a_first_observation_as_no_history():
+    current = {"health": {"status": "degraded"}, "drift": {"results": []}}
+    assert twin.transitions(None, current, at=1.0) == ()
+
+
+def test_extend_history_keeps_the_newest_entries_within_the_limit():
+    history = [{"at": float(i), "kind": "health", "from": "ok", "to": "degraded"}
+               for i in range(twin.HISTORY_LIMIT)]
+    extended = twin.extend_history(history, [{"at": 999.0, "kind": "health",
+                                              "from": "degraded", "to": "ok"}])
+    assert len(extended) == twin.HISTORY_LIMIT
+    assert extended[-1]["at"] == 999.0
+    assert extended[0]["at"] == 1.0          # the oldest entry was dropped
+
+
+def test_fleet_entry_carries_and_extends_the_previous_history():
+    previous = {"health": {"status": "ok"}, "drift": {"results": []},
+                "history": [{"at": 1.0, "kind": "health", "from": "unknown", "to": "ok"}]}
+    entry = twin.fleet_entry(
+        captured_at=2.0, snapshot={}, health={"status": "degraded"},
+        evaluation={"desired": {}, "actual": {}, "drift": {"results": []}},
+        previous=previous,
+    )
+    assert [item["at"] for item in entry["history"]] == [1.0, 2.0]
+    assert entry["history"][-1] == {"at": 2.0, "kind": "health",
+                                    "from": "ok", "to": "degraded"}

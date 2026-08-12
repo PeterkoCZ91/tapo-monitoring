@@ -16,6 +16,8 @@ from collections.abc import Mapping
 from . import capabilities, drift
 
 SCHEMA_VERSION = 1
+# Bounded so the always-rewritten state file cannot grow without limit when a camera flaps.
+HISTORY_LIMIT = 50
 
 
 def default_state_path(env=None, home=None):
@@ -61,14 +63,66 @@ def evaluate_snapshot(camera_name, plan, snapshot):
     return {"desired": desired, "actual": _json_actual(actual), "drift": report.to_dict()}
 
 
-def fleet_entry(*, captured_at, snapshot, health, evaluation):
-    """Build one fully JSON-safe persisted fleet entry."""
-    return capabilities.redact({
+def _alertable_paths(entry):
+    results = (entry or {}).get("drift", {}).get("results", [])
+    return {str(item.get("path", "")) for item in results
+            if isinstance(item, Mapping) and item.get("alertable")}
+
+
+def transitions(previous, current, *, at):
+    """Changes between two consecutive observations of one camera. Pure.
+
+    A snapshot answers "what is wrong now"; only a transition answers "since when", which
+    is what an operator reconstructing an incident actually needs. Reported changes are
+    the aggregate health status and each drift path opening or clearing.
+
+    The first observation of a camera has nothing to compare against, so it yields no
+    transitions rather than a synthetic "appeared" entry.
+    """
+    if not previous:
+        return ()
+    changes = []
+    was = str((previous.get("health") or {}).get("status", "unknown"))
+    now_status = str((current.get("health") or {}).get("status", "unknown"))
+    if was != now_status:
+        changes.append({"at": float(at), "kind": "health", "from": was, "to": now_status})
+    before, after = _alertable_paths(previous), _alertable_paths(current)
+    for path in sorted(after - before):
+        changes.append({"at": float(at), "kind": "drift", "event": "opened", "path": path})
+    for path in sorted(before - after):
+        changes.append({"at": float(at), "kind": "drift", "event": "cleared", "path": path})
+    return tuple(changes)
+
+
+def extend_history(history, new_items, *, limit=HISTORY_LIMIT):
+    """Append transitions to a bounded history, dropping the oldest first. Pure.
+
+    The bound is what makes this safe to keep in the same always-rewritten state file:
+    the entry cannot grow without limit no matter how long a camera flaps.
+    """
+    combined = [item for item in (history or []) if isinstance(item, Mapping)]
+    combined.extend(new_items)
+    return combined[-max(1, int(limit)):] if combined else []
+
+
+def fleet_entry(*, captured_at, snapshot, health, evaluation, previous=None):
+    """Build one fully JSON-safe persisted fleet entry.
+
+    ``previous`` is that camera's last entry; passing it carries the bounded transition
+    history forward and appends whatever changed since. Omitting it keeps the entry a pure
+    snapshot, which is what a one-shot probe wants.
+    """
+    entry = {
         "captured_at": float(captured_at),
         "snapshot": snapshot,
         "health": health.to_dict() if hasattr(health, "to_dict") else health,
         **evaluation,
-    })
+    }
+    if previous is not None:
+        entry["history"] = extend_history(
+            previous.get("history"), transitions(previous, entry, at=captured_at)
+        )
+    return capabilities.redact(entry)
 
 
 def save_state(path, cameras, logger=None):

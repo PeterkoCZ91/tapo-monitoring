@@ -1263,6 +1263,7 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
             snapshot=snapshot_data,
             health=aggregate,
             evaluation=evaluation,
+            previous=state.twin_fleet.get(cfg.name),
         )
         entry["alerted_keys"] = sorted(alerted)
         state.twin_fleet[cfg.name] = entry
