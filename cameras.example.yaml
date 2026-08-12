@@ -168,9 +168,13 @@ cameras:
       tiles: 1               # 1 = whole frame only; 2+ also scores a tile grid so a
                              # distant subject is not lost when the wide view is resized
     # crop_to_subject: true   # optional padded zoom around the scorer's best person box,
-                             # widened towards the scene's aspect ratio so a standing
-                             # figure is not a sliver; keeps the full frame if no usable
-                             # box is available
+                             # widened just enough that a standing figure is not a sliver;
+                             # keeps the full frame if no usable box is available
+    # crop_min_frac: 0.12     # smallest crop as a fraction of the frame (default 0.22).
+                             # The floor stops a distant subject arriving as a postage
+                             # stamp, but it also caps the zoom — where people are small
+                             # and far, lower it. See
+                             # docs/configuration.md#how-small-the-zoom-may-get
     # crop_from_native: true  # crop before the downscale, so the zoom keeps the camera's
                              # detail. Costs a native grab: free on a Pi 4, about +0.5s
                              # on a Pi Zero 2 W. A stream already at delivery width skips

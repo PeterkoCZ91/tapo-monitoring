@@ -629,7 +629,7 @@ def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_f
     w, h = result.get("w"), result.get("h")
     if not box or not w or not h:
         return image
-    rect = compute_crop(box, w, h)
+    rect = compute_crop(box, w, h, min_frac=getattr(cfg, "crop_min_frac", 0.22))
     if rect is None:
         return image
     crop_target = image

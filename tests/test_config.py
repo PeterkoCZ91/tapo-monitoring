@@ -566,3 +566,20 @@ def test_camera_rotate_rejects_non_quarter_turn():
     data = {"cameras": [{"name": "a", "host": "203.0.113.10", "rotate": 45}]}
     with pytest.raises(cfg.ConfigError):
         cfg.load_config_from_dict(data)
+
+
+def test_crop_min_frac_defaults_and_overrides():
+    # The floor is a per-camera knob: how far a distant subject may be zoomed depends on
+    # how far the scene reaches, which differs per site.
+    assert cfg.load_config_from_dict(_minimal()).cameras[0].crop_min_frac == 0.22
+    data = {"cameras": [{"name": "front", "host": "192.0.2.50",
+                         "crop_to_subject": True, "crop_min_frac": 0.12}]}
+    assert cfg.load_config_from_dict(data).cameras[0].crop_min_frac == 0.12
+
+
+def test_crop_min_frac_rejects_a_value_outside_the_frame():
+    for bad in (0, -0.1, 1.5):
+        data = {"cameras": [{"name": "front", "host": "192.0.2.50",
+                             "crop_to_subject": True, "crop_min_frac": bad}]}
+        with pytest.raises(cfg.ConfigError, match="crop_min_frac"):
+            cfg.load_config_from_dict(data)

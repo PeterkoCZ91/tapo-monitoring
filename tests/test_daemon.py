@@ -3282,3 +3282,21 @@ def test_send_alert_photo_records_camera_and_score_in_the_index(monkeypatch, tmp
     assert rec["camera"] == "yard"
     assert rec["person"] == 0.77
     assert rec["animal"] == 0.31
+
+
+def test_crop_for_subject_honours_the_cameras_min_frac(tmp_path):
+    # A lower floor is the only lever left once the subject is centred: it decides how
+    # much scene surrounds a distant person, and it is per-camera.
+    cam = _cam(crop_to_subject=True, crop_min_frac=0.12,
+               scorer={"url": "http://x/score", "tiles": 2})
+    src = tmp_path / "frame.jpg"
+    src.write_bytes(b"jpeg")
+    result = {"person": 0.9, "box": [600, 300, 640, 400], "w": 1280, "h": 720}
+    captured = {}
+    def fake_ffmpeg(image, out_path, rect):
+        captured["rect"] = rect
+        open(out_path, "w").write("crop")
+    daemon.crop_for_subject(cam, str(src), str(tmp_path),
+                            score_result=result, run_ffmpeg=fake_ffmpeg)
+    # 0.12 * 1280 = 153.6 -> 154, against the 282 the 0.22 default would force.
+    assert captured["rect"][2] == 154, captured["rect"]

@@ -172,6 +172,12 @@ class CameraConfig:
     # probe and a reduction per frame, so it is opt-in per camera. A stream already at
     # delivery width is detected after the grab and keeps no native original.
     crop_from_native: bool = False
+    # Smallest crop the zoom may produce, as a fraction of the frame. The floor keeps a
+    # distant subject from arriving as a postage stamp, but it also caps the zoom: where
+    # people are small and far, 0.22 surrounds them with scene they did not need. Lower it
+    # per camera, and only as far as the delivered pixels allow — with crop_from_native the
+    # crop is cut from a frame several times wider, so it can go lower there.
+    crop_min_frac: float = 0.22
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
@@ -432,6 +438,13 @@ def _camera(data, index):
     # on a slow Pi — and nothing would ever use the detail.
     if bool(data.get("crop_from_native", False)) and not bool(data.get("crop_to_subject", False)):
         raise ConfigError(f"{where}: crop_from_native requires crop_to_subject: true")
+    try:
+        crop_min_frac = float(data.get("crop_min_frac", 0.22))
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}: 'crop_min_frac' must be a number") from None
+    # A floor of 0 disables the postage-stamp guard entirely; above 1 it cannot fit.
+    if not 0 < crop_min_frac <= 1:
+        raise ConfigError(f"{where}: 'crop_min_frac' must be greater than 0 and at most 1")
     return CameraConfig(
         name=name,
         host=host,
@@ -457,6 +470,7 @@ def _camera(data, index):
         snapshot_source=snapshot_source,
         crop_to_subject=bool(data.get("crop_to_subject", False)),
         crop_from_native=bool(data.get("crop_from_native", False)),
+        crop_min_frac=crop_min_frac,
         detection=_detection(data.get("detection"), where),
         tracking=_tracking(data.get("tracking"), where),
         weather=_weather(data.get("weather"), where),

@@ -328,7 +328,29 @@ Unset (the default) keeps the legacy behaviour: any motion frame `>= threshold` 
 - `tiles: 1` scores only the whole frame; larger values also score a grid.
 - `crop_to_subject` uses the best returned person box and safely falls back to the full
   frame.
+- `crop_min_frac` sets the smallest crop the zoom may produce (see below).
 - Scorer errors fail open (one automatic retry, then raw passthrough — never a silent drop).
+
+### How small the zoom may get
+
+```yaml
+crop_to_subject: true
+crop_min_frac: 0.12     # default 0.22
+```
+
+A padded box around a distant person is tiny, and an image that small arrives as a postage
+stamp — so the crop has a floor, expressed as a fraction of the frame. The floor is also a
+cap on the zoom, and which of the two matters depends entirely on how far the scene
+reaches. On a camera watching a yard where people cross at 30–90px wide, the default 0.22
+is the binding constraint on *every* alert: it forces a 282px crop around a 40px subject,
+so the person covers a few percent of the delivered photo and the rest is scenery.
+
+Lower it only as far as the delivered pixels allow. With `crop_from_native` the crop is cut
+from a frame several times wider, so the same fraction buys proportionally more pixels: at
+0.12 on a 4K camera the crop is ~460px of real detail, while 0.10 drops most crops under
+400px, which starts to look like a thumbnail. Measure before choosing — the archived
+whole-scene copies in the sent log (`TAPO_SENT_LOG_DIR`) can be re-scored offline, so the
+floor can be picked from that camera's own subject sizes rather than guessed.
 
 ### Cropping at native resolution
 
