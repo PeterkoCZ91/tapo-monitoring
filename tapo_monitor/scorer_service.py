@@ -17,7 +17,7 @@ import json
 import logging
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 log = logging.getLogger(__name__)
 
@@ -271,17 +271,30 @@ def build_score_fn(model_path, input_size=416):
 
 
 def make_server(score_fn, port=8765):
-    """HTTP server: POST /score (JPEG body) -> JSON scores; GET /health -> ok."""
+    """HTTP server: POST /score (JPEG body) -> JSON scores; GET /health -> ok.
+
+    Threaded so /health, /metrics and slow clients never queue behind a long
+    inference (a 4K tiled request can hold the CPU for seconds). Inference itself
+    stays serialized behind one lock: parallel CPU runs would just slow each other
+    down past the callers' timeouts.
+    """
     metrics = ScorerMetrics()
+    inference_lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
         def _reply(self, code, payload):
             body = json.dumps(payload).encode()
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                # The client gave up and closed the socket; there is nobody left
+                # to reply to, and writing an error into the same dead socket
+                # would only crash the handler a second time.
+                log.debug("client closed the connection before the reply")
 
         def do_GET(self):
             if self.path == "/health":
@@ -309,11 +322,14 @@ def make_server(score_fn, port=8765):
             score_started = time.monotonic()
             ok = False
             try:
-                self._reply(200, score_fn(body, tiles))
+                with inference_lock:
+                    result = score_fn(body, tiles)
                 ok = True
             except Exception as e:  # noqa: BLE001 - report, don't kill the server
                 log.warning("scoring failed: %s", e)
                 self._reply(500, {"error": str(e)})
+            else:
+                self._reply(200, result)
             finally:
                 score_seconds = time.monotonic() - score_started
                 metrics.finish(time.monotonic() - request_started, score_seconds, ok)
@@ -321,7 +337,9 @@ def make_server(score_fn, port=8765):
         def log_message(self, fmt, *args):  # route http.server chatter to logging
             log.debug(fmt, *args)
 
-    return HTTPServer(("0.0.0.0", port), Handler)
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    server.daemon_threads = True
+    return server
 
 
 def main(argv=None):  # pragma: no cover - thin entry point, needs model weights

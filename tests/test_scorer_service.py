@@ -1,7 +1,11 @@
 import json
+import logging
 import os
+import socket
+import struct
 import sys
 import threading
+import time
 import urllib.request
 
 import pytest
@@ -76,6 +80,105 @@ def test_score_fn_error_500():
         assert metrics["failed"] == 1
         assert metrics["in_flight"] == 0
     finally:
+        srv.shutdown()
+
+
+def test_health_responds_while_scoring_in_flight():
+    started, release = threading.Event(), threading.Event()
+
+    def slow(_body, tiles=1):
+        started.set()
+        release.wait(5)
+        return {"person": 0.0}
+
+    srv = scorer_service.make_server(slow, port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        post = threading.Thread(
+            target=lambda: urllib.request.urlopen(
+                urllib.request.Request(f"{url}/score", data=b"x"), timeout=10).read(),
+            daemon=True)
+        post.start()
+        assert started.wait(5), "score request never reached score_fn"
+        with urllib.request.urlopen(f"{url}/health", timeout=2) as resp:
+            assert json.load(resp) == {"ok": True}
+    finally:
+        release.set()
+        post.join(5)
+        srv.shutdown()
+
+
+def test_concurrent_score_requests_serialize_inference():
+    gauge_lock = threading.Lock()
+    gauge = {"in_flight": 0, "max": 0}
+
+    def tracking(_body, tiles=1):
+        with gauge_lock:
+            gauge["in_flight"] += 1
+            gauge["max"] = max(gauge["max"], gauge["in_flight"])
+        time.sleep(0.2)
+        with gauge_lock:
+            gauge["in_flight"] -= 1
+        return {"person": 0.0}
+
+    srv = scorer_service.make_server(tracking, port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}/score"
+    try:
+        posts = [threading.Thread(
+            target=lambda: urllib.request.urlopen(
+                urllib.request.Request(url, data=b"x"), timeout=10).read(),
+            daemon=True) for _ in range(2)]
+        for p in posts:
+            p.start()
+        for p in posts:
+            p.join(10)
+        assert gauge["max"] == 1, "two inferences ran concurrently"
+    finally:
+        srv.shutdown()
+
+
+def test_client_gone_before_reply_is_not_a_scoring_failure(caplog):
+    started, client_gone = threading.Event(), threading.Event()
+
+    def slow(_body, tiles=1):
+        started.set()
+        client_gone.wait(5)
+        return {"person": 0.1}
+
+    srv = scorer_service.make_server(slow, port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    try:
+        with caplog.at_level(logging.WARNING, logger="tapo_monitor.scorer_service"):
+            sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+            sock.sendall(b"POST /score HTTP/1.1\r\nHost: x\r\n"
+                         b"Content-Length: 1\r\n\r\nx")
+            assert started.wait(5), "request never reached score_fn"
+            # RST on close so the server's reply write fails immediately.
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                            struct.pack("ii", 1, 0))
+            sock.close()
+            client_gone.set()
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/metrics", timeout=5) as resp:
+                    metrics = json.load(resp)
+                if metrics["completed"] == 1:
+                    break
+                time.sleep(0.05)
+        assert metrics["completed"] == 1
+        assert metrics["failed"] == 0
+        assert "scoring failed" not in caplog.text
+        # The handler must survive to serve the next client.
+        client_gone.set()
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/score", data=b"y")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            assert json.load(resp) == {"person": 0.1}
+    finally:
+        client_gone.set()
         srv.shutdown()
 
 
