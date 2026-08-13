@@ -1,3 +1,5 @@
+import json
+import logging
 import os
 import sys
 import time
@@ -231,14 +233,70 @@ def test_run_scan_matched_observation_writes_no_evidence(tmp_path, monkeypatch):
     assert not list(review.glob("front_shadow_*.jpg"))
 
 
-def test_run_scan_missing_root_is_calm(tmp_path, monkeypatch):
+def test_run_scan_missing_root_is_calm(tmp_path, monkeypatch, caplog):
     from tapo_monitor import config as cfg
     monkeypatch.delenv("RECORDING_ROOT", raising=False)
     monkeypatch.setenv("TAPO_REVIEW_LOG_DIR", str(tmp_path / "review"))
     app = cfg.load_config_from_dict({"cameras": [{
         "name": "front", "host": "192.0.2.10",
         "scorer": {"url": "http://127.0.0.1:1/score", "threshold": 0.55}}]})
-    summary = shadowscan.run_scan(app, "2026-08-12", out_dir=str(tmp_path / "w"),
-                                  ledger_factory=lambda: _FakeLedger())
+    with caplog.at_level(logging.WARNING):
+        summary = shadowscan.run_scan(app, "2026-08-12", out_dir=str(tmp_path / "w"),
+                                      ledger_factory=lambda: _FakeLedger())
     assert summary["cameras"] == {}
+    assert (tmp_path / "review" / shadowscan.SUMMARY_NAME).exists()
+    assert any("RECORDING_ROOT" in r.message for r in caplog.records)
+
+
+def test_run_scan_archives_evidence_with_scan_time_not_observation_time(
+        tmp_path, monkeypatch):
+    """The index ts must be the scan run's now, not the (earlier) observation time,
+    or a digest collecting the last 24h will never see most of a night's candidates."""
+    app, _root = _app_with_recorder(tmp_path, monkeypatch)
+    review = tmp_path / "review"
+    monkeypatch.setenv("TAPO_REVIEW_LOG_DIR", str(review))
+    seg_start = time.mktime((2026, 8, 12, 7, 0, 0, 0, 0, -1))   # early in the scanned day
+
+    def fake_runner(args):
+        target = args[-1]
+        if "%02d" in target:
+            with open(target % 1, "wb") as f:
+                f.write(b"\xff\xd8hit")
+            return "[showinfo] pts_time:5.0\n"
+        with open(target, "wb") as f:
+            f.write(b"\xff\xd8mid")
+        return ""
+
+    def fake_score(url, path, timeout=10, tiles=1):
+        if path.endswith("_sc_01.jpg"):
+            return {"person": 0.81, "animal": 0.0, "box": None}
+        return {"person": 0.02, "animal": 0.0, "box": None}
+
+    scan_now = seg_start + 90000    # the scan runs long after the observation
+    fake = _FakeLedger()
+    shadowscan.run_scan(
+        app, "2026-08-12", out_dir=str(tmp_path / "work"),
+        ledger_factory=lambda: fake, score=fake_score, runner=fake_runner,
+        now=scan_now)
+
+    lines = (review / "index.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["ts"] == scan_now
+    assert record["event_ts"] == seg_start + 5.0
+
+
+def test_run_scan_survives_ledger_construction_failure(tmp_path, monkeypatch):
+    from tapo_monitor import config as cfg
+    monkeypatch.setenv("TAPO_REVIEW_LOG_DIR", str(tmp_path / "review"))
+    app = cfg.load_config_from_dict({"cameras": [{
+        "name": "front", "host": "192.0.2.10",
+        "scorer": {"url": "http://127.0.0.1:1/score", "threshold": 0.55}}]})
+
+    def boom():
+        raise OSError("boom")
+
+    summary = shadowscan.run_scan(app, "2026-08-12", out_dir=str(tmp_path / "w"),
+                                  ledger_factory=boom)
+    assert summary["aborted"] is True
     assert (tmp_path / "review" / shadowscan.SUMMARY_NAME).exists()

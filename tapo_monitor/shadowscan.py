@@ -96,12 +96,13 @@ def extract_candidates(mkv, seg_start, out_dir, base, *, runner=None,
     except Exception:  # noqa: BLE001 - a bad segment must not end the batch
         log.warning("shadow scan: scene extraction failed for %s", mkv, exc_info=True)
     mid = os.path.join(out_dir, f"{base}_mid.jpg")
+    mid_offset = recclip.SEGMENT_SECONDS // 2
     try:
-        runner(["ffmpeg", "-hide_banner", "-y", "-ss", "450", "-i", mkv,
+        runner(["ffmpeg", "-hide_banner", "-y", "-ss", str(mid_offset), "-i", mkv,
                 "-frames:v", "1", "-vf", "scale=1280:-2", "-q:v", "2", "-update", "1",
                 mid])
         if os.path.exists(mid) and os.path.getsize(mid) > 0:
-            out.append((mid, seg_start + 450.0))
+            out.append((mid, seg_start + float(mid_offset)))
     except Exception:  # noqa: BLE001
         log.warning("shadow scan: mid-frame extraction failed for %s", mkv, exc_info=True)
     return out
@@ -183,6 +184,8 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
     now = time.time() if now is None else now
     started = time.monotonic()
     root = (env.get("RECORDING_ROOT") or "").strip()
+    if not root:
+        log.warning("shadow scan: RECORDING_ROOT not set; nothing to scan")
     review_dir = (env.get(sentlog.ENV_REVIEW_DIR) or "").strip() or None
     summary = {"date": date_str, "generated_at": now, "duration_s": 0.0,
                "aborted": False, "trimmed": False, "cameras": {}}
@@ -190,8 +193,15 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
         os.makedirs(out_dir, exist_ok=True)
     except OSError:
         log.warning("shadow scan: could not create out_dir %s", out_dir, exc_info=True)
-    events = (ledger_factory or (lambda: ledger_mod.EventLedger(
-        ledger_mod.default_ledger_path())))()
+    try:
+        events = (ledger_factory or (lambda: ledger_mod.EventLedger(
+            ledger_mod.default_ledger_path())))()
+    except Exception:  # noqa: BLE001 - a broken ledger must not crash the batch
+        log.warning("shadow scan: could not open event ledger", exc_info=True)
+        summary["aborted"] = True
+        summary["duration_s"] = round(time.monotonic() - started, 1)
+        write_summary(review_dir, summary)
+        return summary
     budget_left = int(budget)
     for cfg in app.cameras:
         if not cfg.scorer.url or not root:
@@ -223,10 +233,10 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
                     per_cam["matched"] += 1
                 else:
                     per_cam["shadow_only"] += 1
+                    meta = sentlog.review_meta(cfg.name, "shadow", "person", obs["peak"])
+                    meta["event_ts"] = obs["start"]
                     sentlog.archive_review_if_configured(
-                        obs["frame"],
-                        sentlog.review_meta(cfg.name, "shadow", "person", obs["peak"]),
-                        now=obs["start"], env=env)
+                        obs["frame"], meta, now=now, env=env)
         except Exception:  # noqa: BLE001 - one camera must not end the batch
             log.warning("shadow scan: %s failed", cfg.name, exc_info=True)
         finally:
@@ -258,6 +268,9 @@ def main(argv):
     parser.add_argument("--match-window", type=float, default=DEFAULT_MATCH_WINDOW)
     parser.add_argument("--out-dir")
     args = parser.parse_args(argv)
+
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
     try:
         date_str = resolve_date(args.date)
