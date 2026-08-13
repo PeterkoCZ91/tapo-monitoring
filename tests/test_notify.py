@@ -136,6 +136,21 @@ def test_send_photo_archives_sent_frame_when_uncropped_unreadable(monkeypatch, t
     assert saved[0].read_bytes() == b"\xff\xd8CROP"
 
 
+def test_send_photo_archive_false_skips_sent_log(monkeypatch, tmp_path):
+    # Non-alert traffic (e.g. the review digest re-sending suppressed frames) must not
+    # pollute the sent log, which is read as the record of delivered alerts.
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: _FakeResp(b'{"ok":true}'))
+    archive = tmp_path / "sent"
+    monkeypatch.setenv("TAPO_SENT_LOG_DIR", str(archive))
+    img = tmp_path / "snap.jpg"
+    img.write_bytes(b"\xff\xd8IMG")
+
+    assert notify.send_photo("tok", "chat", str(img), "digest", archive=False) is True
+
+    assert not archive.exists()
+
+
 def test_send_photo_does_not_archive_when_not_configured(monkeypatch, tmp_path):
     monkeypatch.delenv("TAPO_SENT_LOG_DIR", raising=False)
     monkeypatch.setattr(notify.urllib.request, "urlopen",

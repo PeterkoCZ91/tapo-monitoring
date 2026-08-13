@@ -2610,6 +2610,19 @@ def test_loop_step_runs_sampler_every_tick(monkeypatch):
         sample=lambda *a, **k: calls.append(k["now"]))
     assert calls == [1000]
 
+def test_loop_step_runs_review_digest_every_tick():
+    app = _sampler_app()
+    calls = []
+    daemon.loop_step(
+        app, {}, daemon.MonitorState(), now=1000, secrets={"telegram_token": "t"},
+        last_control=1000, control_interval=60,
+        run_control=lambda *a, **k: {}, watchdog=lambda *a, **k: None,
+        monitor=lambda *a, **k: None, drain=lambda *a, **k: None,
+        sample=lambda *a, **k: None,
+        digest=lambda *, now, secrets: calls.append((now, secrets["telegram_token"])))
+    assert calls == [(1000, "t")]
+
+
 def test_pending_scorer_picks_frame_above_threshold(monkeypatch):
     sent = []
     app = cfg.load_config_from_dict(

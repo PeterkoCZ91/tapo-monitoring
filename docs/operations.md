@@ -206,6 +206,20 @@ export TAPO_REVIEW_LOG_DIR=~/tapo-monitor/review-log
 export TAPO_REVIEW_LOG_RETENTION_DAYS=7   # optional, default 7
 ```
 
+**Get the suppressed frames delivered daily.** An archive nobody opens is not review — set
+`TAPO_REVIEW_DIGEST_TIME` (local `HH:MM`) and once a day at that time the daemon sends a
+Telegram summary of the review log's last 24 hours (per-camera counts with the top person
+score) followed by the few highest-scoring suppressed frames, capped by
+`TAPO_REVIEW_DIGEST_MAX_PHOTOS` (default 4). A quiet day still gets its one-line digest, so
+silence always means "nothing suppressed", never "the digest broke". Digest photos are
+deliberately kept **out** of the sent log — that archive stays the record of delivered
+alerts. A failed send retries on the next tick; nothing here can raise into the alert path.
+
+```bash
+export TAPO_REVIEW_DIGEST_TIME=20:45      # off when unset
+export TAPO_REVIEW_DIGEST_MAX_PHOTOS=4    # optional, default 4
+```
+
 **Score a frame on demand.** The daemon only scores frames behind camera events, and
 `night_only` cameras only at night, so there is otherwise no way to see how the scorer reads
 a scene right now. `scene_probe` grabs a current RTSP frame from named cameras and scores it

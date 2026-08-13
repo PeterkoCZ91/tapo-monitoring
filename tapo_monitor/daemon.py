@@ -37,6 +37,7 @@ from . import (
     notify,
     panlimit,
     recclip,
+    reviewdigest,
     sampler,
     scheduling,
     scorer,
@@ -1315,10 +1316,25 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
             g.pop("ptz", None)          # force a clean rebuild on the next poll
 
 
+def _review_digest_pass(*, now, secrets):
+    """Send the daily review-log digest when configured and due (opt-in via env)."""
+    token = secrets.get("telegram_token")
+    chat = secrets.get("telegram_chat")
+    if not token or not chat:
+        return
+    reviewdigest.run_if_due(
+        now=now,
+        send_text=lambda text: notify.send_text(token, chat, text),
+        # Digest photos are re-sent evidence, not alerts: keep them out of the sent log.
+        send_photo=lambda path, caption: notify.send_photo(
+            token, chat, path, caption, archive=False),
+    )
+
+
 def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
               last_control, control_interval,
               run_control=None, watchdog=None, monitor=None, drain=None, sample=None,
-              connect_factory=None, is_night=None, guard=None, inspect=None):
+              connect_factory=None, is_night=None, guard=None, inspect=None, digest=None):
     """One loop iteration with control decoupled from event polling.
 
     The slow, rarely-changing work (camera tracking/sensitivity/preset + the per-tick
@@ -1339,6 +1355,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     sample = sample or process_sampler
     guard = guard or _pan_guard_pass
     inspect = inspect or process_digital_twin
+    digest = digest or _review_digest_pass
     connect_factory = connect_factory or _connect_camera
     is_night = is_night or scheduling.is_night
     night = is_night()                    # one source of truth for this tick's night gate
@@ -1354,6 +1371,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     sample(app, cam_clients, state, now=now, secrets=secrets, night=night)
     drain(app, cam_clients, state, now=now, secrets=secrets, night=night)
     guard(app, cam_clients, state, now=now, secrets=secrets, night=night)
+    digest(now=now, secrets=secrets)
     return last_control
 
 
