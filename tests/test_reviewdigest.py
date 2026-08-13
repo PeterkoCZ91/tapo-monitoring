@@ -233,3 +233,29 @@ def test_run_if_due_appends_scan_context(tmp_path):
         send_text=lambda t: texts.append(t) or True,
         send_photo=lambda p, c: True) is True
     assert "shadow scan 2026-08-12" in texts[0]
+
+
+def test_scan_context_line_malformed_cameras_returns_none(tmp_path):
+    now = _local_ts(2026, 8, 13, 20, 45)
+    review = str(tmp_path)
+    summary = {"date": "2026-08-12", "generated_at": now - 3600,
+               "cameras": ["not", "a", "dict"]}
+    with open(os.path.join(review, ".shadow-scan.json"), "w", encoding="utf-8") as f:
+        json.dump(summary, f)
+    assert reviewdigest.scan_context_line(review, now) is None
+
+
+def test_run_if_due_delivers_digest_despite_malformed_scan_summary(tmp_path):
+    now = _local_ts(2026, 8, 13, 21, 0)
+    _write_entry(str(tmp_path), "a.jpg", now - 60, "front", 0.59)
+    with open(os.path.join(str(tmp_path), ".shadow-scan.json"), "w",
+              encoding="utf-8") as f:
+        json.dump({"date": "2026-08-12", "generated_at": now - 3600,
+                   "cameras": ["not", "a", "dict"]}, f)
+    texts = []
+    assert reviewdigest.run_if_due(
+        env=_env(tmp_path), now=now,
+        send_text=lambda t: texts.append(t) or True,
+        send_photo=lambda p, c: True) is True
+    assert len(texts) == 1
+    assert "1 suppressed frame(s)" in texts[0]

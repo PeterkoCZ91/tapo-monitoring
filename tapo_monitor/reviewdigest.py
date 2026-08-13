@@ -159,8 +159,11 @@ def scan_context_line(review_dir, now):
         return None
     if now - generated_at > SUMMARY_MAX_AGE:
         return "shadow scan: no recent run"
+    cameras = summary.get("cameras")
+    if not isinstance(cameras, dict):
+        return None
     segments = frames = matched = candidates = 0
-    for stats in (summary.get("cameras") or {}).values():
+    for stats in cameras.values():
         try:
             segments += int(stats.get("segments", 0) or 0)
             frames += int(stats.get("frames_scored", 0) or 0)
