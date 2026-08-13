@@ -39,3 +39,49 @@ def test_segments_for_date_sorted_and_parsed(tmp_path):
 
 def test_segments_for_date_empty_tree(tmp_path):
     assert shadowscan.segments_for_date(str(tmp_path), "192.0.2.10", "2026-08-12") == []
+
+
+SHOWINFO = (
+    "[Parsed_showinfo_1 @ 0x1] n:   0 pts:  12800 pts_time:5.12    pos: 1 fmt:yuvj420p\n"
+    "[Parsed_showinfo_1 @ 0x1] n:   1 pts:  64000 pts_time:25.6    pos: 2 fmt:yuvj420p\n"
+    "irrelevant line\n"
+)
+
+
+def test_parse_showinfo_times():
+    assert shadowscan.parse_showinfo_times(SHOWINFO) == [5.12, 25.6]
+    assert shadowscan.parse_showinfo_times("") == []
+
+
+def test_extract_candidates_scene_frames_and_uniform(tmp_path):
+    seg_start = _local(2026, 8, 12, 7, 0)
+    calls = []
+
+    def fake_runner(args):
+        calls.append(args)
+        target = args[-1]        # the implementation passes the output path/pattern last
+        if "%02d" in target:
+            for k in (1, 2):
+                with open(target % k, "wb") as f:
+                    f.write(b"\xff\xd8scene")
+            return SHOWINFO
+        with open(target, "wb") as f:
+            f.write(b"\xff\xd8mid")
+        return ""
+
+    got = shadowscan.extract_candidates(
+        "/rec/zaznam_20260812T070000.mkv", seg_start, str(tmp_path), "seg0",
+        runner=fake_runner)
+    stamps = [ts for _, ts in got]
+    assert seg_start + 5.12 in stamps and seg_start + 25.6 in stamps
+    assert seg_start + 450 in stamps          # uniform mid-segment frame
+    assert len(got) == 3
+    assert all(os.path.exists(p) for p, _ in got)
+
+
+def test_extract_candidates_survives_ffmpeg_failure(tmp_path):
+    def boom(args):
+        raise RuntimeError("ffmpeg exploded")
+    got = shadowscan.extract_candidates(
+        "/rec/zaznam_20260812T070000.mkv", 0.0, str(tmp_path), "seg0", runner=boom)
+    assert got == []
