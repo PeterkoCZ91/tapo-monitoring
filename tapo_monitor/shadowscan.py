@@ -8,14 +8,13 @@ docs/superpowers/specs/2026-08-13-shadow-worker-design.md.
 """
 
 import glob
-import json
 import logging
 import os
 import re
 import subprocess
 import time
 
-from . import recclip, scorer, sentlog
+from . import recclip, scorer
 
 log = logging.getLogger(__name__)
 
