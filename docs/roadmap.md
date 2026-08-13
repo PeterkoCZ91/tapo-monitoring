@@ -96,14 +96,14 @@ Acceptance criteria:
 
 ## Phase 3 — Independent shadow worker
 
-Status: **planned**
+Status: **v1 shipped** (single-recorder-host batch; see docs/operations.md)
 
-- Read new local-recorder segments without depending on a camera event trigger.
-- Use coarse motion/change detection to avoid scoring every frame.
-- Run the local scorer on selected frames and write normalized shadow observations.
-- Keep all media local and store only evidence references with a short expiry when an
+- [x] Read new local-recorder segments without depending on a camera event trigger.
+- [x] Use coarse motion/change detection to avoid scoring every frame.
+- [x] Run the local scorer on selected frames and write normalized shadow observations.
+- [x] Keep all media local and store only evidence references with a short expiry when an
   operator explicitly enables review artifacts.
-- Produce daily per-camera miss candidates and scorer calibration datasets.
+- [x] Produce daily per-camera miss candidates and scorer calibration datasets.
 
 The first rollout is observation-only. It must not change thresholds automatically.
 

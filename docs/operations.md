@@ -220,6 +220,37 @@ export TAPO_REVIEW_DIGEST_TIME=20:45      # off when unset
 export TAPO_REVIEW_DIGEST_MAX_PHOTOS=4    # optional, default 4
 ```
 
+**Audit what the cameras never reported.** Cameras only prove the alerts they raised; a
+person the camera never flagged leaves no trace. When a host runs a 24/7 recorder
+(`RECORDING_ROOT`), the nightly shadow scan re-reads yesterday's segments with no camera
+involvement, scores motion candidates through the same scoring service, records shadow
+observations in the event ledger (enable `observability.ledger`), and files
+miss-candidate frames into the review log under the `shadow` verdict — so they arrive
+with the daily digest. Budget, pacing and the event-match window are flags; the run
+summary lands in `.shadow-scan.json` beside the review log and the digest quotes it, so
+a missing nightly run is visible, not silent.
+
+```bash
+tapo-monitor shadow-scan cameras.yaml            # yesterday, default budget/pacing
+tapo-monitor shadow-scan cameras.yaml --date 2026-08-12 --budget 800 --rate 2.0
+```
+
+Schedule it with a systemd timer in the small hours, niced, with the same environment
+file as the daemon:
+
+```ini
+[Service]
+Type=oneshot
+Nice=15
+IOSchedulingClass=idle
+EnvironmentFile=%h/tapo/tapo-camera.env
+ExecStart=%h/tapo-env/bin/tapo-monitor shadow-scan %h/tapo-monitor/cameras.yaml
+
+[Timer]
+OnCalendar=*-*-* 03:00
+Persistent=true
+```
+
 **Score a frame on demand.** The daemon only scores frames behind camera events, and
 `night_only` cameras only at night, so there is otherwise no way to see how the scorer reads
 a scene right now. `scene_probe` grabs a current RTSP frame from named cameras and scores it
