@@ -8,6 +8,7 @@ Usage:
   tapo-monitor probe [cameras.yaml]     # one-shot camera probe (own authenticated session)
   tapo-monitor shadow-record ...        # ingest an independent local observation
   tapo-monitor shadow-report ...        # compare camera and shadow observations
+  tapo-monitor shadow-scan ...          # nightly recorder audit batch
   tapo-monitor audit-log [logfile|-]    # summarize scorer/Telegram audit lines
 """
 
@@ -312,6 +313,9 @@ def main(argv=None):
         return _shadow_record(argv[1:])
     if cmd == "shadow-report":
         return _shadow_report(argv[1:])
+    if cmd == "shadow-scan":
+        from .shadowscan import main as shadow_scan_main
+        return shadow_scan_main(argv[1:])
     print(__doc__)
     return 2
 

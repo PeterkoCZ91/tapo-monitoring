@@ -131,3 +131,114 @@ def test_cluster_hits_merges_within_gap_and_keeps_peak_frame():
 
 def test_cluster_hits_empty():
     assert shadowscan.cluster_hits([]) == []
+
+
+class _FakeLedger:
+    def __init__(self):
+        self.shadow = []
+        self.camera_events = []
+
+    def record_shadow_event(self, **kw):
+        self.shadow.append(kw)
+        return len(self.shadow)
+
+    def camera_events_between(self, camera, start, end):
+        return [t for (c, t) in self.camera_events if c == camera and start <= t <= end]
+
+
+def _app_with_recorder(tmp_path, monkeypatch, host="192.0.2.10"):
+    from tapo_monitor import config as cfg
+    root = tmp_path / "rec"
+    hour = root / host / "2026-08-12" / "07"
+    hour.mkdir(parents=True)
+    (hour / "zaznam_20260812T070000.mkv").write_bytes(b"mkv")
+    monkeypatch.setenv("RECORDING_ROOT", str(root))
+    app = cfg.load_config_from_dict({"cameras": [{
+        "name": "front", "host": host,
+        "scorer": {"url": "http://127.0.0.1:1/score", "threshold": 0.55}}]})
+    return app, root
+
+
+def test_run_scan_records_matches_and_archives_misses(tmp_path, monkeypatch):
+    app, _root = _app_with_recorder(tmp_path, monkeypatch)
+    review = tmp_path / "review"
+    monkeypatch.setenv("TAPO_REVIEW_LOG_DIR", str(review))
+    seg_start = time.mktime((2026, 8, 12, 7, 0, 0, 0, 0, -1))
+
+    def fake_runner(args):
+        target = args[-1]
+        if "%02d" in target:
+            with open(target % 1, "wb") as f:
+                f.write(b"\xff\xd8hit")
+            return "[showinfo] pts_time:5.0\n"
+        with open(target, "wb") as f:
+            f.write(b"\xff\xd8mid")
+        return ""
+
+    def fake_score(url, path, timeout=10, tiles=1):
+        if path.endswith("_sc_01.jpg"):
+            return {"person": 0.81, "animal": 0.0, "box": None}
+        return {"person": 0.02, "animal": 0.0, "box": None}
+
+    fake = _FakeLedger()          # no camera events -> the hit is a miss candidate
+    summary = shadowscan.run_scan(
+        app, "2026-08-12", out_dir=str(tmp_path / "work"),
+        ledger_factory=lambda: fake, score=fake_score, runner=fake_runner,
+        now=seg_start + 90000)
+    assert summary["cameras"]["front"]["observations"] == 1
+    assert summary["cameras"]["front"]["shadow_only"] == 1
+    assert summary["cameras"]["front"]["matched"] == 0
+    assert fake.shadow[0]["camera"] == "front"
+    assert fake.shadow[0]["adapter"] == "local_scorer"
+    saved = list(review.glob("front_shadow_p0.81_*.jpg"))
+    assert len(saved) == 1                      # evidence frame archived
+    assert (review / shadowscan.SUMMARY_NAME).exists()
+    work_leftovers = list((tmp_path / "work").glob("*.jpg"))
+    assert work_leftovers == []                 # candidates cleaned up
+
+
+def test_run_scan_matched_observation_writes_no_evidence(tmp_path, monkeypatch):
+    app, _root = _app_with_recorder(tmp_path, monkeypatch)
+    review = tmp_path / "review"
+    monkeypatch.setenv("TAPO_REVIEW_LOG_DIR", str(review))
+    seg_start = time.mktime((2026, 8, 12, 7, 0, 0, 0, 0, -1))
+
+    def fake_runner(args):
+        target = args[-1]
+        if "%02d" in target:
+            with open(target % 1, "wb") as f:
+                f.write(b"\xff\xd8hit")
+            return "[showinfo] pts_time:5.0\n"
+        with open(target, "wb") as f:
+            f.write(b"\xff\xd8mid")
+        return ""
+
+    def fake_score(url, path, timeout=10, tiles=1):
+        # Only the scene-change frame is a hit; the uniform mid-segment frame stays
+        # below threshold so this fixture yields exactly one observation to match.
+        if path.endswith("_sc_01.jpg"):
+            return {"person": 0.81, "animal": 0.0, "box": None}
+        return {"person": 0.02, "animal": 0.0, "box": None}
+
+    fake = _FakeLedger()
+    fake.camera_events = [("front", seg_start + 60.0)]   # camera saw it too
+    summary = shadowscan.run_scan(
+        app, "2026-08-12", out_dir=str(tmp_path / "work"),
+        ledger_factory=lambda: fake, score=fake_score,
+        runner=fake_runner, now=seg_start + 90000)
+    assert summary["cameras"]["front"]["matched"] == 1
+    assert summary["cameras"]["front"]["shadow_only"] == 0
+    assert not list(review.glob("front_shadow_*.jpg"))
+
+
+def test_run_scan_missing_root_is_calm(tmp_path, monkeypatch):
+    from tapo_monitor import config as cfg
+    monkeypatch.delenv("RECORDING_ROOT", raising=False)
+    monkeypatch.setenv("TAPO_REVIEW_LOG_DIR", str(tmp_path / "review"))
+    app = cfg.load_config_from_dict({"cameras": [{
+        "name": "front", "host": "192.0.2.10",
+        "scorer": {"url": "http://127.0.0.1:1/score", "threshold": 0.55}}]})
+    summary = shadowscan.run_scan(app, "2026-08-12", out_dir=str(tmp_path / "w"),
+                                  ledger_factory=lambda: _FakeLedger())
+    assert summary["cameras"] == {}
+    assert (tmp_path / "review" / shadowscan.SUMMARY_NAME).exists()

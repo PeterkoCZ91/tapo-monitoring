@@ -164,3 +164,11 @@ def test_probe_can_select_a_single_camera(tmp_path, capsys, monkeypatch):
 def test_probe_rejects_an_unknown_camera(tmp_path, capsys):
     assert cli.main(["probe", str(_probe_config(tmp_path)), "--camera", "nope"]) == 2
     assert "nope" in capsys.readouterr().err
+
+
+def test_main_dispatches_shadow_scan(monkeypatch):
+    called = {}
+    monkeypatch.setattr("tapo_monitor.shadowscan.main",
+                        lambda argv: called.update(argv=argv) or 0)
+    assert cli.main(["shadow-scan", "cameras.yaml", "--date", "2026-08-12"]) == 0
+    assert called["argv"] == ["cameras.yaml", "--date", "2026-08-12"]
