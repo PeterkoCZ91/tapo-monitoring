@@ -19,6 +19,7 @@ import os
 import time
 
 from . import sentlog
+from .shadowscan import SUMMARY_MAX_AGE, SUMMARY_NAME
 
 log = logging.getLogger(__name__)
 
@@ -101,10 +102,7 @@ def collect(review_dir, now, window=WINDOW_SECONDS):
     return entries
 
 
-def build_summary(entries):
-    """One-message digest text: total plus per-camera counts with the max score. Pure."""
-    if not entries:
-        return "\U0001f4cb Review digest: no suppressed frames in the last 24h"
+def _camera_stats(entries):
     cameras = {}
     for e in entries:
         cam = str(e.get("camera", "cam"))
@@ -114,11 +112,64 @@ def build_summary(entries):
             best["max"] = max(best["max"], float(e.get("person", 0.0)))
         except (TypeError, ValueError):
             pass
-    lines = [f"\U0001f4cb Review digest: {len(entries)} suppressed frame(s) in the last 24h"]
+    return cameras
+
+
+def _camera_lines(cameras):
+    lines = []
     for cam in sorted(cameras, key=lambda c: -cameras[c]["count"]):
         stats = cameras[cam]
         lines.append(f"{cam}: {stats['count']} (max p{stats['max']:.2f})")
+    return lines
+
+
+def build_summary(entries):
+    """One-message digest text: total plus per-camera counts with the max score.
+
+    Entries with ``verdict == "shadow"`` (the shadow scan's own miss candidates) are
+    broken out into a separate section below the regular hold counts; everything else
+    (including entries with no verdict at all) keeps today's rendering unchanged. Pure.
+    """
+    if not entries:
+        return "\U0001f4cb Review digest: no suppressed frames in the last 24h"
+    holds = [e for e in entries if e.get("verdict") != "shadow"]
+    shadow = [e for e in entries if e.get("verdict") == "shadow"]
+    lines = [f"\U0001f4cb Review digest: {len(holds)} suppressed frame(s) in the last 24h"]
+    lines.extend(_camera_lines(_camera_stats(holds)))
+    if shadow:
+        lines.append(f"shadow: {len(shadow)} miss candidate(s)")
+        lines.extend(_camera_lines(_camera_stats(shadow)))
     return "\n".join(lines)
+
+
+def scan_context_line(review_dir, now):
+    """One-line shadow-scan status for the digest, or None to stay silent.
+
+    None when the summary file is absent (hosts without a recorder never mention the
+    scan) or on any read/parse failure. A stale ``generated_at`` (older than
+    ``SUMMARY_MAX_AGE``) renders a plain "no recent run" notice instead of numbers that
+    might be a day or more out of date; a fresh summary renders the totals across all
+    cameras. Best-effort: never raises.
+    """
+    try:
+        with open(os.path.join(review_dir, SUMMARY_NAME), encoding="utf-8") as f:
+            summary = json.load(f)
+        generated_at = float(summary["generated_at"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    if now - generated_at > SUMMARY_MAX_AGE:
+        return "shadow scan: no recent run"
+    segments = frames = matched = candidates = 0
+    for stats in (summary.get("cameras") or {}).values():
+        try:
+            segments += int(stats.get("segments", 0) or 0)
+            frames += int(stats.get("frames_scored", 0) or 0)
+            matched += int(stats.get("matched", 0) or 0)
+            candidates += int(stats.get("shadow_only", 0) or 0)
+        except (AttributeError, TypeError, ValueError):
+            return None
+    return (f"shadow scan {summary.get('date')}: {segments} segments, {frames} frames, "
+            f"{matched} matched, {candidates} candidate(s)")
 
 
 def pick_photos(entries, review_dir, limit):
@@ -165,7 +216,11 @@ def run_if_due(*, env=None, now=None, send_text, send_photo):
         if not due(now, hhmm, last_sent_day(review_dir)):
             return False
         entries = collect(review_dir, now)
-        if not send_text(build_summary(entries)):
+        text = build_summary(entries)
+        context = scan_context_line(review_dir, now)
+        if context is not None:
+            text = f"{text}\n{context}"
+        if not send_text(text):
             log.warning("review digest delivery failed; will retry next tick")
             return False
         for entry in pick_photos(entries, review_dir, max_photos_from_env(env)):

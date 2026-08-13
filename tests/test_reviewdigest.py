@@ -108,6 +108,18 @@ def test_summary_when_quiet_says_so():
     assert "no suppressed frames" in text
 
 
+def test_summary_breaks_out_shadow_verdict():
+    entries = [
+        {"ts": 1.0, "file": "a.jpg", "camera": "front", "person": 0.64},
+        {"ts": 2.0, "file": "b.jpg", "camera": "front", "person": 0.81,
+         "verdict": "shadow"},
+    ]
+    text = reviewdigest.build_summary(entries)
+    assert "1 suppressed frame(s)" in text            # holds counted without shadow
+    assert "shadow: 1 miss candidate(s)" in text
+    assert "front: 1 (max p0.81)" in text
+
+
 def test_pick_photos_highest_scores_capped_existing_only(tmp_path):
     review_dir = str(tmp_path)
     now = _local_ts(2026, 8, 13, 21, 0)
@@ -185,3 +197,39 @@ def test_run_if_due_never_raises(tmp_path):
     assert reviewdigest.run_if_due(
         env=_env(tmp_path), now=now,
         send_text=boom, send_photo=lambda p, c: True) is False
+
+
+# ── shadow-scan context line ─────────────────────────────────────────────────
+
+def test_scan_context_line_absent_fresh_and_stale(tmp_path):
+    now = _local_ts(2026, 8, 13, 20, 45)
+    review = str(tmp_path)
+    assert reviewdigest.scan_context_line(review, now) is None
+    summary = {"date": "2026-08-12", "generated_at": now - 3600,
+               "cameras": {"front": {"segments": 96, "frames_scored": 700,
+                                      "observations": 3, "matched": 2,
+                                      "shadow_only": 1}}}
+    with open(os.path.join(review, ".shadow-scan.json"), "w", encoding="utf-8") as f:
+        json.dump(summary, f)
+    line = reviewdigest.scan_context_line(review, now)
+    assert "2026-08-12" in line and "96 segments" in line
+    assert "2 matched" in line and "1 candidate(s)" in line
+    summary["generated_at"] = now - 40 * 3600
+    with open(os.path.join(review, ".shadow-scan.json"), "w", encoding="utf-8") as f:
+        json.dump(summary, f)
+    assert reviewdigest.scan_context_line(review, now) == "shadow scan: no recent run"
+
+
+def test_run_if_due_appends_scan_context(tmp_path):
+    now = _local_ts(2026, 8, 13, 21, 0)
+    _write_entry(str(tmp_path), "a.jpg", now - 60, "front", 0.59)
+    with open(os.path.join(str(tmp_path), ".shadow-scan.json"), "w",
+              encoding="utf-8") as f:
+        json.dump({"date": "2026-08-12", "generated_at": now - 3600,
+                   "cameras": {}}, f)
+    texts = []
+    assert reviewdigest.run_if_due(
+        env=_env(tmp_path), now=now,
+        send_text=lambda t: texts.append(t) or True,
+        send_photo=lambda p, c: True) is True
+    assert "shadow scan 2026-08-12" in texts[0]
