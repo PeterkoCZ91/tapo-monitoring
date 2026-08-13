@@ -132,6 +132,25 @@ def test_pick_photos_highest_scores_capped_existing_only(tmp_path):
     assert [e["file"] for e in picked] == ["top.jpg", "mid.jpg"]
 
 
+# ── photo captions ───────────────────────────────────────────────────────────
+
+def test_photo_caption_shadow_prefers_event_ts_over_scan_ts():
+    scan_ts = _local_ts(2026, 8, 13, 3, 0)
+    event_ts = _local_ts(2026, 8, 13, 13, 45)
+    caption = reviewdigest.photo_caption({
+        "verdict": "shadow", "camera": "front", "person": 0.81,
+        "ts": scan_ts, "event_ts": event_ts})
+    assert "13:45" in caption
+    assert "03:0" not in caption
+
+
+def test_photo_caption_hold_without_event_ts_uses_ts_as_before():
+    ts = _local_ts(2026, 8, 13, 20, 45)
+    caption = reviewdigest.photo_caption({
+        "verdict": "hold", "camera": "front", "person": 0.42, "ts": ts})
+    assert caption == "hold front p0.42 20:45"
+
+
 # ── orchestration ────────────────────────────────────────────────────────────
 
 def _env(tmp_path, hhmm="20:45"):

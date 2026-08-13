@@ -194,8 +194,13 @@ def pick_photos(entries, review_dir, limit):
 
 
 def photo_caption(entry):
-    """Skimmable per-photo caption: verdict, camera, score, local event time. Pure."""
-    when = time.strftime("%H:%M", time.localtime(float(entry.get("ts", 0.0))))
+    """Skimmable per-photo caption: verdict, camera, score, local event time. Pure.
+
+    Shadow entries record ``ts`` as the (much later) scan-run time; the true observation
+    time lives in ``event_ts`` when the shadow worker set it, so that takes priority.
+    """
+    when = time.strftime(
+        "%H:%M", time.localtime(float(entry.get("event_ts", entry.get("ts", 0.0)))))
     try:
         score = f"p{float(entry.get('person', 0.0)):.2f}"
     except (TypeError, ValueError):

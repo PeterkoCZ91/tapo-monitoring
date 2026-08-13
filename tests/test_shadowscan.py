@@ -199,6 +199,49 @@ def test_run_scan_records_matches_and_archives_misses(tmp_path, monkeypatch):
     assert work_leftovers == []                 # candidates cleaned up
 
 
+def test_run_scan_gives_each_shadow_only_observation_a_distinct_evidence_file(
+        tmp_path, monkeypatch):
+    """Two shadow-only observations in one run with the same peak score must not
+    collide on `_stamp(now)` and overwrite each other's archived JPEG."""
+    app, _root = _app_with_recorder(tmp_path, monkeypatch)
+    review = tmp_path / "review"
+    monkeypatch.setenv("TAPO_REVIEW_LOG_DIR", str(review))
+    seg_start = time.mktime((2026, 8, 12, 7, 0, 0, 0, 0, -1))
+
+    def fake_runner(args):
+        target = args[-1]
+        if "%02d" in target:
+            for k in (1, 2):                         # pts_time below: >180s apart
+                with open(target % k, "wb") as f:
+                    f.write(b"\xff\xd8hit")
+            return "[showinfo] pts_time:5.0\n[showinfo] pts_time:400.0\n"
+        with open(target, "wb") as f:
+            f.write(b"\xff\xd8mid")
+        return ""
+
+    def fake_score(url, path, timeout=10, tiles=1):
+        if path.endswith("_sc_01.jpg") or path.endswith("_sc_02.jpg"):
+            return {"person": 0.81, "animal": 0.0, "box": None}
+        return {"person": 0.02, "animal": 0.0, "box": None}
+
+    fake = _FakeLedger()          # no camera events -> both hits are shadow-only
+    summary = shadowscan.run_scan(
+        app, "2026-08-12", out_dir=str(tmp_path / "work"),
+        ledger_factory=lambda: fake, score=fake_score, runner=fake_runner,
+        now=seg_start + 90000)
+
+    assert summary["cameras"]["front"]["observations"] == 2
+    assert summary["cameras"]["front"]["shadow_only"] == 2
+
+    saved = list(review.glob("front_shadow_p0.81_*.jpg"))
+    assert len(saved) == 2                      # both frames archived, neither overwritten
+
+    lines = (review / "index.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    records = [json.loads(line) for line in lines]
+    assert records[0]["ts"] != records[1]["ts"]
+
+
 def test_run_scan_matched_observation_writes_no_evidence(tmp_path, monkeypatch):
     app, _root = _app_with_recorder(tmp_path, monkeypatch)
     review = tmp_path / "review"

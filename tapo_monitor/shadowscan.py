@@ -203,6 +203,7 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
         write_summary(review_dir, summary)
         return summary
     budget_left = int(budget)
+    archive_counter = 0
     for cfg in app.cameras:
         if not cfg.scorer.url or not root:
             continue
@@ -235,8 +236,14 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
                     per_cam["shadow_only"] += 1
                     meta = sentlog.review_meta(cfg.name, "shadow", "person", obs["peak"])
                     meta["event_ts"] = obs["start"]
+                    # Every archived observation in this run must land on a distinct
+                    # filename/index ts: `_stamp` is only unique to the microsecond, and
+                    # two observations sharing a 2-decimal score would otherwise collide
+                    # and silently overwrite each other's JPEG. A millisecond bump per
+                    # observation keeps every entry safely inside the digest's 24h window.
                     sentlog.archive_review_if_configured(
-                        obs["frame"], meta, now=now, env=env)
+                        obs["frame"], meta, now=now + archive_counter * 0.001, env=env)
+                    archive_counter += 1
         except Exception:  # noqa: BLE001 - one camera must not end the batch
             log.warning("shadow scan: %s failed", cfg.name, exc_info=True)
         finally:
