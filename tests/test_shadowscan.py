@@ -115,3 +115,19 @@ def test_score_candidates_aborts_after_consecutive_failures():
     assert out["aborted"] is True
     assert out["scored"] == 0
     assert len(out["hits"]) == 0
+
+
+def test_cluster_hits_merges_within_gap_and_keeps_peak_frame():
+    hits = [
+        {"ts": 100.0, "path": "a.jpg", "person": 0.6, "box": None},
+        {"ts": 220.0, "path": "b.jpg", "person": 0.9, "box": None},   # 120s later: same
+        {"ts": 1000.0, "path": "c.jpg", "person": 0.7, "box": None},  # far: new one
+    ]
+    obs = shadowscan.cluster_hits(hits)
+    assert len(obs) == 2
+    assert obs[0] == {"start": 100.0, "end": 220.0, "peak": 0.9, "frame": "b.jpg"}
+    assert obs[1] == {"start": 1000.0, "end": 1000.0, "peak": 0.7, "frame": "c.jpg"}
+
+
+def test_cluster_hits_empty():
+    assert shadowscan.cluster_hits([]) == []

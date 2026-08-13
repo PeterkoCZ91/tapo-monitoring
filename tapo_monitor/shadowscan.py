@@ -135,3 +135,19 @@ def score_candidates(candidates, url, threshold, *, rate=DEFAULT_RATE, budget,
             hits.append({"ts": ts, "path": path, "person": float(subject),
                          "box": scorer.subject_box(result)})
     return {"hits": hits, "scored": scored, "aborted": aborted, "trimmed": trimmed}
+
+
+def cluster_hits(hits, gap=DEFAULT_CLUSTER_GAP):
+    """Merge time-adjacent hits into observations (span + peak + best frame). Pure."""
+    observations = []
+    for hit in sorted(hits, key=lambda h: h["ts"]):
+        if observations and hit["ts"] - observations[-1]["end"] <= gap:
+            current = observations[-1]
+            current["end"] = hit["ts"]
+            if hit["person"] > current["peak"]:
+                current["peak"] = hit["person"]
+                current["frame"] = hit["path"]
+        else:
+            observations.append({"start": hit["ts"], "end": hit["ts"],
+                                 "peak": hit["person"], "frame": hit["path"]})
+    return observations
