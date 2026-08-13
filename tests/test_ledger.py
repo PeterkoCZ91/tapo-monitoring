@@ -249,3 +249,15 @@ def test_audit_logging_handler_is_best_effort(tmp_path):
     handler.flush()
 
     assert len(events.observations(camera="front", start=0, end=200)) == 1
+
+
+def test_camera_events_between_filters_by_camera_and_window(tmp_path):
+    events = ledger.EventLedger(tmp_path / "events.sqlite3")
+    events.record_camera_event(camera="front", event_type="motion", event_at=100.0)
+    events.record_camera_event(camera="front", event_type="person", event_at=500.0)
+    events.record_shadow_event(camera="front", event_type="motion", event_at=100.0)
+    events.record_camera_event(camera="yard", event_type="motion", event_at=110.0)
+
+    assert events.camera_events_between("front", 50.0, 200.0) == [100.0]
+    assert events.camera_events_between("front", 0.0, 1000.0) == [100.0, 500.0]
+    assert events.camera_events_between("front", 600.0, 700.0) == []

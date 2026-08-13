@@ -420,6 +420,11 @@ class EventLedger:
             rows = connection.execute(query, params).fetchall()
         return [_row_to_observation(row) for row in rows]
 
+    def camera_events_between(self, camera: str, start: float, end: float) -> list[float]:
+        """Ascending event_at timestamps of camera-source observations for one camera."""
+        events = self.observations(camera=camera, start=start, end=end, source="camera")
+        return [event.event_at for event in events]
+
     def correlation_report(
         self,
         *,
