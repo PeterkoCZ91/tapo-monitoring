@@ -101,3 +101,37 @@ def extract_candidates(mkv, seg_start, out_dir, base, *, runner=None,
     except Exception:  # noqa: BLE001
         log.warning("shadow scan: mid-frame extraction failed for %s", mkv, exc_info=True)
     return out
+
+
+def score_candidates(candidates, url, threshold, *, rate=DEFAULT_RATE, budget,
+                     score=None, sleep=None):
+    """Score candidate frames through the shared scorer, politely and boundedly.
+
+    The gap between requests keeps a batch from starving the live pipeline and other
+    scorer consumers; the budget bounds the night's total work; three consecutive
+    failures mean the scorer is down and the batch should stop pretending otherwise.
+    """
+    score = score or scorer.score_image
+    sleep = sleep or time.sleep
+    hits, scored, failures = [], 0, 0
+    trimmed = aborted = False
+    for index, (path, ts) in enumerate(candidates):
+        if scored >= budget:
+            trimmed = True
+            break
+        if index:
+            sleep(rate)
+        result = score(url, path, tiles=1)
+        subject = scorer.subject_score(result) if result is not None else None
+        if subject is None:
+            failures += 1
+            if failures >= SCORER_ABORT_AFTER:
+                aborted = True
+                break
+            continue
+        failures = 0
+        scored += 1
+        if float(subject) >= threshold:
+            hits.append({"ts": ts, "path": path, "person": float(subject),
+                         "box": scorer.subject_box(result)})
+    return {"hits": hits, "scored": scored, "aborted": aborted, "trimmed": trimmed}

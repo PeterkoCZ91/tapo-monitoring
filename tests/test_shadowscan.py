@@ -85,3 +85,33 @@ def test_extract_candidates_survives_ffmpeg_failure(tmp_path):
     got = shadowscan.extract_candidates(
         "/rec/zaznam_20260812T070000.mkv", 0.0, str(tmp_path), "seg0", runner=boom)
     assert got == []
+
+
+def test_score_candidates_hits_budget_and_rate(tmp_path):
+    naps = []
+    results = {"a.jpg": {"person": 0.8, "animal": 0.0, "box": [1, 2, 3, 4]},
+               "b.jpg": {"person": 0.1, "animal": 0.0, "box": None},
+               "c.jpg": {"person": 0.9, "animal": 0.0, "box": None}}
+
+    def fake_score(url, path, timeout=10, tiles=1):
+        assert tiles == 1
+        return results[os.path.basename(path)]
+
+    out = shadowscan.score_candidates(
+        [("a.jpg", 10.0), ("b.jpg", 20.0), ("c.jpg", 30.0)],
+        "http://127.0.0.1:1/score", 0.55,
+        budget=2, score=fake_score, sleep=naps.append)
+    assert [h["ts"] for h in out["hits"]] == [10.0]   # c.jpg fell past the budget
+    assert out["scored"] == 2 and out["trimmed"] is True and out["aborted"] is False
+    assert naps == [shadowscan.DEFAULT_RATE]          # gap between request 1 and 2 only
+
+
+def test_score_candidates_aborts_after_consecutive_failures():
+    def dead(url, path, timeout=10, tiles=1):
+        return None
+    out = shadowscan.score_candidates(
+        [(f"{k}.jpg", float(k)) for k in range(5)], "http://x/score", 0.5,
+        budget=100, score=dead, sleep=lambda s: None)
+    assert out["aborted"] is True
+    assert out["scored"] == 0
+    assert len(out["hits"]) == 0
