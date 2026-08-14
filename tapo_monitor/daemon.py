@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 
 from . import (
     capabilities,
+    dnsfix,
     drift,
     enrich,
     health,
@@ -1574,6 +1575,9 @@ def main(argv=None):  # pragma: no cover - thin entry point
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+    # Before anything reaches the network: a site whose resolver filters the alert endpoint
+    # would otherwise fail every delivery at DNS (see tapo_monitor.dnsfix).
+    dnsfix.install_from_env()
     path = (argv or sys.argv[1:] or ["cameras.yaml"])[0]
     app = load_config(path)
     poll_interval = app.loop.event_interval
