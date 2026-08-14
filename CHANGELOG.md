@@ -19,6 +19,13 @@ All notable changes to this project are documented here.
   off; eviction by the phone app is expected and never alerts.
 - `snapshot.capture_go2rtc`, a single-frame JPEG grab from a go2rtc source, for cameras
   with no usable RTSP. Empty bodies and unreachable sidecars leave no orphan temp file.
+- The alert frame for a hubpoll camera comes from the hub clip itself: it is downloaded
+  over the hub's media port and a frame extracted from the MPEG-TS. The clip *is* the
+  event — measured at 3–5 s and ~3 MB — whereas a live grab lands 20–30 s later, once the
+  camera is asleep again and the scene is empty, which is exactly the empty-scene false
+  alert this project has already paid for. The sidecar grab remains as the backup, and a
+  clip frame is scored and gated like any other, so the fallback is no way past the
+  threshold.
 
 ## [0.4.0] - 2026-08-08
 

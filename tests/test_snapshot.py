@@ -272,3 +272,51 @@ def test_capture_go2rtc_treats_an_empty_body_as_failure(tmp_path):
     assert snapshot.capture_go2rtc("gate", out_dir=str(tmp_path),
                                    _fetch=lambda url, timeout: b"") is None
     assert os.listdir(tmp_path) == []
+
+
+# ── frame from a downloaded hub clip (MPEG-TS) ───────────────────────────────
+
+def test_ts_frame_args_seek_past_the_clip_start_and_grab_one_frame():
+    args = snapshot.ts_frame_args("/tmp/clip.ts", "/tmp/out.jpg")
+    assert args[0] == "ffmpeg"
+    assert "-i" in args and args[args.index("-i") + 1] == "/tmp/clip.ts"
+    assert args[args.index("-frames:v") + 1] == "1"
+    assert args[-1] == "/tmp/out.jpg"
+
+
+def test_ts_frame_args_apply_a_rotation_when_configured():
+    args = snapshot.ts_frame_args("/tmp/clip.ts", "/tmp/out.jpg", rotate=180)
+    assert args[args.index("-vf") + 1].startswith("hflip,vflip")
+
+
+def test_frame_from_clip_returns_the_extracted_frame(tmp_path):
+    clip = tmp_path / "clip.ts"
+    clip.write_bytes(b"\x47" * 188)
+
+    def fake_run(argv, **kwargs):
+        with open(argv[-1], "wb") as f:
+            f.write(b"jpegbytes")
+        return None
+
+    path = snapshot.frame_from_clip(str(clip), out_dir=str(tmp_path), _run=fake_run)
+    assert path is not None
+    with open(path, "rb") as f:
+        assert f.read() == b"jpegbytes"
+
+
+def test_frame_from_clip_returns_none_and_leaves_no_orphan_when_ffmpeg_fails(tmp_path):
+    clip = tmp_path / "clip.ts"
+    clip.write_bytes(b"\x47" * 188)
+
+    def fake_run(argv, **kwargs):
+        with open(argv[-1], "wb") as f:      # ffmpeg can write a partial file then die
+            f.write(b"")
+        raise subprocess.CalledProcessError(1, argv)
+
+    assert snapshot.frame_from_clip(str(clip), out_dir=str(tmp_path), _run=fake_run) is None
+    assert [p.name for p in tmp_path.iterdir()] == ["clip.ts"]
+
+
+def test_frame_from_clip_ignores_a_missing_clip(tmp_path):
+    assert snapshot.frame_from_clip(str(tmp_path / "gone.ts"), out_dir=str(tmp_path),
+                                    _run=lambda *a, **k: None) is None

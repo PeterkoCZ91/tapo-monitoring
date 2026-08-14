@@ -330,3 +330,78 @@ def test_clip_search_params_send_whole_seconds():
                                          player_id="PID")["playback"]["search_video_with_utc"]
     assert (inner["start_time"], inner["end_time"]) == (100, 201)
     assert isinstance(inner["start_time"], int) and isinstance(inner["end_time"], int)
+
+
+# ── hub clip download (port 8800) request shaping ────────────────────────────
+
+def test_download_query_params_select_the_camera_and_download_mode():
+    # Newer firmware wants type=download + camera_mac on the media endpoint; the older
+    # type=sdvod shape is what makes pytapo's stock downloaders fail silently here.
+    assert hubclient.download_query_params(MAC, "PID") == {
+        "camera_mac": MAC, "type": "download", "playerId": "PID", "media_type": 0}
+
+
+def test_prime_query_params_open_a_playback_session_at_the_clip_start():
+    # The hub only arms its per-session nonce generator once something opens a playback
+    # URL — the app does it implicitly when a user views a recording.
+    assert hubclient.prime_query_params(MAC, "PID", 1786665978.9) == {
+        "camera_mac": MAC, "type": "playback", "playerId": "PID",
+        "start_time": "1786665978"}
+
+
+def test_download_payload_wraps_the_request_in_a_download_block():
+    payload = hubclient.download_payload(DEV, MAC, 1786665978, 1786665989, "PID")
+    assert payload["type"] == "request"
+    assert payload["seq"] == 1
+    assert payload["params"]["method"] == "get"
+    dl = payload["params"]["download"]
+    assert (dl["dev_id"], dl["mac"]) == (DEV, MAC)
+    assert (dl["start_time"], dl["end_time"]) == ("1786665978", "1786665989")
+    assert dl["channels"] == [0]
+    assert dl["client_id"] == 1
+    assert dl["event_type"] == []
+    assert dl["media_type"] == 0
+    assert dl["player_id"] == "PID"
+    assert dl["audio_config"] == {"encode_type": "OPUS", "sample_rate": "16"}
+
+
+def test_download_payload_sends_whole_seconds_as_strings():
+    dl = hubclient.download_payload(DEV, MAC, 100.9, 200.2,
+                                   "PID")["params"]["download"]
+    assert (dl["start_time"], dl["end_time"]) == ("100", "201")
+
+
+def test_stop_payload_asks_the_hub_to_close_the_stream():
+    assert hubclient.stop_payload() == {
+        "type": "request", "seq": 2, "params": {"stop": "null"}, "method": "do"}
+
+
+def test_is_nonce_missing_recognises_the_unprimed_hub():
+    assert hubclient.is_nonce_missing(Exception("Nonce is missing from key exchange"))
+    assert hubclient.is_nonce_missing(Exception("nonce is missing")) is True
+    assert hubclient.is_nonce_missing(Exception("Server disconnected")) is False
+
+
+# ── stream control messages (pure) ───────────────────────────────────────────
+
+def test_stream_event_reports_a_refused_request():
+    assert hubclient.stream_event(
+        {"type": "response", "params": {"error_code": -71114}}) == ("error", -71114)
+
+
+def test_stream_event_picks_up_the_session_id():
+    assert hubclient.stream_event(
+        {"type": "response", "params": {"session_id": "7"}}) == ("session", 7)
+
+
+def test_stream_event_reports_the_finished_notification():
+    assert hubclient.stream_event({"type": "notification", "params": {
+        "event_type": "stream_status", "status": "finished"}}) == ("finished", None)
+
+
+def test_stream_event_ignores_anything_else():
+    assert hubclient.stream_event({"type": "response", "params": {"error_code": 0}}) \
+        == (None, None)
+    assert hubclient.stream_event({"type": "notification", "params": {}}) == (None, None)
+    assert hubclient.stream_event({}) == (None, None)
+    assert hubclient.stream_event(None) == (None, None)

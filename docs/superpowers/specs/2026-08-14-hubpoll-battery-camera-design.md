@@ -183,7 +183,12 @@ filesystem path (a `Frame(str)`), which is the contract the scorer and sender al
 
 ### 4.4 Frame capture
 
-**Primary — go2rtc snapshot backend** (`snapshot.py`) — verified live: three consecutive
+**Primary — the clip stored on the hub.** Measured live, a clip downloads in 3–5 s (~3 MB)
+and yields a JPEG from the moment of detection. A live grab, by contrast, only happens once
+the poll has noticed the clip — 20–30 s later, when the camera is usually asleep again and
+the frame shows an empty scene. So the clip is fetched first; the sidecar is the backup.
+
+**Backup — go2rtc snapshot backend** (`snapshot.py`) — verified live: three consecutive
 grabs against a running sidecar returned real ~180 KB JPEGs.
 
 - New function mirroring `capture_rtsp`'s signature/return (an image path or `None`),

@@ -903,9 +903,34 @@ def _default_hub_client(cfg: CameraConfig, state: MonitorState, now):  # pragma:
     return client
 
 
+def _default_clip_frame(cfg: CameraConfig, device):  # pragma: no cover
+    """Build fetch(clip) -> image path|None, pulling the clip off the hub as a last resort.
+
+    The camera is awake only while it records, so by the time a poll notices the clip the
+    live grab may find it asleep. The clip itself still holds the moment of detection, so
+    it is downloaded from the hub and one frame extracted from it.
+    """
+    _, password = resolve_hub_credentials(cfg)
+
+    def fetch(clip):
+        clip_path = os.path.join(tempfile.gettempdir(),
+                                 f"hubclip_{int(clip['start_time'])}.ts")
+        got = hubclient.download_clip(
+            cfg.hub_host, password, device["device_id"], device["mac"],
+            clip["start_time"], clip.get("end_time") or clip["start_time"] + 15,
+            clip_path)
+        if not got:
+            return None
+        try:
+            return snapshot.frame_from_clip(got, rotate=cfg.rotate)
+        finally:
+            _safe_unlink(got)
+    return fetch
+
+
 def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
                      night=True, hub_for=None, frame_for=None, time_str=None,
-                     score_for=None):
+                     score_for=None, clip_frame_for=None):
     """Turn clips indexed on the hub into scored alerts, for cameras that use ``hubpoll``.
 
     A standalone pass on purpose: the sampler only advances groups the getEvents path
@@ -920,6 +945,7 @@ def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
     """
     hub_for = hub_for or _default_hub_client
     frame_for = frame_for or _default_hub_frame
+    clip_frame_for = clip_frame_for or _default_clip_frame
     time_str = time_str or _default_time_str
     score_for = score_for or _default_score_for
     cooldown = app.alerts.cooldown
@@ -958,6 +984,7 @@ def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
         if not clips:
             continue
         grab = frame_for(cfg)
+        clip_fetch = clip_frame_for(cfg, device)
         score = score_for(cfg)
         can_alert, on_alert = alert_gate(state, cfg.name, cooldown, now)
         # night_only camera during the day: drain the cursor silently, exactly as the
@@ -977,7 +1004,17 @@ def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             # decides.
             etype = "motion"
             event = {"start_time": clip["start_time"]}
-            image = grab()
+            # The clip is fetched first because the clip *is* the event: it carries the
+            # moment of detection and arrives in a few seconds. A live grab only happens
+            # once the poll has noticed the clip — 20-30 s later, by which time the camera
+            # is usually asleep again and the frame shows an empty scene. Measured against
+            # the real hub: ~3 MB and 3-5 s per event, which buys a frame that matches the
+            # detection instead of one that merely follows it.
+            image = clip_fetch(clip)
+            if image is None:
+                log.info("hubpoll %s: clip download failed for %s; trying a live frame",
+                         cfg.name, int(clip["start_time"]))
+                image = grab()
             if image is None:
                 log.info("hubpoll %s: no frame for the clip at %s; skipping",
                          cfg.name, int(clip["start_time"]))

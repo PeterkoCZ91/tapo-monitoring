@@ -74,6 +74,14 @@ def day_search_params(device_id, mac, start_date, end_date):
     }}}
 
 
+def _floor_int(value):
+    return int(value // 1)
+
+
+def _ceil_int(value):
+    return -int(-value // 1)
+
+
 def clip_search_params(device_id, mac, start_time, end_time, player_id, end_index=999):
     """Params for the clip index of one camera over an epoch window. Pure.
 
@@ -85,8 +93,8 @@ def clip_search_params(device_id, mac, start_time, end_time, player_id, end_inde
         "channel": 0,
         "child_device_id": device_id,
         "child_device_mac": mac,
-        "start_time": int(start_time // 1),
-        "end_time": -int(-end_time // 1),
+        "start_time": _floor_int(start_time),
+        "end_time": _ceil_int(end_time),
         "start_index": 0,
         "end_index": end_index,
         "player_id": player_id,
@@ -311,6 +319,197 @@ class HubClient:
             CLIP_SEARCH_METHOD,
             clip_search_params(device_id, mac, since, until, self.player_id), now)
         return [c for c in parse_clips(result) if c["start_time"] > since]
+
+
+def download_query_params(mac, player_id):
+    """Query params for the hub's media endpoint in download mode. Pure.
+
+    Newer hub firmware expects ``type=download`` plus the camera's MAC here; the older
+    ``type=sdvod`` shape is why pytapo's stock downloaders fail on it.
+    """
+    return {"camera_mac": mac, "type": "download", "playerId": player_id, "media_type": 0}
+
+
+def prime_query_params(mac, player_id, start_time):
+    """Query params for a throwaway playback session that arms the hub's nonce. Pure.
+
+    The hub only arms its per-session nonce generator once something opens a playback
+    URL — the phone app does that implicitly whenever a user views a recording. Without
+    it a download attempt fails with "Nonce is missing from key exchange".
+    """
+    return {"camera_mac": mac, "type": "playback", "playerId": player_id,
+            "start_time": str(_floor_int(start_time))}
+
+
+def download_payload(device_id, mac, start_time, end_time, player_id):
+    """The multipart request body that asks the hub for one clip. Pure.
+
+    Times go out as whole-second strings, floored/ceiled so rounding can only widen the
+    requested span. The camera is addressed by device id + MAC, as everywhere else in the
+    hub-storage protocol.
+    """
+    return {
+        "type": "request",
+        "seq": 1,
+        "params": {
+            "method": "get",
+            "download": {
+                "audio_config": {"encode_type": "OPUS", "sample_rate": "16"},
+                "dev_id": device_id,
+                "mac": mac,
+                "channels": [0],
+                "client_id": 1,
+                "end_time": str(_ceil_int(end_time)),
+                "event_type": [],
+                "media_type": 0,
+                "player_id": player_id,
+                "start_time": str(_floor_int(start_time)),
+            },
+        },
+    }
+
+
+def stop_payload(seq=2):
+    """The body that closes a finished download stream. Pure."""
+    return {"type": "request", "seq": seq, "params": {"stop": "null"}, "method": "do"}
+
+
+def is_nonce_missing(exc):
+    """Whether a failure is the hub's unprimed-nonce error. Pure."""
+    return "nonce is missing" in str(exc).lower()
+
+
+def stream_event(message):
+    """Classify one JSON control message from a media stream. Pure.
+
+    Returns ``("error", code)``, ``("session", id)``, ``("finished", None)`` or
+    ``(None, None)``. The reader needs all three: an error to give up on, the session id
+    to close the stream politely, and the finished notification to stop reading.
+    """
+    if not isinstance(message, dict):
+        return None, None
+    params = message.get("params")
+    if not isinstance(params, dict):
+        return None, None
+    kind = message.get("type")
+    if kind == "response":
+        code = params.get("error_code")
+        if isinstance(code, int) and code != 0:
+            return "error", code
+        if "session_id" in params:
+            try:
+                return "session", int(params["session_id"])
+            except (TypeError, ValueError):
+                return None, None
+        return None, None
+    if kind == "notification" and params.get("event_type") == "stream_status" \
+            and params.get("status") == "finished":
+        return "finished", None
+    return None, None
+
+
+DEFAULT_ENCRYPTION = "sha256"
+DOWNLOAD_PORT = 8800
+
+
+def download_clip(host, cloud_password, device_id, mac, start_time, end_time, out_path,
+                  *, encryption_method=DEFAULT_ENCRYPTION, super_secret_key="",
+                  username="admin", window_size=50, stall_timeout=10.0,
+                  prime_wait=3.0):  # pragma: no cover - real media-stream I/O
+    """Download one hub-stored clip to ``out_path``. Returns the path or None.
+
+    Thin wrapper around pytapo's ``HttpMediaSession``, which already handles the digest
+    auth and multipart framing on port 8800 — only the query params and body needed the
+    newer download shape (see :func:`download_query_params`, :func:`download_payload`).
+
+    The hub arms its per-session nonce generator only after something opens a playback
+    URL, so a first attempt failing with "Nonce is missing from key exchange" is followed
+    by a throwaway playback session and one retry.
+    """
+    import asyncio
+
+    async def attempt():
+        from pytapo.media_stream.session import HttpMediaSession
+
+        player_id = new_player_id()
+        session = HttpMediaSession(
+            ip=host, cloud_password=cloud_password, super_secret_key=super_secret_key,
+            encryptionMethod=encryption_method, port=DOWNLOAD_PORT, username=username,
+            query_params=download_query_params(mac, player_id), window_size=window_size)
+        payload = json.dumps(
+            download_payload(device_id, mac, start_time, end_time, player_id),
+            separators=(",", ":"))
+        chunks = 0
+        session_id = None
+        with open(out_path, "wb") as out:
+            async with session:
+                stream = session.transceive(payload)
+                while True:
+                    try:
+                        resp = await asyncio.wait_for(stream.__anext__(),
+                                                      timeout=stall_timeout)
+                    except (StopAsyncIteration, TimeoutError, asyncio.TimeoutError):
+                        break
+                    if resp.mimetype == "application/json":
+                        try:
+                            message = json.loads(resp.plaintext.decode())
+                        except (ValueError, UnicodeDecodeError):
+                            continue
+                        kind, value = stream_event(message)
+                        if kind == "error":
+                            log.info("hub clip download refused: error_code %s", value)
+                            return None
+                        if kind == "session":
+                            session_id = value
+                        elif kind == "finished":
+                            break
+                    elif resp.mimetype == "video/mp2t":
+                        out.write(resp.plaintext)
+                        chunks += 1
+                if session_id is not None:
+                    # Leaving the stream open holds the hub's single slot; the app does
+                    # send this, and the hub is slow to accept the next session without it.
+                    try:
+                        stop = session.transceive(
+                            json.dumps(stop_payload(), separators=(",", ":")),
+                            session=session_id)
+                        for _ in range(2):
+                            try:
+                                await asyncio.wait_for(stop.__anext__(), timeout=1.5)
+                            except (StopAsyncIteration, TimeoutError,
+                                    asyncio.TimeoutError):
+                                break
+                    except Exception:  # noqa: BLE001 - cleanup must not fail the download
+                        log.debug("stopping the clip stream failed", exc_info=True)
+        return out_path if chunks else None
+
+    async def prime():
+        from pytapo.media_stream.session import HttpMediaSession
+
+        session = HttpMediaSession(
+            ip=host, cloud_password=cloud_password, super_secret_key=super_secret_key,
+            encryptionMethod=encryption_method, port=DOWNLOAD_PORT, username=username,
+            query_params=prime_query_params(mac, new_player_id(), start_time),
+            window_size=50)
+        async with session:
+            pass
+
+    async def run():
+        try:
+            return await attempt()
+        except Exception as exc:  # noqa: BLE001 - one retry for the unprimed-nonce case
+            if not is_nonce_missing(exc):
+                raise
+            log.info("hub nonce not armed; priming with a playback session and retrying")
+            await prime()
+            await asyncio.sleep(prime_wait)
+            return await attempt()
+
+    try:
+        return asyncio.run(run())
+    except Exception:  # noqa: BLE001 - a missed frame is not worth killing the tick
+        log.info("hub clip download failed", exc_info=True)
+        return None
 
 
 def kasa_session(host, email, password, timeout=SESSION_QUERY_TIMEOUT):  # pragma: no cover

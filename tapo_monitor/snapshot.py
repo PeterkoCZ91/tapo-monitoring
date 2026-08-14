@@ -215,6 +215,58 @@ def capture_go2rtc(src, out_dir="/tmp", timeout=15, host=GO2RTC_HOST, port=GO2RT
     return out_path
 
 
+def ts_frame_args(clip_path, out_path, rotate=0, skip=1.0):
+    """ffmpeg argv extracting one JPEG from a downloaded clip. Pure.
+
+    Seeks a moment past the start: the first frames of a motion recording are the ones the
+    encoder produced while the sensor was still settling, so they are the blurriest of the
+    clip.
+    """
+    vf = scaled_vf(rotate)
+    return [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-ss", f"{skip:g}",
+        "-i", clip_path,
+        "-frames:v", "1",
+        *(("-vf", vf) if vf else ()),
+        "-q:v", "2",
+        "-update", "1",
+        "-y", out_path,
+    ]
+
+
+def frame_from_clip(clip_path, out_dir="/tmp", timeout=30, rotate=0, skip=1.0,
+                    _run=subprocess.run):
+    """Extract one frame from a clip file. Returns the image path or None.
+
+    This is the frame of last resort for a hub-backed battery camera: the clip *is* the
+    event, so its frame carries the detection moment even when the camera went back to
+    sleep before a live grab could reach it. Failures clean up after themselves, so a
+    camera whose clips never decode cannot fill the disk with empty JPEGs.
+    """
+    if not clip_path or not os.path.exists(clip_path):
+        return None
+    out_path = os.path.join(out_dir, f"snapclip_{int(_time.time() * 1000)}.jpg")
+    try:
+        _run(
+            ts_frame_args(clip_path, out_path, rotate=rotate, skip=skip),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=True,
+        )
+        ok = os.path.exists(out_path) and os.path.getsize(out_path) > 0
+    except Exception:
+        log.debug("extracting a frame from %s failed", clip_path, exc_info=True)
+        ok = False
+    if ok:
+        return out_path
+    _safe_unlink(out_path)
+    return None
+
+
 def _env_float(name, default):
     value = os.getenv(name)
     if value in (None, ""):

@@ -3402,7 +3402,8 @@ def test_hubpoll_first_pass_arms_the_cursor_without_replaying_history(monkeypatc
     state = daemon.MonitorState()
 
     daemon.run_hubpoll_pass(app, {}, state, now=1000, secrets=_hub_secrets(),
-                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path))
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
 
     assert counter.photos == 0          # a day of old clips must not arrive at startup
     assert state.hub_cursor["gate"] == 1000
@@ -3418,7 +3419,8 @@ def test_hubpoll_sends_one_alert_per_fresh_clip(monkeypatch, tmp_path):
     state.hub_cursor["gate"] = 1000
 
     daemon.run_hubpoll_pass(app, {}, state, now=1300, secrets=_hub_secrets(),
-                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path))
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
 
     assert counter.photos == 2
     assert hub.searches == [("DEV1", "AABBCCDDEEFF", 1000, 1300)]
@@ -3436,7 +3438,8 @@ def test_hubpoll_captions_the_clip_time_not_the_send_time(monkeypatch, tmp_path)
 
     daemon.run_hubpoll_pass(app, {}, state, now=9999, secrets=_hub_secrets(),
                             hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
-                            time_str=lambda clip: f"clip@{int(clip['start_time'])}")
+                            time_str=lambda clip: f"clip@{int(clip['start_time'])}",
+                            clip_frame_for=_clip_frames(tmp_path))
 
     assert captions and "clip@1100" in captions[0]
 
@@ -3451,9 +3454,11 @@ def test_hubpoll_does_not_reprocess_a_clip_it_already_sent(monkeypatch, tmp_path
     state.hub_cursor["gate"] = 1000
 
     daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(),
-                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path))
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
     daemon.run_hubpoll_pass(app, {}, state, now=1400, secrets=_hub_secrets(),
-                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path))
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
 
     assert counter.photos == 1
     assert hub.searches[1][2] == 1100        # second poll starts at the advanced cursor
@@ -3467,28 +3472,16 @@ def test_hubpoll_honours_the_poll_interval(monkeypatch, tmp_path):
     state.hub_cursor["gate"] = 1000
 
     daemon.run_hubpoll_pass(app, {}, state, now=1100, secrets=_hub_secrets(),
-                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path))
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
     daemon.run_hubpoll_pass(app, {}, state, now=1130, secrets=_hub_secrets(),
-                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path))
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
     assert len(hub.searches) == 1            # 30s < 60s: the hub is left alone
     daemon.run_hubpoll_pass(app, {}, state, now=1161, secrets=_hub_secrets(),
-                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path))
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
     assert len(hub.searches) == 2
-
-
-def test_hubpoll_skips_a_clip_whose_frame_never_arrived(monkeypatch, tmp_path):
-    counter = _CountingNotify()
-    monkeypatch.setattr(daemon.notify, "send_photo", counter.send_photo)
-    app = _hub_app()
-    hub = _FakeHub(clips=[[_clip(1100)]])
-    state = daemon.MonitorState()
-    state.hub_cursor["gate"] = 1000
-
-    daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(),
-                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path, [None]))
-
-    assert counter.photos == 0                # never a blank alert
-    assert state.hub_cursor["gate"] == 1100   # but the clip is not retried forever
 
 
 def test_hubpoll_drops_a_frame_below_the_scorer_threshold(monkeypatch, tmp_path):
@@ -3501,7 +3494,7 @@ def test_hubpoll_drops_a_frame_below_the_scorer_threshold(monkeypatch, tmp_path)
 
     daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(),
                             hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
-                            score_for=_scores(0.2))
+                            clip_frame_for=_clip_frames(tmp_path), score_for=_scores(0.2))
 
     assert counter.photos == 0
     assert state.hub_cursor["gate"] == 1100
@@ -3517,7 +3510,7 @@ def test_hubpoll_sends_a_frame_above_the_scorer_threshold(monkeypatch, tmp_path)
 
     daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(),
                             hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
-                            score_for=_scores(0.9))
+                            clip_frame_for=_clip_frames(tmp_path), score_for=_scores(0.9))
     assert counter.photos == 1
 
 
@@ -3532,7 +3525,7 @@ def test_hubpoll_passes_a_frame_through_when_the_scorer_is_unavailable(monkeypat
 
     daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(),
                             hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
-                            score_for=_scores(None))
+                            clip_frame_for=_clip_frames(tmp_path), score_for=_scores(None))
     assert counter.photos == 1
 
 
@@ -3545,7 +3538,8 @@ def test_hubpoll_cooldown_rate_limits_a_burst(monkeypatch, tmp_path):
     state.hub_cursor["gate"] = 1000
 
     daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(),
-                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path))
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
     assert counter.photos == 1
     assert state.hub_cursor["gate"] == 1130   # both clips consumed, one delivered
 
@@ -3558,9 +3552,11 @@ def test_hubpoll_resolves_the_camera_addressing_once(monkeypatch, tmp_path):
     state.hub_cursor["gate"] = 1000
 
     daemon.run_hubpoll_pass(app, {}, state, now=1100, secrets=_hub_secrets(),
-                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path))
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
     daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(),
-                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path))
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
 
     assert hub.list_calls == 1                 # cached: the hub is asked once, not per tick
     assert state.hub_devices["gate"]["device_id"] == "DEV1"
@@ -3575,7 +3571,8 @@ def test_hubpoll_is_quiet_when_the_hub_cannot_be_reached(monkeypatch, tmp_path):
     state.hub_cursor["gate"] = 1000
 
     daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(),
-                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path))
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
 
     assert counter.photos == 0
     assert state.events_reachable["gate"] is False
@@ -3592,7 +3589,8 @@ def test_hubpoll_mutes_a_night_only_camera_by_day_but_keeps_the_cursor_moving(
     state.hub_cursor["gate"] = 1000
 
     daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(), night=False,
-                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path))
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
 
     assert counter.photos == 0
     assert state.hub_cursor["gate"] == 1150   # drained, so dusk does not replay the day
@@ -3604,7 +3602,8 @@ def test_hubpoll_ignores_cameras_that_do_not_use_the_source(monkeypatch, tmp_pat
     state = daemon.MonitorState()
 
     daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(),
-                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path))
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
 
     assert hub.list_calls == 0 and hub.searches == []
     assert state.hub_cursor == {}
@@ -3657,3 +3656,96 @@ def test_connect_camera_does_not_log_into_a_hubpoll_camera(monkeypatch):
 
     assert client is None and clients == {}
     assert pinged == []          # a sleeping camera is not worth a ping either
+
+
+# ── hubpoll frame fallback: the clip stored on the hub ───────────────────────
+
+def _clip_frames(tmp_path, results=None):
+    """Build clip_frame_for(cfg); ``results`` may inject failures as None entries."""
+    queue = list(results or [])
+    calls = []
+
+    def clip_frame_for(_cfg, _device):
+        def fetch(clip):
+            calls.append(clip["start_time"])
+            outcome = queue.pop(0) if queue else "ok"
+            if outcome is None:
+                return None
+            path = tmp_path / f"clipframe{len(calls)}.jpg"
+            path.write_bytes(b"clipjpeg")
+            return str(path)
+        return fetch
+    clip_frame_for.calls = calls
+    return clip_frame_for
+
+
+def test_hubpoll_takes_the_frame_from_the_stored_clip(monkeypatch, tmp_path):
+    # The clip IS the event: it carries the moment of detection and downloads in seconds.
+    # A live grab happens 20-30s later, when the camera is usually asleep again and the
+    # scene is empty — the empty-scene false alert this project has already paid for once.
+    counter = _CountingNotify()
+    monkeypatch.setattr(daemon.notify, "send_photo", counter.send_photo)
+    app = _hub_app()
+    hub = _FakeHub(clips=[[_clip(1100)]])
+    state = daemon.MonitorState()
+    state.hub_cursor["gate"] = 1000
+    clip_frames = _clip_frames(tmp_path)
+    live_frames = _frames(tmp_path)
+
+    daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(),
+                            hub_for=_hub_for(hub), frame_for=live_frames,
+                            clip_frame_for=clip_frames)
+
+    assert counter.photos == 1
+    assert clip_frames.calls == [1100.0]
+    assert live_frames.calls == []          # the live path is not even touched
+
+
+def test_hubpoll_falls_back_to_a_live_frame_when_the_clip_download_fails(
+        monkeypatch, tmp_path):
+    counter = _CountingNotify()
+    monkeypatch.setattr(daemon.notify, "send_photo", counter.send_photo)
+    app = _hub_app()
+    hub = _FakeHub(clips=[[_clip(1100)]])
+    state = daemon.MonitorState()
+    state.hub_cursor["gate"] = 1000
+    live_frames = _frames(tmp_path)
+
+    daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(),
+                            hub_for=_hub_for(hub), frame_for=live_frames,
+                            clip_frame_for=_clip_frames(tmp_path, [None]))
+
+    assert counter.photos == 1
+    assert live_frames.calls == [1]         # the sidecar rescued the event
+
+
+def test_hubpoll_skips_the_clip_when_neither_frame_path_works(monkeypatch, tmp_path):
+    counter = _CountingNotify()
+    monkeypatch.setattr(daemon.notify, "send_photo", counter.send_photo)
+    app = _hub_app()
+    hub = _FakeHub(clips=[[_clip(1100)]])
+    state = daemon.MonitorState()
+    state.hub_cursor["gate"] = 1000
+
+    daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(),
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path, [None]),
+                            clip_frame_for=_clip_frames(tmp_path, [None]))
+
+    assert counter.photos == 0                 # never a blank alert
+    assert state.hub_cursor["gate"] == 1100    # and not retried forever
+
+
+def test_hubpoll_scores_a_clip_frame_like_any_other(monkeypatch, tmp_path):
+    # The fallback must not become a way past the scorer.
+    counter = _CountingNotify()
+    monkeypatch.setattr(daemon.notify, "send_photo", counter.send_photo)
+    app = _hub_app(scorer={"url": "http://scorer/score", "threshold": 0.5})
+    hub = _FakeHub(clips=[[_clip(1100)]])
+    state = daemon.MonitorState()
+    state.hub_cursor["gate"] = 1000
+
+    daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(),
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path, [None]),
+                            clip_frame_for=_clip_frames(tmp_path), score_for=_scores(0.1))
+
+    assert counter.photos == 0
