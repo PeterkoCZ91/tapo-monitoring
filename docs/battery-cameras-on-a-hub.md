@@ -102,6 +102,20 @@ second past the clip start, because the first frames of a recording are the most
 missing key-exchange nonce on the first attempt is answered by opening a throwaway playback
 session once and retrying.
 
+Two limits of that download path, learned from prior art rather than from our own hardware
+(`phit/vigilatus`, whose Electron client plays the same recordings, and pytapo's own
+`media_stream`):
+
+- **Media parts are encrypted from a `key-exchange` header** — key `md5(nonce:hashed_pw)`,
+  IV `md5(username:nonce)`. pytapo raises when that header carries no nonce, but some
+  firmware variants legitimately omit it and serve the parts in plaintext, so a "nonce
+  missing" failure is not proof that the session was set up wrong.
+- **The stream expects flow-control ACKs**: parts carry a sequence number and the client is
+  expected to acknowledge every window of them. pytapo sends none. Clips of 11–13 s (~3 MB)
+  download fine without them, which is what a motion-triggered recording produces here — but
+  a site with longer segments (24/7 recording on the hub) should expect a stall part-way and
+  needs the ACKs implemented.
+
 The alternative is a **go2rtc sidecar**, which speaks the camera's native protocol and
 serves `GET /api/frame.jpeg?src=<name>`. It works — but only while the camera is awake.
 

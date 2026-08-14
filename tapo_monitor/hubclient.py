@@ -387,7 +387,14 @@ def stop_payload(seq=2):
 
 
 def is_nonce_missing(exc):
-    """Whether a failure is the hub's unprimed-nonce error. Pure."""
+    """Whether a failure is the hub's unprimed-nonce error. Pure.
+
+    pytapo treats a key-exchange header without a nonce as fatal, which is why priming a
+    throwaway playback session helps. Worth knowing before chasing this further: other
+    clients of the same endpoint report firmware variants that omit the header on purpose
+    and serve the media parts in plaintext, so this error is not by itself proof that the
+    session was set up wrong.
+    """
     return "nonce is missing" in str(exc).lower()
 
 
