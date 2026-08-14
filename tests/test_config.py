@@ -583,3 +583,89 @@ def test_crop_min_frac_rejects_a_value_outside_the_frame():
                              "crop_to_subject": True, "crop_min_frac": bad}]}
         with pytest.raises(cfg.ConfigError, match="crop_min_frac"):
             cfg.load_config_from_dict(data)
+
+
+# ── hubpoll: battery cameras whose detections come from the hub ───────────────
+
+def _hubpoll_camera(**overrides):
+    cam = {"name": "gate", "host": "192.0.2.50",
+           "detection": {"sources": ["hubpoll"]},
+           "hub_host": "192.0.2.60", "go2rtc_src": "gate"}
+    cam.update(overrides)
+    return {"cameras": [cam]}
+
+
+def test_hubpoll_is_a_valid_detection_source():
+    cam = cfg.load_config_from_dict(_hubpoll_camera()).cameras[0]
+    assert cam.detection.sources == ["hubpoll"]
+
+
+def test_hubpoll_camera_parses_hub_fields():
+    data = _hubpoll_camera(hub_device_id="ABCDEF0123", hub_device_mac="AABBCCDDEEFF",
+                           hub_poll_interval=30)
+    cam = cfg.load_config_from_dict(data).cameras[0]
+    assert cam.hub_host == "192.0.2.60"
+    assert cam.hub_device_id == "ABCDEF0123"
+    assert cam.hub_device_mac == "AABBCCDDEEFF"
+    assert cam.go2rtc_src == "gate"
+    assert cam.hub_poll_interval == 30
+
+
+def test_hub_fields_absent_by_default_on_a_normal_camera():
+    cam = cfg.load_config_from_dict(_minimal()).cameras[0]
+    assert cam.hub_host is None
+    assert cam.go2rtc_src is None
+    # Addressing is discovered from the hub at runtime, so both stay unset until then.
+    assert cam.hub_device_id is None
+    assert cam.hub_device_mac is None
+    assert cam.hub_poll_interval == 20
+
+
+def test_hubpoll_requires_hub_host():
+    # A battery camera has no event source of its own: without the hub there is nothing.
+    data = _hubpoll_camera()
+    del data["cameras"][0]["hub_host"]
+    with pytest.raises(cfg.ConfigError, match="hub_host"):
+        cfg.load_config_from_dict(data)
+
+
+def test_hubpoll_requires_go2rtc_src():
+    # These cameras have no usable RTSP; go2rtc is where the alert frame comes from.
+    data = _hubpoll_camera()
+    del data["cameras"][0]["go2rtc_src"]
+    with pytest.raises(cfg.ConfigError, match="go2rtc_src"):
+        cfg.load_config_from_dict(data)
+
+
+def test_hub_poll_interval_must_be_a_positive_integer():
+    for bad in (0, -5, "soon"):
+        with pytest.raises(cfg.ConfigError, match="hub_poll_interval"):
+            cfg.load_config_from_dict(_hubpoll_camera(hub_poll_interval=bad))
+
+
+def test_hubpoll_rejects_a_rotation_it_cannot_apply():
+    # go2rtc hands over a finished JPEG and there is no capture-time filter behind it, so
+    # a configured rotation would be silently dropped — the scorer would see it sideways.
+    with pytest.raises(cfg.ConfigError, match="rotate"):
+        cfg.load_config_from_dict(_hubpoll_camera(rotate=180))
+
+
+def test_hub_credential_env_names_parse_and_default_to_none():
+    assert cfg.load_config_from_dict(_minimal()).cameras[0].hub_user_env is None
+    assert cfg.load_config_from_dict(_minimal()).cameras[0].hub_password_env is None
+    cam = cfg.load_config_from_dict(
+        _hubpoll_camera(hub_user_env="HUB_EMAIL", hub_password_env="HUB_PASS")).cameras[0]
+    assert (cam.hub_user_env, cam.hub_password_env) == ("HUB_EMAIL", "HUB_PASS")
+
+
+def test_resolve_hub_credentials_reads_the_named_env_vars(monkeypatch):
+    monkeypatch.setenv("HUB_EMAIL", "account@example.invalid")
+    monkeypatch.setenv("HUB_PASS", "s3cret")
+    cam = cfg.load_config_from_dict(
+        _hubpoll_camera(hub_user_env="HUB_EMAIL", hub_password_env="HUB_PASS")).cameras[0]
+    assert cfg.resolve_hub_credentials(cam) == ("account@example.invalid", "s3cret")
+
+
+def test_resolve_hub_credentials_missing_env_is_empty():
+    cam = cfg.load_config_from_dict(_hubpoll_camera()).cameras[0]
+    assert cfg.resolve_hub_credentials(cam) == ("", "")

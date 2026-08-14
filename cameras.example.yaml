@@ -197,3 +197,20 @@ cameras:
       sources: [getevents]
     weather:
       strategy: none
+
+  # ── battery camera bound to a hub (opt-in; keep commented until go2rtc runs) ──
+  # A battery camera keeps no event index of its own — its clips live on the hub and it
+  # sleeps between events — so detections are polled from the hub and the alert frame
+  # comes from a go2rtc sidecar. See docs/configuration.md#battery-cameras-on-a-hub-hubpoll
+  # - name: gate
+  #   host: "<BATTERY_CAMERA_IP>"       # informational here: no RTSP, no stok login
+  #   role: static
+  #   detection:
+  #     sources: [hubpoll]
+  #   hub_host: "<HUB_IP>"
+  #   hub_user_env: HUB_EMAIL           # Tapo account e-mail, by env var name
+  #   hub_password_env: HUB_PASSWORD    # Tapo account password
+  #   go2rtc_src: gate                  # stream name in go2rtc.yaml
+  #   hub_poll_interval: 20
+  #   # hub_device_mac:                 # pin only when one hub holds several cameras and
+  #   # hub_device_id:                  # neither the alias nor the MAC can be matched

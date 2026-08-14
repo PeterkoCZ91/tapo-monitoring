@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+- `hubpoll`, a detection source for battery cameras that record to a hub instead of to
+  their own SD card. Such a camera has no event index of its own and sleeps between
+  events, so the daemon reads new clips from the hub (a standalone pass, since the sampler
+  only advances groups the getEvents path creates) and grabs the alert frame from a go2rtc
+  sidecar over HTTP. Scorer, cooldown gate and sender are reused unchanged. Nothing changes
+  for existing cameras: the source is inert until a camera opts into it.
+- `hubclient`, the hub session client behind it. Newer hub firmware does not expose these
+  cameras through the child-device family — that one covers sub-GHz sensors and doorbells —
+  so they come from a paired-general-device list and their recordings are addressed by
+  device id plus MAC rather than by channel. One session is opened and held (the handshake
+  is what the hub rate-limits, not the queries inside a session) and every failure backs
+  off; eviction by the phone app is expected and never alerts.
+- `snapshot.capture_go2rtc`, a single-frame JPEG grab from a go2rtc source, for cameras
+  with no usable RTSP. Empty bodies and unreachable sidecars leave no orphan temp file.
+
 ## [0.4.0] - 2026-08-08
 
 ### Fixed

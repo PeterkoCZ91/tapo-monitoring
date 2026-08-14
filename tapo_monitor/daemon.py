@@ -32,6 +32,7 @@ from . import (
     drift,
     enrich,
     health,
+    hubclient,
     ledger,
     monitor,
     notify,
@@ -52,6 +53,7 @@ from .config import (
     AppConfig,
     CameraConfig,
     resolve_camera_credentials,
+    resolve_hub_credentials,
     resolve_rtsp_credentials,
 )
 
@@ -282,6 +284,14 @@ class MonitorState:
     pending_sd: list = field(default_factory=list)
     groups: dict = field(default_factory=dict)
     pan_guard: dict = field(default_factory=dict)   # per-camera ONVIF pan-limit state
+    # ── hubpoll (battery cameras indexed on a hub) ───────────────────────────
+    # Sessions are keyed by hub host, not camera: two cameras on one hub share the single
+    # session that hub tolerates. Kept here rather than in ``cam_clients`` because that
+    # mapping is cleared on every control pass, which would destroy a held session.
+    hub_clients: dict = field(default_factory=dict)
+    hub_devices: dict = field(default_factory=dict)   # camera -> hub-side {device_id, mac}
+    hub_cursor: dict = field(default_factory=dict)    # camera -> newest clip start consumed
+    hub_last_poll: dict = field(default_factory=dict)
 
 
 def backoff_seconds(fails, base=60, cap=1800):
@@ -524,6 +534,10 @@ def score_for(cfg: CameraConfig):
         return None if result is None else scorer.subject_score(result)
 
     return score
+
+
+# Alias so passes can accept a ``score_for`` collaborator without losing the default.
+_default_score_for = score_for
 
 
 def _widen_to_scene_ratio(cw, ch, w, h, widen_frac, min_ratio):
@@ -866,6 +880,142 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
         )
         state.last_seen[cfg.name] = watermark
     return state.last_seen
+
+
+def _default_hub_frame(cfg: CameraConfig):
+    """Build grab() -> image path|None for one hubpoll camera, via the go2rtc sidecar."""
+    def grab():
+        return snapshot.capture_go2rtc(cfg.go2rtc_src, timeout=cfg.rtsp_timeout)
+    return grab
+
+
+def _default_hub_client(cfg: CameraConfig, state: MonitorState, now):  # pragma: no cover
+    """Return the held :class:`hubclient.HubClient` for this camera's hub, creating it once.
+
+    Keyed by hub host: cameras sharing a hub share the one session that hub tolerates.
+    """
+    client = state.hub_clients.get(cfg.hub_host)
+    if client is None:
+        email, password = resolve_hub_credentials(cfg)
+        client = hubclient.HubClient(
+            lambda: hubclient.kasa_session(cfg.hub_host, email, password))
+        state.hub_clients[cfg.hub_host] = client
+    return client
+
+
+def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
+                     night=True, hub_for=None, frame_for=None, time_str=None,
+                     score_for=None):
+    """Turn clips indexed on the hub into scored alerts, for cameras that use ``hubpoll``.
+
+    A standalone pass on purpose: the sampler only advances groups the getEvents path
+    created, and a battery camera creates none. So this triggers (a new clip on the hub),
+    captures (go2rtc), scores, gates and sends on its own, reusing the existing scorer,
+    cooldown gate and sender unchanged.
+
+    The per-camera cursor is the newest clip start already consumed. It is advanced even
+    when a clip yields no alert — a clip we could not turn into a frame must not be retried
+    forever — and it starts at ``now`` on the first pass, so a hub full of stored clips does
+    not arrive as an alert storm at startup.
+    """
+    hub_for = hub_for or _default_hub_client
+    frame_for = frame_for or _default_hub_frame
+    time_str = time_str or _default_time_str
+    score_for = score_for or _default_score_for
+    cooldown = app.alerts.cooldown
+    for cfg in app.cameras:
+        if "hubpoll" not in cfg.detection.sources:
+            continue
+        if now - state.hub_last_poll.get(cfg.name, 0) < cfg.hub_poll_interval:
+            continue
+        client = hub_for(cfg, state, now)
+        if client is None:
+            continue
+        device = state.hub_devices.get(cfg.name)
+        if device is None:
+            device = hubclient.match_camera(
+                client.list_cameras(now), name=cfg.name,
+                mac=cfg.hub_device_mac, device_id=cfg.hub_device_id)
+            if device is None:
+                # Either the hub is away (its client is backing off, nothing to say) or it
+                # answered a list this camera is not in — pin hub_device_mac in that case.
+                state.events_reachable[cfg.name] = bool(client.connected)
+                if client.connected:
+                    log.warning("hubpoll %s: no matching camera in the hub's device list",
+                                cfg.name)
+                continue
+            state.hub_devices[cfg.name] = device
+            log.info("hubpoll %s: resolved to hub camera %r (%s)",
+                     cfg.name, device["alias"], device["model"])
+        state.hub_last_poll[cfg.name] = now
+        cursor = state.hub_cursor.get(cfg.name)
+        if cursor is None:
+            state.hub_cursor[cfg.name] = now
+            log.info("hubpoll %s: cursor started at now (history not replayed)", cfg.name)
+            continue
+        clips = client.search_clips(device["device_id"], device["mac"], cursor, now, now=now)
+        state.events_reachable[cfg.name] = bool(client.connected)
+        if not clips:
+            continue
+        grab = frame_for(cfg)
+        score = score_for(cfg)
+        can_alert, on_alert = alert_gate(state, cfg.name, cooldown, now)
+        # night_only camera during the day: drain the cursor silently, exactly as the
+        # getEvents path drains its watermark, so dusk does not replay the whole day.
+        muted = cfg.night_only and not night
+        for clip in clips:
+            if clip["start_time"] <= cursor:
+                # The hub's window is inclusive and it re-lists a clip that is still the
+                # newest one; dedup here as well as in the client, so a re-list can never
+                # re-alert.
+                continue
+            state.hub_cursor[cfg.name] = clip["start_time"]
+            if muted:
+                continue
+            # A hub clip is a triggered recording, not a classified detection: the camera
+            # does not tell us what it saw, so it is gated as bare motion and the scorer
+            # decides.
+            etype = "motion"
+            event = {"start_time": clip["start_time"]}
+            image = grab()
+            if image is None:
+                log.info("hubpoll %s: no frame for the clip at %s; skipping",
+                         cfg.name, int(clip["start_time"]))
+                monitor.audit_event(cfg, event, etype, "hubpoll", "drop", reason="no_frame")
+                continue
+            try:
+                s = score(image) if score is not None else None
+                if score is not None and s is None:
+                    log.warning("scorer unavailable; hubpoll passes %s frame through", cfg.name)
+                    monitor.audit_event(cfg, event, etype, "hubpoll", "scorer_unavailable")
+                elif s is not None and s < cfg.scorer.threshold:
+                    log.info("drop hub clip: score %.2f below threshold %.2f",
+                             s, cfg.scorer.threshold)
+                    monitor.audit_event(cfg, event, etype, "hubpoll", "drop", score=s,
+                                        threshold=cfg.scorer.threshold,
+                                        reason="below_threshold")
+                    continue
+                if not can_alert(etype, event):
+                    log.info("skip hub clip: cooldown active [hubpoll]")
+                    monitor.audit_event(cfg, event, etype, "hubpoll", "cooldown")
+                    continue
+                description = _caption_describe(cfg, secrets["groq_key"], image)
+                caption = notify.build_caption(
+                    monitor.TYPE_EMOJI.get(etype, "👁"), time_str(clip),
+                    description=description or None, score=s,
+                )
+                ok = send_alert_photo(cfg, secrets, image, caption, score=s)
+                monitor.audit_event(cfg, event, etype, "hubpoll", "send", score=s,
+                                    threshold=cfg.scorer.threshold if score is not None else None,
+                                    telegram=ok)
+                if ok:
+                    log.info("alert hub clip sent for %s (score=%s) [hubpoll]",
+                             cfg.name, f"{s:.2f}" if s is not None else "n/a")
+                    on_alert(etype, event)
+                else:
+                    log.warning("hub clip Telegram delivery failed for %s", cfg.name)
+            finally:
+                _safe_unlink(image)
 
 
 def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None):
@@ -1334,7 +1484,8 @@ def _review_digest_pass(*, now, secrets):
 def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
               last_control, control_interval,
               run_control=None, watchdog=None, monitor=None, drain=None, sample=None,
-              connect_factory=None, is_night=None, guard=None, inspect=None, digest=None):
+              connect_factory=None, is_night=None, guard=None, inspect=None, digest=None,
+              hubpoll=None):
     """One loop iteration with control decoupled from event polling.
 
     The slow, rarely-changing work (camera tracking/sensitivity/preset + the per-tick
@@ -1351,6 +1502,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     run_control = run_control or run_once
     watchdog = watchdog or _watchdog_pass
     monitor = monitor or run_monitor_pass
+    hubpoll = hubpoll or run_hubpoll_pass
     drain = drain or process_pending_sd
     sample = sample or process_sampler
     guard = guard or _pan_guard_pass
@@ -1368,6 +1520,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
         inspect(app, cam_clients, state, now=now, secrets=secrets)
         last_control = now
     monitor(app, cam_clients, state, now=now, secrets=secrets, night=night)
+    hubpoll(app, cam_clients, state, now=now, secrets=secrets, night=night)
     sample(app, cam_clients, state, now=now, secrets=secrets, night=night)
     drain(app, cam_clients, state, now=now, secrets=secrets, night=night)
     guard(app, cam_clients, state, now=now, secrets=secrets, night=night)
@@ -1454,6 +1607,11 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
     for cfg in app.cameras:
         if cfg.night_only and not night:
             continue
+        if "hubpoll" in cfg.detection.sources:
+            # A battery camera sleeps through nearly every ping (measured ~6 % answered in
+            # deep night), so ICMP says nothing about its health and would alert nightly.
+            # Its liveness comes from the hub poll instead (state.events_reachable).
+            continue
         # Network uptime is intentionally independent from API/auth health. The connector
         # records a fresh ping result on every control pass; fall back to the historical
         # client-based behaviour only for injected/test connectors that do not.
@@ -1494,6 +1652,10 @@ def _connect_camera(cam_clients, state=None, now=None):
 
     def connect(cfg: CameraConfig):
         name = cfg.name
+        if "getevents" not in cfg.detection.sources and "hubpoll" in cfg.detection.sources:
+            # A hubpoll-only camera has no stok login to make and sleeps through the ping;
+            # spending a control pass on both every minute buys nothing.
+            return None, "hubpoll"
         reachable = camera.ping_reachable(cfg.host)
         if state is not None:
             was_reachable = state.network_reachable.get(name)

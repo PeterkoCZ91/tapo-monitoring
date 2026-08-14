@@ -237,3 +237,38 @@ def test_frame_defaults_have_no_twin():
     assert frame.native is None
     assert frame.native_width is None
     assert frame.native_height is None
+
+
+# ── go2rtc snapshot (battery cameras with no usable RTSP) ────────────────────
+
+def test_go2rtc_frame_url_points_at_the_named_source():
+    url = snapshot.go2rtc_frame_url("gate")
+    assert url == "http://127.0.0.1:1984/api/frame.jpeg?src=gate"
+
+
+def test_go2rtc_frame_url_honours_host_port_and_quotes_the_source():
+    url = snapshot.go2rtc_frame_url("front door", host="198.51.100.7", port=8554)
+    assert url == "http://198.51.100.7:8554/api/frame.jpeg?src=front%20door"
+
+
+def test_capture_go2rtc_writes_the_frame_and_returns_its_path(tmp_path):
+    path = snapshot.capture_go2rtc("gate", out_dir=str(tmp_path),
+                                   _fetch=lambda url, timeout: b"\xff\xd8jpegbytes")
+    assert path is not None
+    with open(path, "rb") as f:
+        assert f.read() == b"\xff\xd8jpegbytes"
+
+
+def test_capture_go2rtc_returns_none_when_go2rtc_is_unreachable(tmp_path):
+    def fetch(url, timeout):
+        raise OSError("connection refused")
+
+    assert snapshot.capture_go2rtc("gate", out_dir=str(tmp_path), _fetch=fetch) is None
+    assert os.listdir(tmp_path) == []       # no empty snap_*.jpg left behind
+
+
+def test_capture_go2rtc_treats_an_empty_body_as_failure(tmp_path):
+    # go2rtc answers 200 with nothing while it is still reconnecting to a woken camera.
+    assert snapshot.capture_go2rtc("gate", out_dir=str(tmp_path),
+                                   _fetch=lambda url, timeout: b"") is None
+    assert os.listdir(tmp_path) == []

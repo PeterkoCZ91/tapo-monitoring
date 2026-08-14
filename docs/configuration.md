@@ -189,11 +189,52 @@ detection:
   strict_people: true
 ```
 
-`getevents` is the production-wired daemon source. `onvif` and `motion` are accepted by the
+`getevents` is the production-wired daemon source for mains cameras, and `hubpoll` (below)
+for battery cameras that record to a hub. `onvif` and `motion` are accepted by the
 configuration model for ongoing research but do not currently run as independent daemon
 event sources; never configure them as the only source. `strict_people: true` prioritizes
 camera-confirmed people while still allowing bare motion to enter the scorer/follow-up
 funnel where configured.
+
+### Battery cameras on a hub (`hubpoll`)
+
+```yaml
+detection:
+  sources: [hubpoll]
+
+hub_host: 192.0.2.60
+hub_user_env: HUB_EMAIL         # Tapo account e-mail (env var name, not the value)
+hub_password_env: HUB_PASSWORD  # Tapo account password
+go2rtc_src: gate                # go2rtc stream name for this camera
+hub_poll_interval: 20           # seconds between hub polls
+hub_device_mac: null            # optional: pin the hub-side addressing
+hub_device_id: null
+```
+
+A battery camera with no usable SD keeps no event index of its own: its recordings — and
+therefore its detections — live on the hub it is bound to, and it sleeps between events.
+So `hubpoll` reads new clips from the hub and grabs the alert frame from a **go2rtc**
+sidecar, which speaks the camera's native protocol (these cameras serve no usable RTSP).
+The camera is awake for the duration of a real event, which is exactly when the frame is
+wanted.
+
+Notes and constraints:
+
+- **Addressing is discovered.** The hub's paired-device list hands over each camera's
+  device id and MAC at startup; the camera is matched by that MAC, that id, or by an alias
+  equal to the camera's `name`, and a hub with exactly one camera needs no hint at all.
+  With several cameras and no match the daemon refuses to guess — pin `hub_device_mac`.
+- **One held session per hub.** The hub's handshake is rate-limited while queries inside an
+  established session are reliable, so cameras sharing a hub share one session, and every
+  failure backs off exponentially. Being evicted (the phone app takes the slot) is normal
+  and never raises an alert.
+- **No ICMP watchdog.** A sleeping camera answers almost no pings, so `hubpoll` cameras are
+  excluded from the unreachable-camera alert; their liveness comes from the hub poll.
+  They also skip the stok login entirely — there is none to make.
+- **No `rotate`.** go2rtc delivers a finished JPEG and there is no capture-time filter
+  behind it, so a rotation here is rejected rather than silently ignored.
+- On the first pass the cursor starts at *now*: a hub full of stored clips is not replayed
+  as an alert storm. Clips are scored and gated exactly like bare motion elsewhere.
 
 ### Tracking and detection policy
 

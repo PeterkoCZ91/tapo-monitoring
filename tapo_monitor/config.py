@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 ROLES = {"tracking", "static"}
 SCHEDULES = {"astral", "always_night", "always_day"}
 WEATHER_STRATEGIES = {"none", "disable_tracking", "lower_sensitivity"}
-DETECTION_SOURCES = {"onvif", "getevents", "motion"}
+DETECTION_SOURCES = {"onvif", "getevents", "motion", "hubpoll"}
 SMARTTRACK_KINDS = {"people", "vehicle", "pet", "baby"}
 SNAPSHOT_SOURCES = {"rtsp", "sd"}
 
@@ -178,6 +178,22 @@ class CameraConfig:
     # per camera, and only as far as the delivered pixels allow — with crop_from_native the
     # crop is cut from a frame several times wider, so it can go lower there.
     crop_min_frac: float = 0.22
+    # ── hubpoll cameras (battery, hub-backed) ────────────────────────────────
+    # A battery camera keeps no usable index of its own: its recordings — and therefore
+    # its detections — live on the hub it is bound to, and the camera sleeps between
+    # events. So the event source is the hub, and the alert frame comes from a go2rtc
+    # sidecar that speaks the camera's native protocol. All unset on a normal camera.
+    hub_host: str | None = None
+    # Hub-side addressing. Left unset in config: the hub's own paired-device list hands
+    # both out at startup, so nothing has to be transcribed by hand.
+    hub_device_id: str | None = None
+    hub_device_mac: str | None = None
+    go2rtc_src: str | None = None       # go2rtc stream name for the snapshot
+    hub_poll_interval: int = 20         # seconds between hub polls
+    # The hub authenticates against the Tapo *account* (e-mail + account password), not a
+    # camera account, so it gets its own env-var-name pair. Values name env vars.
+    hub_user_env: str | None = None
+    hub_password_env: str | None = None
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
@@ -256,6 +272,18 @@ def resolve_rtsp_credentials(cfg: CameraConfig):
         return os.environ.get(name, "") if name else ""
 
     return env(cfg.rtsp_user_env), env(cfg.rtsp_password_env)
+
+
+def resolve_hub_credentials(cfg: CameraConfig):
+    """Read (email, password) for the camera's hub from the env vars named in ``cfg``.
+
+    Pure-ish (env read only). Missing/unset env vars resolve to "" so callers never crash;
+    the hub client then simply fails its handshake and backs off.
+    """
+    def env(name):
+        return os.environ.get(name, "") if name else ""
+
+    return env(cfg.hub_user_env), env(cfg.hub_password_env)
 
 
 def _require(mapping, key, where):
@@ -445,6 +473,27 @@ def _camera(data, index):
     # A floor of 0 disables the postage-stamp guard entirely; above 1 it cannot fit.
     if not 0 < crop_min_frac <= 1:
         raise ConfigError(f"{where}: 'crop_min_frac' must be greater than 0 and at most 1")
+    detection = _detection(data.get("detection"), where)
+    try:
+        hub_poll_interval = int(data.get("hub_poll_interval", 20))
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}: 'hub_poll_interval' must be an integer") from None
+    if hub_poll_interval < 1:
+        raise ConfigError(f"{where}: 'hub_poll_interval' must be >= 1")
+    if "hubpoll" in detection.sources:
+        # Both are load-bearing: the hub is the only event source such a camera has, and
+        # go2rtc the only way to a frame (no usable RTSP). Missing either means a camera
+        # that could never produce an alert, so refuse at startup rather than at 3 a.m.
+        if not data.get("hub_host"):
+            raise ConfigError(f"{where}: detection source 'hubpoll' requires 'hub_host'")
+        if not data.get("go2rtc_src"):
+            raise ConfigError(f"{where}: detection source 'hubpoll' requires 'go2rtc_src'")
+        if rotate:
+            # go2rtc hands over a finished JPEG; there is no capture-time filter behind it,
+            # so a rotation set here would be silently dropped and the scorer would see the
+            # scene sideways. Refuse rather than pretend.
+            raise ConfigError(f"{where}: 'rotate' is not supported with detection source "
+                              f"'hubpoll' (frames come from go2rtc)")
     return CameraConfig(
         name=name,
         host=host,
@@ -471,7 +520,14 @@ def _camera(data, index):
         crop_to_subject=bool(data.get("crop_to_subject", False)),
         crop_from_native=bool(data.get("crop_from_native", False)),
         crop_min_frac=crop_min_frac,
-        detection=_detection(data.get("detection"), where),
+        hub_host=data.get("hub_host"),
+        hub_device_id=data.get("hub_device_id"),
+        hub_device_mac=data.get("hub_device_mac"),
+        go2rtc_src=data.get("go2rtc_src"),
+        hub_poll_interval=hub_poll_interval,
+        hub_user_env=data.get("hub_user_env"),
+        hub_password_env=data.get("hub_password_env"),
+        detection=detection,
         tracking=_tracking(data.get("tracking"), where),
         weather=_weather(data.get("weather"), where),
         enrich=_enrich(data.get("enrich"), where),

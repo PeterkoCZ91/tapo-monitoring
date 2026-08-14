@@ -170,6 +170,51 @@ def capture_rtsp(rtsp_url, out_dir="/tmp", timeout=15, _run=subprocess.run, rota
     return None
 
 
+GO2RTC_HOST = "127.0.0.1"
+GO2RTC_PORT = 1984
+
+
+def go2rtc_frame_url(src, host=GO2RTC_HOST, port=GO2RTC_PORT):
+    """URL of go2rtc's single-frame JPEG endpoint for one source. Pure."""
+    return f"http://{host}:{port}/api/frame.jpeg?src={urllib.parse.quote(src, safe='')}"
+
+
+def _http_get(url, timeout):  # pragma: no cover - network I/O
+    import urllib.request
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        return resp.read()
+
+
+def capture_go2rtc(src, out_dir="/tmp", timeout=15, host=GO2RTC_HOST, port=GO2RTC_PORT,
+                   _fetch=_http_get):
+    """Grab one frame from a go2rtc source. Returns the image path or None.
+
+    The battery cameras this exists for have no usable RTSP of their own: go2rtc speaks
+    their native protocol as a sidecar and reconnects when motion wakes one, so a frame is
+    an HTTP GET rather than an ffmpeg pull. An unreachable sidecar and a 200 with an empty
+    body (go2rtc answering before the stream is back up) are both plain failures — and
+    neither may leave a zero-byte ``snap_*.jpg`` behind, which is what once filled /tmp on
+    the RTSP path.
+    """
+    out_path = os.path.join(out_dir, f"snap_{int(_time.time() * 1000)}.jpg")
+    try:
+        body = _fetch(go2rtc_frame_url(src, host=host, port=port), timeout)
+    except Exception:  # noqa: BLE001 - a sleeping camera is a routine miss, not an error
+        log.debug("go2rtc frame fetch failed for %s", src, exc_info=True)
+        body = None
+    if not body:
+        _safe_unlink(out_path)
+        return None
+    try:
+        with open(out_path, "wb") as f:
+            f.write(body)
+    except OSError:
+        log.debug("writing go2rtc frame failed for %s", src, exc_info=True)
+        _safe_unlink(out_path)
+        return None
+    return out_path
+
+
 def _env_float(name, default):
     value = os.getenv(name)
     if value in (None, ""):
