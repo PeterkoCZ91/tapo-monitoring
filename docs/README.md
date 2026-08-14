@@ -20,8 +20,10 @@ camera names, addresses, credentials, coordinates and observations do not belong
    failure containment.
 2. [Capabilities](capabilities.md) — implemented and deliberately unimplemented features.
 3. [`events_1` bitmask](events1-bitmask.md) — known firmware event signals.
-4. [Observability](observability.md) — Camera Digital Twin and Shadow Detection Auditor.
-5. [Roadmap](roadmap.md) — remaining product phases and research tracks.
+4. [Battery cameras on a hub](battery-cameras-on-a-hub.md) — how a sleeping camera's events
+   are read off the hub it records to, and the hub rules that shape the client.
+5. [Observability](observability.md) — Camera Digital Twin and Shadow Detection Auditor.
+6. [Roadmap](roadmap.md) — remaining product phases and research tracks.
 
 ## Feature maturity
 
