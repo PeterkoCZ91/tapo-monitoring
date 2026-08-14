@@ -41,12 +41,28 @@ def test_health(server):
         assert json.load(resp) == {"ok": True}
 
 
+def _metrics_when_settled(server, timeout=3.0):
+    """Read /metrics once the request has been accounted for.
+
+    The server finishes a request before it books it, so a client holding the response can
+    outrun the counter. That is fine in production — the metrics are aggregate and eventually
+    consistent — but a test that reads them the microsecond after the response fails maybe
+    one run in fifty. Poll instead of asserting on a race.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        with urllib.request.urlopen(f"{server}/metrics", timeout=5) as resp:
+            metrics = json.load(resp)
+        if metrics["completed"] >= 1 or time.monotonic() > deadline:
+            return metrics
+        time.sleep(0.02)
+
+
 def test_metrics_are_aggregate_only_and_count_tile_inference(server):
     req = urllib.request.Request(f"{server}/score?tiles=2", data=b"jpegbytes")
     with urllib.request.urlopen(req, timeout=5):
         pass
-    with urllib.request.urlopen(f"{server}/metrics", timeout=5) as resp:
-        metrics = json.load(resp)
+    metrics = _metrics_when_settled(server)
     assert metrics["requests"] == 1
     assert metrics["completed"] == 1
     assert metrics["inference_runs"] == 5
