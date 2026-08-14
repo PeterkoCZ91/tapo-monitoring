@@ -494,6 +494,12 @@ def _camera(data, index):
             # scene sideways. Refuse rather than pretend.
             raise ConfigError(f"{where}: 'rotate' is not supported with detection source "
                               f"'hubpoll' (frames come from go2rtc)")
+        if bool(data.get("crop_from_native", False)):
+            # Neither frame path carries a native original to crop from — the hub clip and
+            # the sidecar both deliver one finished JPEG — so the flag would cost the crop
+            # its detail while buying nothing.
+            raise ConfigError(f"{where}: 'crop_from_native' is not supported with detection "
+                              f"source 'hubpoll' (no native frame is grabbed)")
     return CameraConfig(
         name=name,
         host=host,

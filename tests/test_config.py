@@ -669,3 +669,11 @@ def test_resolve_hub_credentials_reads_the_named_env_vars(monkeypatch):
 def test_resolve_hub_credentials_missing_env_is_empty():
     cam = cfg.load_config_from_dict(_hubpoll_camera()).cameras[0]
     assert cfg.resolve_hub_credentials(cam) == ("", "")
+
+
+def test_hubpoll_rejects_crop_from_native_it_cannot_honour():
+    # Both frame paths hand over a finished JPEG with no native twin attached, so the flag
+    # would silently buy nothing while costing the crop its detail.
+    with pytest.raises(cfg.ConfigError, match="crop_from_native"):
+        cfg.load_config_from_dict(_hubpoll_camera(crop_to_subject=True,
+                                                 crop_from_native=True))
