@@ -38,6 +38,13 @@ DEVICE_LIST_METHOD = "getGeneralDeviceList"
 DAY_SEARCH_METHOD = "searchDateWithVideo"
 CLIP_SEARCH_METHOD = "searchVideoWithUTC"
 
+# Opening a session means UDP discovery, which authenticates nothing: the handshake only
+# happens on the first send. So a new session is proved with one cheap call before it is
+# called established — otherwise the client reports a session it does not have, and the
+# handshake failure lands on whichever query happened to be next.
+PROBE_METHOD = "getDeviceInfo"
+PROBE_PARAMS = {"device_info": {"name": ["basic_info"]}}
+
 # A hub answers a refused method rather than dropping the connection, so these are not
 # session failures: -40106 unknown method, -40101 bad params, -50021 unsupported model.
 SESSION_QUERY_TIMEOUT = 30
@@ -252,6 +259,11 @@ class HubClient:
             self._session = self._connect()
         except Exception as exc:  # noqa: BLE001 - a refused handshake is routine here
             self._fail(now, "connect", exc)
+            return False
+        try:
+            self._session.send(PROBE_METHOD, PROBE_PARAMS)
+        except Exception as exc:  # noqa: BLE001 - this is where the handshake really lands
+            self._fail(now, "handshake", exc)
             return False
         log.info("hub session established")
         return True

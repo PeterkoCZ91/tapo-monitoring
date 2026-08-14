@@ -21,6 +21,7 @@ import logging
 import math
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import time as _time
@@ -929,6 +930,21 @@ def _default_clip_frame(cfg: CameraConfig, device):  # pragma: no cover
     return fetch
 
 
+def close_hub_clients(state: MonitorState):
+    """Release every held hub session. Never raises.
+
+    A hub of this class tolerates one session at a time, so a session left dangling by a
+    stopped daemon keeps the slot until the hub times it out — and the next start is then
+    accepted and dropped again. Closing on the way out is what keeps a restart cheap.
+    """
+    for host, client in list(state.hub_clients.items()):
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001 - shutdown must not fail on a dead session
+            log.debug("closing the hub session for %s failed", host, exc_info=True)
+    state.hub_clients.clear()
+
+
 def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
                      night=True, hub_for=None, frame_for=None, time_str=None,
                      score_for=None, clip_frame_for=None):
@@ -1609,10 +1625,23 @@ def main(argv=None):  # pragma: no cover - thin entry point
     log.info("health state %s: %s", "restored" if restored else "initialized", state.health_path)
     cam_clients = {}
     last_control = None
-    while True:
-        last_control = tick(app, cam_clients, state, now=_time.time(), secrets=secrets,
-                            last_control=last_control, control_interval=control_interval)
-        _time.sleep(poll_interval)
+
+    # A hub tolerates one session; leaving it dangling makes the next start be accepted and
+    # immediately dropped. SIGTERM (what a restart sends) would skip the cleanup, so it is
+    # turned into a normal exit first.
+    def _stop(signum, _frame):
+        log.info("signal %s received; releasing sessions and exiting", signum)
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+    try:
+        while True:
+            last_control = tick(app, cam_clients, state, now=_time.time(), secrets=secrets,
+                                last_control=last_control, control_interval=control_interval)
+            _time.sleep(poll_interval)
+    finally:
+        close_hub_clients(state)
 
 
 def tick(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,

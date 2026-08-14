@@ -3749,3 +3749,39 @@ def test_hubpoll_scores_a_clip_frame_like_any_other(monkeypatch, tmp_path):
                             clip_frame_for=_clip_frames(tmp_path), score_for=_scores(0.1))
 
     assert counter.photos == 0
+
+
+# ── releasing the hub's session slot on shutdown ─────────────────────────────
+
+class _HeldClient:
+    def __init__(self, fail=False):
+        self.closed = False
+        self._fail = fail
+
+    def close(self):
+        if self._fail:
+            raise OSError("session already gone")
+        self.closed = True
+
+
+def test_close_hub_clients_closes_every_held_session():
+    # A session left dangling keeps occupying the hub, which only tolerates one.
+    state = daemon.MonitorState()
+    first, second = _HeldClient(), _HeldClient()
+    state.hub_clients = {"hub-a": first, "hub-b": second}
+
+    daemon.close_hub_clients(state)
+
+    assert (first.closed, second.closed) == (True, True)
+    assert state.hub_clients == {}
+
+
+def test_close_hub_clients_survives_a_session_that_refuses_to_close():
+    state = daemon.MonitorState()
+    good = _HeldClient()
+    state.hub_clients = {"hub-a": _HeldClient(fail=True), "hub-b": good}
+
+    daemon.close_hub_clients(state)          # must not raise on the way out
+
+    assert good.closed is True
+    assert state.hub_clients == {}

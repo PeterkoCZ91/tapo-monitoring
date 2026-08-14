@@ -208,6 +208,8 @@ class _FakeSession:
         self.calls.append((method, params))
         if self.fail_after is not None and len(self.calls) > self.fail_after:
             raise ConnectionError("Server disconnected")
+        if method == hubclient.PROBE_METHOD:
+            return _raw({"device_info": {"basic_info": {"device_model": "H200"}}})
         return _raw(self.results.pop(0) if self.results else {})
 
     def close(self):
@@ -239,11 +241,13 @@ def test_client_connects_once_and_reuses_the_session():
     client.search_days(DEV, MAC, "20260801", "20260814", now=1)
 
     assert len(connect.made) == 1
-    assert [m for m, _ in session.calls] == ["getGeneralDeviceList", "searchDateWithVideo"]
+    assert [m for m, _ in session.calls] == [
+        hubclient.PROBE_METHOD, "getGeneralDeviceList", "searchDateWithVideo"]
 
 
 def test_a_dropped_session_is_not_reused_and_backs_off():
-    session = _FakeSession([DEVICE_LIST_RESULT], fail_after=1)
+    # Two calls survive — the probe that proves the session, then one real query.
+    session = _FakeSession([DEVICE_LIST_RESULT], fail_after=2)
     connect = _connector(session)          # only one session available
     client = hubclient.HubClient(connect, backoff_base=60)
 
@@ -405,3 +409,37 @@ def test_stream_event_ignores_anything_else():
     assert hubclient.stream_event({"type": "notification", "params": {}}) == (None, None)
     assert hubclient.stream_event({}) == (None, None)
     assert hubclient.stream_event(None) == (None, None)
+
+
+# ── a discovered device is not an established session ────────────────────────
+
+def test_ensure_session_proves_a_new_session_with_a_probe():
+    # UDP discovery alone authenticates nothing: the handshake happens on the first send.
+    # Without a probe the client reports "established" while nothing is established, and
+    # the handshake failure is then miscounted against the query that happened to be next.
+    session = _FakeSession([DEVICE_LIST_RESULT])
+    client = hubclient.HubClient(_connector(session))
+
+    assert client.ensure_session(now=0) is True
+    assert session.calls[0][0] == hubclient.PROBE_METHOD
+
+
+def test_a_session_whose_probe_fails_is_not_established():
+    session = _FakeSession(fail_after=0)          # dies on the handshake itself
+    connect = _connector(session)
+    client = hubclient.HubClient(connect, backoff_base=60)
+
+    assert client.ensure_session(now=0) is False
+    assert client.connected is False
+    assert client.fails == 1                      # one handshake failure, not two
+    assert client.retry_at == 60
+
+
+def test_the_probe_runs_once_per_session_not_once_per_query():
+    session = _FakeSession([DEVICE_LIST_RESULT, DAYS_RESULT])
+    client = hubclient.HubClient(_connector(session))
+
+    client.list_cameras(now=0)
+    client.search_days(DEV, MAC, "20260801", "20260814", now=1)
+
+    assert [m for m, _ in session.calls].count(hubclient.PROBE_METHOD) == 1
