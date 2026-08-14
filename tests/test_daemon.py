@@ -3713,7 +3713,7 @@ def test_hubpoll_falls_back_to_a_live_frame_when_the_clip_download_fails(
 
     daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(),
                             hub_for=_hub_for(hub), frame_for=live_frames,
-                            clip_frame_for=_clip_frames(tmp_path, [None]))
+                            clip_frame_for=_clip_frames(tmp_path, [None, None]))
 
     assert counter.photos == 1
     assert live_frames.calls == [1]         # the sidecar rescued the event
@@ -3729,7 +3729,7 @@ def test_hubpoll_skips_the_clip_when_neither_frame_path_works(monkeypatch, tmp_p
 
     daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(),
                             hub_for=_hub_for(hub), frame_for=_frames(tmp_path, [None]),
-                            clip_frame_for=_clip_frames(tmp_path, [None]))
+                            clip_frame_for=_clip_frames(tmp_path, [None, None]))
 
     assert counter.photos == 0                 # never a blank alert
     assert state.hub_cursor["gate"] == 1100    # and not retried forever
@@ -3785,3 +3785,45 @@ def test_close_hub_clients_survives_a_session_that_refuses_to_close():
 
     assert good.closed is True
     assert state.hub_clients == {}
+
+
+def test_hubpoll_retries_the_clip_download_once_before_the_live_frame(monkeypatch, tmp_path):
+    # The download is a few seconds and the clip is the only frame that matches the event,
+    # so a transient failure is worth one retry before settling for a live grab that may
+    # show an empty scene. Observed in production: three failures in a row that the same
+    # call reproduced fine a minute later.
+    counter = _CountingNotify()
+    monkeypatch.setattr(daemon.notify, "send_photo", counter.send_photo)
+    app = _hub_app()
+    hub = _FakeHub(clips=[[_clip(1100)]])
+    state = daemon.MonitorState()
+    state.hub_cursor["gate"] = 1000
+    clip_frames = _clip_frames(tmp_path, [None])      # first call fails, second succeeds
+    live_frames = _frames(tmp_path)
+
+    daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(),
+                            hub_for=_hub_for(hub), frame_for=live_frames,
+                            clip_frame_for=clip_frames)
+
+    assert counter.photos == 1
+    assert clip_frames.calls == [1100.0, 1100.0]      # retried the clip
+    assert live_frames.calls == []                    # never needed the sidecar
+
+
+def test_hubpoll_gives_up_on_the_clip_after_one_retry(monkeypatch, tmp_path):
+    counter = _CountingNotify()
+    monkeypatch.setattr(daemon.notify, "send_photo", counter.send_photo)
+    app = _hub_app()
+    hub = _FakeHub(clips=[[_clip(1100)]])
+    state = daemon.MonitorState()
+    state.hub_cursor["gate"] = 1000
+    clip_frames = _clip_frames(tmp_path, [None, None])
+    live_frames = _frames(tmp_path)
+
+    daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(),
+                            hub_for=_hub_for(hub), frame_for=live_frames,
+                            clip_frame_for=clip_frames)
+
+    assert counter.photos == 1
+    assert len(clip_frames.calls) == 2                # two attempts, not more
+    assert live_frames.calls == [1]                   # then the sidecar rescued it

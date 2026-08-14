@@ -459,6 +459,7 @@ def download_clip(host, cloud_password, device_id, mac, start_time, end_time, ou
             download_payload(device_id, mac, start_time, end_time, player_id),
             separators=(",", ":"))
         chunks = 0
+        messages = 0
         session_id = None
         with open(out_path, "wb") as out:
             async with session:
@@ -470,6 +471,7 @@ def download_clip(host, cloud_password, device_id, mac, start_time, end_time, ou
                     except (StopAsyncIteration, TimeoutError, asyncio.TimeoutError):
                         break
                     if resp.mimetype == "application/json":
+                        messages += 1
                         try:
                             message = json.loads(resp.plaintext.decode())
                         except (ValueError, UnicodeDecodeError):
@@ -500,7 +502,13 @@ def download_clip(host, cloud_password, device_id, mac, start_time, end_time, ou
                                 break
                     except Exception:  # noqa: BLE001 - cleanup must not fail the download
                         log.debug("stopping the clip stream failed", exc_info=True)
-        return out_path if chunks else None
+        if not chunks:
+            # Silence here cost a production debugging session: the pass reported "download
+            # failed" while this function had returned None without a word about why.
+            log.info("hub clip download produced no video parts (session=%s, json=%d)",
+                     session_id, messages)
+            return None
+        return out_path
 
     async def prime():
         from pytapo.media_stream.session import HttpMediaSession

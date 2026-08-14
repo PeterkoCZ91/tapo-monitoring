@@ -1029,7 +1029,14 @@ def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             # detection instead of one that merely follows it.
             image = clip_fetch(clip)
             if image is None:
-                log.info("hubpoll %s: clip download failed for %s; trying a live frame",
+                # One retry: the download costs a few seconds, transient refusals were
+                # observed in production that the same call reproduced fine a minute later,
+                # and the clip is the only frame that matches the event.
+                log.info("hubpoll %s: clip download failed for %s; retrying once",
+                         cfg.name, int(clip["start_time"]))
+                image = clip_fetch(clip)
+            if image is None:
+                log.info("hubpoll %s: clip unavailable for %s; trying a live frame",
                          cfg.name, int(clip["start_time"]))
                 image = grab()
             if image is None:
