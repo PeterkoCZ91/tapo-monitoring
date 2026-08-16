@@ -26,6 +26,17 @@ All notable changes to this project are documented here.
   alert this project has already paid for. The sidecar grab remains as the backup, and a
   clip frame is scored and gated like any other, so the fallback is no way past the
   threshold.
+- A startup warning when a `hubpoll` camera is configured and `ffmpeg` is not on the
+  daemon's PATH. Both frame paths shell out to it, and it is looked up per event, so a
+  daemon started with a minimal PATH detects everything and alerts on nothing. One site ran
+  two days that way: 13 real detections, all dropped as `no_frame`, clips downloading fine
+  the whole time.
+
+### Fixed
+- A failed frame extraction is logged with its reason instead of at debug level, and the
+  hubpoll retry now says "no frame from the clip" rather than "clip download failed" — the
+  download is one of two steps there, and naming the wrong one pointed a real investigation
+  at the hub for two days.
 
 ## [0.4.0] - 2026-08-08
 

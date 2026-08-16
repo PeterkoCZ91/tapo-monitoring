@@ -945,6 +945,24 @@ def close_hub_clients(state: MonitorState):
     state.hub_clients.clear()
 
 
+def hubpoll_decoder_warning(app: AppConfig, available):
+    """The warning a hubpoll site needs at startup, or None. Pure.
+
+    A hub clip is only an alert once a decoder turns it into a frame, and that decoder is
+    looked up at the moment of an event — so a missing one shows up as "no frame" hours
+    later, per event, and looks like a camera or network fault. Said once at startup, it
+    is a two-line fix instead of a day of chasing the hub.
+    """
+    if available:
+        return None
+    names = [cfg.name for cfg in app.cameras if "hubpoll" in cfg.detection.sources]
+    if not names:
+        return None
+    return (f"{snapshot.DECODER} is not on PATH: hubpoll camera(s) "
+            f"{', '.join(names)} can download clips but not turn them into frames, "
+            f"so every event will be dropped as no_frame")
+
+
 def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
                      night=True, hub_for=None, frame_for=None, time_str=None,
                      score_for=None, clip_frame_for=None):
@@ -1031,8 +1049,10 @@ def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             if image is None:
                 # One retry: the download costs a few seconds, transient refusals were
                 # observed in production that the same call reproduced fine a minute later,
-                # and the clip is the only frame that matches the event.
-                log.info("hubpoll %s: clip download failed for %s; retrying once",
+                # and the clip is the only frame that matches the event. The message says
+                # "no frame", not "download failed" — the download is only one of the two
+                # steps here, and naming the wrong one sent a real investigation astray.
+                log.info("hubpoll %s: no frame from the clip at %s; retrying once",
                          cfg.name, int(clip["start_time"]))
                 image = clip_fetch(clip)
             if image is None:
@@ -1630,6 +1650,9 @@ def main(argv=None):  # pragma: no cover - thin entry point
     log.info("loaded %d camera(s); poll events every %ds, control every %ds; face_names=%d known",
              len(app.cameras), poll_interval, control_interval, len(secrets.get("face_names") or {}))
     log.info("health state %s: %s", "restored" if restored else "initialized", state.health_path)
+    decoder_warning = hubpoll_decoder_warning(app, snapshot.decoder_available())
+    if decoder_warning:
+        log.warning("%s", decoder_warning)
     cam_clients = {}
     last_control = None
 

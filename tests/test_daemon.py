@@ -3827,3 +3827,21 @@ def test_hubpoll_gives_up_on_the_clip_after_one_retry(monkeypatch, tmp_path):
     assert counter.photos == 1
     assert len(clip_frames.calls) == 2                # two attempts, not more
     assert live_frames.calls == [1]                   # then the sidecar rescued it
+
+
+# ── hubpoll prerequisites ────────────────────────────────────────────────────
+
+
+def test_hubpoll_decoder_warning_names_the_camera_when_the_decoder_is_missing():
+    warning = daemon.hubpoll_decoder_warning(_hub_app(), available=False)
+    assert warning is not None
+    assert "gate" in warning and "ffmpeg" in warning
+
+
+def test_hubpoll_decoder_warning_is_silent_when_the_decoder_is_present():
+    assert daemon.hubpoll_decoder_warning(_hub_app(), available=True) is None
+
+
+def test_hubpoll_decoder_warning_is_silent_without_a_hubpoll_camera():
+    app = cfg.load_config_from_dict({"cameras": [{"name": "c", "host": "203.0.113.10"}]})
+    assert daemon.hubpoll_decoder_warning(app, available=False) is None

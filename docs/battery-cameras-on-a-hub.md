@@ -125,6 +125,14 @@ from the moment of detection. A live grab can only happen once the poll has noti
 the same empty-scene false alert this project has already paid for once. The sidecar is the
 backup for when a download fails.
 
+**Both frame paths need `ffmpeg` on the daemon's own PATH** — the clip is decoded with it,
+and the sidecar shells out to it too. This is worth checking before anything else when a
+site detects events but never alerts: a daemon started from `cron` or a unit file inherits a
+minimal PATH, so an `ffmpeg` installed under the operator's `~/.local/bin` is simply not
+there. It cost this project two days at one site — 13 real detections, every one dropped as
+`no_frame`, while the clips themselves downloaded perfectly. The daemon now says so once at
+startup instead of leaving it to be inferred per event.
+
 ## Consequences for the daemon
 
 See `docs/configuration.md` for the `hubpoll` detection source these notes produced. The

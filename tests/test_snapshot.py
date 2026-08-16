@@ -1,3 +1,4 @@
+import logging
 import os
 import subprocess
 import sys
@@ -320,3 +321,21 @@ def test_frame_from_clip_returns_none_and_leaves_no_orphan_when_ffmpeg_fails(tmp
 def test_frame_from_clip_ignores_a_missing_clip(tmp_path):
     assert snapshot.frame_from_clip(str(tmp_path / "gone.ts"), out_dir=str(tmp_path),
                                     _run=lambda *a, **k: None) is None
+
+
+def test_decoder_available_follows_the_path_lookup():
+    assert snapshot.decoder_available(which=lambda name: None) is False
+    assert snapshot.decoder_available(which=lambda name: "/usr/bin/" + name) is True
+
+
+def test_frame_from_clip_says_why_the_extraction_failed(tmp_path, caplog):
+    clip = tmp_path / "clip.ts"
+    clip.write_bytes(b"\x47" * 188)
+
+    def fake_run(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    with caplog.at_level(logging.INFO, logger="tapo_monitor.snapshot"):
+        assert snapshot.frame_from_clip(str(clip), out_dir=str(tmp_path),
+                                        _run=fake_run) is None
+    assert any("ffmpeg" in record.getMessage() for record in caplog.records)

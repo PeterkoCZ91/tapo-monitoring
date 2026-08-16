@@ -7,6 +7,7 @@ subprocess in :func:`capture_rtsp` is a thin I/O wrapper kept deliberately untes
 
 import logging
 import os
+import shutil
 import subprocess
 import time as _time
 import urllib.parse
@@ -215,6 +216,19 @@ def capture_go2rtc(src, out_dir="/tmp", timeout=15, host=GO2RTC_HOST, port=GO2RT
     return out_path
 
 
+DECODER = "ffmpeg"
+
+
+def decoder_available(which=shutil.which):
+    """Is the external decoder that turns a clip into a frame on PATH?
+
+    Looked up by name at the moment of an event, which is the wrong time to find out it
+    is missing: a daemon started from cron gets a PATH without the operator's own bin
+    directory, and every clip then silently yields no frame, hours after startup.
+    """
+    return which(DECODER) is not None
+
+
 def ts_frame_args(clip_path, out_path, rotate=0, skip=1.0):
     """ffmpeg argv extracting one JPEG from a downloaded clip. Pure.
 
@@ -224,7 +238,7 @@ def ts_frame_args(clip_path, out_path, rotate=0, skip=1.0):
     """
     vf = scaled_vf(rotate)
     return [
-        "ffmpeg",
+        DECODER,
         "-hide_banner",
         "-loglevel", "error",
         "-ss", f"{skip:g}",
@@ -258,8 +272,10 @@ def frame_from_clip(clip_path, out_dir="/tmp", timeout=30, rotate=0, skip=1.0,
             check=True,
         )
         ok = os.path.exists(out_path) and os.path.getsize(out_path) > 0
-    except Exception:
-        log.debug("extracting a frame from %s failed", clip_path, exc_info=True)
+    except Exception as exc:  # noqa: BLE001 - the caller only needs "no frame"
+        # Loud on purpose: a whole site ran for two days dropping every event because the
+        # decoder was not on the daemon's PATH, and this failure was only visible at debug.
+        log.info("extracting a frame from %s failed: %s", clip_path, exc)
         ok = False
     if ok:
         return out_path
