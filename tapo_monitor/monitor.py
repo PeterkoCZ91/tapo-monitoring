@@ -35,6 +35,11 @@ def _health_observe(observe, ok, error=None):
         observe(bool(ok))
 
 
+def _latency_observe(observe, operation, seconds):
+    if observe is not None:
+        observe(operation, seconds)
+
+
 def _can_alert(can_alert, etype, event):
     if can_alert is None:
         return True
@@ -156,7 +161,8 @@ TYPE_EMOJI = {"person": "👤", "vehicle": "🚗", "pet": "🐾", "tamper": "⚠
 def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_chat,
                 snapshot, time_str, can_alert=None, on_alert=None, face_names=None,
                 defer=None, score=None, observe=None, poll_observe=None,
-                media_observe=None, mute=False, corroborate=None, burst_sent=None,
+                media_observe=None, latency_observe=None, mute=False, corroborate=None,
+                burst_sent=None,
                 send_alert=None):
     """Poll one camera once and alert on new detections. Returns the new watermark.
 
@@ -188,6 +194,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         same route the sampler and the SD follow-up already take. The default posts the
         frame as-is, so a caller that does not care keeps the old behaviour.
     """
+    started = _time.monotonic()
     try:
         events = cam.getEvents() or []
     except Exception as exc:
@@ -196,6 +203,8 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         audit_error(cfg, exc, now=now)
         _health_observe(poll_observe, False, exc)
         return last_seen
+    finally:
+        _latency_observe(latency_observe, "getevents", _time.monotonic() - started)
     _health_observe(poll_observe, True, None)
 
     alertable, watermark = collect_detections(events, last_seen, cfg.detection.strict_people)

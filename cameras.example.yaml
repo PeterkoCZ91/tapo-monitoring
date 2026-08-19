@@ -54,6 +54,14 @@ observability:
   ledger_retention_days: 30
   shadow_match_window: 20  # seconds for camera ↔ independent shadow observation matching
 
+reliability:
+  enabled: false       # enable layered health, recorder continuity and latency metrics
+  auto_fix: true       # only the allow-list below may write camera settings
+  allowed_repairs: [person_detection, vehicle_detection, smarttrack]
+  storage_health: true
+  latency_metrics: true
+  recorder_max_age: 300
+
 cameras:
   - name: front              # unique label used in logs/alerts
     host: "<LAN_CAMERA_IP>"    # camera IP or DNS name on your LAN

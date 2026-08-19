@@ -14,6 +14,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from . import reliability
+
 ROLES = {"tracking", "static"}
 SCHEDULES = {"astral", "always_night", "always_day"}
 WEATHER_STRATEGIES = {"none", "disable_tracking", "lower_sensitivity"}
@@ -237,6 +239,17 @@ class ObservabilityConfig:
 
 
 @dataclass
+class ReliabilityConfig:
+    """Operational health and bounded camera self-healing policy."""
+    enabled: bool = False
+    auto_fix: bool = True
+    allowed_repairs: tuple[str, ...] = reliability.DEFAULT_REPAIRS
+    storage_health: bool = True
+    latency_metrics: bool = True
+    recorder_max_age: int = 300
+
+
+@dataclass
 class AppConfig:
     location: Location = field(default_factory=Location)
     telegram: dict = field(default_factory=dict)
@@ -247,6 +260,7 @@ class AppConfig:
     alerts: AlertsConfig = field(default_factory=AlertsConfig)
     loop: LoopConfig = field(default_factory=LoopConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
+    reliability: ReliabilityConfig = field(default_factory=ReliabilityConfig)
     cameras: list[CameraConfig] = field(default_factory=list)
 
 
@@ -423,6 +437,30 @@ def _pan_limit(data, where):
         onvif_port=onvif_port,
         onvif_user_env=d.get("onvif_user_env"),
         onvif_password_env=d.get("onvif_password_env"),
+    )
+
+
+def _reliability(data, where):
+    d = data or {}
+    try:
+        recorder_max_age = int(d.get("recorder_max_age", 300))
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}: reliability.recorder_max_age must be an integer") from None
+    if recorder_max_age < 1:
+        raise ConfigError(f"{where}: reliability.recorder_max_age must be >= 1")
+    try:
+        allowed_repairs = reliability.normalize_repairs(
+            d.get("allowed_repairs", reliability.DEFAULT_REPAIRS)
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(str(exc)) from None
+    return ReliabilityConfig(
+        enabled=bool(d.get("enabled", False)),
+        auto_fix=bool(d.get("auto_fix", True)),
+        allowed_repairs=allowed_repairs,
+        storage_health=bool(d.get("storage_health", True)),
+        latency_metrics=bool(d.get("latency_metrics", True)),
+        recorder_max_age=recorder_max_age,
     )
 
 
@@ -616,6 +654,7 @@ def load_config_from_dict(data) -> AppConfig:
         shadow_match_window=match_window,
     )
 
+    reliability_config = _reliability(data.get("reliability"), "config")
     return AppConfig(
         location=location,
         telegram=data.get("telegram") or {},
@@ -623,6 +662,7 @@ def load_config_from_dict(data) -> AppConfig:
         faces=data.get("faces") or {},
         alerts=alerts,
         loop=loop,
+        reliability=reliability_config,
         observability=observability,
         cameras=cameras,
     )

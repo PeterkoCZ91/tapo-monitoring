@@ -517,6 +517,27 @@ export TAPO_LEDGER_FILE=/private/path/events.sqlite3
 
 See [Observability](observability.md) for schema, privacy and rollout details.
 
+## Reliability
+
+```yaml
+reliability:
+  enabled: true
+  auto_fix: true
+  allowed_repairs: [person_detection, vehicle_detection, smarttrack]
+  storage_health: true
+  latency_metrics: true
+  recorder_max_age: 300
+```
+
+- `enabled` adds layered health, recorder continuity and aggregate latency observations to
+  the Digital Twin state.
+- `auto_fix` is limited by `allowed_repairs`; unknown or unsupported capabilities never
+  trigger a write.
+- The allow-list covers only person detection, vehicle detection and SmartTrack. Firmware,
+  network, credentials, storage formatting and PTZ calibration are never self-healed.
+- `recorder_max_age` marks a local recorder stale after the configured number of seconds;
+  it does not treat normal loop-recording disk usage as a failure.
+
 ## Suggested profiles
 
 ### Lowest overhead

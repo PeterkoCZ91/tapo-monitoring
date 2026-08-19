@@ -40,6 +40,7 @@ from . import (
     notify,
     panlimit,
     recclip,
+    reliability,
     reviewdigest,
     sampler,
     scheduling,
@@ -123,7 +124,14 @@ def effective_night(cfg: CameraConfig, astronomical_night: bool) -> bool:
     return astronomical_night
 
 
-def apply_plan(cam, plan: CameraPlan):
+def _repair_allowed(policy, name):
+    """Return whether one bounded camera repair may run this control pass."""
+    if policy is None:
+        return True
+    return bool(policy.auto_fix and name in policy.allowed_repairs)
+
+
+def apply_plan(cam, plan: CameraPlan, reliability_config=None):
     """Apply a CameraPlan to a connected camera in firmware-safe order.
 
     SmartTrack / motion sensitivity / preset first; auto-track asserted LAST and verified.
@@ -148,20 +156,22 @@ def apply_plan(cam, plan: CameraPlan):
     # funnel then dropped. Re-assert ON every tick. When a per-camera
     # person_sensitivity is configured, re-assert it too (lower = fewer false
     # AI-person detections on an empty yard); otherwise leave sensitivity untouched.
-    try:
-        if plan.person_sensitivity is not None:
-            cam.setPersonDetection(True, sensitivity=plan.person_sensitivity)
-        else:
-            cam.setPersonDetection(True)
-    except Exception:
-        pass
+    if _repair_allowed(reliability_config, "person_detection"):
+        try:
+            if plan.person_sensitivity is not None:
+                cam.setPersonDetection(True, sensitivity=plan.person_sensitivity)
+            else:
+                cam.setPersonDetection(True)
+        except Exception:
+            pass
     # Keep the camera following people, not cars: the C560WS auto-track swings after any
     # AI-detected target, so vehicle detection is re-asserted OFF every tick (SmartTrack
     # already excludes vehicles, but that alone doesn't stop the detector feeding track).
-    try:
-        cam.setVehicleDetection(False)
-    except Exception:
-        pass
+    if _repair_allowed(reliability_config, "vehicle_detection"):
+        try:
+            cam.setVehicleDetection(False)
+        except Exception:
+            pass
     if plan.preset:
         try:
             cam.setPreset(plan.preset)
@@ -173,7 +183,7 @@ def apply_plan(cam, plan: CameraPlan):
     # filter, so auto-track followed any motion (including cars). Nothing may run between
     # apply_smarttrack and ensure_autotrack — setSmartTrackConfig clears the auto-track
     # master switch, so ensure_autotrack (setAutoTrackTarget) has to stay truly last.
-    if plan.autotrack_on:
+    if plan.autotrack_on and _repair_allowed(reliability_config, "smarttrack"):
         try:
             tracking.apply_smarttrack(cam, plan.smarttrack)
         except Exception:
@@ -205,7 +215,7 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
         if connect is not None:
             cam, _err = connect(cfg)
             if cam is not None:
-                apply_plan(cam, plan)
+                apply_plan(cam, plan, app.reliability)
     return plans
 
 
@@ -278,6 +288,8 @@ class MonitorState:
     event_alerted: dict = field(default_factory=dict)
     event_restart_attempted: dict = field(default_factory=dict)
     rtsp_reachable: dict = field(default_factory=dict)
+    latency: dict = field(default_factory=dict)
+    recorder_health: dict = field(default_factory=dict)
     desired_plans: dict = field(default_factory=dict)
     twin_last_probe: dict = field(default_factory=dict)
     twin_fleet: dict = field(default_factory=dict)
@@ -829,7 +841,30 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                 "live_sent": live_sent,
             })
         defer_fn = defer if cfg.sd_snapshot else None
-        score = score_for(cfg)
+        raw_snapshot = snapshot_for(cfg)
+        raw_score = score_for(cfg)
+
+        def observe_latency(operation, seconds, _name=name):
+            if not (app.reliability.enabled and app.reliability.latency_metrics):
+                return
+            bucket = state.latency.setdefault(_name, {})
+            reliability.observe_latency(bucket, operation, seconds)
+
+        def timed_snapshot(camera, event, _raw=raw_snapshot):
+            started = _time.monotonic()
+            try:
+                return _raw(camera, event)
+            finally:
+                observe_latency("snapshot", _time.monotonic() - started)
+
+        def timed_score(image, _raw=raw_score):
+            started = _time.monotonic()
+            try:
+                return _raw(image) if _raw is not None else None
+            finally:
+                observe_latency("scorer", _time.monotonic() - started)
+
+        score = timed_score if raw_score is not None else None
 
         corroborate = None
         if cfg.sampler.enabled and cfg.scorer.motion_send_threshold is not None:
@@ -869,7 +904,11 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
         def send_alert(image, caption, score, _cfg=cfg):
             # The live pass takes the same crop+archive route as the sampler and the SD
             # follow-up: a zoom to Telegram, the whole scene to the sent log.
-            return send_alert_photo(_cfg, secrets, image, caption, score=score)
+            started = _time.monotonic()
+            try:
+                return send_alert_photo(_cfg, secrets, image, caption, score=score)
+            finally:
+                observe_latency("telegram", _time.monotonic() - started)
 
         # night_only camera during the day: mute (drain the watermark, alert nothing).
         watermark = monitor.run_monitor(
@@ -878,7 +917,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             groq_key=secrets["groq_key"],
             telegram_token=secrets["telegram_token"],
             telegram_chat=secrets["telegram_chat"],
-            snapshot=snapshot_for(cfg),
+            snapshot=timed_snapshot,
             time_str=time_str,
             can_alert=can_alert,
             on_alert=on_alert,
@@ -888,6 +927,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             corroborate=corroborate,
             observe=observe,
             burst_sent=burst_sent,
+            latency_observe=observe_latency,
             send_alert=send_alert,
             poll_observe=poll_observe,
             media_observe=media_observe,
@@ -1216,7 +1256,15 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
         if span is None:  # backwards-compatible with entries queued by older daemons
             span = sdclip.event_span(event, cap=cfg.sd_span_cap)
         full_span = entry.get("full_span", sdclip.event_span(event, cap=cfg.sd_span_cap))
-        frames = fetch(cfg, start_time, span=span, out_dir=job_dir)
+        fetch_started = _time.monotonic()
+        try:
+            frames = fetch(cfg, start_time, span=span, out_dir=job_dir)
+        finally:
+            if app.reliability.enabled and app.reliability.latency_metrics:
+                reliability.observe_latency(
+                    state.latency.setdefault(cfg.name, {}), "sd_fetch",
+                    _time.monotonic() - fetch_started,
+                )
         image, description, fallback_image = None, "", None
         selected_score = None
         score = score_for(cfg)
@@ -1444,7 +1492,7 @@ def control_due(last_control, now, interval):
 
 def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
     """Refresh the opt-in Camera Digital Twin using already-connected clients only."""
-    if not app.observability.digital_twin:
+    if not app.observability.digital_twin and not app.reliability.enabled:
         return state.twin_fleet
     probe = probe or capabilities.collect_snapshot
     changed = False
@@ -1464,6 +1512,17 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
                 events=state.events_reachable.get(cfg.name),
                 rtsp=state.rtsp_reachable.get(cfg.name),
             )
+            recorder = state.recorder_health.get(
+                cfg.name, {"status": "unknown", "reason": "disabled"}
+            )
+            if app.reliability.enabled and app.reliability.storage_health:
+                recorder = reliability.recorder_health(
+                    os.getenv("RECORDING_ROOT"), cfg.host, now=now,
+                    max_age=app.reliability.recorder_max_age,
+                )
+                state.recorder_health[cfg.name] = recorder
+                if recorder.get("status") == "degraded":
+                    layers["storage"] = "degraded"
             aggregate = drift.aggregate_health(layers)
             plan = state.desired_plans.get(cfg.name)
             if plan is None:
@@ -1511,6 +1570,10 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
             previous=state.twin_fleet.get(cfg.name),
         )
         entry["alerted_keys"] = sorted(alerted)
+        entry["reliability"] = {
+            "recorder": recorder,
+            "latency": reliability.latency_snapshot(state.latency.get(cfg.name, {})),
+        }
         state.twin_fleet[cfg.name] = entry
         state.twin_last_probe[cfg.name] = now
         changed = True
