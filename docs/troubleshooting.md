@@ -61,6 +61,14 @@ control interval to work around auth errors; that usually makes the condition wo
 The production daemon uses `getEvents`. Check logs for the event audit line and decoded
 `events_1` fields. On tested firmware, `event_type` may be empty even when the bitmask is
 valid.
+If the camera is pingable and configuration reads work but no event lines appear, search
+for `getEvents failed` and `path=getevents action=error`. The event watchdog keeps this
+failure separate from network health, sends a Telegram warning after
+`alerts.event_failure_threshold`, and can request one API reboot after
+`alerts.event_restart_threshold`. A successful `getEvents` poll sends the recovery notice.
+Keep `event_restart_enabled: false` on installations where an automatic reboot would
+interrupt recording or another camera client.
+
 
 Known signals are documented in [`events1-bitmask.md`](events1-bitmask.md). Unknown bits
 remain unknown until repeatable ground truth exists.

@@ -209,6 +209,9 @@ class AlertsConfig:
     cooldown: int = 120         # min seconds between detection alerts per camera
     outage_threshold: int = 900  # seconds a camera must be unreachable before alerting
     stall_threshold: int = 900  # seconds of failing daemon ticks before alerting
+    event_failure_threshold: int = 300  # seconds getEvents may fail before alerting
+    event_restart_threshold: int = 900  # seconds of getEvents failure before API reboot
+    event_restart_enabled: bool = True  # one reboot per failure episode
 
 
 @dataclass
@@ -571,7 +574,16 @@ def load_config_from_dict(data) -> AppConfig:
         cooldown=int(alerts_raw.get("cooldown", 120)),
         outage_threshold=int(alerts_raw.get("outage_threshold", 900)),
         stall_threshold=int(alerts_raw.get("stall_threshold", 900)),
+        event_failure_threshold=int(alerts_raw.get("event_failure_threshold", 300)),
+        event_restart_threshold=int(alerts_raw.get("event_restart_threshold", 900)),
+        event_restart_enabled=bool(alerts_raw.get("event_restart_enabled", True)),
     )
+    if alerts.event_failure_threshold < 1:
+        raise ConfigError("alerts.event_failure_threshold must be >= 1")
+    if alerts.event_restart_threshold < alerts.event_failure_threshold:
+        raise ConfigError(
+            "alerts.event_restart_threshold must be >= event_failure_threshold"
+        )
 
     loop_raw = data.get("loop") or {}
     loop = LoopConfig(

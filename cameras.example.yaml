@@ -30,6 +30,9 @@ alerts:
   cooldown: 120            # min seconds between detection alerts per camera
   outage_threshold: 900    # seconds a camera must be unreachable before a 🔴 alert
   stall_threshold: 900     # seconds of failing daemon ticks before a 🔴 alert
+  event_failure_threshold: 300  # seconds getEvents may fail before a 🔴 alert
+  event_restart_threshold: 900  # seconds before one API reboot is attempted
+  event_restart_enabled: true   # set false to alert only
 
 # Loop cadence. Detections are polled fast (event_interval) on the already-connected
 # client so the live snapshot is taken while the subject is still in frame; camera

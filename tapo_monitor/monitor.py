@@ -26,8 +26,12 @@ def _observe(observe, event, etype, sent, delivered=False):
         observe(event, etype, sent)
 
 
-def _health_observe(observe, ok):
-    if observe is not None:
+def _health_observe(observe, ok, error=None):
+    if observe is None:
+        return
+    try:
+        observe(bool(ok), error)
+    except TypeError:
         observe(bool(ok))
 
 
@@ -84,6 +88,19 @@ def audit_event(cfg, event, etype, path, action, *, score=None, threshold=None,
     if reason:
         parts.append(f"reason={_fmt_audit_value(reason)}")
     log.info("audit %s", " ".join(parts))
+
+
+def audit_error(cfg, error, *, now=None):
+    """Record a structured getEvents failure without storing a full exception."""
+    now = _time.time() if now is None else now
+    detail = type(error).__name__
+    text = str(error).replace("\n", " ").strip()
+    if text:
+        detail = f"{detail}: {text[:160]}"
+    log.info(
+        "audit camera=%s path=getevents action=error etype=system start=%s reason=%s",
+        _fmt_audit_value(cfg.name), _fmt_audit_value(now), _fmt_audit_value(detail),
+    )
 
 
 def face_ids(event):
@@ -173,10 +190,13 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
     """
     try:
         events = cam.getEvents() or []
-    except Exception:
-        _health_observe(poll_observe, False)
+    except Exception as exc:
+        # A camera can answer configuration calls while its event endpoint is broken.
+        log.warning("getEvents failed: %s", type(exc).__name__)
+        audit_error(cfg, exc, now=now)
+        _health_observe(poll_observe, False, exc)
         return last_seen
-    _health_observe(poll_observe, True)
+    _health_observe(poll_observe, True, None)
 
     alertable, watermark = collect_detections(events, last_seen, cfg.detection.strict_people)
     if mute:

@@ -22,6 +22,9 @@ PERSISTED_FIELDS = (
     "recovery_pending",
     "total_observed_online",
     "total_observed_offline",
+    "event_fail_since",
+    "event_alerted",
+    "event_restart_attempted",
 )
 
 
@@ -96,7 +99,7 @@ def _validated(payload):
         for camera, value in values.items():
             if not isinstance(camera, str):
                 raise ValueError("health camera names must be strings")
-            if field_name == "outage_alerted":
+            if field_name in ("outage_alerted", "event_alerted", "event_restart_attempted"):
                 if not isinstance(value, bool):
                     raise ValueError("outage_alerted values must be booleans")
             elif field_name == "reconnect_count":

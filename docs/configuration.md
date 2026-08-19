@@ -83,7 +83,7 @@ instead of restarting the daemon in a tight loop.
 | `telegram` | Names of token and chat-ID environment variables. | Empty values make delivery unavailable. |
 | `groq` | Name of optional Groq API-key environment variable. | No key: captioning unavailable. |
 | `faces` | Name of a local face-ID-to-label mapping environment variable. | No face labels. |
-| `alerts` | Detection cooldown and outage threshold. | 120 s cooldown, 900 s outage threshold. |
+| `alerts` | Detection cooldown, outage threshold and event-API recovery. | 120 s cooldown, 900 s outage threshold, 300 s event-API alert. |
 | `loop` | Fast event and slow control cadence. | 4 s events, 60 s control. |
 | `observability` | Digital Twin and Shadow Auditor switches. | Entirely off. |
 | `cameras` | Non-empty list of camera definitions. | Required. |
@@ -124,6 +124,9 @@ alerts:
   cooldown: 120
   outage_threshold: 900
   stall_threshold: 900
+  event_failure_threshold: 300
+  event_restart_threshold: 900
+  event_restart_enabled: true
 
 loop:
   event_interval: 4
@@ -132,6 +135,11 @@ loop:
 
 - `cooldown` gates repeated alerts per camera/event class after confirmed delivery.
 - `outage_threshold` avoids alerting on brief network gaps.
+- `event_failure_threshold` alerts when a connected camera's `getEvents` call keeps failing. Network reachability alone is not enough:
+  a camera can answer configuration calls while its event endpoint is unavailable.
+- `event_restart_threshold` requests at most one API reboot during one event-API failure
+  episode. Set `event_restart_enabled: false` when reboots would interrupt a recorder or
+  require operator approval.
 - `stall_threshold` guards the daemon itself: if every tick has *raised* for this long, a
   🔴 goes out. The camera watchdog runs inside the tick, so when the tick is what broke,
   only this one is left to notice — without it a daemon logging an exception every poll

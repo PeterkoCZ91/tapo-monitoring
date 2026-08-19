@@ -726,6 +726,30 @@ def test_stall_watchdog_never_raises_into_the_loop(monkeypatch):
                           ok=False, now=1900)   # would raise if unguarded
 
 
+def test_watchdog_event_api_alert_restart_and_recovery(monkeypatch):
+    app = cfg.load_config_from_dict({
+        "alerts": {"event_failure_threshold": 10, "event_restart_threshold": 20},
+        "cameras": [{"name": "a", "host": "203.0.113.10"}],
+    })
+    state = daemon.MonitorState()
+    state.network_reachable["a"] = True
+    state.events_reachable["a"] = False
+    state.event_fail_since["a"] = 0
+    state.event_error["a"] = "RuntimeError: -40214"
+    sent = []
+    monkeypatch.setattr(daemon.notify, "send_text", lambda tok, chat, msg: sent.append(msg) or True)
+    from tapo_monitor import camera
+    rebooted = []
+    monkeypatch.setattr(camera, "reboot", lambda client: rebooted.append(client) or True)
+    secrets = {"telegram_token": "t", "telegram_chat": "c"}
+    daemon._watchdog_pass(app, {"a": object()}, state, now=10, secrets=secrets)
+    assert sent and "event API unavailable" in sent[0]
+    daemon._watchdog_pass(app, {"a": object()}, state, now=20, secrets=secrets)
+    assert rebooted and state.event_restart_attempted["a"] is True
+    state.events_reachable["a"] = True
+    daemon._watchdog_pass(app, {"a": object()}, state, now=30, secrets=secrets)
+    assert any("event API restored" in msg for msg in sent)
+
 # ── update_outage (pure transitions) ─────────────────────────────────────────
 
 def test_outage_no_alert_before_threshold():

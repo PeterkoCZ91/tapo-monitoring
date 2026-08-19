@@ -65,6 +65,20 @@ def test_connect_exhausts_and_returns_error():
     assert isinstance(err, RuntimeError)
 
 
+def test_reboot_calls_api_and_swallows_failure():
+    class Client:
+        def __init__(self, fail=False):
+            self.fail = fail
+            self.calls = 0
+        def reboot(self):
+            self.calls += 1
+            if self.fail:
+                raise RuntimeError("busy")
+    ok = Client()
+    assert camera.reboot(ok) is True
+    assert ok.calls == 1
+    assert camera.reboot(Client(fail=True)) is False
+
 # ── new_events / newest_start ────────────────────────────────────────────────
 
 def test_new_events_filters_and_sorts():

@@ -61,6 +61,19 @@ def connect(factory, retries=3, sleep=_time.sleep, delay=5):
     return None, last_err
 
 
+def reboot(client):
+    """Request a camera reboot through its authenticated API client.
+
+    Returns ``True`` only when the API call was accepted; never raises into the
+    monitor loop.
+    """
+    try:
+        client.reboot()
+        return True
+    except Exception:  # noqa: BLE001 - health recovery must be best effort
+        return False
+
+
 def new_events(events, last_seen):
     """Events whose start_time is strictly newer than the watermark, oldest first."""
     fresh = [e for e in (events or []) if e.get("start_time", 0) > last_seen]

@@ -60,6 +60,19 @@ def test_collect_detections_watermark_only_from_fresh():
     assert watermark == 100
 
 
+def test_run_monitor_reports_getevents_error():
+    errors = []
+    class Cam:
+        def getEvents(self):
+            raise RuntimeError("-40214")
+    cfg = config.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0]
+    assert monitor.run_monitor(
+        Cam(), cfg, 0, now=100, groq_key="", telegram_token="", telegram_chat="",
+        snapshot=lambda *a: None, time_str=lambda e: "t",
+        poll_observe=lambda ok, error=None: errors.append((ok, str(error))),
+    ) == 0
+    assert errors == [(False, "-40214")]
+
 def _person_event(start=100):
     # events_1 bit19 (524288) + bit1 (2) = camera-confirmed person
     return {"start_time": start, "events_1": 524290, "alarm_type": 2}

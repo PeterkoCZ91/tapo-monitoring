@@ -273,6 +273,10 @@ class MonitorState:
     connect_backoff_until: dict = field(default_factory=dict)
     health_path: str | None = None
     events_reachable: dict = field(default_factory=dict)
+    event_error: dict = field(default_factory=dict)
+    event_fail_since: dict = field(default_factory=dict)
+    event_alerted: dict = field(default_factory=dict)
+    event_restart_attempted: dict = field(default_factory=dict)
     rtsp_reachable: dict = field(default_factory=dict)
     desired_plans: dict = field(default_factory=dict)
     twin_last_probe: dict = field(default_factory=dict)
@@ -847,8 +851,17 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             return bool(g and g.get("delivered")
                         and (now - g["last_event_at"]) <= _cfg.sampler.group_gap)
 
-        def poll_observe(ok, _name=name):
+        def poll_observe(ok, error=None, _name=name):
             state.events_reachable[_name] = bool(ok)
+            if ok:
+                state.event_fail_since.pop(_name, None)
+                state.event_error.pop(_name, None)
+            else:
+                state.event_fail_since.setdefault(_name, now)
+                if error is not None:
+                    detail = type(error).__name__
+                    text = str(error).replace("\n", " ").strip()
+                    state.event_error[_name] = f"{detail}: {text[:160]}" if text else detail
 
         def media_observe(ok, _name=name):
             state.rtsp_reachable[_name] = bool(ok)
@@ -1703,6 +1716,7 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
     """
     token = secrets["telegram_token"]
     chat = secrets["telegram_chat"]
+    from . import camera as camera_api
     previous = health.snapshot(state)
     for cfg in app.cameras:
         if cfg.night_only and not night:
@@ -1737,6 +1751,52 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
                 state.recovery_pending.pop(cfg.name, None)
             else:
                 log.warning("recovery notification delivery failed for %s", cfg.name)
+    for cfg in app.cameras:
+        if cfg.night_only and not night:
+            continue
+        if "getevents" not in cfg.detection.sources:
+            continue
+        name = cfg.name
+        event_ok = state.events_reachable.get(name)
+        if event_ok is False:
+            started = state.event_fail_since.setdefault(name, now)
+            age = max(0, now - started)
+            if age >= app.alerts.event_failure_threshold and not state.event_alerted.get(name):
+                detail = f" after {notify.format_duration(age)}"
+                reason = state.event_error.get(name)
+                if reason:
+                    detail += f" ({reason})"
+                delivered = notify.send_text(
+                    token, chat, f"event API unavailable for camera {name}{detail}"
+                )
+                if delivered:
+                    state.event_alerted[name] = True
+            if (app.alerts.event_restart_enabled
+                    and age >= app.alerts.event_restart_threshold
+                    and not state.event_restart_attempted.get(name)):
+                client = cam_clients.get(name)
+                if client is not None:
+                    state.event_restart_attempted[name] = True
+                    if camera_api.reboot(client):
+                        log.warning("event API restart requested for %s", name)
+                        notify.send_text(
+                            token, chat, f"event API restart requested for camera {name}"
+                        )
+                    else:
+                        log.warning("event API restart failed for %s", name)
+        elif event_ok is True:
+            if state.event_alerted.get(name):
+                age = max(0, now - state.event_fail_since.get(name, now))
+                delivered = notify.send_text(
+                    token, chat,
+                    f"event API restored for camera {name} after "
+                    f"{notify.format_duration(age)}"
+                )
+                if delivered:
+                    state.event_alerted.pop(name, None)
+            state.event_fail_since.pop(name, None)
+            state.event_restart_attempted.pop(name, None)
+            state.event_error.pop(name, None)
     if state.health_path and health.snapshot(state) != previous:
         health.save_state(state.health_path, state, logger=log)
 

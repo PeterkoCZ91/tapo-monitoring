@@ -50,6 +50,8 @@ recorder and scorer can complement the daemon, but neither is required for the b
 - **It tells you when it stops working** — a dead-man's switch outside the main loop
   reports a daemon whose every tick is failing, because silence otherwise looks exactly
   like a quiet night.
+- **Event-API watchdog** — separates `getEvents` failures from network reachability, reports
+  recovery and can request one bounded API reboot per failure episode.
 - **Camera Digital Twin** — redacted safe-getter snapshots, desired/actual drift and
   layered health without a second login loop.
 - **Shadow Detection Auditor** — a private, media-free SQLite ledger correlates camera

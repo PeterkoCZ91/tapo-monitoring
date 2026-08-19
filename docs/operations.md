@@ -39,6 +39,12 @@ Use another instance only when cameras live on a different host/network or you w
 isolated state. Runtime state owned by an instance: event watermarks, per-camera alert
 cooldowns, camera-down watchdog, pending SD follow-up queue, sampler groups, weather and
 day/night control decisions.
+Event-API health is tracked separately from network reachability. When `getEvents` fails,
+the daemon leaves the watermark unchanged, records the exception in the audit stream and
+uses `alerts.event_failure_threshold` / `alerts.event_restart_threshold` for warning and
+optional one-time recovery. A successful poll clears the episode and emits a recovery
+notice when a warning was delivered.
+
 
 Network health transitions survive daemon restarts in
 `$XDG_STATE_HOME/tapo-monitor/health.json` (default

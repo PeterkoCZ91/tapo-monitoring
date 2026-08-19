@@ -96,6 +96,8 @@ Rain makes auto-tracking cameras chase raindrops and IR reflections. Using open-
 ## 6. Operations
 
 - Camera-down watchdog with de-duplicated Telegram alerts.
+- Event-API watchdog: records `getEvents` errors, alerts on sustained failures, reports
+  recovery, and can request one API reboot per failure episode.
 - Daemon dead-man's switch (`alerts.stall_threshold`): the camera watchdog runs inside the
   tick, so a fault in the tick suppresses the alerting meant to report it. A second
   watchdog in the outer loop sends 🔴 once every tick has raised for the threshold and 🟢

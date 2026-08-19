@@ -275,6 +275,33 @@ def test_stall_threshold_defaults_and_overrides():
     assert cfg.load_config_from_dict(data).alerts.stall_threshold == 300
 
 
+def test_event_watchdog_defaults_and_overrides():
+    app = cfg.load_config_from_dict(_minimal())
+    assert app.alerts.event_failure_threshold == 300
+    assert app.alerts.event_restart_threshold == 900
+    assert app.alerts.event_restart_enabled is True
+    data = {"alerts": {"event_failure_threshold": 20, "event_restart_threshold": 40,
+                         "event_restart_enabled": False},
+            "cameras": [{"name": "front", "host": "192.0.2.50"}]}
+    app = cfg.load_config_from_dict(data)
+    assert app.alerts.event_failure_threshold == 20
+    assert app.alerts.event_restart_threshold == 40
+    assert app.alerts.event_restart_enabled is False
+
+
+@pytest.mark.parametrize(
+    ("alerts", "message"),
+    [({"event_failure_threshold": 0}, "event_failure_threshold"),
+     ({"event_failure_threshold": 60, "event_restart_threshold": 30},
+      "event_restart_threshold")],
+)
+def test_event_watchdog_rejects_unsafe_ranges(alerts, message):
+    data = {"alerts": alerts, "cameras": [{"name": "front", "host": "192.0.2.50"}]}
+    with pytest.raises(cfg.ConfigError, match=message):
+        cfg.load_config_from_dict(data)
+
+
+
 def test_observability_defaults_are_safe_and_opt_in():
     obs = cfg.load_config_from_dict(_minimal()).observability
     assert obs.digital_twin is False

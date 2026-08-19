@@ -112,6 +112,11 @@ Runs on `loop.event_interval` (default 4 seconds) using the connected client:
    Telegram confirms success;
 6. process due sampler and SD/local-recorder jobs;
 7. run the optional ONVIF soft pan guard.
+If `getEvents` raises, the event watermark is left unchanged, the error is written to the
+structured audit stream, and the event-health watchdog can notify Telegram and request one
+lockout-aware API reboot after its configured thresholds. A ping or successful configuration
+read does not clear this condition; only a successful event poll does.
+
 
 The event pass never creates a new camera login. This is central to both low latency and
 lockout avoidance.
