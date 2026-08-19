@@ -465,6 +465,28 @@ def test_motion_empty_still_drops_without_sd_motion(monkeypatch):
     assert sent == [] and deferred == []
 
 
+def test_recording_source_defers_bare_motion_for_scored_frame(monkeypatch):
+    """Recording-backed cameras must search the recorder before dropping motion."""
+    sent, deferred = [], []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+
+    class Cam:
+        def getEvents(self):
+            return [{"start_time": 100, "events_1": 2, "alarm_type": 2}]
+
+    cfg = config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10",
+                      "sd_snapshot": True, "snapshot_source": "recording"}]}
+    ).cameras[0]
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        score=lambda path: 0.1,
+        defer=lambda ev, et, live_sent: deferred.append((et, live_sent)))
+    assert sent == []
+    assert deferred == [("motion", False)]
+
+
 def test_run_monitor_raw_mode_sends_motion_without_groq(monkeypatch):
     # enrich.groq=false = raw mode: no AI arbiter, so bare motion must not be dropped
     # as "empty scene" (blank description) — the live frame goes straight to Telegram.

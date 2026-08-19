@@ -206,9 +206,14 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         event_flags = detection.decode_events_1(event.get("events_1"))
         defer_motion = (
             etype == "motion"
-            and cfg.sd_motion
-            and event_flags["pir"]
             and defer is not None
+            and (
+                # A local recorder is the configured alert-media source. Let it
+                # inspect bare motion too; the recorder path still sends only a
+                # frame that clears the normal scorer threshold.
+                cfg.snapshot_source == "recording"
+                or (cfg.sd_motion and event_flags["pir"])
+            )
         )
         if not _can_alert(can_alert, etype, event):
             if etype != "motion" and has_known_face(event, face_names):
