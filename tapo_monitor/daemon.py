@@ -172,11 +172,15 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None):
             cam.setVehicleDetection(False)
         except Exception:
             pass
+    # A refused recall must be visible: the camera answers configuration calls happily
+    # while sitting off-target, so a silent failure here is indistinguishable from a
+    # healthy camera. One sat aimed at the ground for two days (2026-08-20) while this
+    # very call was re-sent every tick.
     if plan.preset:
         try:
             cam.setPreset(plan.preset)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - a camera control failure must not stop polling
+            log.warning("failed to recall preset %s: %s", plan.preset, exc)
     # apply_smarttrack MUST be the LAST configuration call before ensure_autotrack.
     # Live evidence (2026-06-23) showed one of the calls above resets smart_track_info
     # to ALL-OFF; running SmartTrack first let those calls wipe the night people-only

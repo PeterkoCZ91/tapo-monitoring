@@ -324,6 +324,28 @@ def test_apply_plan_disables_vehicle_detection(monkeypatch):
     assert cam.vehicle is False
 
 
+def test_apply_plan_logs_preset_recall_failure(monkeypatch, caplog):
+    # A refused preset recall used to be swallowed by a bare except, so a camera stuck
+    # off-target looked exactly like a healthy one. Live cost (2026-08-20): a camera sat
+    # aimed at the ground for two days while the daemon re-sent the same recall every
+    # tick, and no log line said the recall was going nowhere.
+    FakeCam, tracking = _nightvision_fakecam()
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+
+    class RefusingCam(FakeCam):
+        def setPreset(self, preset):
+            raise RuntimeError("MOTOR_LOCKED_ROTOR")
+
+    cam = RefusingCam()
+    plan = daemon.plan_camera(_cam(role="static", tracking={"day_preset": "4"}),
+                              night=False, rain_active=False)
+    assert plan.preset == "4"
+    with caplog.at_level("WARNING", logger="tapo_monitor.daemon"):
+        daemon.apply_plan(cam, plan)
+    assert "4" in caplog.text
+    assert "MOTOR_LOCKED_ROTOR" in caplog.text
+
+
 def test_apply_plan_smarttrack_is_last_config_before_autotrack(monkeypatch):
     # Live evidence (2026-06-23): one of setMotionDetection/setPersonDetection/
     # setVehicleDetection/setPreset resets the camera's smart_track_info to ALL-OFF.
