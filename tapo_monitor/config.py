@@ -344,7 +344,11 @@ def _detection(data, where):
     d = data or {}
     sources = d.get("sources", ["getevents"])
     _check_subset(sources, DETECTION_SOURCES, "detection.sources", where)
-    return DetectionConfig(sources=list(sources), strict_people=bool(d.get("strict_people", True)))
+    # Do not coerce strings: bool("false") is True and would invert the policy.
+    strict_people = d.get("strict_people", True)
+    if not isinstance(strict_people, bool):
+        raise ConfigError(f"{where}: detection.strict_people must be a boolean")
+    return DetectionConfig(sources=list(sources), strict_people=strict_people)
 
 
 def _tracking(data, where):

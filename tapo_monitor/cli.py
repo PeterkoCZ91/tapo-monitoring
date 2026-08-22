@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -237,6 +238,8 @@ def _shadow_report(argv, *, now=None):
     args = parser.parse_args(argv)
     if args.hours <= 0:
         parser.error("--hours must be greater than zero")
+    if not math.isfinite(args.window) or args.window <= 0:
+        parser.error("--window must be a finite number greater than zero")
     end = args.end if args.end is not None else (time.time() if now is None else now)
     start = max(0.0, end - args.hours * 3600)
     events = ledger.EventLedger(args.ledger_path)

@@ -1,6 +1,8 @@
 import json
 import types
 
+import pytest
+
 from tapo_monitor import cli, health, ledger, twin
 
 
@@ -109,6 +111,29 @@ def test_shadow_record_and_report_commands(tmp_path, capsys):
     assert report["matched"] == 1
     assert report["camera_only"] == 0
     assert report["shadow_only"] == 0
+
+
+def test_shadow_report_rejects_non_positive_window(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main([
+            "shadow-report", "front", "--window", "-1",
+            "--ledger", str(tmp_path / "events.sqlite3"),
+        ])
+
+    assert exc.value.code == 2
+    assert "--window" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("window", ["nan", "inf", "-inf"])
+def test_shadow_report_rejects_non_finite_window(tmp_path, capsys, window):
+    with pytest.raises(SystemExit) as exc:
+        cli.main([
+            "shadow-report", "front", "--window", window,
+            "--ledger", str(tmp_path / "events.sqlite3"),
+        ])
+
+    assert exc.value.code == 2
+    assert "--window" in capsys.readouterr().err
 
 
 def _probe_config(tmp_path):

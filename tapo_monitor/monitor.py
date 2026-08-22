@@ -232,8 +232,9 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 log.info("cooldown override %s: recognized face present", etype)
             else:
                 log.info("skip %s: cooldown active", etype)
+                # Only this event is cooled down; a later event in the same poll may be new.
                 audit_event(cfg, event, etype, "live", "cooldown")
-                break
+                continue
         image = snapshot(cam, event)
         if not image:
             # RTSP capture on a slow Pi (e.g. Pi Zero) fails transiently — one retry

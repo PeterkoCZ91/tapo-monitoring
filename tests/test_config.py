@@ -180,6 +180,14 @@ def test_invalid_detection_source_is_error():
         ]})
 
 
+def test_strict_people_requires_a_boolean():
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config_from_dict({"cameras": [{
+            "name": "x", "host": "203.0.113.10",
+            "detection": {"strict_people": "false"},
+        }]})
+
+
 def test_duplicate_camera_names_is_error():
     with pytest.raises(cfg.ConfigError):
         cfg.load_config_from_dict({"cameras": [

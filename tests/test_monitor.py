@@ -295,6 +295,31 @@ def test_run_monitor_drops_motion_when_groq_blank(monkeypatch):
     assert sent == []            # blank Groq -> motion dropped, no blank alert
 
 
+def test_run_monitor_continues_after_cooldown_event():
+    sent = []
+    grabbed = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(1050), _person_event(1300)]
+
+    cfg = config.load_config_from_dict({
+        "cameras": [{"name": "a", "host": "203.0.113.10",
+                     "enrich": {"groq": False}}]
+    }).cameras[0]
+    watermark = monitor.run_monitor(
+        Cam(), cfg, 0, now=1300, groq_key="", telegram_token="", telegram_chat="",
+        snapshot=lambda _cam, event: grabbed.append(event["start_time"]) or "/tmp/x.jpg",
+        time_str=lambda _event: "T",
+        can_alert=lambda _etype, event: event["start_time"] == 1300,
+        send_alert=lambda image, caption, score: sent.append((image, caption, score)) or True,
+    )
+
+    assert grabbed == [1300]
+    assert len(sent) == 1
+    assert watermark == 1300
+
+
 def test_cooldown_overridden_by_recognized_face(monkeypatch):
     # 2026-07-06 18:37:22 live: the camera recognized 3 known faces 40 s after a person
     # alert, and the per-type cooldown silently ate the richest event of the day. A face

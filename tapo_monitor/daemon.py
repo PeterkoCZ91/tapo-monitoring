@@ -202,12 +202,22 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
     """
     now = now if now is not None else _time.time()
     is_night = is_night or scheduling.is_night
-    is_raining = is_raining or weather.is_raining_now
+    if is_raining is None:
+        def is_raining(now, *, threshold, poll_interval):
+            return weather.is_raining_now(
+                now,
+                threshold=threshold,
+                poll_interval=poll_interval,
+                lat=app.location.lat,
+                lon=app.location.lon,
+                tz=app.location.tz,
+            )
 
     night = is_night() if is_night is not scheduling.is_night else scheduling.is_night(location=app.location)
     plans = {}
     for cfg in app.cameras:
         rain_active = False
+        # Use the config location; weather module defaults are import-time env values.
         if cfg.weather.strategy != "none" or cfg.weather.storm_park:
             rain_active = is_raining(
                 now,

@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from unittest.mock import sentinel
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -80,6 +81,21 @@ def test_run_once_plans_each_camera():
     assert plans["b"].autotrack_on is False
 
 
+def test_run_once_keeps_injected_weather_callback_contract():
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "a", "host": "203.0.113.10",
+         "weather": {"strategy": "lower_sensitivity"}},
+    ]})
+    seen = []
+
+    def is_raining(now, threshold, poll_interval):
+        seen.append((now, threshold, poll_interval))
+        return False
+
+    daemon.run_once(app, now=1000, is_night=lambda: True, is_raining=is_raining)
+    assert seen == [(1000, 0.1, 900)]
+
+
 def test_run_once_skips_weather_when_strategy_none():
     app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
     called = {"weather": 0}
@@ -89,6 +105,25 @@ def test_run_once_skips_weather_when_strategy_none():
     # default weather strategy is "none" -> weather must not be queried
     daemon.run_once(app, now=1, is_night=lambda: True, is_raining=is_raining)
     assert called["weather"] == 0
+
+
+def test_run_once_passes_configured_location_to_weather(monkeypatch):
+    app = cfg.AppConfig(
+        location=cfg.Location(
+            lat=sentinel.weather_lat, lon=sentinel.weather_lon, tz=sentinel.weather_tz,
+        ),
+        cameras=[_cam(name="a", weather={"strategy": "lower_sensitivity"})],
+    )
+    seen = {}
+    def is_raining(now, **kwargs):
+        seen.update(kwargs)
+        return True
+    monkeypatch.setattr(daemon.weather, "is_raining_now", is_raining)
+    plans = daemon.run_once(app, now=1, is_night=lambda: True)
+    assert seen == {"threshold": 0.1, "poll_interval": 900,
+                    "lat": sentinel.weather_lat, "lon": sentinel.weather_lon,
+                    "tz": sentinel.weather_tz}
+    assert plans["a"].motion_sensitivity == 20
 
 
 def test_run_once_applies_via_connect(monkeypatch):
