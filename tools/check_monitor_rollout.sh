@@ -9,20 +9,38 @@
 # usage: check_monitor_rollout.sh [EXPECTED_FINGERPRINT]
 #   TAPO_MONITOR_UNIT    systemd unit to inspect      (default tapo-monitor.service)
 #   TAPO_MONITOR_PYTHON  interpreter of the venv      (default python3)
-#   TAPO_MONITOR_CONFIG  config for the selfcheck     (default ~/tapo-monitor/cameras.yaml)
+#   TAPO_MONITOR_CONFIG  config for the selfcheck     (default <package root>/cameras.yaml)
+#   TAPO_MONITOR_ENV     env file to source first     (default: the unit's EnvironmentFile)
 set -uo pipefail
 
 expected_fingerprint="${1:-}"
 unit="${TAPO_MONITOR_UNIT:-tapo-monitor.service}"
 python_bin="${TAPO_MONITOR_PYTHON:-python3}"
-config="${TAPO_MONITOR_CONFIG:-$HOME/tapo-monitor/cameras.yaml}"
+# A deployed host is an rsync copy, not an installed package: tools/ sits beside
+# tapo_monitor/, so the package root is one level up from this script.
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+config="${TAPO_MONITOR_CONFIG:-$root/cameras.yaml}"
 failures=()
+
+# Assert the credentials the service actually gets: read the env file from the unit
+# itself rather than guessing a host-specific path.
+env_file="${TAPO_MONITOR_ENV:-$(systemctl show -p EnvironmentFiles --value "$unit" 2>/dev/null \
+    | tr ' ' '\n' | sed 's/^-//' | grep -m1 '^/' || true)}"
+if [[ -n "$env_file" && -r "$env_file" ]]; then
+    set -a
+    # Host-specific path, so shellcheck cannot follow it.
+    # shellcheck source=/dev/null
+    . "$env_file"
+    set +a
+fi
+
+run_cli() { (cd "$root" && PYTHONPATH="$root" "$python_bin" -m tapo_monitor.cli "$@"); }
 
 fail() { echo "  $1: FAILED${2:+ ($2)}"; failures+=("$1"); }
 pass() { echo "  $1: ok${2:+ ($2)}"; }
 warn() { echo "  $1: unknown${2:+ ($2)}"; }
 
-echo "monitor rollout check: $unit"
+echo "monitor rollout check: $unit (package $root)"
 
 state="$(systemctl show -p ActiveState --value "$unit" 2>/dev/null || true)"
 sub_state="$(systemctl show -p SubState --value "$unit" 2>/dev/null || true)"
@@ -35,7 +53,7 @@ else
     fail unit "ActiveState=$state SubState=$sub_state"
 fi
 
-version_output="$("$python_bin" -m tapo_monitor.cli version 2>&1)" || {
+version_output="$(run_cli version 2>&1)" || {
     fail version "the deployed package cannot even report its version"
     version_output=""
 }
@@ -50,7 +68,7 @@ if [[ -n "$fingerprint" ]]; then
     fi
 fi
 
-if "$python_bin" -m tapo_monitor.cli selfcheck "$config" > /tmp/monitor-selfcheck.$$ 2>&1; then
+if run_cli selfcheck "$config" > /tmp/monitor-selfcheck.$$ 2>&1; then
     pass selfcheck
 else
     fail selfcheck "see output below"

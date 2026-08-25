@@ -120,6 +120,14 @@ Status: **core v1 shipped; optional exporters remain planned**
 - [x] Collect bounded, secret-free latency aggregates for snapshot, scorer, Telegram and
   SD/recording follow-up operations in the durable Digital Twin state.
 - [ ] Add a standalone JSON status endpoint and optional Prometheus/MQTT export.
+- [ ] Make the repair policy consistent: `auto_fix` and `allowed_repairs` take effect even
+  when `reliability.enabled` is false, so trimming the allow-list silently disables
+  repairs that guard known regressions (person detection off, auto-track without the
+  people-only filter).
+- [ ] Rotate the metrics journal on size as well as age, so a burst cannot outgrow a disk
+  between two age checks.
+- [ ] Sanitise addresses in the ledger at the sanitiser, not only at each caller: extend
+  the sensitive-value pattern with IPv4 and session-token shapes as defence in depth.
 
 The remaining exporter item is operationally optional: the CLI, twin state and scorer
 `/health`/`/metrics` endpoints already provide machine-readable status without opening a
@@ -137,12 +145,53 @@ Status: **pilot v1 deployed (2026-08-25)**
 - [ ] Preserve lead/follow camera pairs with event-time delta and derive a probable
   transition direction only after camera-clock alignment; never infer biometric identity.
 - [ ] Select the best frame across cameras.
+- [ ] Measure and report each camera's clock offset. The duplicate gate compares event
+  times across cameras, so a skew larger than the window makes it silently inert — and any
+  later lead/follow inference would be worse than inert.
+- [ ] Decide the preset policy for `role: static`. Such a camera is planned no preset
+  movement, so its configured preset is never recalled; a camera that has been physically
+  re-aimed once has no automatic way back.
 - Give PTZ handoffs a bounded lease and always restore the previous control policy.
 
 The first slice is deliberately limited to configured camera groups. It leaves camera
 motion untouched, does not use `handoff_preset`, shares one gate across live/sampler/SD
 delivery paths, and persists the event watermark after each detection pass. The first
 production pilot uses two cameras with overlapping views.
+
+## Phase 6 — Deployment and fleet integrity
+
+Status: **partially shipped**
+
+Deployed hosts are rsync copies of the package, not git checkouts, and a partial copy has
+twice produced a daemon that ran for hours while alerting on nothing. The work here is
+about making a deploy verifiable rather than hopeful.
+
+- [x] `tapo-monitor version`: release plus a fingerprint over the deployed module set, so a
+  host can state which code it runs and a half-copied package differs visibly from its source.
+- [x] `tapo-monitor selfcheck`: imports every module, loads the config, asserts the
+  credential env vars that config names are set, and finds `ffmpeg`.
+- [x] `tools/check_monitor_rollout.sh` and `tools/check_scorer_rollout.sh`: post-restart
+  verification for both sides, including a unit in `auto-restart` that `is-active` hides.
+- [x] `OnFailure` plus a start limit on both units, so a crash loop reports itself instead
+  of retrying forever in silence.
+- [ ] One deploy path: full-package transfer into a timestamped release directory, a
+  `selfcheck` inside it, then an atomic symlink switch and a per-host restart. Rollback
+  becomes re-pointing the symlink instead of finding the right tarball. Requires the unit
+  to start from an absolute interpreter and a `__main__` entry point.
+- [ ] Snapshot each host's config and env file into the release directory it belongs to,
+  so a rollback restores the configuration that matched that code.
+- [ ] Reject unknown configuration keys (warn first, then fail). A mistyped key currently
+  takes its default silently, and a dropped `rotate` costs roughly a third of the person
+  score — a silent alert killer.
+- [ ] Nightly fleet-drift report: compare each host's fingerprint against the intended
+  release and say so once when a host has diverged. Manual inventory found exactly this
+  drift after a header change had already shipped.
+- [ ] Make the repository's unit templates match a real host, or ship a provisioning
+  script. The shared scorer currently runs a hand-written unit with hardcoded paths, so a
+  replacement cannot be built from the repository alone.
+- [ ] Failure notification on the scorer host. It is the single point of failure for every
+  camera's alerts and the only host with no Telegram credentials, so its crash loop is the
+  one that cannot report itself.
 
 ## Research tracks
 
