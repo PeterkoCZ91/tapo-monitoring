@@ -24,13 +24,25 @@ only shared contract is HTTP:
 ```text
 POST /score  JPEG bytes -> {"person": float, "animal": float, "classes": {...}}
 GET /health              -> {"ok": true}
-GET /metrics             -> aggregate request, inference and latency counters
+GET /metrics             -> aggregate request, candidate, failure and latency counters
 ```
 
 The monitor gates person alerts on `person` only. `animal` is returned for audit and
 calibration, but an animal score can never pass a person-alert threshold. `/metrics`
 contains aggregate counts and durations only: it does not retain JPEGs, URLs, camera names
 or client addresses.
+
+The live `/metrics` counters include `score_successes`, `person_candidates`,
+`animal_candidates`, `malformed_responses`, sanitised `failure_reasons` and recent-window
+`request_seconds_p50`/`p95` plus `score_seconds_p50`/`p95` in addition to the request,
+inference and latency fields. `sources` contains the same aggregate counters grouped by a
+16-hex pseudonymous source ID; it never contains camera names or URLs. When the durable
+metrics journal is configured, cumulative counters survive a service restart. Percentiles
+are intentionally recent-window measurements, bounded to keep memory constant. They
+describe only the shared scorer: caller retry/circuit-breaker/fallback, stream-freeze and
+notification counters remain caller-side. Run
+`tools/check_scorer_rollout.sh http://SCORER_HOST:8766` after deployment; it fails when the
+endpoint is healthy but still running the older metrics schema.
 
 ## Monitor instances
 
@@ -88,17 +100,41 @@ state paths, CLI commands, privacy boundaries and rollout guidance are in
 TAPO_SCORER_MODEL=/opt/tapo-monitor/models/yolox_m.onnx
 TAPO_SCORER_PORT=8766
 TAPO_SCORER_INPUT_SIZE=640
+TAPO_SCORER_METRICS_FILE=/opt/tapo-monitor/data/scorer.jsonl
+TAPO_SCORER_METRICS_PERSIST_SECONDS=60
+TAPO_SCORER_METRICS_RETENTION_DAYS=7
+TAPO_SCORER_METRICS_RETENTION_FILES=8
 ```
 
-3. Install and start the unit:
+The four `TAPO_SCORER_METRICS_*` values are read from this file by the process itself and
+never appear in `ExecStart`: an undefined `${VAR}` there expands to nothing, and the
+service would exit before the model loads — under `Restart=always` that is an invisible
+crash loop caused by an observability setting. Unset, blank and unparseable values all
+fall back to the built-in defaults.
+
+3. Install and start the unit. **On an existing host, write `scorer.env` before copying
+   the unit**, and note that `install` overwrites it — copy the example only when
+   provisioning, and hand-edit an env file that already carries local paths:
 
 ```bash
+sudo install -d -o tapo -g tapo /opt/tapo-monitor/data
+sudo install -m 0640 systemd/tapo-scorer.env.example /etc/tapo-monitor/scorer.env
+# Edit scorer.env if the service user, model path or retention differs.
 sudo cp systemd/tapo-scorer@.service /etc/systemd/system/tapo-scorer@.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now tapo-scorer@tapo
 curl -s http://127.0.0.1:8766/health   # -> {"ok": true}
-curl -s http://127.0.0.1:8766/metrics  # request/inference/latency counters
+curl -s http://127.0.0.1:8766/metrics  # current aggregate counters; no image data
+tools/check_scorer_rollout.sh http://127.0.0.1:8766
 ```
+
+When `TAPO_SCORER_METRICS_FILE` is set, the scorer also writes one aggregate JSON line
+after the configured persistence interval. The small `.state` sidecar restores cumulative
+counters after a restart. The current JSONL file rotates once its **oldest record** is
+older than the retention window and keeps eight rotated files; it contains timestamps,
+counters, latency totals and sanitised failure reasons only — never JPEGs, URLs, camera
+names or client addresses. The age deliberately comes from the first record rather than
+the file mtime, which an every-minute append keeps permanently fresh.
 
 Point each camera's `scorer.url` at the service:
 
@@ -111,11 +147,33 @@ scorer:
 
 ## Deploy the monitor
 
+Deploy the **whole package**, never a subset of changed files: modules are versioned
+together and a partial copy fails at import, which `Restart=always` then retries forever.
+
 ```bash
-tapo-monitor check /etc/tapo-monitor/cameras.yaml   # validate before restart
+tapo-monitor version                                # fingerprint of the tree to be copied
+# ... copy the full package to the host ...
+tapo-monitor selfcheck /etc/tapo-monitor/cameras.yaml   # imports, config, credentials, ffmpeg
 sudo systemctl restart tapo-monitor
+tools/check_monitor_rollout.sh <FINGERPRINT>        # on the host, after the restart
 journalctl -u tapo-monitor -f
 ```
+
+`version` prints the release plus a short digest over the deployed module set, so a host
+can answer "which code am I running" without being a git checkout — and a half-copied
+package reports a different fingerprint than the tree it came from. `selfcheck` imports
+every module, loads the config, asserts that the credential env vars named by that config
+are actually set, and looks for `ffmpeg`; it prints env var *names*, never values.
+`tools/check_monitor_rollout.sh` re-checks the unit state (an `auto-restart` sub-state is
+the crash loop `is-active` hides), the fingerprint, `selfcheck`, and the journal since the
+restart. It reports rather than asserts liveness: the daemon logs per decision, not per
+poll, so a quiet camera is not a failure.
+
+Both units carry `OnFailure=pi-failure-notify@%n.service` with `StartLimitBurst=5` per 300
+seconds, so a crash loop stops retrying and sends one Telegram message instead of failing
+silently forever. `pi_notify.sh` must be at `/usr/local/bin/pi_notify.sh`; it reads the
+Telegram secrets from `/etc/tapo-monitor/secrets.env`, and a host that keeps them
+elsewhere sets `TAPO_ENV_FILE` in `/etc/tapo-monitor/notify.env`.
 
 ## Snapshot sources
 
@@ -239,7 +297,14 @@ a missing nightly run is visible, not silent.
 ```bash
 tapo-monitor shadow-scan cameras.yaml            # yesterday, default budget/pacing
 tapo-monitor shadow-scan cameras.yaml --date 2026-08-12 --budget 800 --rate 2.0
+tapo-monitor shadow-scan cameras.yaml --extract-budget 3600   # cap the decode phase
 ```
+
+`--extract-budget` bounds the ffmpeg decode phase for the whole run (default 5400 s). The
+per-segment timeouts bound one call each, and a full day is 96 segments per camera, so
+without a run-level ceiling a slow host can still decode into the working morning. A run
+that hits the ceiling counts the skipped segments per camera and sets `extract_exhausted`
+in the summary — a trimmed run never looks like a complete one.
 
 Schedule it with a systemd timer in the small hours, niced, with the same environment
 file as the daemon:

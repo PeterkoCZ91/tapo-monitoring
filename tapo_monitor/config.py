@@ -109,6 +109,7 @@ class PanLimitConfig:
 class CoordinatorConfig:
     group: str | None = None
     handoff_preset: str | None = None
+    scene_window: int = 15
 
 
 @dataclass
@@ -478,6 +479,12 @@ def _camera(data, index):
     schedule = _check_enum(data.get("schedule", "astral"), SCHEDULES, "schedule", where)
     coord = data.get("coordinator") or {}
     try:
+        scene_window = int(coord.get("scene_window", 15))
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}: 'coordinator.scene_window' must be an integer") from None
+    if scene_window < 1:
+        raise ConfigError(f"{where}: 'coordinator.scene_window' must be >= 1")
+    try:
         rtsp_port = int(data.get("rtsp_port", 554))
     except (TypeError, ValueError):
         raise ConfigError(f"{where}: 'rtsp_port' must be an integer") from None
@@ -588,6 +595,7 @@ def _camera(data, index):
         coordinator=CoordinatorConfig(
             group=coord.get("group"),
             handoff_preset=coord.get("handoff_preset"),
+            scene_window=scene_window,
         ),
     )
 

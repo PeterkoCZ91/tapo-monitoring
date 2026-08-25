@@ -70,8 +70,9 @@ def latency_snapshot(bucket: Mapping) -> dict:
 
 def recorder_health(root: str | None, host: str, *, now: float,
                     max_age: float = 300.0, segment_seconds: float = 900.0,
+                    continuity_window: float = 86_400.0,
                     lister=None, parse_start=None) -> dict:
-    """Inspect freshness and continuity of one local recorder tree.
+    """Inspect recent freshness and continuity of one local recorder tree.
 
     ``lister`` and ``parse_start`` are injectable for deterministic tests. The returned
     structure contains no absolute path, only health facts safe for twin state.
@@ -106,8 +107,16 @@ def recorder_health(root: str | None, host: str, *, now: float,
     entries.sort()
     newest_mtime = max(mtime for _start, mtime in entries)
     age = max(0.0, float(now) - newest_mtime)
-    gaps = [right[0] - left[0] for left, right in zip(entries, entries[1:], strict=False)]
-    max_gap = max(gaps, default=0.0)
+    historical_gaps = [
+        right[0] - left[0] for left, right in zip(entries, entries[1:], strict=False)
+    ]
+    recent_entries = [start for start, _mtime in entries
+                      if start >= float(now) - continuity_window]
+    recent_gaps = [right - left for left, right in zip(
+        recent_entries, recent_entries[1:], strict=False
+    )]
+    max_gap = max(recent_gaps, default=0.0)
+    historical_max_gap = max(historical_gaps, default=0.0)
     stale = age > max_age
     gap = max_gap > segment_seconds * 1.5
     status = "degraded" if stale or gap else "ok"
@@ -118,6 +127,7 @@ def recorder_health(root: str | None, host: str, *, now: float,
         "segments": len(entries),
         "latest_age_s": round(age, 3),
         "max_gap_s": round(max_gap, 3),
+        "historical_max_gap_s": round(historical_max_gap, 3),
     }
 
 

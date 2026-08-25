@@ -138,6 +138,22 @@ def test_real_capture_retry_also_rotates(monkeypatch):
     assert [kw.get("rotate") for kw in calls] == [90, 90]   # retry keeps the rotation
 
 
+def test_real_score_passes_pseudonymous_source_id(monkeypatch, tmp_path):
+    conf = config.load_config_from_dict(
+        {"cameras": [{"name": "front", "host": "203.0.113.10",
+                       "scorer": {"url": "http://scorer/score"}}]})
+    seen = []
+    monkeypatch.setattr(
+        scene_probe.scorer, "score_image",
+        lambda url, path, **kwargs: seen.append(kwargs["source_id"]) or {"person": 0.1},
+    )
+
+    result = scene_probe._real_score(1)(conf.cameras[0], str(tmp_path / "frame.jpg"))
+
+    assert result["person"] == 0.1
+    assert seen == [scene_probe.scorer.source_id_for_camera("front")]
+
+
 def test_run_records_scorer_unavailable(tmp_path):
     conf = _conf("front")
     src = tmp_path / "g.jpg"

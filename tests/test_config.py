@@ -34,6 +34,26 @@ def test_minimal_config_loads_with_defaults():
     assert cam.enrich.snapshot == "rtsp"
 
 
+def test_coordinator_group_and_scene_window_parse():
+    data = {"cameras": [{"name": "f", "host": "192.0.2.50", "coordinator": {
+        "group": "overlap-group", "scene_window": 18,
+    }}]}
+
+    coordinator = cfg.load_config_from_dict(data).cameras[0].coordinator
+
+    assert coordinator.group == "overlap-group"
+    assert coordinator.scene_window == 18
+
+
+def test_coordinator_scene_window_rejects_non_positive_value():
+    data = {"cameras": [{"name": "f", "host": "192.0.2.50", "coordinator": {
+        "scene_window": 0,
+    }}]}
+
+    with pytest.raises(cfg.ConfigError, match="scene_window"):
+        cfg.load_config_from_dict(data)
+
+
 def test_night_vision_defaults_none_and_parses():
     assert cfg.load_config_from_dict(_minimal()).cameras[0].night_vision is None
     data = {"cameras": [{"name": "f", "host": "192.0.2.50", "night_vision": "ir"}]}

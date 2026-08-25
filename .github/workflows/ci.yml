@@ -26,5 +26,11 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
+      - name: Lint (shellcheck)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck tools/*.sh pi_notify.sh
+
       - name: Test (pytest)
         run: pytest -q

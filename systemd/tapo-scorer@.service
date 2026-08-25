@@ -2,11 +2,22 @@
 Description=tapo-monitor shared YOLO scoring service
 After=network-online.target
 Wants=network-online.target
+# A crash loop is otherwise silent: Restart=always retries forever and nothing tells
+# anyone. Give up after 5 starts in 5 minutes and report it instead.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+OnFailure=pi-failure-notify@%n.service
 
 [Service]
 Type=simple
 User=%i
 EnvironmentFile=/etc/tapo-monitor/scorer.env
+# Start from systemd/tapo-scorer.env.example when provisioning a new instance.
+# The durable-metrics settings (TAPO_SCORER_METRICS_*) are read from this file by the
+# process itself, on purpose: they must never appear as ExecStart arguments, because an
+# undefined ${VAR} expands to nothing there and argparse would exit before the model
+# loads — an invisible crash loop caused by an observability setting.
+# The metrics directory must be writable by User=%i.
 # Adjust these paths to the scorer checkout/venv on the target host.
 WorkingDirectory=/opt/tapo-monitor
 ExecStart=/opt/tapo-monitor/.venv/bin/python -m tapo_monitor.scorer_service --model ${TAPO_SCORER_MODEL} --port ${TAPO_SCORER_PORT} --input-size ${TAPO_SCORER_INPUT_SIZE}

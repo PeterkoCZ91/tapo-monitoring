@@ -3,4 +3,7 @@ Description=Telegram failure notification for %i
 
 [Service]
 Type=oneshot
+# pi_notify.sh reads the Telegram secrets from /etc/tapo-monitor/secrets.env by
+# default; a host that keeps them elsewhere points TAPO_ENV_FILE at that file here.
+EnvironmentFile=-/etc/tapo-monitor/notify.env
 ExecStart=/usr/local/bin/pi_notify.sh "🔴 <b>Service failed:</b> %i&#10;%H" "%i"

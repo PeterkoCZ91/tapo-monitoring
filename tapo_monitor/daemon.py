@@ -43,6 +43,7 @@ from . import (
     reliability,
     reviewdigest,
     sampler,
+    scene,
     scheduling,
     scorer,
     sdclip,
@@ -95,7 +96,9 @@ def plan_camera(cfg: CameraConfig, night: bool, rain_active: bool) -> CameraPlan
     sensitivity = tracking.decide_motion_sensitivity(
         rain_active, cfg.weather.motion_normal, cfg.weather.motion_rain, cfg.weather.strategy
     )
-    if not autotrack_on:
+    if cfg.role == "static":
+        preset = None
+    elif not autotrack_on:
         preset = cfg.tracking.day_preset          # parked (day or rain) -> day preset
     else:
         preset = cfg.tracking.night_preset        # tracking at night -> optional night preset
@@ -315,6 +318,7 @@ class MonitorState:
     ledger_handler: object | None = None
     pending_sd: list = field(default_factory=list)
     groups: dict = field(default_factory=dict)
+    scene_coordinator: object = field(default_factory=scene.SceneCoordinator)
     pan_guard: dict = field(default_factory=dict)   # per-camera ONVIF pan-limit state
     # ── hubpoll (battery cameras indexed on a hub) ───────────────────────────
     # Sessions are keyed by hub host, not camera: two cameras on one hub share the single
@@ -544,11 +548,15 @@ def score_for(cfg: CameraConfig):
     """Build score(image_path) -> float|None for a camera, or None if no scorer configured."""
     if not cfg.scorer.url:
         return None
+    source_id = scorer.source_id_for_camera(cfg.name)
+
+    def score_remote(image_path):
+        return scorer.score_image(cfg.scorer.url, image_path, timeout=cfg.scorer.timeout,
+                                  tiles=cfg.scorer.tiles, source_id=source_id)
 
     def score(image_path):
         started = _time.monotonic()
-        result = scorer.score_image(cfg.scorer.url, image_path, timeout=cfg.scorer.timeout,
-                                    tiles=cfg.scorer.tiles)
+        result = score_remote(image_path)
         if result is None:
             elapsed = _time.monotonic() - started
             if elapsed >= cfg.scorer.timeout:
@@ -561,8 +569,7 @@ def score_for(cfg: CameraConfig):
             # whole burst from being spammed through passthrough.
             log.info("scorer retry for %s after %.2fs failure", cfg.name, elapsed)
             _time.sleep(SCORER_RETRY_DELAY)
-            result = scorer.score_image(cfg.scorer.url, image_path, timeout=cfg.scorer.timeout,
-                                        tiles=cfg.scorer.tiles)
+            result = score_remote(image_path)
         return None if result is None else scorer.subject_score(result)
 
     return score
@@ -669,7 +676,8 @@ def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_f
     result = score_result
     if result is None:
         result = scorer.score_image(cfg.scorer.url, image, timeout=cfg.scorer.timeout,
-                                    tiles=cfg.scorer.tiles)
+                                    tiles=cfg.scorer.tiles,
+                                    source_id=scorer.source_id_for_camera(cfg.name))
     if not result:
         return image
     box = scorer.subject_box(result)
@@ -888,9 +896,20 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                     g, s, _cfg.scorer.threshold, _cfg.scorer.motion_send_threshold)
 
         def observe(event, etype, sent, delivered=False, _name=name, _cfg=cfg):
+            if delivered:
+                state.scene_coordinator.record_delivery(
+                    _cfg.coordinator.group, _name, etype, event, now,
+                    window=_cfg.coordinator.scene_window,
+                )
             if _cfg.sampler.enabled:
                 sampler.observe_event(state.groups, _name, event, etype, sent, now,
                                       _cfg.sampler, delivered=delivered)
+
+        def scene_alert(etype, event, _name=name, _cfg=cfg):
+            return state.scene_coordinator.allows(
+                _cfg.coordinator.group, _name, etype, event, now,
+                window=_cfg.coordinator.scene_window,
+            )
 
         def burst_sent(_name=name, _cfg=cfg):
             # Only a real delivery suppresses a follow-up: "sent" also means "queued for
@@ -945,6 +964,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             send_alert=send_alert,
             poll_observe=poll_observe,
             media_observe=media_observe,
+            scene_alert=scene_alert,
             mute=cfg.night_only and not night,
         )
         state.last_seen[cfg.name] = watermark
@@ -1010,6 +1030,22 @@ def close_hub_clients(state: MonitorState):
         except Exception:  # noqa: BLE001 - shutdown must not fail on a dead session
             log.debug("closing the hub session for %s failed", host, exc_info=True)
     state.hub_clients.clear()
+
+
+def inert_preset_warning(app: AppConfig):
+    """The warning for a static camera that configures a preset, or None. Pure.
+
+    ``plan_camera`` plans no preset for ``role: static``, so such a camera's
+    ``day_preset``/``night_preset`` is never recalled. The config still reads as if the
+    preset were being held — and on a camera that has been physically re-aimed once, that
+    is exactly the difference between "pointing where we think" and blind.
+    """
+    names = [cfg.name for cfg in app.cameras
+             if cfg.role == "static" and (cfg.tracking.day_preset or cfg.tracking.night_preset)]
+    if not names:
+        return None
+    return (f"preset not recalled for static camera(s) {', '.join(names)}: "
+            "role=static plans no preset movement, so the configured preset is inert")
 
 
 def hubpoll_decoder_warning(app: AppConfig, available):
@@ -1245,6 +1281,13 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
         if cam is None:
             remaining.append(entry)               # camera offline this tick -> keep
             continue
+        if not state.scene_coordinator.allows(
+                cfg.coordinator.group, entry["camera"], etype, event, now,
+                window=cfg.coordinator.scene_window):
+            log.info("skip %s: scene duplicate [sd]", etype)
+            monitor.audit_event(cfg, event, etype, "sd", "scene_duplicate",
+                                reason="same_scene")
+            continue
 
         limit = cfg.sd_jobs_per_tick
         if limit is not None and processed_by_camera.get(entry["camera"], 0) >= limit:
@@ -1474,6 +1517,14 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                 monitor.audit_event(cfg, group["event"], etype, "sampler", "cooldown")
                 group["sent"] = True
                 continue
+            if not state.scene_coordinator.allows(
+                    cfg.coordinator.group, cfg.name, etype, group["event"], now,
+                    window=cfg.coordinator.scene_window):
+                log.info("skip %s: scene duplicate [sampler]", etype)
+                monitor.audit_event(cfg, group["event"], etype, "sampler",
+                                    "scene_duplicate", reason="same_scene")
+                group["sent"] = True
+                continue
             description = _caption_describe(cfg, secrets["groq_key"], image)
             label = enrich.face_label(monitor.face_ids(group["event"]), secrets.get("face_names"))
             caption = notify.build_caption(
@@ -1490,6 +1541,10 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                 on_alert(etype)
                 group["sent"] = True
                 group["delivered"] = True
+                state.scene_coordinator.record_delivery(
+                    cfg.coordinator.group, cfg.name, etype, group["event"], now,
+                    window=cfg.coordinator.scene_window,
+                )
             else:
                 log.warning("alert %s Telegram delivery failed [sampler]", etype)
         finally:
@@ -1690,7 +1745,10 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
         watchdog(app, cam_clients, state, now=now, secrets=secrets, night=night)
         inspect(app, cam_clients, state, now=now, secrets=secrets)
         last_control = now
+    previous_watermark = dict(state.last_seen)
     monitor(app, cam_clients, state, now=now, secrets=secrets, night=night)
+    if state.health_path and state.last_seen != previous_watermark:
+        health.save_state(state.health_path, state, logger=log)
     hubpoll(app, cam_clients, state, now=now, secrets=secrets, night=night)
     sample(app, cam_clients, state, now=now, secrets=secrets, night=night)
     drain(app, cam_clients, state, now=now, secrets=secrets, night=night)
@@ -1743,6 +1801,9 @@ def main(argv=None):  # pragma: no cover - thin entry point
     decoder_warning = hubpoll_decoder_warning(app, snapshot.decoder_available())
     if decoder_warning:
         log.warning("%s", decoder_warning)
+    preset_warning = inert_preset_warning(app)
+    if preset_warning:
+        log.warning("%s", preset_warning)
     cam_clients = {}
     last_control = None
 

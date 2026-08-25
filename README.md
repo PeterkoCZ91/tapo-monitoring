@@ -133,6 +133,8 @@ available frame contains the subject.
 | Command | Purpose |
 | --- | --- |
 | `tapo-monitor check [cameras.yaml]` | Validate configuration and print the fleet summary. |
+| `tapo-monitor version` | Release plus a fingerprint of the deployed module set. |
+| `tapo-monitor selfcheck [cameras.yaml]` | Can this host run? Imports, config, credential env vars, `ffmpeg`. |
 | `tapo-monitor run [cameras.yaml]` | Start the daemon. |
 | `tapo-monitor status [health.json]` | Inspect observed uptime, outages and reconnects offline. |
 | `tapo-monitor audit-log [logfile\|-]` | Summarize event/scorer/Telegram audit records. |

@@ -2,6 +2,11 @@
 Description=tapo-monitor — config-driven Tapo camera monitoring
 After=network-online.target
 Wants=network-online.target
+# Restart=always alone retries a crash loop forever in silence — an ImportError from
+# a half-copied package never self-heals. Stop after 5 starts in 5 minutes and report.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+OnFailure=pi-failure-notify@%n.service
 
 [Service]
 Type=simple

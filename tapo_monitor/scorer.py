@@ -7,6 +7,7 @@ callers can degrade to raw passthrough (send unfiltered) — the scorer must nev
 into a silent drop.
 """
 
+import hashlib
 import json
 import logging
 import math
@@ -15,7 +16,13 @@ import urllib.request
 log = logging.getLogger(__name__)
 
 
-def score_image(url, image_path, timeout=10, tiles=1):
+def source_id_for_camera(camera_name):
+    """Return a stable pseudonymous source identifier for scorer telemetry."""
+    value = f"tapo-camera:{camera_name}".encode()
+    return hashlib.sha256(value).hexdigest()[:16]
+
+
+def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None):
     """POST a JPEG to the scoring service; dict on success, None on ANY failure.
 
     ``tiles > 1`` asks the service to also score a tiles×tiles grid (rescues distant
@@ -31,7 +38,12 @@ def score_image(url, image_path, timeout=10, tiles=1):
     if tiles and int(tiles) > 1:
         sep = "&" if "?" in url else "?"
         url = f"{url}{sep}tiles={int(tiles)}"
-    req = urllib.request.Request(url, data=body, headers={"Content-Type": "image/jpeg"})
+    headers = {"Content-Type": "image/jpeg"}
+    if isinstance(source_id, str) and len(source_id) in range(16, 65):
+        normalized_source_id = source_id.lower()
+        if all(character in "0123456789abcdef" for character in normalized_source_id):
+            headers["X-Tapo-Source-ID"] = normalized_source_id
+    req = urllib.request.Request(url, data=body, headers=headers)
     try:
         resp = urllib.request.urlopen(req, timeout=timeout)
         try:

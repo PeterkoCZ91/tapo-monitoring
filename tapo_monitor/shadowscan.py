@@ -25,6 +25,14 @@ log = logging.getLogger(__name__)
 
 DEFAULT_SCENE = 0.04
 DEFAULT_SEGMENT_CAP = 8
+FALLBACK_FRAME_CAP = 2
+SEGMENT_EXTRACTION_TIMEOUT = 120
+# Whole-run ceiling for the decode phase: the nightly timer starts at 03:00
+# and a full day is 96 segments per camera, so per-segment timeouts alone
+# would let extraction run into the working morning.
+DEFAULT_EXTRACT_BUDGET = 5400.0
+SCENE_EXTRACTION_TIMEOUT = 60
+SEEK_EXTRACTION_TIMEOUT = 30
 DEFAULT_BUDGET = 1500
 DEFAULT_RATE = 1.5
 DEFAULT_CLUSTER_GAP = 180.0
@@ -66,41 +74,73 @@ def parse_showinfo_times(stderr_text):
     return [float(m) for m in _PTS_RE.findall(stderr_text or "")]
 
 
-def _run_ffmpeg(args):  # pragma: no cover - subprocess I/O
+def _ffmpeg_timeout(args):
+    return SEEK_EXTRACTION_TIMEOUT if "-ss" in args else SCENE_EXTRACTION_TIMEOUT
+
+
+def _run_ffmpeg(args, *, timeout=None):  # pragma: no cover - subprocess I/O
+    timeout = _ffmpeg_timeout(args) if timeout is None else timeout
     proc = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                          timeout=120)
+                          timeout=timeout)
     return proc.stderr.decode("utf-8", "replace")
 
 
 def extract_candidates(mkv, seg_start, out_dir, base, *, runner=None,
-                       scene=DEFAULT_SCENE, cap=DEFAULT_SEGMENT_CAP):
+                       scene=DEFAULT_SCENE, cap=DEFAULT_SEGMENT_CAP, clock=None,
+                       scene_pass=True):
     """Scene-change candidate JPEGs (+1 uniform mid-segment frame) with epoch stamps.
 
     The uniform frame exists so a slow or static subject cannot slip through a
     scene-change-only filter. Any ffmpeg failure degrades to fewer frames, never raises.
     """
-    runner = runner or _run_ffmpeg
+    if runner is None:
+        clock = clock or time.monotonic
+        deadline = clock() + SEGMENT_EXTRACTION_TIMEOUT
+
+        def run_bounded(args):
+            remaining = deadline - clock()
+            if remaining <= 0:
+                raise TimeoutError("shadow segment ffmpeg budget exhausted")
+            return _run_ffmpeg(args, timeout=min(_ffmpeg_timeout(args), remaining))
+
+        runner = run_bounded
     out = []
     pattern = os.path.join(out_dir, f"{base}_sc_%02d.jpg")
-    try:
-        stderr = runner([
-            "ffmpeg", "-hide_banner", "-y", "-i", mkv,
-            "-vf", f"select='gt(scene,{scene})',showinfo,scale=1280:-2",
-            "-vsync", "vfr", "-frames:v", str(int(cap)), "-q:v", "2", pattern,
-        ])
-        times = parse_showinfo_times(stderr)
-        for k, offset in enumerate(times[:cap], start=1):
-            path = pattern % k
-            if os.path.exists(path) and os.path.getsize(path) > 0:
-                out.append((path, seg_start + offset))
-    except Exception:  # noqa: BLE001 - a bad segment must not end the batch
-        log.warning("shadow scan: scene extraction failed for %s", mkv, exc_info=True)
+    scene_failed = not scene_pass
+    if scene_pass:
+        try:
+            stderr = runner([
+                "ffmpeg", "-hide_banner", "-y", "-i", mkv,
+                "-vf", f"scale=1280:-2,select='gt(scene,{scene})',showinfo",
+                "-vsync", "vfr", "-an", "-frames:v", str(int(cap)), "-q:v", "2", pattern,
+            ])
+            times = parse_showinfo_times(stderr)
+            for k, offset in enumerate(times[:cap], start=1):
+                path = pattern % k
+                if os.path.exists(path) and os.path.getsize(path) > 0:
+                    out.append((path, seg_start + offset))
+        except Exception:  # noqa: BLE001 - a bad segment must not end the batch
+            log.warning("shadow scan: scene extraction failed for %s", mkv, exc_info=True)
+            scene_failed = True
+    if scene_failed:
+        fallback_count = min(FALLBACK_FRAME_CAP, max(int(cap), 1))
+        for index in range(fallback_count):
+            offset = round((index + 0.5) * recclip.SEGMENT_SECONDS / fallback_count)
+            path = os.path.join(out_dir, f"{base}_fb_{index:02d}.jpg")
+            try:
+                runner(["ffmpeg", "-hide_banner", "-y", "-ss", str(offset), "-i", mkv,
+                        "-an", "-frames:v", "1", "-vf", "scale=1280:-2", "-q:v", "2",
+                        "-update", "1", path])
+                if os.path.exists(path) and os.path.getsize(path) > 0:
+                    out.append((path, seg_start + float(offset)))
+            except Exception:  # noqa: BLE001 - one fallback frame must not end the batch
+                log.warning("shadow scan: seek fallback failed for %s at %ss", mkv, offset)
     mid = os.path.join(out_dir, f"{base}_mid.jpg")
     mid_offset = recclip.SEGMENT_SECONDS // 2
     try:
         runner(["ffmpeg", "-hide_banner", "-y", "-ss", str(mid_offset), "-i", mkv,
-                "-frames:v", "1", "-vf", "scale=1280:-2", "-q:v", "2", "-update", "1",
-                mid])
+                "-frames:v", "1", "-vf", "scale=1280:-2", "-an", "-q:v", "2",
+                "-update", "1", mid])
         if os.path.exists(mid) and os.path.getsize(mid) > 0:
             out.append((mid, seg_start + float(mid_offset)))
     except Exception:  # noqa: BLE001
@@ -109,7 +149,7 @@ def extract_candidates(mkv, seg_start, out_dir, base, *, runner=None,
 
 
 def score_candidates(candidates, url, threshold, *, rate=DEFAULT_RATE, budget,
-                     score=None, sleep=None):
+                     score=None, sleep=None, source_id=None):
     """Score candidate frames through the shared scorer, politely and boundedly.
 
     The gap between requests keeps a batch from starving the live pipeline and other
@@ -126,7 +166,7 @@ def score_candidates(candidates, url, threshold, *, rate=DEFAULT_RATE, budget,
             break
         if index:
             sleep(rate)
-        result = score(url, path, tiles=1)
+        result = score(url, path, tiles=1, source_id=source_id)
         subject = scorer.subject_score(result) if result is not None else None
         if subject is None:
             failures += 1
@@ -176,19 +216,30 @@ def write_summary(review_dir, summary):
 
 def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
              rate=DEFAULT_RATE, match_window=DEFAULT_MATCH_WINDOW,
-             ledger_factory=None, score=None, runner=None, now=None):
-    """One observation-only pass over a date's recorder segments. Never raises."""
+             ledger_factory=None, score=None, runner=None, now=None,
+             extract_budget=DEFAULT_EXTRACT_BUDGET, clock=None):
+    """One observation-only pass over a date's recorder segments. Never raises.
+
+    ``extract_budget`` caps the ffmpeg decode phase for the whole run. The per-segment
+    timeouts bound one call each, which on a full day (96 segments) still adds up to
+    hours per camera; the nightly timer must not run into the morning. Skipped segments
+    are counted per camera and flagged in the summary — a trimmed run never looks
+    complete.
+    """
     from . import ledger as ledger_mod
 
     env = os.environ if env is None else env
     now = time.time() if now is None else now
+    clock = time.monotonic if clock is None else clock
     started = time.monotonic()
+    extract_deadline = clock() + float(extract_budget)
     root = (env.get("RECORDING_ROOT") or "").strip()
     if not root:
         log.warning("shadow scan: RECORDING_ROOT not set; nothing to scan")
     review_dir = (env.get(sentlog.ENV_REVIEW_DIR) or "").strip() or None
     summary = {"date": date_str, "generated_at": now, "duration_s": 0.0,
-               "aborted": False, "trimmed": False, "cameras": {}}
+               "aborted": False, "trimmed": False, "extract_exhausted": False,
+               "cameras": {}}
     try:
         os.makedirs(out_dir, exist_ok=True)
     except OSError:
@@ -211,13 +262,25 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
             continue
         segments = segments_for_date(root, cfg.host, date_str)
         candidates, per_cam = [], {"segments": len(segments), "frames_scored": 0,
-                                   "observations": 0, "matched": 0, "shadow_only": 0}
+                                   "observations": 0, "matched": 0, "shadow_only": 0,
+                                   "segments_skipped": 0}
         try:
             for index, (mkv, seg_start) in enumerate(segments):
+                if clock() >= extract_deadline:
+                    per_cam["segments_skipped"] = len(segments) - index
+                    summary["extract_exhausted"] = True
+                    log.warning("shadow scan: extraction budget spent, skipping %d of "
+                                "%d segment(s) for %s", per_cam["segments_skipped"],
+                                len(segments), cfg.name)
+                    break
+                extract_kwargs = {"runner": runner}
                 candidates.extend(extract_candidates(
-                    mkv, seg_start, out_dir, f"{cfg.name}_{index:03d}", runner=runner))
-            scored = score_candidates(candidates, cfg.scorer.url, cfg.scorer.threshold,
-                                      rate=rate, budget=budget_left, score=score)
+                    mkv, seg_start, out_dir, f"{cfg.name}_{index:03d}", **extract_kwargs))
+            scored = score_candidates(
+                candidates, cfg.scorer.url, cfg.scorer.threshold,
+                rate=rate, budget=budget_left, score=score,
+                source_id=scorer.source_id_for_camera(cfg.name),
+            )
             per_cam["frames_scored"] = scored["scored"]
             budget_left -= scored["scored"]
             summary["aborted"] = summary["aborted"] or scored["aborted"]
@@ -273,6 +336,9 @@ def main(argv):
     parser.add_argument("--budget", type=int, default=DEFAULT_BUDGET)
     parser.add_argument("--rate", type=float, default=DEFAULT_RATE)
     parser.add_argument("--match-window", type=float, default=DEFAULT_MATCH_WINDOW)
+    parser.add_argument("--extract-budget", type=float,
+                        default=DEFAULT_EXTRACT_BUDGET,
+                        help="seconds of ffmpeg decode for the whole run")
     parser.add_argument("--out-dir")
     args = parser.parse_args(argv)
 
@@ -288,7 +354,8 @@ def main(argv):
     out_dir = args.out_dir or tempfile.mkdtemp(prefix="shadowscan-")
     try:
         summary = run_scan(app, date_str, out_dir=out_dir, budget=args.budget,
-                           rate=args.rate, match_window=args.match_window)
+                           rate=args.rate, match_window=args.match_window,
+                           extract_budget=args.extract_budget)
     finally:
         if not args.out_dir:
             shutil.rmtree(out_dir, ignore_errors=True)

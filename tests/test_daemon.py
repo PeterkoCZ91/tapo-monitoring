@@ -48,6 +48,13 @@ def test_plan_static_never_tracks():
     plan = daemon.plan_camera(_cam(role="static"), night=True, rain_active=False)
     assert plan.autotrack_on is False
 
+
+def test_plan_static_does_not_recall_day_preset():
+    cam = _cam(role="static", tracking={"day_preset": "4"})
+    plan = daemon.plan_camera(cam, night=False, rain_active=False)
+    assert plan.preset is None
+
+
 def test_plan_night_vision_untouched_by_default():
     assert daemon.plan_camera(_cam(), night=True, rain_active=False).night_vision is None
     assert daemon.plan_camera(_cam(), night=False, rain_active=False).night_vision is None
@@ -372,7 +379,7 @@ def test_apply_plan_logs_preset_recall_failure(monkeypatch, caplog):
             raise RuntimeError("MOTOR_LOCKED_ROTOR")
 
     cam = RefusingCam()
-    plan = daemon.plan_camera(_cam(role="static", tracking={"day_preset": "4"}),
+    plan = daemon.plan_camera(_cam(role="tracking", tracking={"day_preset": "4"}),
                               night=False, rain_active=False)
     assert plan.preset == "4"
     with caplog.at_level("WARNING", logger="tapo_monitor.daemon"):
@@ -1017,7 +1024,7 @@ def _run_marginal_motion_pass(monkeypatch, motion_send):
     monkeypatch.setattr(mon.notify, "send_photo", counter.send_photo)
     monkeypatch.setattr(mon.enrich, "groq_describe", lambda *a, **k: "x")
     monkeypatch.setattr(daemon.scorer, "score_image",
-                        lambda url, img, timeout=10, tiles=1: {"person": 0.4, "animal": 0.0})
+                        lambda url, img, timeout=10, tiles=1, **kw: {"person": 0.4, "animal": 0.0})
     state = daemon.MonitorState()
     secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": "k"}
     cam = _FakeEventCam([[{"start_time": 100, "events_1": 2}]])   # bare non-PIR motion
@@ -1049,7 +1056,7 @@ def test_corroborated_motion_sends_on_the_next_sampler_frame(monkeypatch):
     monkeypatch.setattr(mon.notify, "send_photo", counter.send_photo)
     monkeypatch.setattr(mon.enrich, "groq_describe", lambda *a, **k: "x")
     monkeypatch.setattr(daemon.scorer, "score_image",
-                        lambda url, img, timeout=10, tiles=1: {"person": 0.4, "animal": 0.0})
+                        lambda url, img, timeout=10, tiles=1, **kw: {"person": 0.4, "animal": 0.0})
     monkeypatch.setattr(daemon, "_safe_unlink", lambda p: None)
     app = _corroboration_app(motion_send=0.6)
     state = daemon.MonitorState()
@@ -1080,7 +1087,7 @@ def _run_confirmed_person_with_open_group(monkeypatch, sent, delivered=False,
     counter = _CountingNotify()
     monkeypatch.setattr(mon.notify, "send_photo", counter.send_photo)
     monkeypatch.setattr(daemon.scorer, "score_image",
-                        lambda url, img, timeout=10, tiles=1: {"person": 0.1, "animal": 0.0})
+                        lambda url, img, timeout=10, tiles=1, **kw: {"person": 0.1, "animal": 0.0})
     app = _corroboration_app(sd_snapshot=True)
     state = daemon.MonitorState()
     state.groups["a"] = {
@@ -1140,7 +1147,7 @@ def test_run_monitor_pass_marks_group_delivered_on_live_send(monkeypatch):
     monkeypatch.setattr(mon.notify, "send_photo", counter.send_photo)
     monkeypatch.setattr(mon.enrich, "groq_describe", lambda *a, **k: "Person")
     monkeypatch.setattr(daemon.scorer, "score_image",
-                        lambda url, img, timeout=10, tiles=1: {"person": 0.9, "animal": 0.0})
+                        lambda url, img, timeout=10, tiles=1, **kw: {"person": 0.9, "animal": 0.0})
     state = daemon.MonitorState()
     secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": "k"}
     cam = _FakeEventCam([[{"start_time": 100, "events_1": 524288}]])
@@ -1160,7 +1167,7 @@ def test_score_for_retries_once_before_passthrough(monkeypatch):
                       "scorer": {"url": "http://x/score", "threshold": 0.3}}]}).cameras[0]
     calls = []
 
-    def fake_score_image(url, path, timeout=10, tiles=1):
+    def fake_score_image(url, path, timeout=10, tiles=1, **kw):
         calls.append(1)
         return None if len(calls) == 1 else {"person": 0.9, "animal": 0.0}
 
@@ -2327,7 +2334,7 @@ def test_pending_scorer_pick_captions_with_frame_sequence(monkeypatch):
 
     scores = {"/tmp/f0.jpg": 0.1, "/tmp/f1.jpg": 0.9, "/tmp/f2.jpg": 0.8}
     monkeypatch.setattr(daemon.scorer, "score_image",
-                        lambda url, img, timeout=10, tiles=1: {"person": scores[img], "animal": 0.0})
+                        lambda url, img, timeout=10, tiles=1, **kw: {"person": scores[img], "animal": 0.0})
     groq_calls = []
     state.pending_sd = [{"camera": "a", "etype": "person",
                          "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
@@ -2351,7 +2358,7 @@ def test_pending_send_marks_open_group_delivered(monkeypatch):
                                              "threshold": 0.4}}]})
     state = daemon.MonitorState()
     monkeypatch.setattr(daemon.scorer, "score_image",
-                        lambda url, img, timeout=10, tiles=1: {"person": 0.9, "animal": 0.0})
+                        lambda url, img, timeout=10, tiles=1, **kw: {"person": 0.9, "animal": 0.0})
     state.groups["a"] = {"camera": "a", "etype": "person", "event": {"start_time": 1000},
                          "started": 1000, "last_event_at": 1010, "frames": 0,
                          "next_due": 10**9, "sent": True, "delivered": False}
@@ -2412,7 +2419,7 @@ def _run_sampler(app, state, now, sent, monkeypatch, *, score=0.9, snap="/tmp/f.
                         lambda tok, chat, img, cap, **k: sent.append((img, cap)) or delivered)
     monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: groq)
     monkeypatch.setattr(daemon.scorer, "score_image",
-                        lambda url, img, timeout=10, tiles=1: None if score is None
+                        lambda url, img, timeout=10, tiles=1, **kw: None if score is None
                         else {"person": score, "animal": 0.0})
     monkeypatch.setattr(daemon, "_safe_unlink", lambda p: None)
     secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
@@ -2461,10 +2468,78 @@ def test_sampler_failed_delivery_keeps_group_retryable(monkeypatch):
     state.groups["a"] = _group()
 
     _run_sampler(app, state, 1035, sent, monkeypatch, score=0.9, delivered=False)
-
     assert len(sent) == 1
     assert state.groups["a"]["sent"] is False
     assert ("a", "motion") not in state.last_alert
+
+
+def test_sampler_scene_duplicate_is_suppressed(monkeypatch):
+    sent = []
+    app = cfg.load_config_from_dict({"cameras": [{
+        "name": "a", "host": "203.0.113.10",
+        "coordinator": {"group": "overlap-group"},
+        "sampler": {"enabled": True, "interval": 30, "max_frames": 6, "group_gap": 90},
+        "scorer": {"url": "http://127.0.0.1:1/score", "threshold": 0.4},
+    }]})
+    state = daemon.MonitorState()
+    state.groups["a"] = _group(started=1000)
+    state.scene_coordinator.record_delivery(
+        "overlap-group", "b", "motion", {"start_time": 1000}, 1000
+    )
+
+    _run_sampler(app, state, 1035, sent, monkeypatch, score=0.9)
+
+    assert sent == []
+    assert state.groups["a"]["sent"] is True
+
+
+def test_pending_scene_duplicate_is_suppressed_before_fetch(monkeypatch):
+    sent = []
+    fetch_calls = []
+    app = cfg.load_config_from_dict({"cameras": [{
+        "name": "a", "host": "203.0.113.10", "sd_snapshot": True,
+        "coordinator": {"group": "overlap-group"},
+    }]})
+    state = daemon.MonitorState()
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075,
+                         "live_sent": False}]
+    state.scene_coordinator.record_delivery(
+        "overlap-group", "b", "person", {"start_time": 1000}, 1000
+    )
+
+    _run_pending(
+        app, state, {"a": object()}, 1080,
+        lambda *args, **kwargs: fetch_calls.append(True) or ["/tmp/sd.jpg"],
+        lambda cfg_: (lambda cam, ev: None), sent, monkeypatch,
+    )
+
+    assert sent == []
+    assert fetch_calls == []
+    assert state.pending_sd == []
+
+
+def test_loop_step_persists_event_watermark_after_monitor(monkeypatch, tmp_path):
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    state = daemon.MonitorState(health_path=str(tmp_path / "health.json"))
+    saved = []
+    monkeypatch.setattr(
+        daemon.health, "save_state",
+        lambda path, current, logger=None: saved.append(daemon.health.snapshot(current)),
+    )
+
+    def monitor(*args, **kwargs):
+        state.last_seen["a"] = 1234
+
+    daemon.loop_step(
+        app, {}, state, now=1000, secrets={}, last_control=1000, control_interval=60,
+        run_control=lambda *a, **k: {}, watchdog=lambda *a, **k: None,
+        monitor=monitor, drain=lambda *a, **k: None, sample=lambda *a, **k: None,
+        guard=lambda *a, **k: None, inspect=lambda *a, **k: None,
+        digest=lambda *a, **k: None,
+    )
+
+    assert saved and saved[-1]["last_seen"] == {"a": 1234}
 
 
 def test_sampler_below_threshold_keeps_sampling(monkeypatch):
@@ -2674,9 +2749,9 @@ def test_score_for_maps_result_and_failure(monkeypatch):
     app = _sampler_app(threshold=0.4)
     camera_cfg = app.cameras[0]
     monkeypatch.setattr(daemon.scorer, "score_image",
-                        lambda url, img, timeout=10, tiles=1: {"person": 0.2, "animal": 0.6})
+                        lambda url, img, timeout=10, tiles=1, **kw: {"person": 0.2, "animal": 0.6})
     assert daemon.score_for(camera_cfg)("/tmp/x.jpg") == 0.2
-    monkeypatch.setattr(daemon.scorer, "score_image", lambda url, img, timeout=10, tiles=1: None)
+    monkeypatch.setattr(daemon.scorer, "score_image", lambda url, img, timeout=10, tiles=1, **kw: None)
     assert daemon.score_for(camera_cfg)("/tmp/x.jpg") is None
 
 
@@ -2713,7 +2788,7 @@ def test_pending_scorer_picks_frame_above_threshold(monkeypatch):
     state = daemon.MonitorState()
     scores = {"/tmp/sd-1.jpg": 0.1, "/tmp/sd-2.jpg": 0.9}
     monkeypatch.setattr(daemon.scorer, "score_image",
-                        lambda url, img, timeout=10, tiles=1: {"person": scores[img], "animal": 0.0})
+                        lambda url, img, timeout=10, tiles=1, **kw: {"person": scores[img], "animal": 0.0})
 
     def fetch_frames(cfg_, start_time, span=None, out_dir=None):
         return ["/tmp/sd-1.jpg", "/tmp/sd-2.jpg"]
@@ -2738,7 +2813,7 @@ def test_pending_scorer_all_below_threshold_drops(monkeypatch):
                                                "threshold": 0.4}}]})
     state = daemon.MonitorState()
     monkeypatch.setattr(daemon.scorer, "score_image",
-                        lambda url, img, timeout=10, tiles=1: {"person": 0.05, "animal": 0.0})
+                        lambda url, img, timeout=10, tiles=1, **kw: {"person": 0.05, "animal": 0.0})
 
     def fetch_frames(cfg_, start_time, span=None, out_dir=None):
         return ["/tmp/sd-1.jpg"]
@@ -2759,7 +2834,7 @@ def test_pending_scorer_failure_passes_frame_through(monkeypatch):
                                     "scorer": {"url": "http://127.0.0.1:1/score",
                                                "threshold": 0.4}}]})
     state = daemon.MonitorState()
-    monkeypatch.setattr(daemon.scorer, "score_image", lambda url, img, timeout=10, tiles=1: None)
+    monkeypatch.setattr(daemon.scorer, "score_image", lambda url, img, timeout=10, tiles=1, **kw: None)
 
     def fetch_frames(cfg_, start_time, span=None, out_dir=None):
         return ["/tmp/sd-1.jpg"]
@@ -3926,3 +4001,58 @@ def test_hubpoll_decoder_warning_is_silent_when_the_decoder_is_present():
 def test_hubpoll_decoder_warning_is_silent_without_a_hubpoll_camera():
     app = cfg.load_config_from_dict({"cameras": [{"name": "c", "host": "203.0.113.10"}]})
     assert daemon.hubpoll_decoder_warning(app, available=False) is None
+
+
+def test_score_for_passes_the_pseudonymous_source_id(monkeypatch):
+    # The scorer groups its per-source metrics on this header. It is a hash of the
+    # camera name, never the name itself.
+    calls = []
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, image, **kw: calls.append((url, image, kw)) or
+                        {"person": 0.9, "animal": 0.0})
+    camera = _cam(scorer={"url": "http://127.0.0.1:8765/score", "threshold": 0.4})
+
+    assert daemon.score_for(camera)("/tmp/frame.jpg") == 0.9
+
+    url, image, kwargs = calls[0]
+    assert (url, image) == ("http://127.0.0.1:8765/score", "/tmp/frame.jpg")
+    assert kwargs["source_id"] == daemon.scorer.source_id_for_camera("c")
+    assert "c" not in kwargs["source_id"]
+
+
+def test_crop_for_subject_passes_the_pseudonymous_source_id(monkeypatch):
+    calls = []
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, image, **kw: calls.append(kw) or None)
+    camera = _cam(scorer={"url": "http://127.0.0.1:8765/score", "threshold": 0.4},
+                  crop_to_subject=True)
+
+    daemon.crop_for_subject(camera, "/tmp/frame.jpg", "/tmp")
+
+    assert calls[0]["source_id"] == daemon.scorer.source_id_for_camera("c")
+
+
+def test_inert_preset_warning_names_static_cameras_that_configure_one():
+    # plan_camera never recalls a preset for a static camera, so a day_preset on one is
+    # dead config that reads as if it were being held. Say so once instead of silently.
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "yard", "host": "203.0.113.10", "role": "static",
+         "tracking": {"day_preset": "4"}},
+        {"name": "front", "host": "203.0.113.11", "role": "tracking",
+         "tracking": {"day_preset": "1"}},
+        {"name": "gate", "host": "203.0.113.12", "role": "static",
+         "tracking": {"day_preset": None}},
+    ]})
+
+    warning = daemon.inert_preset_warning(app)
+
+    assert "static camera(s) yard:" in warning     # tracking role and no preset excluded
+
+
+def test_inert_preset_warning_is_none_without_static_presets():
+    # day_preset defaults to a real preset, so a static camera that never mentions one
+    # still lost its recall — the warning is about the role, not about explicit config.
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "front", "host": "203.0.113.11", "tracking": {"day_preset": "1"}}]})
+
+    assert daemon.inert_preset_warning(app) is None

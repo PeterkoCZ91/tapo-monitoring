@@ -81,6 +81,53 @@ def test_extract_candidates_scene_frames_and_uniform(tmp_path):
     assert all(os.path.exists(p) for p, _ in got)
 
 
+def test_extract_candidates_fast_mode_uses_seek_samples_only(tmp_path):
+    calls = []
+
+    def runner(args):
+        calls.append(args)
+        target = args[-1]
+        assert "%02d" not in target
+        with open(target, "wb") as f:
+            f.write(b"fallback")
+        return ""
+
+    got = shadowscan.extract_candidates(
+        "/rec/segment.mkv", 0.0, str(tmp_path), "seg0", runner=runner,
+        scene_pass=False)
+
+    assert len(got) == shadowscan.FALLBACK_FRAME_CAP + 1
+    assert all("-ss" in args for args in calls)
+
+
+def test_extract_candidates_bounds_and_optimizes_scene_ffmpeg(tmp_path, monkeypatch):
+    """Scene analysis must not decode full-resolution video with an open-ended cost."""
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        target = args[-1]
+        if "%02d" in target:
+            with open(target % 1, "wb") as f:
+                f.write(b"scene")
+            return type("Result", (), {"stderr": b"[showinfo] pts_time:5.0\n"})()
+        with open(target, "wb") as f:
+            f.write(b"mid")
+        return type("Result", (), {"stderr": b""})()
+
+    monkeypatch.setattr(shadowscan.subprocess, "run", fake_run)
+    got = shadowscan.extract_candidates(
+        "/rec/segment.mkv", 1000.0, str(tmp_path), "seg0")
+
+    assert len(got) == 2
+    assert [kwargs["timeout"] for _args, kwargs in calls] == [
+        shadowscan.SCENE_EXTRACTION_TIMEOUT, shadowscan.SEEK_EXTRACTION_TIMEOUT]
+    scene_args = calls[0][0]
+    scene_filter = scene_args[scene_args.index("-vf") + 1]
+    assert scene_filter.index("scale=") < scene_filter.index("select=")
+    assert "-an" in scene_args
+
+
 def test_extract_candidates_survives_ffmpeg_failure(tmp_path):
     def boom(args):
         raise RuntimeError("ffmpeg exploded")
@@ -89,13 +136,73 @@ def test_extract_candidates_survives_ffmpeg_failure(tmp_path):
     assert got == []
 
 
+def test_extract_candidates_uses_spread_seek_fallback_after_scene_timeout(tmp_path):
+    calls = []
+
+    def runner(args):
+        calls.append(args)
+        target = args[-1]
+        if "%02d" in target:
+            raise TimeoutError("scene pass too slow")
+        with open(target, "wb") as f:
+            f.write(b"\xff\xd8fallback")
+        return ""
+
+    got = shadowscan.extract_candidates(
+        "/rec/zaznam_20260812T070000.mkv", 0.0, str(tmp_path), "seg0",
+        runner=runner)
+
+    seek_offsets = [args[args.index("-ss") + 1] for args in calls if "-ss" in args]
+    assert len(seek_offsets) == shadowscan.FALLBACK_FRAME_CAP + 1  # + uniform mid-frame
+    assert "0" not in seek_offsets
+    assert len(got) == shadowscan.FALLBACK_FRAME_CAP + 1
+
+
+def test_extract_candidates_caps_total_ffmpeg_work_per_segment(tmp_path, monkeypatch):
+    """A timed-out scene pass must not unlock another full fallback budget."""
+    now = [0.0]
+    calls = []
+
+    def fake_run(args, *, timeout):
+        calls.append((args, timeout))
+        now[0] += timeout
+        if "-ss" not in args:
+            raise TimeoutError("scene pass too slow")
+        target = args[-1]
+        with open(target, "wb") as f:
+            f.write(b"fallback")
+        return ""
+
+    monkeypatch.setattr(shadowscan, "_run_ffmpeg", fake_run)
+    got = shadowscan.extract_candidates(
+        "/rec/segment.mkv", 0.0, str(tmp_path), "seg0",
+        clock=lambda: now[0])
+
+    assert sum(timeout for _args, timeout in calls) <= (
+        shadowscan.SEGMENT_EXTRACTION_TIMEOUT)
+    assert len(calls) == 3  # scene + two seeks; later fallback/mid are skipped
+    assert len(got) == 2
+
+
+def test_ffmpeg_seek_extraction_uses_short_timeout(monkeypatch):
+    seen = {}
+
+    def run(args, **kwargs):
+        seen["timeout"] = kwargs["timeout"]
+        return type("Proc", (), {"stderr": b""})()
+
+    monkeypatch.setattr(shadowscan.subprocess, "run", run)
+    shadowscan._run_ffmpeg(["ffmpeg", "-ss", "112", "-i", "segment.mkv"])
+    assert seen["timeout"] == shadowscan.SEEK_EXTRACTION_TIMEOUT
+
+
 def test_score_candidates_hits_budget_and_rate(tmp_path):
     naps = []
     results = {"a.jpg": {"person": 0.8, "animal": 0.0, "box": [1, 2, 3, 4]},
                "b.jpg": {"person": 0.1, "animal": 0.0, "box": None},
                "c.jpg": {"person": 0.9, "animal": 0.0, "box": None}}
 
-    def fake_score(url, path, timeout=10, tiles=1):
+    def fake_score(url, path, timeout=10, tiles=1, **kw):
         assert tiles == 1
         return results[os.path.basename(path)]
 
@@ -108,8 +215,23 @@ def test_score_candidates_hits_budget_and_rate(tmp_path):
     assert naps == [shadowscan.DEFAULT_RATE]          # gap between request 1 and 2 only
 
 
+def test_score_candidates_passes_pseudonymous_source_id():
+    seen = []
+
+    def fake_score(url, path, timeout=10, tiles=1, *, source_id=None):
+        seen.append(source_id)
+        return {"person": 0.8, "animal": 0.0}
+
+    out = shadowscan.score_candidates(
+        [("frame.jpg", 10.0)], "http://scorer/score", 0.55,
+        budget=1, score=fake_score, source_id="0123456789abcdef", sleep=lambda _s: None)
+
+    assert out["scored"] == 1
+    assert seen == ["0123456789abcdef"]
+
+
 def test_score_candidates_aborts_after_consecutive_failures():
-    def dead(url, path, timeout=10, tiles=1):
+    def dead(url, path, timeout=10, tiles=1, **kw):
         return None
     out = shadowscan.score_candidates(
         [(f"{k}.jpg", float(k)) for k in range(5)], "http://x/score", 0.5,
@@ -177,7 +299,7 @@ def test_run_scan_records_matches_and_archives_misses(tmp_path, monkeypatch):
             f.write(b"\xff\xd8mid")
         return ""
 
-    def fake_score(url, path, timeout=10, tiles=1):
+    def fake_score(url, path, timeout=10, tiles=1, **kw):
         if path.endswith("_sc_01.jpg"):
             return {"person": 0.81, "animal": 0.0, "box": None}
         return {"person": 0.02, "animal": 0.0, "box": None}
@@ -197,6 +319,23 @@ def test_run_scan_records_matches_and_archives_misses(tmp_path, monkeypatch):
     assert (review / shadowscan.SUMMARY_NAME).exists()
     work_leftovers = list((tmp_path / "work").glob("*.jpg"))
     assert work_leftovers == []                 # candidates cleaned up
+
+
+def test_run_scan_keeps_scene_pass_enabled_with_default_runner(tmp_path, monkeypatch):
+    app, _root = _app_with_recorder(tmp_path, monkeypatch)
+    calls = []
+
+    def fake_extract(*args, **kwargs):
+        calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(shadowscan, "extract_candidates", fake_extract)
+    shadowscan.run_scan(
+        app, "2026-08-12", out_dir=str(tmp_path / "work"),
+        ledger_factory=_FakeLedger, runner=None)
+
+    assert calls
+    assert calls[0].get("scene_pass", True) is True
 
 
 def test_run_scan_gives_each_shadow_only_observation_a_distinct_evidence_file(
@@ -219,7 +358,7 @@ def test_run_scan_gives_each_shadow_only_observation_a_distinct_evidence_file(
             f.write(b"\xff\xd8mid")
         return ""
 
-    def fake_score(url, path, timeout=10, tiles=1):
+    def fake_score(url, path, timeout=10, tiles=1, **kw):
         if path.endswith("_sc_01.jpg") or path.endswith("_sc_02.jpg"):
             return {"person": 0.81, "animal": 0.0, "box": None}
         return {"person": 0.02, "animal": 0.0, "box": None}
@@ -258,7 +397,7 @@ def test_run_scan_matched_observation_writes_no_evidence(tmp_path, monkeypatch):
             f.write(b"\xff\xd8mid")
         return ""
 
-    def fake_score(url, path, timeout=10, tiles=1):
+    def fake_score(url, path, timeout=10, tiles=1, **kw):
         # Only the scene-change frame is a hit; the uniform mid-segment frame stays
         # below threshold so this fixture yields exactly one observation to match.
         if path.endswith("_sc_01.jpg"):
@@ -310,7 +449,7 @@ def test_run_scan_archives_evidence_with_scan_time_not_observation_time(
             f.write(b"\xff\xd8mid")
         return ""
 
-    def fake_score(url, path, timeout=10, tiles=1):
+    def fake_score(url, path, timeout=10, tiles=1, **kw):
         if path.endswith("_sc_01.jpg"):
             return {"person": 0.81, "animal": 0.0, "box": None}
         return {"person": 0.02, "animal": 0.0, "box": None}
@@ -343,3 +482,54 @@ def test_run_scan_survives_ledger_construction_failure(tmp_path, monkeypatch):
                                   ledger_factory=boom)
     assert summary["aborted"] is True
     assert (tmp_path / "review" / shadowscan.SUMMARY_NAME).exists()
+
+
+def _app_with_many_segments(tmp_path, monkeypatch, count, host="192.0.2.11"):
+    from tapo_monitor import config as cfg
+    root = tmp_path / "rec"
+    hour = root / host / "2026-08-12" / "07"
+    hour.mkdir(parents=True)
+    for index in range(count):
+        (hour / f"zaznam_20260812T07{index:02d}00.mkv").write_bytes(b"mkv")
+    monkeypatch.setenv("RECORDING_ROOT", str(root))
+    app = cfg.load_config_from_dict({"cameras": [{
+        "name": "front", "host": host,
+        "scorer": {"url": "http://127.0.0.1:1/score", "threshold": 0.55}}]})
+    return app
+
+
+def test_run_scan_stops_extracting_when_the_run_budget_is_spent(tmp_path, monkeypatch, caplog):
+    # Per-segment timeouts bound one ffmpeg call, not the night: 96 segments x 120 s is
+    # over three hours of decode per camera, and the timer starts at 03:00. The run needs
+    # its own ceiling, and a cap that trims work must say so instead of looking complete.
+    app = _app_with_many_segments(tmp_path, monkeypatch, 5)
+    ticks = iter([0, 0, 10, 40, 130, 200, 260])
+
+    def fake_extract(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(shadowscan, "extract_candidates", fake_extract)
+    with caplog.at_level("WARNING", logger="tapo_monitor.shadowscan"):
+        summary = shadowscan.run_scan(
+            app, "2026-08-12", out_dir=str(tmp_path / "work"),
+            ledger_factory=_FakeLedger, score=lambda *a, **k: None,
+            extract_budget=100, clock=lambda: next(ticks), now=1_000_000)
+
+    front = summary["cameras"]["front"]
+    assert front["segments"] == 5
+    assert front["segments_skipped"] == 2       # budget ran out mid-run
+    assert summary["extract_exhausted"] is True
+    assert any("extraction budget" in message for message in caplog.messages)
+
+
+def test_run_scan_extracts_every_segment_inside_the_budget(tmp_path, monkeypatch):
+    app = _app_with_many_segments(tmp_path, monkeypatch, 3, host="192.0.2.12")
+    monkeypatch.setattr(shadowscan, "extract_candidates", lambda *a, **k: [])
+
+    summary = shadowscan.run_scan(
+        app, "2026-08-12", out_dir=str(tmp_path / "work"),
+        ledger_factory=_FakeLedger, score=lambda *a, **k: None,
+        extract_budget=3600, now=1_000_000)
+
+    assert summary["cameras"]["front"]["segments_skipped"] == 0
+    assert summary["extract_exhausted"] is False

@@ -477,16 +477,24 @@ The guard reads current/preset pan positions over ONVIF and recalls the nearest 
 preset when auto-track moves outside their span. It does not create a hard motor limit.
 ONVIF errors are isolated from the event loop.
 
-### Reserved coordinator fields
+### Observation-only coordinator
 
 ```yaml
 coordinator:
-  group:
+  group: overlap-group
+  scene_window: 15
   handoff_preset:
 ```
 
-These fields are parsed for forward compatibility. Multi-camera handoff is not implemented
-yet; leave them empty. Track progress in the [roadmap](roadmap.md).
+`group` enables the observation-only duplicate gate for cameras sharing the same group.
+`scene_window` is the inclusive event-time window in seconds. A detection is committed to
+the group only after its Telegram delivery succeeds; failed or deferred deliveries do not
+block another camera. The live, sampler and SD paths share the same gate. Cameras without
+a group keep the existing per-camera behavior.
+
+`handoff_preset` remains reserved. This first slice never moves a camera and does not
+select a better frame, so it is safe for a camera whose physical angle is currently
+wrong. Track progress in the [roadmap](roadmap.md).
 
 ## Observability
 

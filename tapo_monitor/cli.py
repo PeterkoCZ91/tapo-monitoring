@@ -10,15 +10,123 @@ Usage:
   tapo-monitor shadow-report ...        # compare camera and shadow observations
   tapo-monitor shadow-scan ...          # nightly recorder audit batch
   tapo-monitor audit-log [logfile|-]    # summarize scorer/Telegram audit lines
+  tapo-monitor version                  # release plus a fingerprint of the deployed package
+  tapo-monitor selfcheck [cameras.yaml] # is this host able to run? (imports, config, deps)
 """
 
 import argparse
+import hashlib
+import importlib
 import json
 import math
 import os
+import pkgutil
+import shutil
 import sys
 import time
 import types
+
+
+def package_fingerprint(package_dir=None):
+    """Short digest over every module in the package directory.
+
+    Deploys are rsync/tar copies, not git checkouts, so "which version is this host
+    running" has no answer on the host itself. Hashing the module set answers it without
+    anyone having to remember to bump a version string: a half-copied package gets a
+    different fingerprint than the tree it was copied from.
+    """
+    package_dir = package_dir or os.path.dirname(os.path.abspath(__file__))
+    digest = hashlib.sha256()
+    for name in sorted(os.listdir(package_dir)):
+        if not name.endswith(".py"):
+            continue
+        path = os.path.join(package_dir, name)
+        with open(path, "rb") as module_file:
+            digest.update(name.encode())
+            digest.update(module_file.read())
+    return digest.hexdigest()[:12]
+
+
+def _version():
+    from . import __version__
+
+    print(f"tapo-monitor {__version__}")
+    print(f"package {package_fingerprint()}")
+    print(f"python {sys.version.split()[0]}")
+    return 0
+
+
+def _selfcheck(path):
+    """Answer "can this host run the code that was just copied onto it?".
+
+    Deliberately offline and fast: it imports every module (a partial copy fails here,
+    the way the daemon would but before the restart), loads the config, asserts the
+    credential env vars named by that config are actually set, and looks for ffmpeg —
+    the four ways a deploy has silently produced a running-but-useless daemon.
+    """
+    failures = []
+    print(f"tapo-monitor {package_fingerprint()} selfcheck")
+
+    package = os.path.dirname(os.path.abspath(__file__))
+    broken = []
+    for module in pkgutil.iter_modules([package]):
+        try:
+            importlib.import_module(f"{__package__}.{module.name}")
+        except Exception as exc:  # noqa: BLE001 - report every broken module, not the first
+            broken.append(f"{module.name}: {type(exc).__name__}")
+    if broken:
+        failures.append("modules")
+        print("  modules: FAILED")
+        for line in broken:
+            print(f"    {line}")
+    else:
+        print("  modules: ok")
+
+    app = None
+    try:
+        from .config import load_config
+
+        app = load_config(path)
+        print(f"  config: ok ({len(app.cameras)} camera(s))")
+    except Exception as exc:  # noqa: BLE001 - a config error is a finding, not a crash
+        failures.append("config")
+        print(f"  config: FAILED ({type(exc).__name__}: {exc})")
+
+    if app is not None:
+        from .config import resolve_camera_credentials
+
+        missing = []
+        for cam in app.cameras:
+            user, password, _cloud = resolve_camera_credentials(cam)
+            # Only a camera that names an env var is asserted: a battery camera read
+            # through a hub has no stok login of its own and names none.
+            names = [name for name, value in ((cam.user_env, user),
+                                              (cam.password_env, password))
+                     if name and not value]
+            if names:
+                # Names only: the whole point of the env indirection is that secrets
+                # never appear in output that gets pasted into a report.
+                missing.append(f"{cam.name}: {', '.join(names)}")
+        if missing:
+            failures.append("credentials")
+            print("  credentials: FAILED")
+            for line in missing:
+                print(f"    {line}")
+        else:
+            print("  credentials: ok")
+
+    if shutil.which("ffmpeg"):
+        print("  ffmpeg: ok")
+    else:
+        # A cron/systemd PATH without ffmpeg already cost two days of missing alerts.
+        failures.append("ffmpeg")
+        print("  ffmpeg: FAILED (not on PATH)")
+
+    if failures:
+        print(f"selfcheck FAILED: {', '.join(failures)}")
+        return 1
+    print("selfcheck ok")
+    return 0
 
 
 def _check(path):
@@ -293,6 +401,10 @@ def main(argv=None):
 
     if cmd == "check":
         return _check(path)
+    if cmd == "version":
+        return _version()
+    if cmd == "selfcheck":
+        return _selfcheck(path)
     if cmd == "run":
         from .daemon import main as daemon_main
         daemon_main([path])

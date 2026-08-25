@@ -162,7 +162,8 @@ def _real_score(tiles):
         if not cfg.scorer.url:
             return None
         return scorer.score_image(cfg.scorer.url, image_path,
-                                  timeout=cfg.scorer.timeout, tiles=tiles)
+                                  timeout=cfg.scorer.timeout, tiles=tiles,
+                                  source_id=scorer.source_id_for_camera(cfg.name))
     return score
 
 

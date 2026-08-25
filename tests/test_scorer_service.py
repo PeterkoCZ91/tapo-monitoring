@@ -60,6 +60,8 @@ def _metrics_when_settled(server, timeout=3.0):
 
 def test_metrics_are_aggregate_only_and_count_tile_inference(server):
     req = urllib.request.Request(f"{server}/score?tiles=2", data=b"jpegbytes")
+    source_id = "0123456789abcdef"
+    req.add_header("X-Tapo-Source-ID", source_id)
     with urllib.request.urlopen(req, timeout=5):
         pass
     metrics = _metrics_when_settled(server)
@@ -67,7 +69,16 @@ def test_metrics_are_aggregate_only_and_count_tile_inference(server):
     assert metrics["completed"] == 1
     assert metrics["inference_runs"] == 5
     assert metrics["failed"] == 0
+    assert metrics["score_successes"] == 1
+    assert metrics["person_candidates"] == 1
+    assert metrics["animal_candidates"] == 0
+    assert metrics["malformed_responses"] == 0
+    assert metrics["failure_reasons"] == {}
     assert metrics["score_seconds_max"] >= 0
+    assert metrics["request_seconds_p50"] >= 0
+    assert metrics["request_seconds_p95"] >= 0
+    assert metrics["sources"][source_id]["requests"] == 1
+    assert metrics["sources"][source_id]["score_successes"] == 1
 
 
 def test_unknown_path_404(server):
@@ -95,6 +106,162 @@ def test_score_fn_error_500():
         assert metrics["completed"] == 1
         assert metrics["failed"] == 1
         assert metrics["in_flight"] == 0
+        assert metrics["failure_reasons"] == {"inference_error": 1}
+    finally:
+        srv.shutdown()
+
+
+def test_metrics_mark_malformed_score_result():
+    srv = scorer_service.make_server(lambda _body, tiles=1: [tiles], port=0)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{srv.server_address[1]}/score",
+            data=b"jpeg",
+            timeout=5,
+        ) as response:
+            assert json.load(response) == [1]
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{srv.server_address[1]}/metrics", timeout=5
+        ) as response:
+            metrics = json.load(response)
+        assert metrics["completed"] == 1
+        assert metrics["failed"] == 0
+        assert metrics["score_successes"] == 0
+        assert metrics["malformed_responses"] == 1
+        assert metrics["failure_reasons"] == {"malformed_response": 1}
+    finally:
+        srv.shutdown()
+
+
+def test_metrics_report_percentiles_from_completed_requests():
+    metrics = scorer_service.ScorerMetrics()
+    for request_seconds, score_seconds in ((1.0, 0.5), (2.0, 1.0), (3.0, 1.5)):
+        metrics.begin(1)
+        metrics.finish(
+            request_seconds,
+            score_seconds,
+            True,
+            result={"person": 0.0, "animal": 0.0},
+        )
+
+    snapshot = metrics.snapshot()
+    assert snapshot["request_seconds_p50"] == pytest.approx(2.0)
+    assert snapshot["request_seconds_p95"] == pytest.approx(2.9)
+    assert snapshot["score_seconds_p50"] == pytest.approx(1.0)
+    assert snapshot["score_seconds_p95"] == pytest.approx(1.45)
+
+
+def test_invalid_state_counters_are_ignored(tmp_path):
+    metrics_file = tmp_path / "scorer-metrics.jsonl"
+    state_file = metrics_file.with_name(metrics_file.name + ".state")
+    state_file.write_text(json.dumps({"counters": []}), encoding="utf-8")
+
+    metrics = scorer_service.ScorerMetrics(metrics_file=str(metrics_file))
+
+    assert metrics.requests == 0
+    assert metrics.completed == 0
+
+
+def test_persistence_failure_does_not_break_scoring_accounting(tmp_path, monkeypatch):
+    metrics = scorer_service.ScorerMetrics(
+        metrics_file=str(tmp_path / "scorer-metrics.jsonl"), persist_seconds=0
+    )
+
+    def fail_persist():
+        raise OSError("disk full")
+
+    monkeypatch.setattr(metrics, "_persist_unlocked", fail_persist)
+    metrics.begin(1)
+    metrics.finish(0.1, 0.1, True, result={"person": 0.0, "animal": 0.0})
+
+    assert metrics.snapshot()["completed"] == 1
+
+
+def test_metrics_persist_across_restart(tmp_path):
+    metrics_file = tmp_path / "scorer-metrics.jsonl"
+
+    first = scorer_service.make_server(
+        lambda _body, tiles=1: {"person": 0.8, "animal": 0.0},
+        port=0,
+        metrics_file=str(metrics_file),
+        metrics_persist_seconds=0,
+    )
+    threading.Thread(target=first.serve_forever, daemon=True).start()
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(
+                f"http://127.0.0.1:{first.server_address[1]}/score", data=b"jpeg"
+            ),
+            timeout=5,
+        ):
+            pass
+    finally:
+        first.shutdown()
+
+    second = scorer_service.make_server(
+        lambda _body, tiles=1: {"person": 0.0, "animal": 0.0},
+        port=0,
+        metrics_file=str(metrics_file),
+        metrics_persist_seconds=0,
+    )
+    threading.Thread(target=second.serve_forever, daemon=True).start()
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{second.server_address[1]}/metrics", timeout=5
+        ) as response:
+            metrics = json.load(response)
+        assert metrics["requests"] == 1
+        assert metrics["score_successes"] == 1
+        assert metrics["person_candidates"] == 1
+        assert metrics["in_flight"] == 0
+        assert metrics["restart_count"] == 2
+        assert len(metrics["instance_id"]) == 16
+        assert metrics["started_at"].endswith("Z")
+        assert metrics_file.exists()
+        assert metrics_file.with_name(metrics_file.name + ".state").exists()
+    finally:
+        second.shutdown()
+
+
+def test_metrics_journal_rotates_after_retention_window(tmp_path):
+    metrics_file = tmp_path / "scorer-metrics.jsonl"
+    metrics_file.write_text('{"recorded_at":"old"}\n', encoding="utf-8")
+    old = time.time() - (8 * 24 * 60 * 60)
+    os.utime(metrics_file, (old, old))
+
+    srv = scorer_service.make_server(
+        lambda _body, tiles=1: {"person": 0.0, "animal": 0.0},
+        port=0,
+        metrics_file=str(metrics_file),
+        metrics_persist_seconds=0,
+        metrics_retention_days=7,
+    )
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(
+                f"http://127.0.0.1:{srv.server_address[1]}/score", data=b"jpeg"
+            ),
+            timeout=5,
+        ):
+            pass
+        deadline = time.monotonic() + 3
+        rotated = []
+        while time.monotonic() < deadline:
+            rotated = [
+                path for path in tmp_path.glob("scorer-metrics.jsonl.*")
+                if path.name[len("scorer-metrics.jsonl."):][:8].isdigit()
+            ]
+            # The rotated file appears one os.replace before the fresh journal is
+            # appended, so wait for both rather than racing that window.
+            if rotated and metrics_file.exists():
+                break
+            time.sleep(0.02)
+        assert len(rotated) == 1
+        assert rotated[0].read_text(encoding="utf-8") == '{"recorded_at":"old"}\n'
+        assert metrics_file.read_text(encoding="utf-8").count("recorded_at") == 1
     finally:
         srv.shutdown()
 
@@ -321,3 +488,98 @@ def test_scores_from_output_uses_darknet_coco_names():
 
     assert scores["classes"]["motorbike"] == pytest.approx(0.4, abs=1e-4)
     assert "motorcycle" not in scores["classes"]
+
+
+def test_metrics_journal_rotates_while_it_is_still_being_appended(tmp_path):
+    # The production shape the mtime-based check missed: the journal is written every
+    # persist interval, so its mtime is always fresh while its oldest record ages out.
+    metrics_file = tmp_path / "scorer-metrics.jsonl"
+    old_stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                              time.gmtime(time.time() - 8 * 24 * 60 * 60))
+    metrics_file.write_text(json.dumps({"recorded_at": old_stamp, "requests": 1}) + "\n",
+                            encoding="utf-8")
+    metrics = scorer_service.ScorerMetrics(metrics_file=str(metrics_file),
+                                          persist_seconds=0, retention_days=7)
+
+    metrics.flush()
+
+    rotated = [path for path in tmp_path.glob("scorer-metrics.jsonl.*")
+               if path.name[len("scorer-metrics.jsonl."):][:8].isdigit()]
+    assert len(rotated) == 1
+    assert old_stamp in rotated[0].read_text(encoding="utf-8")
+    assert old_stamp not in metrics_file.read_text(encoding="utf-8")
+
+
+def test_metrics_journal_keeps_a_young_journal_with_an_old_mtime(tmp_path):
+    metrics_file = tmp_path / "scorer-metrics.jsonl"
+    fresh_stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    metrics_file.write_text(json.dumps({"recorded_at": fresh_stamp}) + "\n",
+                            encoding="utf-8")
+    old = time.time() - (8 * 24 * 60 * 60)
+    os.utime(metrics_file, (old, old))
+    metrics = scorer_service.ScorerMetrics(metrics_file=str(metrics_file),
+                                          persist_seconds=0, retention_days=7)
+
+    metrics.flush()
+
+    assert not [path for path in tmp_path.glob("scorer-metrics.jsonl.*")
+                if path.name[len("scorer-metrics.jsonl."):][:8].isdigit()]
+
+
+def test_metrics_settings_ignore_unset_blank_and_invalid_environment():
+    defaults = scorer_service.metrics_settings(env={})
+    assert defaults == {"metrics_file": None, "metrics_persist_seconds": 60.0,
+                        "metrics_retention_days": 7.0, "metrics_retention_files": 8}
+    blank = scorer_service.metrics_settings(env={
+        "TAPO_SCORER_METRICS_FILE": "  ",
+        "TAPO_SCORER_METRICS_PERSIST_SECONDS": "",
+        "TAPO_SCORER_METRICS_RETENTION_DAYS": "",
+        "TAPO_SCORER_METRICS_RETENTION_FILES": "",
+    })
+    assert blank == defaults
+    mixed = scorer_service.metrics_settings(env={
+        "TAPO_SCORER_METRICS_PERSIST_SECONDS": "not-a-number",
+        "TAPO_SCORER_METRICS_RETENTION_FILES": "12",
+    })
+    assert mixed["metrics_persist_seconds"] == 60.0     # invalid -> default
+    assert mixed["metrics_retention_files"] == 12       # valid -> honoured
+
+
+def test_metrics_settings_read_the_environment():
+    settings = scorer_service.metrics_settings(env={
+        "TAPO_SCORER_METRICS_FILE": "/var/lib/tapo/scorer.jsonl",
+        "TAPO_SCORER_METRICS_PERSIST_SECONDS": "30",
+        "TAPO_SCORER_METRICS_RETENTION_DAYS": "2",
+        "TAPO_SCORER_METRICS_RETENTION_FILES": "3",
+    })
+    assert settings == {"metrics_file": "/var/lib/tapo/scorer.jsonl",
+                        "metrics_persist_seconds": 30.0,
+                        "metrics_retention_days": 2.0,
+                        "metrics_retention_files": 3}
+
+
+def test_cli_survives_a_unit_file_whose_metrics_variables_are_unset():
+    # systemd drops an unset ${VAR} word entirely, so the flags arrive without values.
+    # That used to exit 2 under Restart=always, i.e. an invisible crash loop.
+    parser = scorer_service.build_parser(env={})
+    args = parser.parse_args([
+        "--model", "/models/yolox_m.onnx", "--port", "8766", "--input-size", "640",
+        "--metrics-file", "--metrics-persist-seconds", "--metrics-retention-days",
+        "--metrics-retention-files",
+    ])
+    assert args.metrics_file is None
+    assert args.metrics_persist_seconds == 60.0
+    assert args.metrics_retention_days == 7.0
+    assert args.metrics_retention_files == 8
+
+
+def test_cli_survives_quoted_empty_metrics_variables():
+    parser = scorer_service.build_parser(env={})
+    args = parser.parse_args([
+        "--model", "/models/yolox_m.onnx",
+        "--metrics-file", "", "--metrics-persist-seconds", "",
+        "--metrics-retention-days", "", "--metrics-retention-files", "",
+    ])
+    assert args.metrics_file is None
+    assert args.metrics_persist_seconds == 60.0
+    assert args.metrics_retention_files == 8

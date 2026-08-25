@@ -73,6 +73,31 @@ def test_run_monitor_reports_getevents_error():
     ) == 0
     assert errors == [(False, "-40214")]
 
+
+def test_run_monitor_skips_scene_duplicate_before_snapshot():
+    sent = []
+    snapshots = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    camera_cfg = config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]}
+    ).cameras[0]
+
+    watermark = monitor.run_monitor(
+        Cam(), camera_cfg, 0, now=100, groq_key="", telegram_token="", telegram_chat="",
+        snapshot=lambda *a: snapshots.append(a) or "/tmp/frame.jpg",
+        time_str=lambda e: "t",
+        scene_alert=lambda etype, event: False,
+        send_alert=lambda *a: sent.append(a) or True,
+    )
+
+    assert watermark == 100
+    assert snapshots == []
+    assert sent == []
+
 def _person_event(start=100):
     # events_1 bit19 (524288) + bit1 (2) = camera-confirmed person
     return {"start_time": start, "events_1": 524290, "alarm_type": 2}
@@ -1002,3 +1027,37 @@ def test_live_pass_without_sender_still_posts_directly(monkeypatch):
         snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T")
 
     assert len(posted) == 1
+
+
+def test_audit_error_keeps_the_exception_message_out_of_the_audit_line(caplog):
+    # The audit line is what AuditLedgerHandler persists, and the ledger is documented
+    # as free of camera addresses. A requests/pytapo failure text carries the camera IP
+    # (and sometimes a session token), so only the exception class may travel there.
+    cfg = _cfg_with_scorer()
+    error = Exception("Invalid stok value from 203.0.113.10 (url /stok=abc123/ds)")
+    with caplog.at_level("INFO", logger="tapo_monitor.monitor"):
+        monitor.audit_error(cfg, error, now=1000.0)
+
+    audit_lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("audit ")]
+    assert audit_lines == ["audit camera=a path=getevents action=error etype=system "
+                           "start=1000.0 reason=Exception"]
+    assert "203.0.113.10" not in audit_lines[0]
+    assert "stok" not in audit_lines[0]
+
+
+def test_get_events_failure_logs_the_detail_in_the_journal(monkeypatch, caplog):
+    # The detail must still be diagnosable — it belongs in the local journal, once.
+    cfg = _cfg_with_scorer()
+
+    class Cam:
+        def getEvents(self):
+            raise Exception("Invalid stok value from 203.0.113.10")
+
+    with caplog.at_level("WARNING", logger="tapo_monitor.monitor"):
+        watermark = monitor.run_monitor(
+            Cam(), cfg, 5, now=10, groq_key="", telegram_token="", telegram_chat="",
+            snapshot=lambda *a: None, time_str=lambda e: "t")
+
+    assert watermark == 5
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings == ["getEvents failed: Exception: Invalid stok value from 203.0.113.10"]

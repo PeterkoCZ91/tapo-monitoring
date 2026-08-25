@@ -109,25 +109,40 @@ The first rollout is observation-only. It must not change thresholds automatical
 
 ## Phase 4 — Closed-loop reliability
 
-Status: **planned**
+Status: **core v1 shipped; optional exporters remain planned**
 
-- Add allow-listed self-healing for configuration drift already asserted safely by the
-  daemon (for example person detection and SmartTrack categories).
-- Verify mutations by reading state back after a settle interval.
-- Add storage health based on recording continuity and repeated download failures, not
-  free-space percentage alone (loop recording normally keeps cards nearly full).
-- Measure event/API/RTSP latency and publish service-level objectives.
-- Add a JSON status endpoint and optional Prometheus/MQTT export.
+- [x] Add allow-listed self-healing for configuration drift already asserted safely by the
+  daemon (person detection, vehicle detection and SmartTrack categories).
+- [x] Keep repairs bounded by policy and verify the final auto-track state after the
+  allow-listed mutation path.
+- [x] Add storage health based on recording continuity and freshness, not free-space
+  percentage alone (loop recording normally keeps cards nearly full).
+- [x] Collect bounded, secret-free latency aggregates for snapshot, scorer, Telegram and
+  SD/recording follow-up operations in the durable Digital Twin state.
+- [ ] Add a standalone JSON status endpoint and optional Prometheus/MQTT export.
+
+The remaining exporter item is operationally optional: the CLI, twin state and scorer
+`/health`/`/metrics` endpoints already provide machine-readable status without opening a
+new network listener in the camera daemon.
 
 ## Phase 5 — Multi-camera scene intelligence
 
-Status: **planned**
+Status: **pilot v1 deployed (2026-08-25)**
 
-- Implement the existing coordinator group and handoff-preset configuration.
-- Correlate adjacent-camera observations into one scene event.
-- Select the best frame across cameras and suppress duplicate notifications.
-- Track transition direction and time while avoiding biometric identity requirements.
+- [x] Implement the existing coordinator group with a bounded event-time window.
+- [x] Suppress duplicate live, sampler and SD notifications after a successful delivery.
+- [x] Persist the per-camera event watermark after each detection pass to prevent replay
+  after a daemon restart.
+- [ ] Correlate adjacent-camera observations into a durable scene event.
+- [ ] Preserve lead/follow camera pairs with event-time delta and derive a probable
+  transition direction only after camera-clock alignment; never infer biometric identity.
+- [ ] Select the best frame across cameras.
 - Give PTZ handoffs a bounded lease and always restore the previous control policy.
+
+The first slice is deliberately limited to configured camera groups. It leaves camera
+motion untouched, does not use `handoff_preset`, shares one gate across live/sampler/SD
+delivery paths, and persists the event watermark after each detection pass. The first
+production pilot uses two cameras with overlapping views.
 
 ## Research tracks
 

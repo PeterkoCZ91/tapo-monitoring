@@ -86,6 +86,29 @@ def test_score_image_no_tiles_query_when_one(monkeypatch, tmp_path):
     assert calls[0][0] == "http://h/score"
 
 
+def test_score_image_sends_anonymous_source_id(monkeypatch, tmp_path):
+    img = tmp_path / "f.jpg"
+    img.write_bytes(b"x")
+    seen = []
+
+    def fake(req, timeout=None):
+        seen.append(req.get_header("X-tapo-source-id"))
+        return io.BytesIO(b'{"person": 0.5}')
+
+    monkeypatch.setattr(scorer.urllib.request, "urlopen", fake)
+    scorer.score_image("http://h/score", str(img), source_id="0123456789abcdef")
+    assert seen == ["0123456789abcdef"]
+
+
+def test_camera_source_id_is_stable_without_exposing_camera_name():
+    source_id = scorer.source_id_for_camera("front")
+    assert source_id == scorer.source_id_for_camera("front")
+    assert source_id != scorer.source_id_for_camera("back")
+    assert len(source_id) == 16
+    assert all(character in "0123456789abcdef" for character in source_id)
+    assert "front" not in source_id
+
+
 def test_subject_box_parses_and_validates():
     assert scorer.subject_box({"box": [1, 2, 3, 4]}) == [1.0, 2.0, 3.0, 4.0]
     assert scorer.subject_box({"box": None}) is None

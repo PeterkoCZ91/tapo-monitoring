@@ -5,6 +5,33 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `tapo-monitor version` and `tapo-monitor selfcheck`. Deployed hosts are rsync/tar copies
+  rather than git checkouts, so a host could not say which code it was running; `version`
+  answers that with a digest over the deployed module set, which also makes a half-copied
+  package visibly different from the tree it came from. `selfcheck` imports every module,
+  loads the config, asserts the credential env vars that config names are actually set, and
+  looks for `ffmpeg` — the four ways a deploy has produced a running-but-useless daemon.
+  It prints env var names, never values.
+- `tools/check_monitor_rollout.sh`, the post-deploy check the daemon never had: unit state
+  (an `auto-restart` sub-state is the crash loop `is-active` hides), package fingerprint,
+  `selfcheck`, and the journal since the restart. Liveness is reported, not asserted — the
+  daemon logs per decision, not per poll, so a quiet camera is not a failure.
+- `OnFailure=pi-failure-notify@%n.service` plus `StartLimitBurst=5`/300 s on both units.
+  The notifier and its 30-minute cooldown were already in the repository, wired to nothing,
+  so a crash loop retried forever in complete silence.
+- A startup warning naming static cameras whose configured preset is never recalled.
+  `role: static` plans no preset movement, so `day_preset` — which defaults to a real
+  preset — reads as if it were being held while nothing holds it. On a camera that has
+  been physically re-aimed once, that is the difference between "pointing where we think"
+  and blind.
+- A whole-run ffmpeg budget for the shadow scan (`--extract-budget`, default 5400 s). The
+  per-segment timeouts bound one call each, but a full day is 96 segments per camera, so a
+  slow host could still decode into the morning. Skipped segments are counted per camera
+  and flagged in the run summary: a trimmed run must not look like a complete one.
+- Durable shared-scorer metrics with bounded p50/p95 latency windows, restart-safe
+  aggregate counters, seven-day journal rotation and optional pseudonymous source buckets.
+- Bounded shadow-scan scene extraction remains enabled in the normal nightly pass, with
+  seek-sample fallback only after a scene pass fails or times out.
 - `hubpoll`, a detection source for battery cameras that record to a hub instead of to
   their own SD card. Such a camera has no event index of its own and sleeps between
   events, so the daemon reads new clips from the hub (a standalone pass, since the sampler
@@ -32,7 +59,32 @@ All notable changes to this project are documented here.
   two days that way: 13 real detections, all dropped as `no_frame`, clips downloading fine
   the whole time.
 
+### Changed
+- `scorer.score_image` is called with `source_id` directly. Two reflective
+  `inspect.signature` probes (in the daemon and in the shadow scan) asked at runtime
+  whether a same-package function accepted the argument; the injected-callable contract is
+  now explicit, and test doubles accept the keywords the production caller actually sends.
+
 ### Fixed
+- The metrics journal now rotates. Its age was measured from the file mtime, which every
+  append refreshes, so a journal written once a minute never reached the retention window
+  and grew without bound while `retention_files` stayed unused. The age now comes from the
+  oldest record in the file; content this process did not write still falls back to mtime.
+- A scorer host whose `scorer.env` predates the durable-metrics settings no longer
+  crash-loops. The four `TAPO_SCORER_METRICS_*` values are read from the environment by
+  the process instead of being interpolated into `ExecStart`, where an undefined `${VAR}`
+  expands to nothing and argparse exits before the model loads. Unset, blank and
+  unparseable values keep the defaults — observability must never be why a service refuses
+  to start.
+- A `getEvents` failure no longer puts the camera's address in the event ledger. Only the
+  exception class is recorded there; the message, which carries the host and sometimes a
+  session token, stays in the local journal where it is diagnosable. As a side effect the
+  reason is no longer dropped whole: a long failure text used to exceed the ledger's value
+  limit and be discarded, leaving the record with no reason at all.
+- A malformed scorer metrics state file no longer prevents startup, and metrics write
+  failures cannot turn a successful scoring request into an HTTP error.
+- The scorer performs one orderly persistence flush on shutdown instead of duplicating it
+  from both the signal handler and the shutdown path.
 - A failed frame extraction is logged with its reason instead of at debug level, and the
   hubpoll retry now says "no frame from the clip" rather than "clip download failed" — the
   download is one of two steps there, and naming the wrong one pointed a real investigation

@@ -4,6 +4,8 @@ set -u
 ENV_FILE="${TAPO_ENV_FILE:-/etc/tapo-monitor/secrets.env}"
 if [ -f "$ENV_FILE" ]; then
   set -a
+  # The env file path is host-specific, so shellcheck cannot follow it.
+  # shellcheck source=/dev/null
   . "$ENV_FILE"
   set +a
 fi

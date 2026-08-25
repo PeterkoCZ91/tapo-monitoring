@@ -63,6 +63,27 @@ def test_recorder_health_reports_stale_and_gap(tmp_path):
     )["reason"] == "recording_gap"
 
 
+def test_recorder_health_ignores_gap_outside_recent_continuity_window(tmp_path):
+    camera_dir = tmp_path / "camera"
+    camera_dir.mkdir()
+    paths = [camera_dir / name for name in ("old-a.mkv", "old-b.mkv", "recent-a.mkv", "recent-b.mkv")]
+    for path in paths:
+        path.write_bytes(b"")
+        os.utime(path, (10_000, 10_000))
+
+    starts = dict(zip(paths, (0, 3600, 7200, 8100), strict=True))
+    result = reliability.recorder_health(
+        str(tmp_path), "camera", now=9000, continuity_window=3600,
+        lister=lambda _directory: paths,
+        parse_start=lambda path: starts[path],
+    )
+
+    assert result["status"] == "ok"
+    assert result["reason"] == "continuous"
+    assert result["max_gap_s"] == 900.0
+    assert result["historical_max_gap_s"] == 3600.0
+
+
 def test_recorder_health_is_unknown_without_root():
     assert reliability.recorder_health(None, "camera", now=1000)["status"] == "unknown"
 

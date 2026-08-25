@@ -96,12 +96,15 @@ def audit_event(cfg, event, etype, path, action, *, score=None, threshold=None,
 
 
 def audit_error(cfg, error, *, now=None):
-    """Record a structured getEvents failure without storing a full exception."""
+    """Record a structured getEvents failure without storing a full exception.
+
+    Only the exception class travels here. The audit line is what AuditLedgerHandler
+    persists, and a pytapo/requests failure text carries the camera's address — and
+    occasionally a session token — which the ledger is documented not to hold. The
+    message itself is logged once by the caller, where the journal keeps it local.
+    """
     now = _time.time() if now is None else now
     detail = type(error).__name__
-    text = str(error).replace("\n", " ").strip()
-    if text:
-        detail = f"{detail}: {text[:160]}"
     log.info(
         "audit camera=%s path=getevents action=error etype=system start=%s reason=%s",
         _fmt_audit_value(cfg.name), _fmt_audit_value(now), _fmt_audit_value(detail),
@@ -163,7 +166,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 defer=None, score=None, observe=None, poll_observe=None,
                 media_observe=None, latency_observe=None, mute=False, corroborate=None,
                 burst_sent=None,
-                send_alert=None):
+                send_alert=None, scene_alert=None):
     """Poll one camera once and alert on new detections. Returns the new watermark.
 
     ``mute`` polls and advances the watermark but skips all grabbing/scoring/alerting.
@@ -193,13 +196,19 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         passes a sender that crops to the subject and archives the uncropped scene, the
         same route the sampler and the SD follow-up already take. The default posts the
         frame as-is, so a caller that does not care keeps the old behaviour.
+      scene_alert(etype, event) -> bool — optional cross-camera group gate checked after
+        the per-camera cooldown and before snapshot capture.
     """
     started = _time.monotonic()
     try:
         events = cam.getEvents() or []
     except Exception as exc:
         # A camera can answer configuration calls while its event endpoint is broken.
-        log.warning("getEvents failed: %s", type(exc).__name__)
+        # The message stays here, in the local journal: it is the only place that says
+        # *why* (timeout vs auth vs refused), and audit_error deliberately drops it.
+        text = str(exc).replace("\n", " ").strip()
+        log.warning("getEvents failed: %s%s", type(exc).__name__,
+                    f": {text[:200]}" if text else "")
         audit_error(cfg, exc, now=now)
         _health_observe(poll_observe, False, exc)
         return last_seen
@@ -235,6 +244,10 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 # Only this event is cooled down; a later event in the same poll may be new.
                 audit_event(cfg, event, etype, "live", "cooldown")
                 continue
+        if not _can_alert(scene_alert, etype, event):
+            log.info("skip %s: scene duplicate", etype)
+            audit_event(cfg, event, etype, "live", "scene_duplicate", reason="same_scene")
+            continue
         image = snapshot(cam, event)
         if not image:
             # RTSP capture on a slow Pi (e.g. Pi Zero) fails transiently — one retry
