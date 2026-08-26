@@ -26,12 +26,15 @@ log = logging.getLogger(__name__)
 DEFAULT_SCENE = 0.04
 DEFAULT_SEGMENT_CAP = 8
 FALLBACK_FRAME_CAP = 2
-SEGMENT_EXTRACTION_TIMEOUT = 120
-# Whole-run ceiling for the decode phase: the nightly timer starts at 03:00
-# and a full day is 96 segments per camera, so per-segment timeouts alone
-# would let extraction run into the working morning.
-DEFAULT_EXTRACT_BUDGET = 5400.0
-SCENE_EXTRACTION_TIMEOUT = 60
+SEGMENT_EXTRACTION_TIMEOUT = 150
+# Whole-run ceiling for the decode phase, split as an even share per camera. Sized from
+# measurement rather than from the clock: on a 2-core 2.8 GHz x86 host a keyframe-only
+# scene pass over one 15-minute 4K HEVC segment costs 30 s when it exits early on scene
+# changes and up to 59 s when traversed whole, so a full day is ~72 min per camera. 3.5 h
+# leaves both cameras their 96 segments plus winter headroom. Delivering a few minutes
+# late is cheap here; scanning only part of the day is not.
+DEFAULT_EXTRACT_BUDGET = 12600.0
+SCENE_EXTRACTION_TIMEOUT = 90
 SEEK_EXTRACTION_TIMEOUT = 30
 DEFAULT_BUDGET = 1500
 DEFAULT_RATE = 1.5
@@ -110,7 +113,13 @@ def extract_candidates(mkv, seg_start, out_dir, base, *, runner=None,
     if scene_pass:
         try:
             stderr = runner([
-                "ffmpeg", "-hide_banner", "-y", "-i", mkv,
+                "ffmpeg", "-hide_banner", "-y",
+                # Scene changes live between keyframes, and a 15-minute 4K HEVC segment
+                # holds ~18000 frames against ~300 keyframes. Decoding all of them can
+                # not finish a quiet segment inside SCENE_EXTRACTION_TIMEOUT, so the
+                # pass used to be killed and the segment fell back to two seek frames.
+                # Scaling ahead of select only cheapens the filter, never the decode.
+                "-skip_frame", "nokey", "-i", mkv,
                 "-vf", f"scale=1280:-2,select='gt(scene,{scene})',showinfo",
                 "-vsync", "vfr", "-an", "-frames:v", str(int(cap)), "-q:v", "2", pattern,
             ])
@@ -220,11 +229,13 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
              extract_budget=DEFAULT_EXTRACT_BUDGET, clock=None):
     """One observation-only pass over a date's recorder segments. Never raises.
 
-    ``extract_budget`` caps the ffmpeg decode phase for the whole run. The per-segment
-    timeouts bound one call each, which on a full day (96 segments) still adds up to
-    hours per camera; the nightly timer must not run into the morning. Skipped segments
-    are counted per camera and flagged in the summary — a trimmed run never looks
-    complete.
+    ``extract_budget`` caps the ffmpeg decode phase and ``budget`` the frames scored.
+    Both are split as even shares over the scannable cameras, because the per-segment
+    timeouts bound one call each and on a full day (96 segments) still add up to hours
+    per camera; a single run-wide counter spent in ``cameras.yaml`` order left the last
+    camera with whatever the earlier ones had not eaten. Unspent share rolls forward, so
+    a share is a floor and not a cap. Skipped segments are counted per camera and
+    flagged in the summary — a trimmed run never looks complete.
     """
     from . import ledger as ledger_mod
 
@@ -232,7 +243,6 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
     now = time.time() if now is None else now
     clock = time.monotonic if clock is None else clock
     started = time.monotonic()
-    extract_deadline = clock() + float(extract_budget)
     root = (env.get("RECORDING_ROOT") or "").strip()
     if not root:
         log.warning("shadow scan: RECORDING_ROOT not set; nothing to scan")
@@ -254,12 +264,19 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
         write_summary(review_dir, summary)
         return summary
     budget_left = int(budget)
+    extract_left = float(extract_budget)
     archive_counter = 0
-    for cfg in app.cameras:
-        if not cfg.scorer.url or not root:
-            continue
-        if not os.path.isdir(os.path.join(root, cfg.host)):
-            continue
+    scannable = [cfg for cfg in app.cameras
+                 if cfg.scorer.url and root
+                 and os.path.isdir(os.path.join(root, cfg.host))]
+    for position, cfg in enumerate(scannable):
+        # Both budgets are shares, not a first-come counter: whoever is last in
+        # cameras.yaml must not inherit whatever the earlier cameras left over.
+        # Unspent share rolls forward, so a cheap camera still funds a busy one.
+        cameras_left = len(scannable) - position
+        camera_started = clock()
+        extract_deadline = camera_started + extract_left / cameras_left
+        camera_frames = budget_left // cameras_left
         segments = segments_for_date(root, cfg.host, date_str)
         candidates, per_cam = [], {"segments": len(segments), "frames_scored": 0,
                                    "observations": 0, "matched": 0, "shadow_only": 0,
@@ -278,7 +295,7 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
                     mkv, seg_start, out_dir, f"{cfg.name}_{index:03d}", **extract_kwargs))
             scored = score_candidates(
                 candidates, cfg.scorer.url, cfg.scorer.threshold,
-                rate=rate, budget=budget_left, score=score,
+                rate=rate, budget=camera_frames, score=score,
                 source_id=scorer.source_id_for_camera(cfg.name),
             )
             per_cam["frames_scored"] = scored["scored"]
@@ -315,6 +332,7 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
                     os.unlink(path)
                 except OSError:
                     pass
+        extract_left = max(0.0, extract_left - (clock() - camera_started))
         summary["cameras"][cfg.name] = per_cam
         if summary["aborted"]:
             break

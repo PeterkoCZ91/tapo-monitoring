@@ -533,3 +533,143 @@ def test_run_scan_extracts_every_segment_inside_the_budget(tmp_path, monkeypatch
 
     assert summary["cameras"]["front"]["segments_skipped"] == 0
     assert summary["extract_exhausted"] is False
+
+
+def _app_with_two_recorders(tmp_path, monkeypatch, count, hosts=("192.0.2.20",
+                                                                "192.0.2.21")):
+    """Two scannable cameras, each with ``count`` segments on the same date."""
+    from tapo_monitor import config as cfg
+    root = tmp_path / "rec"
+    for host in hosts:
+        for index in range(count):
+            # real recorder layout: four 15-minute segments per hour directory, so a
+            # 96-segment day stays a valid set of parseable timestamps
+            hour, minute = divmod(index, 4)
+            hour_dir = root / host / "2026-08-12" / f"{hour:02d}"
+            hour_dir.mkdir(parents=True, exist_ok=True)
+            name = f"zaznam_20260812T{hour:02d}{minute * 15:02d}00.mkv"
+            (hour_dir / name).write_bytes(b"mkv")
+    monkeypatch.setenv("RECORDING_ROOT", str(root))
+    return cfg.load_config_from_dict({"cameras": [
+        {"name": "first", "host": hosts[0],
+         "scorer": {"url": "http://127.0.0.1:1/score", "threshold": 0.55}},
+        {"name": "second", "host": hosts[1],
+         "scorer": {"url": "http://127.0.0.1:1/score", "threshold": 0.55}},
+    ]})
+
+
+def test_run_scan_does_not_let_the_first_camera_eat_the_whole_extract_budget(
+        tmp_path, monkeypatch):
+    # A single run-wide deadline plus sequential cameras starves whoever is last in
+    # cameras.yaml: in production the first camera spent the whole budget and the second
+    # got 25 of its 96 segments. Each camera must get its own share of the decode budget.
+    app = _app_with_two_recorders(tmp_path, monkeypatch, 4)
+    elapsed = [0.0]
+
+    def fake_extract(*args, **kwargs):
+        elapsed[0] += 30.0          # every segment costs the same to decode
+        return []
+
+    monkeypatch.setattr(shadowscan, "extract_candidates", fake_extract)
+    summary = shadowscan.run_scan(
+        app, "2026-08-12", out_dir=str(tmp_path / "work"),
+        ledger_factory=_FakeLedger, score=lambda *a, **k: None,
+        extract_budget=100, clock=lambda: elapsed[0], now=1_000_000)
+
+    assert summary["cameras"]["first"]["segments_skipped"] > 0    # nobody gets it all
+    assert summary["cameras"]["second"]["segments_skipped"] < 4   # nobody starves
+
+
+def test_run_scan_splits_the_scoring_budget_between_cameras(tmp_path, monkeypatch):
+    # frames_scored is bounded by one shared counter decremented in camera order, so the
+    # first camera can consume every frame of the night's budget. Same starvation as the
+    # decode budget, one loop further down.
+    app = _app_with_two_recorders(tmp_path, monkeypatch, 3,
+                                  hosts=("192.0.2.22", "192.0.2.23"))
+    frames = [(str(tmp_path / "f.jpg"), 1_000_000.0 + n) for n in range(20)]
+    monkeypatch.setattr(shadowscan, "extract_candidates", lambda *a, **k: list(frames))
+
+    summary = shadowscan.run_scan(
+        app, "2026-08-12", out_dir=str(tmp_path / "work"),
+        ledger_factory=_FakeLedger, score=lambda *a, **k: {"person_score": 0.0},
+        budget=10, rate=0, extract_budget=3600, now=1_000_000)
+
+    assert summary["cameras"]["second"]["frames_scored"] > 0
+
+
+def test_run_scan_rolls_an_unspent_camera_share_over_to_the_next_camera(
+        tmp_path, monkeypatch):
+    # A fair share must not become a per-camera cap: when the first camera finishes
+    # cheaply, the second one gets the leftover instead of being held to half.
+    app = _app_with_two_recorders(tmp_path, monkeypatch, 6,
+                                  hosts=("192.0.2.24", "192.0.2.25"))
+    frames = [(str(tmp_path / "f.jpg"), 1_000_000.0 + n) for n in range(4)]
+    scored_per_camera = {}
+
+    def fake_extract(mkv, *a, **k):
+        return list(frames) if "192.0.2.25" in mkv else []
+
+    def fake_score(url, path, **kwargs):
+        key = kwargs.get("source_id")
+        scored_per_camera[key] = scored_per_camera.get(key, 0) + 1
+        return {"person_score": 0.0}
+
+    monkeypatch.setattr(shadowscan, "extract_candidates", fake_extract)
+    summary = shadowscan.run_scan(
+        app, "2026-08-12", out_dir=str(tmp_path / "work"),
+        ledger_factory=_FakeLedger, score=fake_score,
+        budget=20, rate=0, extract_budget=3600, now=1_000_000)
+
+    # The first camera produced no frames, so all 20 stay available for the second.
+    assert summary["cameras"]["second"]["frames_scored"] == 20
+
+
+def test_extract_candidates_scene_pass_decodes_keyframes_only(tmp_path, monkeypatch):
+    # A 15-minute 4K HEVC segment is ~18000 frames but only ~300 keyframes. Decoding
+    # every frame cannot finish a quiet segment inside SCENE_EXTRACTION_TIMEOUT (measured
+    # on production media: >200 s and still no verdict), so the scene pass was killed and
+    # the segment fell back to two seek frames. Keyframes are enough for scene changes.
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        target = args[-1]
+        if "%02d" in target:
+            with open(target % 1, "wb") as f:
+                f.write(b"scene")
+            return type("Result", (), {"stderr": b"[showinfo] pts_time:5.0\n"})()
+        with open(target, "wb") as f:
+            f.write(b"mid")
+        return type("Result", (), {"stderr": b""})()
+
+    monkeypatch.setattr(shadowscan.subprocess, "run", fake_run)
+    shadowscan.extract_candidates("/rec/segment.mkv", 1000.0, str(tmp_path), "seg0")
+
+    scene_args = calls[0]
+    assert scene_args[scene_args.index("-skip_frame") + 1] == "nokey"
+    # a decoder flag only takes effect on the input it precedes
+    assert scene_args.index("-skip_frame") < scene_args.index("-i")
+
+
+def test_default_extract_budget_covers_a_full_day_on_both_cameras(tmp_path, monkeypatch):
+    # Sizing test, not a unit test: measured over a real day on a 2-core 2.8 GHz x86
+    # host, a keyframe-only scene pass over one 15-minute 4K HEVC segment costs 30 s
+    # (exits early on scene changes) to 59 s (bright daylight, traversed whole). Two
+    # cameras x 96 segments at the worst case must fit, or the scan silently drops part
+    # of the day again -- and the point of the nightly scan is the whole day.
+    app = _app_with_two_recorders(tmp_path, monkeypatch, 96,
+                                  hosts=("192.0.2.26", "192.0.2.27"))
+    elapsed = [0.0]
+
+    def fake_extract(*args, **kwargs):
+        elapsed[0] += 59.0
+        return []
+
+    monkeypatch.setattr(shadowscan, "extract_candidates", fake_extract)
+    summary = shadowscan.run_scan(
+        app, "2026-08-12", out_dir=str(tmp_path / "work"),
+        ledger_factory=_FakeLedger, score=lambda *a, **k: None,
+        clock=lambda: elapsed[0], now=1_000_000)
+
+    assert summary["extract_exhausted"] is False
+    assert [cam["segments_skipped"] for cam in summary["cameras"].values()] == [0, 0]

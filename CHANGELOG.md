@@ -24,10 +24,11 @@ All notable changes to this project are documented here.
   preset — reads as if it were being held while nothing holds it. On a camera that has
   been physically re-aimed once, that is the difference between "pointing where we think"
   and blind.
-- A whole-run ffmpeg budget for the shadow scan (`--extract-budget`, default 5400 s). The
-  per-segment timeouts bound one call each, but a full day is 96 segments per camera, so a
-  slow host could still decode into the morning. Skipped segments are counted per camera
-  and flagged in the run summary: a trimmed run must not look like a complete one.
+- An ffmpeg budget for the shadow scan (`--extract-budget`, default 12600 s), split as an
+  even share per camera. The per-segment timeouts bound one call each, but a full day is 96
+  segments per camera, so a slow host could otherwise decode all night. Skipped segments are
+  counted per camera and flagged in the run summary: a trimmed run must not look like a
+  complete one.
 - Durable shared-scorer metrics with bounded p50/p95 latency windows, restart-safe
   aggregate counters, seven-day journal rotation and optional pseudonymous source buckets.
 - Bounded shadow-scan scene extraction remains enabled in the normal nightly pass, with
@@ -66,6 +67,20 @@ All notable changes to this project are documented here.
   now explicit, and test doubles accept the keywords the production caller actually sends.
 
 ### Fixed
+- The shadow scan analyses keyframes only (`-skip_frame nokey`). A 15-minute 4K HEVC
+  segment holds roughly 18000 frames against 300 keyframes, and scene changes live between
+  keyframes, so decoding every frame bought nothing: measured on the production host, a
+  quiet segment ran past 200 s without reaching a verdict and was killed at the 60 s scene
+  timeout, leaving two seek frames in place of the pass. Scaling ahead of `select` only ever
+  cheapened the filter, never the decode. Keyframe-only decode finishes the same segment in
+  30-59 s, so the whole day is analysed instead of sampled. The scene timeout rises to 90 s
+  because bright daylight segments measured 58-59 s, right at the old ceiling.
+- Both shadow-scan budgets are shares per camera instead of one run-wide counter spent in
+  `cameras.yaml` order. Cameras are processed sequentially, so the first one could take
+  everything: on a two-camera host the first spent the whole decode budget and the second
+  got 25 of its 96 segments — 74 % of the day unscanned — while the frames actually scored
+  split 726 to 99. Unspent share rolls forward, so a share is a floor and not a cap and a
+  cheap camera still funds a busy one.
 - The metrics journal now rotates. Its age was measured from the file mtime, which every
   append refreshes, so a journal written once a minute never reached the retention window
   and grew without bound while `retention_files` stayed unused. The age now comes from the
