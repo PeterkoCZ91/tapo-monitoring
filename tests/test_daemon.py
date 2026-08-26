@@ -609,6 +609,22 @@ def test_run_monitor_pass_advances_watermark_across_ticks():
     assert state.last_seen["a"] == 250  # advanced; old events not re-alerted
 
 
+def test_run_monitor_pass_records_rtsp_health_under_the_camera_name():
+    # The RTSP layer of the digital twin read state.rtsp_reachable[name] and always found
+    # nothing, so health could never reach "ok". monitor._health_observe calls its observer
+    # as observe(ok, error), and media_observe's second positional slot was its private
+    # _name capture -- so every observation was filed under None instead of the camera.
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    cam = _FakeEventCam([[{"start_time": 100, "event_type": "personDetection"}]])
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
+
+    daemon.run_monitor_pass(app, {"a": cam}, state, now=1, secrets=secrets,
+                            snapshot_for=_no_snapshot, time_str=lambda e: "t")
+
+    assert state.rtsp_reachable == {"a": False}   # snapshot returned None
+
+
 def test_run_monitor_pass_skips_non_getevents_cameras():
     app = cfg.load_config_from_dict({"cameras": [
         {"name": "a", "host": "203.0.113.10", "detection": {"sources": ["onvif"]}},

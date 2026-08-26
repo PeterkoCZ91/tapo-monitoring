@@ -942,7 +942,11 @@ def test_run_monitor_reports_event_and_media_health(monkeypatch):
     monitor.run_monitor(
         Cam(), cfg, 0, now=1000, groq_key="", telegram_token="t", telegram_chat="c",
         snapshot=lambda cam, event: "/tmp/live.jpg", time_str=lambda event: "T",
-        poll_observe=event_health.append, media_observe=media_health.append,
+        # both observers take the shape the production caller sends, observe(ok, error);
+        # a one-argument double falls into _health_observe's TypeError fallback and never
+        # exercises the real call
+        poll_observe=lambda ok, error=None: event_health.append(ok),
+        media_observe=lambda ok, error=None: media_health.append(ok),
     )
 
     assert event_health == [True]
@@ -963,7 +967,8 @@ def test_run_monitor_reports_failed_event_poll_without_media_probe():
     watermark = monitor.run_monitor(
         Cam(), cfg, 123, now=1000, groq_key="", telegram_token="t", telegram_chat="c",
         snapshot=lambda cam, event: None, time_str=lambda event: "T",
-        poll_observe=event_health.append, media_observe=media_health.append,
+        poll_observe=lambda ok, error=None: event_health.append(ok),
+        media_observe=lambda ok, error=None: media_health.append(ok),
     )
 
     assert watermark == 123

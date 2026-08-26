@@ -919,7 +919,11 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             return bool(g and g.get("delivered")
                         and (now - g["last_event_at"]) <= _cfg.sampler.group_gap)
 
-        def poll_observe(ok, error=None, _name=name):
+        # The private capture is keyword-only on purpose: monitor._health_observe calls
+        # its observer as observe(ok, error) and falls back to observe(ok) on TypeError,
+        # so a capture sitting in the second positional slot silently swallows `error`
+        # and files every observation under it instead of under the camera.
+        def poll_observe(ok, error=None, *, _name=name):
             state.events_reachable[_name] = bool(ok)
             if ok:
                 state.event_fail_since.pop(_name, None)
@@ -931,7 +935,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                     text = str(error).replace("\n", " ").strip()
                     state.event_error[_name] = f"{detail}: {text[:160]}" if text else detail
 
-        def media_observe(ok, _name=name):
+        def media_observe(ok, error=None, *, _name=name):
             state.rtsp_reachable[_name] = bool(ok)
 
         def send_alert(image, caption, score, _cfg=cfg):
