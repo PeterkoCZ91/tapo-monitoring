@@ -652,17 +652,18 @@ def test_extract_candidates_scene_pass_decodes_keyframes_only(tmp_path, monkeypa
 
 
 def test_default_extract_budget_covers_a_full_day_on_both_cameras(tmp_path, monkeypatch):
-    # Sizing test, not a unit test: measured over a real day on a 2-core 2.8 GHz x86
-    # host, a keyframe-only scene pass over one 15-minute 4K HEVC segment costs 30 s
-    # (exits early on scene changes) to 59 s (bright daylight, traversed whole). Two
-    # cameras x 96 segments at the worst case must fit, or the scan silently drops part
-    # of the day again -- and the point of the nightly scan is the whole day.
+    # Sizing test, not a unit test. Measured through this very function on a 2-core
+    # 2.8 GHz x86 host against real segments, with the daemon running: 48 s for a quiet
+    # night segment, 64-75 s in daylight. That is the number that matters, not the bare
+    # ffmpeg time -- extraction also pays for the mid-segment seek and competes with the
+    # live pipeline. Two cameras x 96 segments at the worst case must fit, or the scan
+    # silently drops part of the day again, and the point of a nightly scan is the day.
     app = _app_with_two_recorders(tmp_path, monkeypatch, 96,
                                   hosts=("192.0.2.26", "192.0.2.27"))
     elapsed = [0.0]
 
     def fake_extract(*args, **kwargs):
-        elapsed[0] += 59.0
+        elapsed[0] += 75.0
         return []
 
     monkeypatch.setattr(shadowscan, "extract_candidates", fake_extract)

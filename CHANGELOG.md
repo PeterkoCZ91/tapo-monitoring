@@ -24,7 +24,7 @@ All notable changes to this project are documented here.
   preset — reads as if it were being held while nothing holds it. On a camera that has
   been physically re-aimed once, that is the difference between "pointing where we think"
   and blind.
-- An ffmpeg budget for the shadow scan (`--extract-budget`, default 12600 s), split as an
+- An ffmpeg budget for the shadow scan (`--extract-budget`, default 18000 s), split as an
   even share per camera. The per-segment timeouts bound one call each, but a full day is 96
   segments per camera, so a slow host could otherwise decode all night. Skipped segments are
   counted per camera and flagged in the run summary: a trimmed run must not look like a

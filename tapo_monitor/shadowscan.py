@@ -28,12 +28,13 @@ DEFAULT_SEGMENT_CAP = 8
 FALLBACK_FRAME_CAP = 2
 SEGMENT_EXTRACTION_TIMEOUT = 150
 # Whole-run ceiling for the decode phase, split as an even share per camera. Sized from
-# measurement rather than from the clock: on a 2-core 2.8 GHz x86 host a keyframe-only
-# scene pass over one 15-minute 4K HEVC segment costs 30 s when it exits early on scene
-# changes and up to 59 s when traversed whole, so a full day is ~72 min per camera. 3.5 h
-# leaves both cameras their 96 segments plus winter headroom. Delivering a few minutes
-# late is cheap here; scanning only part of the day is not.
-DEFAULT_EXTRACT_BUDGET = 12600.0
+# measurement through the extraction function itself, not from bare ffmpeg: on a 2-core
+# 2.8 GHz x86 host with the daemon running, one 15-minute 4K HEVC segment costs 48 s when
+# the view is quiet and 64-75 s in daylight, because extraction also pays for the
+# mid-segment seek and competes with the live pipeline. A full day is then ~2 h per camera,
+# so 5 h covers two cameras at the worst case with room for a slower day. Delivering a few
+# minutes late is cheap here; scanning only part of the day is not.
+DEFAULT_EXTRACT_BUDGET = 18000.0
 SCENE_EXTRACTION_TIMEOUT = 90
 SEEK_EXTRACTION_TIMEOUT = 30
 DEFAULT_BUDGET = 1500

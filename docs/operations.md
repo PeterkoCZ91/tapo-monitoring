@@ -300,7 +300,7 @@ tapo-monitor shadow-scan cameras.yaml --date 2026-08-12 --budget 800 --rate 2.0
 tapo-monitor shadow-scan cameras.yaml --extract-budget 3600   # cap the decode phase
 ```
 
-`--extract-budget` bounds the ffmpeg decode phase (default 12600 s) and `--budget` the
+`--extract-budget` bounds the ffmpeg decode phase (default 18000 s) and `--budget` the
 frames scored. Both are split as an **even share per camera**: cameras are processed one
 after another, so a single run-wide counter left whoever is last in `cameras.yaml` with
 only the leftovers. Unspent share rolls forward, so a share is a floor and not a cap. A run
@@ -309,10 +309,12 @@ in the summary — a trimmed run never looks like a complete one.
 
 The scene pass decodes keyframes only (`-skip_frame nokey`). Scene changes live between
 keyframes and a 15-minute 4K HEVC segment holds ~18000 frames against ~300 keyframes, so
-full decode cost 4x more without finding more; measured on a 2-core 2.8 GHz x86 host one
-segment now costs 30 s (exits early on scene changes) to 59 s (bright daylight, traversed
-whole), which is where the 12600 s default comes from: two cameras x 96 segments x the
-worst case, plus headroom. Sizing a host of your own? Time one segment first:
+full decode cost 4x more without finding more. Measured through the extraction function
+itself on a 2-core 2.8 GHz x86 host with the daemon running, one segment costs 48 s when
+the view is quiet and 64-75 s in daylight — extraction also pays for the mid-segment seek
+and competes with the live pipeline, so bare ffmpeg time understates it. That is where the
+18000 s default comes from: two cameras x 96 segments x the worst case, plus room for a
+slower day. Sizing a host of your own? Time one segment first:
 
 ```bash
 time ffmpeg -hide_banner -skip_frame nokey -i <segment>.mkv \
