@@ -11,22 +11,43 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # The fleet does not run one Python. The host with the recorder is on 3.12 and both
+    # Pis are on 3.13, so testing a single version means a 3.13-incompatible change ships
+    # green and breaks two of the three sites, with the deploy already done. Lint and
+    # shellcheck are version-independent, so they run once on the primary version.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v5
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "${{ matrix.python-version }}"
 
+      # The scorer extra is not optional for CI. tests/test_scorer_service.py opens with
+      # pytest.importorskip("numpy"), and numpy lives in the scorer extra, so installing
+      # only [dev] skipped that whole module: 34 tests covering the one component whose
+      # death stops alerts at every site at once had never run here. Verified against the
+      # run for cf8998d, which reported 893 passed instead of 927.
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,scorer]"
+
+      # Guard the guard. importorskip turns a missing dependency into a green build with
+      # a whole module quietly absent, which is exactly how those 34 went unnoticed. Naming
+      # the module keeps this assertion true as tests are added, unlike a total count.
+      - name: Assert the scorer service tests are collected, not skipped
+        run: pytest tests/test_scorer_service.py --collect-only -q | grep -q "::"
 
       - name: Lint (ruff)
+        if: matrix.python-version == '3.12'
         run: ruff check .
 
       - name: Lint (shellcheck)
+        if: matrix.python-version == '3.12'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck

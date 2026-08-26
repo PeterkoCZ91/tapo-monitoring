@@ -76,6 +76,16 @@ All notable changes to this project are documented here.
   now explicit, and test doubles accept the keywords the production caller actually sends.
 
 ### Fixed
+- CI runs the scorer-service tests, which it had never run. `tests/test_scorer_service.py`
+  opens with `pytest.importorskip("numpy")` and numpy lives in the `scorer` extra, while CI
+  installed only `[dev]` — so 34 tests covering the one component whose death stops alerts
+  at every site at once were skipped as a whole module, and the build stayed green. Local
+  runs passed them only because a developer machine happened to have numpy. CI installs
+  `[dev,scorer]` now, and a step asserts that module is collected rather than skipped,
+  because a silently absent module is what hid this.
+- CI tests both Python versions the fleet actually runs. The host with the recorder is on
+  3.12 and both Pis are on 3.13; testing one meant a 3.13-incompatible change could ship
+  green and break two of three sites, with the deploy already done.
 - A camera refusing one of the three bounded self-heals is reported instead of swallowed.
   They are idempotent re-assertions sent every control pass inside bare excepts, so a
   camera that rejects them looked exactly like one that accepted them — the same blindness
