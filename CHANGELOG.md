@@ -67,6 +67,16 @@ All notable changes to this project are documented here.
   now explicit, and test doubles accept the keywords the production caller actually sends.
 
 ### Fixed
+- The camera reachability probe sends more than one echo. These cameras drop 2-4 % of
+  ICMP echoes on a radio whose own gateway drops none, and a single-packet probe on the
+  60 s control pass turned each lost packet into a warning *and* a hole: a camera that
+  fails the probe is dropped from the client map, so event polling, the sampler and the
+  follow-up drain all skipped it until the next pass. ping exits 0 when any echo is
+  answered, so the retry costs a healthy camera nothing and a genuinely offline one still
+  fails them all - the outage threshold that raises the real alarm is untouched.
+- The daily review digest logs the digest it sent. Only failures were logged, so a
+  delivered digest left no trace in the journal and the only evidence the channel still
+  worked was its state file: silent-when-healthy is indistinguishable from dead.
 - Below-threshold motion on a recorder-backed camera reaches the recorder again. The
   second look is the reason `snapshot_source: recording` exists - a live frame can score
   0.05 on a subject the recording shows at 0.83 - and it was unreachable: `empty` is

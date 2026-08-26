@@ -231,9 +231,16 @@ def run_if_due(*, env=None, now=None, send_text, send_photo):
         if not send_text(text):
             log.warning("review digest delivery failed; will retry next tick")
             return False
+        photos = 0
         for entry in pick_photos(entries, review_dir, max_photos_from_env(env)):
             send_photo(os.path.join(review_dir, str(entry["file"])), photo_caption(entry))
+            photos += 1
         mark_sent(review_dir, now)
+        # Say it out loud. Only failures used to log, so a working digest was
+        # indistinguishable in the journal from one that had quietly stopped running, and
+        # the only evidence either way was the state file.
+        log.info("review digest sent: %d suppressed frame(s), %d photo(s)",
+                 len(entries), photos)
         return True
     except Exception:  # noqa: BLE001 - telemetry must never break the daemon loop
         log.warning("review digest failed", exc_info=True)

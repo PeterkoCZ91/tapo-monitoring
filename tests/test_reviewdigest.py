@@ -192,6 +192,23 @@ def test_run_if_due_sends_text_and_capped_photos_once(tmp_path):
     assert len(texts) == 1 and len(photos) == 3
 
 
+def test_run_if_due_says_when_a_digest_went_out(tmp_path, caplog):
+    # Only failures were logged, so a delivered digest left no trace in the journal at all
+    # and the only evidence it still worked was the .digest-sent stamp. A telemetry channel
+    # that is silent when healthy cannot be distinguished from one that died.
+    review_dir = str(tmp_path)
+    now = _local_ts(2026, 8, 13, 21, 0)
+    _write_entry(review_dir, "e0.jpg", now - 60, "front", 0.64)
+
+    with caplog.at_level("INFO", logger="tapo_monitor.reviewdigest"):
+        assert reviewdigest.run_if_due(
+            env=_env(tmp_path), now=now,
+            send_text=lambda t: True,
+            send_photo=lambda p, c: True) is True
+
+    assert any("digest" in message for message in caplog.messages)
+
+
 def test_run_if_due_failed_text_send_retries_next_tick(tmp_path):
     now = _local_ts(2026, 8, 13, 21, 0)
     _write_entry(str(tmp_path), "a.jpg", now - 60, "front", 0.59)

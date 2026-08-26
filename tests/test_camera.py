@@ -12,7 +12,7 @@ def _no_sleep(_):
 
 # ── ping_reachable ───────────────────────────────────────────────────────────
 
-def test_ping_reachable_uses_one_bounded_shell_free_probe():
+def test_ping_reachable_uses_a_bounded_shell_free_probe():
     calls = []
     class Result:
         returncode = 0
@@ -22,9 +22,28 @@ def test_ping_reachable_uses_one_bounded_shell_free_probe():
 
     assert camera.ping_reachable("203.0.113.10", run=run) is True
     argv, kwargs = calls[0]
-    assert argv == ["ping", "-n", "-c", "1", "-W", "1", "203.0.113.10"]
-    assert kwargs["timeout"] == 2
+    assert argv == ["ping", "-n", "-c", "2", "-i", "0.3", "-W", "1", "203.0.113.10"]
+    assert kwargs["timeout"] == 3
     assert kwargs["check"] is False
+
+
+def test_ping_reachable_survives_a_single_lost_packet():
+    # Measured on the production cameras: 2-4 % of echoes to the camera are lost while the
+    # default gateway loses none from the same radio. A one-packet probe on a 60 s control
+    # pass turned each lost packet into a warning AND a 60 s hole, because a camera that
+    # fails the probe is dropped from the client map until the next pass.
+    calls = []
+    class Result:
+        returncode = 0
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return Result()
+
+    camera.ping_reachable("203.0.113.10", run=run)
+    argv, kwargs = calls[0]
+    assert int(argv[argv.index("-c") + 1]) > 1
+    # ping exits 0 when any echo is answered, so the deadline has to cover them all
+    assert kwargs["timeout"] > int(argv[argv.index("-W") + 1])
 
 
 def test_ping_reachable_returns_false_on_nonzero_or_command_error():

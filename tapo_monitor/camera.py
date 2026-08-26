@@ -17,19 +17,28 @@ tests — import without the dependency present.
 import subprocess
 import time as _time
 
+PING_ECHOES = 2
+PING_INTERVAL = "0.3"
+
 
 def ping_reachable(host, timeout=1, run=subprocess.run):
-    """True when the camera answers one ICMP echo request.
+    """True when the camera answers any of a few ICMP echo requests.
 
-    The command uses an argv list (never a shell), suppresses output and has both ping's
-    own deadline and a subprocess deadline. It performs no camera login.
+    More than one echo on purpose: these cameras drop 2-4 % of packets on a radio whose
+    gateway drops none, and a caller that treats one failure as "down" both cries wolf and
+    parks the camera until its next pass. ping exits 0 when any echo is answered, so the
+    retry costs nothing on a healthy camera and a genuinely offline one still fails them
+    all. The command uses an argv list (never a shell), suppresses output and has both
+    ping's own deadline and a subprocess deadline. It performs no camera login.
     """
+    deadline = max(1, int(timeout))
     try:
         result = run(
-            ["ping", "-n", "-c", "1", "-W", str(max(1, int(timeout))), host],
+            ["ping", "-n", "-c", str(PING_ECHOES), "-i", PING_INTERVAL,
+             "-W", str(deadline), host],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=timeout + 1,
+            timeout=deadline + PING_ECHOES,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
