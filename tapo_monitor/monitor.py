@@ -296,6 +296,24 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 # Groq disabled = raw mode: there is no arbiter to declare a scene
                 # empty, so nothing is — every live frame goes straight out.
                 empty = False
+            if etype == "motion" and empty and defer_motion:
+                # This has to come before the corroborate gate. `empty` is
+                # `score < scorer.threshold` and the gate is handed that same threshold as
+                # its confirm level, so every frame that qualifies for a recorder look was
+                # dropped one branch earlier and the look never happened. That is the case
+                # it exists for: a live frame can score 0.05 on a subject the recording
+                # shows at 0.83.
+                log.info("defer %s: live empty, SD follow-up queued", etype)
+                defer(event, etype, False)
+                audit_event(cfg, event, etype, "live", "defer", score=s,
+                            threshold=cfg.scorer.threshold if score is not None else None,
+                            reason="below_threshold" if score is not None else "empty")
+                # Deliberately not "sent": the recorder look is extra evidence, not a
+                # replacement, so the live sampler keeps working this burst instead of
+                # standing down for a look that may find nothing. Both cannot reach the
+                # phone - process_pending_sd asks the alert gate before it sends.
+                _observe(observe, event, etype, False)
+                continue
             if etype == "motion" and s is not None and corroborate is not None:
                 # Do not alert on a single marginal motion frame — an empty IR scene can
                 # hallucinate a person once and not on the next, while a real subject
@@ -321,14 +339,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 empty = False   # verdict == "send": fall through to the send block
             if etype == "motion":
                 if empty:
-                    if defer_motion:
-                        log.info("defer %s: live empty, SD follow-up queued", etype)
-                        defer(event, etype, False)
-                        audit_event(cfg, event, etype, "live", "defer", score=s,
-                                    threshold=cfg.scorer.threshold if score is not None else None,
-                                    reason="below_threshold" if score is not None else "empty")
-                        _observe(observe, event, etype, True)
-                        continue
+                    # defer_motion was handled above, before the corroborate gate.
                     if score is not None:
                         # Keep the score in the trace: threshold calibration reads this.
                         log.info("drop %s: score %.2f below threshold %.2f",

@@ -1051,6 +1051,70 @@ def _run_marginal_motion_pass(monkeypatch, motion_send):
     return counter.photos, state
 
 
+def _run_recording_motion_pass(monkeypatch, person_score):
+    """One bare motion event on a camera shaped like production: recorder-backed
+    snapshots, sampler on, and a motion_send_threshold above the scorer threshold."""
+    from tapo_monitor import monitor as mon
+    counter = _CountingNotify()
+    monkeypatch.setattr(mon.notify, "send_photo", counter.send_photo)
+    monkeypatch.setattr(mon.enrich, "groq_describe", lambda *a, **k: "x")
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, img, timeout=10, tiles=1, **kw: {"person": person_score,
+                                                                    "animal": 0.0})
+    app = cfg.load_config_from_dict({"groq": {}, "cameras": [{
+        "name": "a", "host": "203.0.113.10",
+        "sd_snapshot": True, "snapshot_source": "recording",
+        "sampler": {"enabled": True, "interval": 30, "max_frames": 6, "group_gap": 90},
+        "scorer": {"url": "http://127.0.0.1:1/score", "threshold": 0.55,
+                   "motion_send_threshold": 0.70},
+    }]})
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": "k"}
+    cam = _FakeEventCam([[{"start_time": 100, "events_1": 2}]])   # bare non-PIR motion
+    daemon.run_monitor_pass(app, {"a": cam}, state, now=1000, secrets=secrets,
+                            snapshot_for=lambda c: (lambda cam, ev: "/tmp/x.jpg"),
+                            time_str=lambda e: "t")
+    return counter.photos, state
+
+
+def test_run_monitor_pass_gives_below_threshold_motion_a_recorder_look(monkeypatch):
+    # The recorder second look is the whole point of snapshot_source: recording -- a live
+    # frame can score 0.05 on a subject the recording shows at 0.83. It was unreachable:
+    # `empty` is `score < scorer.threshold` and corroborate is handed that same threshold
+    # as its confirm level, so every frame that would qualify for the recorder look is
+    # dropped by the corroborate verdict first, one branch earlier.
+    photos, state = _run_recording_motion_pass(monkeypatch, person_score=0.05)
+
+    assert photos == 0                                    # nothing sent live
+    assert [p["etype"] for p in state.pending_sd] == ["motion"]
+
+
+def test_run_monitor_pass_keeps_sampling_after_a_motion_recorder_look(monkeypatch):
+    # The recorder look is extra evidence, not a replacement. Marking the burst as sent
+    # would stand the live sampler down (sampler.due checks group["sent"]) and trade six
+    # live frames for one recorder window that may find nothing.
+    _photos, state = _run_recording_motion_pass(monkeypatch, person_score=0.05)
+
+    assert state.groups["a"]["sent"] is False
+
+
+def test_run_monitor_pass_still_holds_marginal_recording_motion(monkeypatch):
+    # Only the below-threshold path changes: a marginal frame must keep waiting for
+    # corroboration rather than skipping straight to the recorder.
+    photos, state = _run_recording_motion_pass(monkeypatch, person_score=0.60)
+
+    assert photos == 0
+    assert state.pending_sd == []
+    assert state.groups["a"]["motion_candidates"] == 1
+
+
+def test_run_monitor_pass_sends_clear_recording_motion_without_deferring(monkeypatch):
+    photos, state = _run_recording_motion_pass(monkeypatch, person_score=0.90)
+
+    assert photos == 1
+    assert state.pending_sd == []
+
+
 def test_run_monitor_pass_holds_first_marginal_motion(monkeypatch):
     photos, state = _run_marginal_motion_pass(monkeypatch, motion_send=0.6)
     assert photos == 0                                   # held, not sent
@@ -1875,6 +1939,27 @@ def _run_pending(app, state, cam_clients, now, fetch_frames, snapshot_for, sent,
         fetch_frames=fetch_frames)
 
 
+def test_pending_motion_skips_a_burst_the_group_already_delivered(monkeypatch):
+    # A motion follow-up is queued while the live sampler keeps working on the same burst,
+    # so by the time the recorder window is downloadable the sampler may already have sent.
+    # There is no cooldown check before the send, only a recording of it afterwards, so the
+    # same passage would reach the phone twice minutes apart.
+    sent = []
+    app, state, fetch_frames, snapshot_for = _pending({}, sent)
+    event = {"start_time": 100}
+    state.pending_sd.append({"camera": "a", "etype": "motion", "event": event,
+                             "span": 30, "full_span": 30, "due_at": 0, "live_sent": False})
+    # record a prior send the way the production senders do
+    _, on_alert = daemon.alert_gate(state, "a", app.alerts.cooldown, 150)
+    on_alert("motion", event)
+
+    remaining = _run_pending(app, state, {"a": object()}, 400, fetch_frames,
+                             snapshot_for, sent, monkeypatch)
+
+    assert sent == []
+    assert remaining == []
+
+
 def test_pending_respects_camera_sd_jobs_per_tick(monkeypatch):
     sent = []
     app = cfg.load_config_from_dict(
@@ -1890,18 +1975,22 @@ def test_pending_respects_camera_sd_jobs_per_tick(monkeypatch):
     def snapshot_for(cfg_):
         return lambda cam, ev: None
 
+    # Two separate passages, both due, and both confirmed: the per-tick limit must be the
+    # only thing holding one back. A motion entry here would instead be held by the alert
+    # gate (the first send starts a cooldown), which is a different mechanism -- see
+    # test_pending_motion_skips_a_burst_the_group_already_delivered.
     state.pending_sd = [
         {"camera": "a", "etype": "person",
+         "event": {"start_time": 600}, "due_at": 1075, "live_sent": True},
+        {"camera": "a", "etype": "person",
          "event": {"start_time": 1000}, "due_at": 1075, "live_sent": True},
-        {"camera": "a", "etype": "motion",
-         "event": {"start_time": 1001}, "due_at": 1075, "live_sent": False},
     ]
     _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent, monkeypatch)
-    assert calls == [1000]
+    assert calls == [600]
     assert len(sent) == 1
-    assert state.pending_sd == [{"camera": "a", "etype": "motion",
-                                 "event": {"start_time": 1001},
-                                 "due_at": 1075, "live_sent": False}]
+    assert state.pending_sd == [{"camera": "a", "etype": "person",
+                                 "event": {"start_time": 1000},
+                                 "due_at": 1075, "live_sent": True}]
 
 def test_pending_not_due_is_kept(monkeypatch):
     sent = []

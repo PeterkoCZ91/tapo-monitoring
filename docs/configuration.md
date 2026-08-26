@@ -304,6 +304,15 @@ sd_jobs_per_tick: 1
 - `sd_motion` also gives PIR-backed bare motion a second chance; it can be expensive.
 - `sd_jobs_per_tick` adds per-camera backpressure for slow hosts.
 
+With `snapshot_source: recording`, bare motion whose live frame scores below the threshold
+also gets a recorder look — that is the point of a local recorder, since a live frame can
+score 0.05 on a subject the recording shows at 0.83. It is throttled by design: only one
+motion follow-up is pending per camera at a time, so the rate is bounded by how long a
+window takes to become downloadable rather than by the event rate. The live sampler keeps
+working the same burst in parallel, and whichever gets there first closes the alert gate for
+that passage, so only one alert can reach the phone. On a slow host, `sd_jobs_per_tick` and
+`sd_motion_span_cap` are the brakes.
+
 Local-recorder environment:
 
 ```bash

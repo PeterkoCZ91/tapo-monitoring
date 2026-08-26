@@ -67,6 +67,22 @@ All notable changes to this project are documented here.
   now explicit, and test doubles accept the keywords the production caller actually sends.
 
 ### Fixed
+- Below-threshold motion on a recorder-backed camera reaches the recorder again. The
+  second look is the reason `snapshot_source: recording` exists - a live frame can score
+  0.05 on a subject the recording shows at 0.83 - and it was unreachable: `empty` is
+  `score < scorer.threshold`, the corroboration gate is handed that same threshold as its
+  confirm level, and its drop verdict returned one branch before the deferral. So every
+  frame that qualified for a look was dropped just short of it, roughly 500 motion events a
+  day per camera. The look now runs before the gate; marginal frames still wait for
+  corroboration and clear frames still send live, unchanged.
+- A deferred motion burst no longer stands the live sampler down. The recorder look is
+  extra evidence, not a replacement, so marking the burst as sent traded six live frames
+  for one recorder window that may find nothing.
+- Unconfirmed motion follow-ups ask the alert gate before sending. The send only recorded
+  itself in the gate afterwards, so with the sampler still working the same burst the same
+  passage could reach the phone twice, minutes apart. A same-passage alert retires the
+  entry, since no later tick can make it sendable; a plain wall-clock cooldown puts it back
+  on the queue instead of discarding it.
 - The shadow scan analyses keyframes only (`-skip_frame nokey`). A 15-minute 4K HEVC
   segment holds roughly 18000 frames against 300 keyframes, and scene changes live between
   keyframes, so decoding every frame bought nothing: measured on the production host, a

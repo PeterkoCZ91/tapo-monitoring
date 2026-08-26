@@ -1293,6 +1293,25 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
                                 reason="same_scene")
             continue
 
+        if etype == "motion":
+            # Unconfirmed motion waits for its window while the live sampler keeps working
+            # the same burst, so the sampler may have alerted already. The send below only
+            # *records* itself in the alert gate, so without asking first the same passage
+            # arrives twice, minutes apart. Two different answers matter here: a
+            # same-passage alert (the gate compares camera event starts, which is what
+            # survives the follow-up's own delay) can never become sendable, so the entry
+            # is finished; a plain wall-clock cooldown expires, so that entry still
+            # deserves its turn and goes back on the queue rather than being thrown away.
+            can_alert, _ = alert_gate(state, cfg.name, app.alerts.cooldown, now)
+            if not can_alert(etype, event):
+                if not can_alert(etype):
+                    remaining.append(entry)
+                    continue
+                log.info("drop %s: this passage already alerted [sd]", etype)
+                monitor.audit_event(cfg, event, etype, "sd", "cooldown",
+                                    reason="passage_already_alerted")
+                continue
+
         limit = cfg.sd_jobs_per_tick
         if limit is not None and processed_by_camera.get(entry["camera"], 0) >= limit:
             remaining.append(entry)               # slow-host backpressure -> next tick
