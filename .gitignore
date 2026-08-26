@@ -1,11 +1,18 @@
 # Secrets / local deployment state
 tapo-camera.env
 *.env
+# `*.env` does NOT match `tapo-camera.env.bak-20260826` — a glob has to end at the
+# pattern. The hosts name their backups exactly that way, so a copied-in backup would
+# have been staged by `git add -A` with camera credentials in it.
+*.env.*
+!*.env.example
 !.env.example
 
 # Real deployment config (coordinates, hosts, camera layout) — never published.
 cameras.yaml
 cameras.*.yaml
+# Same hole, same reason: `cameras.yaml.bak-cropnative-20260807` is the live convention.
+cameras.yaml.*
 !cameras.example.yaml
 
 # Python
