@@ -104,8 +104,20 @@ Status: **v1 shipped** (single-recorder-host batch; see docs/operations.md)
 - [x] Keep all media local and store only evidence references with a short expiry when an
   operator explicitly enables review artifacts.
 - [x] Produce daily per-camera miss candidates and scorer calibration datasets.
+- [x] Analyse keyframes only. Scene changes live between keyframes, so decoding every
+  frame of a 4K HEVC segment bought nothing and could not finish a quiet segment inside
+  its timeout; the pass was killed and the segment fell back to two seek frames.
+- [x] Split the decode and scoring budgets as even shares per camera, with unspent share
+  rolling forward. Cameras are processed sequentially, so one run-wide counter left
+  whoever was last in the config with the leftovers: on the first production night the
+  second camera scanned a quarter of its day.
 
 The first rollout is observation-only. It must not change thresholds automatically.
+
+Open follow-up: extraction cost, not scoring, is the binding constraint, and it is
+host-specific. Size the decode budget from a measurement through the extraction function
+on the target host — bare ffmpeg timing understates it, because extraction also pays for
+the uniform mid-segment frame and competes with the live pipeline.
 
 ## Phase 4 — Closed-loop reliability
 
@@ -119,7 +131,21 @@ Status: **core v1 shipped; optional exporters remain planned**
   percentage alone (loop recording normally keeps cards nearly full).
 - [x] Collect bounded, secret-free latency aggregates for snapshot, scorer, Telegram and
   SD/recording follow-up operations in the durable Digital Twin state.
+- [x] Report a refused repair instead of swallowing it. The repairs are idempotent
+  re-assertions sent every control pass, so the useful signal is not how often they ran
+  but whether a camera is rejecting them — a camera with person detection stuck off
+  demotes every person to bare motion. Refusals are logged and counted per repair.
+- [x] Say once a day that the fleet is alive. Every other notification is a transition, so
+  "everything works" was expressed as silence — indistinguishable from a dead host, a hung
+  daemon or an expired bot token. The daily digest carries camera reachability, the
+  daemon's tick, the shared scorer, recorder freshness, the day's delivered alert counts
+  and any refused repair. It claims OK only for what it checked, and any failed check
+  removes the headline: a heartbeat that says OK while a camera is down converts a silence
+  you might question into a confirmation you will trust.
 - [ ] Add a standalone JSON status endpoint and optional Prometheus/MQTT export.
+- [ ] Close the one gap a self-reported heartbeat cannot: a host cannot report that it is
+  dead, and nobody notices an absent message. This needs an external dead-man's switch
+  where the alarm is raised by something other than the host being watched.
 - [ ] Make the repair policy consistent: `auto_fix` and `allowed_repairs` take effect even
   when `reliability.enabled` is false, so trimming the allow-list silently disables
   repairs that guard known regressions (person detection off, auto-track without the
@@ -147,7 +173,14 @@ Status: **pilot v1 deployed (2026-08-25)**
 - [ ] Select the best frame across cameras.
 - [ ] Measure and report each camera's clock offset. The duplicate gate compares event
   times across cameras, so a skew larger than the window makes it silently inert — and any
-  later lead/follow inference would be worse than inert.
+  later lead/follow inference would be worse than inert. First production evidence: on the
+  pilot pair the suppressed events' start times differed by one to two seconds, so the gate
+  is genuinely deciding rather than inert. That is an observation, not the reported metric
+  this item asks for.
+- [ ] Re-measure the gate's reach whenever a new delivery path appears. The gate is shared
+  across live, sampler and follow-up paths, so giving below-threshold motion a recorder
+  look multiplied its firing rate roughly sevenfold on the pilot pair — the same policy,
+  a much larger effect, and no config change to point at.
 - [ ] Decide the preset policy for `role: static`. Such a camera is planned no preset
   movement, so its configured preset is never recalled; a camera that has been physically
   re-aimed once has no automatic way back.
@@ -173,7 +206,15 @@ about making a deploy verifiable rather than hopeful.
 - [x] `tools/check_monitor_rollout.sh` and `tools/check_scorer_rollout.sh`: post-restart
   verification for both sides, including a unit in `auto-restart` that `is-active` hides.
 - [x] `OnFailure` plus a start limit on both units, so a crash loop reports itself instead
-  of retrying forever in silence.
+  of retrying forever in silence. (Recorded as done before it was true everywhere: one
+  host was missed and stayed silent for a further day. Verify a fleet-wide claim on every
+  host, not on the hosts that were convenient to reach.)
+- [x] Test every Python version the fleet runs, not one. A single-version matrix let a
+  change ship green and break the hosts on the other version, with the deploy already done.
+- [x] Install the optional extras CI needs to collect the whole suite. A module guarded by
+  `pytest.importorskip` disappears silently when its dependency is absent, so the scorer
+  service's tests had never run in CI while the build reported success; a step now asserts
+  that module is collected rather than skipped.
 - [ ] One deploy path: full-package transfer into a timestamped release directory, a
   `selfcheck` inside it, then an atomic symlink switch and a per-host restart. Rollback
   becomes re-pointing the symlink instead of finding the right tarball. Requires the unit
