@@ -192,6 +192,74 @@ def test_run_if_due_sends_text_and_capped_photos_once(tmp_path):
     assert len(texts) == 1 and len(photos) == 3
 
 
+def test_run_if_due_includes_the_fleet_health_and_alert_sections(tmp_path):
+    # The point of the whole feature: one message a day that says the fleet is alive, not
+    # only what it suppressed. Silence used to be the only "all good" signal there was.
+    review_dir = str(tmp_path / "review")
+    sent_dir = str(tmp_path / "sent")
+    os.makedirs(review_dir)
+    os.makedirs(sent_dir)
+    now = _local_ts(2026, 8, 13, 21, 0)
+    _write_entry(review_dir, "e0.jpg", now - 60, "front", 0.64)
+    with open(os.path.join(sent_dir, "index.jsonl"), "w", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": now - 300, "file": "s.jpg", "camera": "front",
+                            "delivered": True}) + "\n")
+    env = {"TAPO_REVIEW_DIGEST_TIME": "20:45",
+           sentlog.ENV_REVIEW_DIR: review_dir,
+           sentlog.ENV_DIR: sent_dir}
+    texts = []
+
+    assert reviewdigest.run_if_due(
+        env=env, now=now,
+        send_text=lambda t: texts.append(t) or True,
+        send_photo=lambda p, c: True,
+        health={"cameras": {"front": {"reachable": True, "events": True}},
+                "tick": {"ok": True}, "scorer": {"ok": True, "requests": 10, "failed": 0,
+                                                 "p95": 0.4},
+                "recorder": None, "repairs": {}}) is True
+
+    assert len(texts) == 1
+    assert "Fleet OK" in texts[0]
+    assert "1 sent" in texts[0]
+    assert "suppressed frame(s)" in texts[0]
+
+
+def test_run_if_due_indents_alerts_under_the_fleet_header(tmp_path):
+    review_dir = str(tmp_path / "review")
+    sent_dir = str(tmp_path / "sent")
+    os.makedirs(review_dir)
+    os.makedirs(sent_dir)
+    now = _local_ts(2026, 8, 13, 21, 0)
+    with open(os.path.join(sent_dir, "index.jsonl"), "w", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": now - 300, "file": "s.jpg", "camera": "front",
+                            "delivered": True}) + "\n")
+    env = {"TAPO_REVIEW_DIGEST_TIME": "20:45",
+           sentlog.ENV_REVIEW_DIR: review_dir, sentlog.ENV_DIR: sent_dir}
+    texts = []
+
+    reviewdigest.run_if_due(
+        env=env, now=now, send_text=lambda t: texts.append(t) or True,
+        send_photo=lambda p, c: True,
+        health={"cameras": {"front": {"reachable": True, "events": True}},
+                "tick": {"ok": True}, "scorer": None, "recorder": None, "repairs": {}})
+
+    assert "\n   alerts 24h: 1 sent" in texts[0]
+
+
+def test_run_if_due_without_health_keeps_the_old_message(tmp_path):
+    review_dir = str(tmp_path)
+    now = _local_ts(2026, 8, 13, 21, 0)
+    _write_entry(review_dir, "e0.jpg", now - 60, "front", 0.64)
+    texts = []
+
+    assert reviewdigest.run_if_due(
+        env=_env(tmp_path), now=now,
+        send_text=lambda t: texts.append(t) or True,
+        send_photo=lambda p, c: True) is True
+
+    assert "Fleet" not in texts[0]
+
+
 def test_run_if_due_says_when_a_digest_went_out(tmp_path, caplog):
     # Only failures were logged, so a delivered digest left no trace in the journal at all
     # and the only evidence it still worked was the .digest-sent stamp. A telemetry channel
@@ -269,6 +337,161 @@ def test_run_if_due_appends_scan_context(tmp_path):
         send_text=lambda t: texts.append(t) or True,
         send_photo=lambda p, c: True) is True
     assert "shadow scan 2026-08-12" in texts[0]
+
+
+def test_fleet_lines_reports_ok_and_names_what_it_checked():
+    # The whole point of a positive heartbeat: it has to say which subsystems it actually
+    # verified, so "OK" cannot be read as covering something nobody looked at.
+    lines = reviewdigest.fleet_lines({
+        "cameras": {"front": {"reachable": True, "events": True},
+                    "yard": {"reachable": True, "events": True}},
+        "tick": {"ok": True},
+        "scorer": {"ok": True, "requests": 4180, "failed": 0, "p95": 0.73},
+        "recorder": {"status": "ok", "age_s": 47.0},
+        "repairs": {},
+    })
+    text = "\n".join(lines)
+    assert text.startswith("\U0001f49a Fleet OK")
+    assert "front" in text and "yard" in text
+    assert "4180" in text and "0 failed" in text
+    assert "47s" in text
+
+
+def test_fleet_lines_never_says_ok_when_a_camera_is_unreachable():
+    lines = reviewdigest.fleet_lines({
+        "cameras": {"front": {"reachable": False, "events": True},
+                    "yard": {"reachable": True, "events": True}},
+        "tick": {"ok": True},
+        "scorer": None, "recorder": None, "repairs": {},
+    })
+    text = "\n".join(lines)
+    assert "Fleet OK" not in text
+    assert "front" in text and "unreachable" in text
+
+
+def test_fleet_lines_distinguishes_not_yet_checked_from_unreachable():
+    # Before the first control pass a camera's reachability is simply unknown. Calling
+    # that "unreachable" cries wolf; hiding it lets "Fleet OK" imply a camera nobody
+    # looked at is fine. It has to be named as unchecked.
+    lines = reviewdigest.fleet_lines({
+        "cameras": {"front": {"reachable": True, "events": True},
+                    "yard": {"reachable": None, "events": None}},
+        "tick": {"ok": True}, "scorer": None, "recorder": None, "repairs": {},
+    })
+    text = "\n".join(lines)
+    assert "unreachable" not in text
+    assert "yard" in text
+    assert "not checked" in text
+
+
+def test_fleet_lines_never_says_ok_when_the_scorer_is_down():
+    lines = reviewdigest.fleet_lines({
+        "cameras": {"front": {"reachable": True, "events": True}},
+        "tick": {"ok": True},
+        "scorer": {"ok": False, "error": "ConnectionRefused"},
+        "recorder": None, "repairs": {},
+    })
+    text = "\n".join(lines)
+    assert "Fleet OK" not in text
+    assert "scorer" in text
+
+
+def test_fleet_lines_stays_silent_about_subsystems_it_could_not_check():
+    # A host with no recorder must not get a recorder line at all, the same way the
+    # shadow-scan line is omitted there. Claiming nothing beats claiming "ok".
+    lines = reviewdigest.fleet_lines({
+        "cameras": {"front": {"reachable": True, "events": True}},
+        "tick": {"ok": True}, "scorer": None, "recorder": None, "repairs": {},
+    })
+    text = "\n".join(lines)
+    assert "recorder" not in text
+    assert "scorer" not in text
+    assert text.startswith("\U0001f49a Fleet OK")
+
+
+def test_fleet_lines_reports_a_camera_refusing_its_self_heal():
+    lines = reviewdigest.fleet_lines({
+        "cameras": {"front": {"reachable": True, "events": True}},
+        "tick": {"ok": True}, "scorer": None, "recorder": None,
+        "repairs": {"person_detection": 12},
+    })
+    text = "\n".join(lines)
+    assert "Fleet OK" not in text
+    assert "person_detection" in text and "12" in text
+
+
+def test_fleet_lines_reports_a_stalled_daemon():
+    lines = reviewdigest.fleet_lines({
+        "cameras": {"front": {"reachable": True, "events": True}},
+        "tick": {"ok": False, "stalled_for": 900.0},
+        "scorer": None, "recorder": None, "repairs": {},
+    })
+    text = "\n".join(lines)
+    assert "Fleet OK" not in text
+    assert "tick" in text or "stalled" in text
+
+
+def test_alert_lines_counts_what_actually_went_out(tmp_path):
+    # "Alerts sent" has to come from the sent log, not from a counter that a restart
+    # resets: the index is the only durable record of what reached the phone.
+    sent = str(tmp_path)
+    now = _local_ts(2026, 8, 13, 20, 45)
+    rows = [
+        {"ts": now - 60, "file": "a.jpg", "camera": "front", "delivered": True},
+        {"ts": now - 120, "file": "b.jpg", "camera": "front", "delivered": True},
+        {"ts": now - 180, "file": "c.jpg", "camera": "yard", "delivered": False},
+        {"ts": now - 40 * 3600, "file": "old.jpg", "camera": "front", "delivered": True},
+    ]
+    with open(os.path.join(sent, "index.jsonl"), "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+
+    lines = reviewdigest.alert_lines(sent, now)
+    text = "\n".join(lines)
+    assert "2 sent" in text              # the 40h-old one is outside the window
+    assert "front 2" in text
+    assert "1 undelivered" in text       # a refused send is not a sent alert
+
+
+def test_alert_lines_without_a_sent_log_is_silent(tmp_path):
+    assert reviewdigest.alert_lines(str(tmp_path), 1000.0) == []
+    assert reviewdigest.alert_lines(None, 1000.0) == []
+
+
+def test_scan_context_line_says_when_the_scan_skipped_part_of_the_day(tmp_path):
+    # A scan that ran out of decode budget reports the same segment total as a complete
+    # one, so the digest read as full coverage while a camera had 74 % of its day
+    # unscanned (2026-08-25). The skipped count is the whole point of the summary flag.
+    now = _local_ts(2026, 8, 13, 20, 45)
+    review = str(tmp_path)
+    summary = {"date": "2026-08-12", "generated_at": now - 3600,
+               "extract_exhausted": True,
+               "cameras": {
+                   "front": {"segments": 96, "frames_scored": 700, "observations": 3,
+                             "matched": 2, "shadow_only": 1, "segments_skipped": 0},
+                   "yard": {"segments": 96, "frames_scored": 99, "observations": 1,
+                            "matched": 1, "shadow_only": 0, "segments_skipped": 71}}}
+    with open(os.path.join(review, ".shadow-scan.json"), "w", encoding="utf-8") as f:
+        json.dump(summary, f)
+
+    line = reviewdigest.scan_context_line(review, now)
+    assert "121 of 192 segments" in line     # covered, not merely present
+    assert "71 skipped" in line
+
+
+def test_scan_context_line_complete_run_does_not_mention_skipping(tmp_path):
+    now = _local_ts(2026, 8, 13, 20, 45)
+    review = str(tmp_path)
+    summary = {"date": "2026-08-12", "generated_at": now - 3600,
+               "cameras": {"front": {"segments": 96, "frames_scored": 700,
+                                     "observations": 3, "matched": 2,
+                                     "shadow_only": 1, "segments_skipped": 0}}}
+    with open(os.path.join(review, ".shadow-scan.json"), "w", encoding="utf-8") as f:
+        json.dump(summary, f)
+
+    line = reviewdigest.scan_context_line(review, now)
+    assert "96 of 96 segments" in line
+    assert "skipped" not in line
 
 
 def test_scan_context_line_malformed_cameras_returns_none(tmp_path):

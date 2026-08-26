@@ -134,11 +134,29 @@ def _repair_allowed(policy, name):
     return bool(policy.auto_fix and name in policy.allowed_repairs)
 
 
-def apply_plan(cam, plan: CameraPlan, reliability_config=None):
+def _repair(name, call, failures):
+    """Run one bounded repair, reporting a refusal instead of swallowing it.
+
+    The repairs are idempotent re-assertions sent every control pass, so the useful
+    signal is not how often they ran but whether the camera is refusing them: a camera
+    with person detection stuck off demotes every person to bare motion. Counting into
+    ``failures`` lets the daily digest say so; the exception stays contained, because a
+    control failure must never stop polling.
+    """
+    try:
+        call()
+    except Exception as exc:  # noqa: BLE001 - a camera control failure must not stop polling
+        log.warning("self-heal %s refused by camera: %s", name, exc)
+        if failures is not None:
+            failures[name] = failures.get(name, 0) + 1
+
+
+def apply_plan(cam, plan: CameraPlan, reliability_config=None, *, repair_failures=None):
     """Apply a CameraPlan to a connected camera in firmware-safe order.
 
     SmartTrack / motion sensitivity / preset first; auto-track asserted LAST and verified.
-    Returns True if auto-track ended in the intended state.
+    Returns True if auto-track ended in the intended state. Refused repairs are counted
+    into ``repair_failures`` when given, so a camera quietly rejecting them is visible.
     """
     try:
         cam.setMotionDetection(sensitivity=int(plan.motion_sensitivity))
@@ -160,21 +178,18 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None):
     # person_sensitivity is configured, re-assert it too (lower = fewer false
     # AI-person detections on an empty yard); otherwise leave sensitivity untouched.
     if _repair_allowed(reliability_config, "person_detection"):
-        try:
+        def _person():
             if plan.person_sensitivity is not None:
                 cam.setPersonDetection(True, sensitivity=plan.person_sensitivity)
             else:
                 cam.setPersonDetection(True)
-        except Exception:
-            pass
+        _repair("person_detection", _person, repair_failures)
     # Keep the camera following people, not cars: the C560WS auto-track swings after any
     # AI-detected target, so vehicle detection is re-asserted OFF every tick (SmartTrack
     # already excludes vehicles, but that alone doesn't stop the detector feeding track).
     if _repair_allowed(reliability_config, "vehicle_detection"):
-        try:
-            cam.setVehicleDetection(False)
-        except Exception:
-            pass
+        _repair("vehicle_detection", lambda: cam.setVehicleDetection(False),
+                repair_failures)
     # A refused recall must be visible: the camera answers configuration calls happily
     # while sitting off-target, so a silent failure here is indistinguishable from a
     # healthy camera. One sat aimed at the ground for two days (2026-08-20) while this
@@ -191,17 +206,18 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None):
     # apply_smarttrack and ensure_autotrack — setSmartTrackConfig clears the auto-track
     # master switch, so ensure_autotrack (setAutoTrackTarget) has to stay truly last.
     if plan.autotrack_on and _repair_allowed(reliability_config, "smarttrack"):
-        try:
-            tracking.apply_smarttrack(cam, plan.smarttrack)
-        except Exception:
-            pass
+        _repair("smarttrack", lambda: tracking.apply_smarttrack(cam, plan.smarttrack),
+                repair_failures)
     return tracking.ensure_autotrack(cam, plan.autotrack_on)
 
 
-def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=None):
+def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=None,
+             repair_failures=None):
     """One pass over all cameras. Dependencies injectable for testing.
 
-    Returns a dict {camera_name: CameraPlan} of what was planned.
+    Returns a dict {camera_name: CameraPlan} of what was planned. ``repair_failures`` is
+    the sink for refused self-heals, so a day of them can be reported rather than only
+    logged one line at a time.
     """
     now = now if now is not None else _time.time()
     is_night = is_night or scheduling.is_night
@@ -232,7 +248,8 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
         if connect is not None:
             cam, _err = connect(cfg)
             if cam is not None:
-                apply_plan(cam, plan, app.reliability)
+                apply_plan(cam, plan, app.reliability,
+                           repair_failures=repair_failures)
     return plans
 
 
@@ -307,6 +324,7 @@ class MonitorState:
     rtsp_reachable: dict = field(default_factory=dict)
     latency: dict = field(default_factory=dict)
     recorder_health: dict = field(default_factory=dict)
+    repair_failures: dict = field(default_factory=dict)
     desired_plans: dict = field(default_factory=dict)
     twin_last_probe: dict = field(default_factory=dict)
     twin_fleet: dict = field(default_factory=dict)
@@ -1715,14 +1733,87 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
             g.pop("ptz", None)          # force a clean rebuild on the next poll
 
 
-def _review_digest_pass(*, now, secrets):
-    """Send the daily review-log digest when configured and due (opt-in via env)."""
+def _fetch_scorer_metrics(url, timeout=5.0):  # pragma: no cover - network I/O
+    """GET the shared scorer's /metrics as a dict. Raises on any failure."""
+    import json as _json
+    import urllib.request
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        return _json.loads(response.read().decode("utf-8"))
+
+
+def fleet_health_snapshot(app: AppConfig, state: MonitorState, *, now,
+                          fetch_metrics=None):
+    """Assemble the fleet snapshot the daily digest renders. Never raises.
+
+    Everything here is already known to the daemon except the shared scorer, which is
+    asked once a day: when it dies, alerts stop at every site at once, and today the only
+    symptom is suspicious quiet. A subsystem that cannot be established stays ``None`` so
+    the digest can omit it rather than vouch for it.
+    """
+    fetch_metrics = fetch_metrics or _fetch_scorer_metrics
+    cameras = {}
+    for cfg in app.cameras:
+        cameras[cfg.name] = {
+            "reachable": state.network_reachable.get(cfg.name),
+            "events": state.events_reachable.get(cfg.name),
+        }
+
+    stalled = None if state.tick_fail_since is None else max(0.0,
+                                                            now - state.tick_fail_since)
+    tick = {"ok": state.tick_fail_since is None, "stalled_for": stalled}
+
+    scorer_health = None
+    urls = [c.scorer.url for c in app.cameras if c.scorer.url]
+    if urls:
+        # One /metrics per distinct endpoint: the sites share a scorer, so asking per
+        # camera would poll the same process twice for the same answer.
+        url = sorted(set(urls))[0]
+        metrics_url = url[: -len("/score")] + "/metrics" if url.endswith("/score") else url
+        try:
+            metrics = fetch_metrics(metrics_url) or {}
+            scorer_health = {
+                "ok": True,
+                "requests": int(metrics.get("requests", 0) or 0),
+                "failed": int(metrics.get("failed", 0) or 0),
+                "p95": float(metrics.get("request_seconds_p95", 0.0) or 0.0),
+            }
+        except Exception as exc:  # noqa: BLE001 - telemetry must never break the loop
+            scorer_health = {"ok": False, "error": type(exc).__name__}
+
+    recorder = None
+    for entry in state.recorder_health.values():
+        if not isinstance(entry, dict):
+            continue
+        age = entry.get("latest_age_s")
+        candidate = {"status": entry.get("status", "unknown"),
+                     "age_s": None if age is None else float(age)}
+        # Worst camera wins: one silent recorder is the whole story, not an average.
+        if recorder is None or candidate["status"] != "ok":
+            recorder = candidate
+
+    return {"cameras": cameras, "tick": tick, "scorer": scorer_health,
+            "recorder": recorder, "repairs": dict(state.repair_failures)}
+
+
+def _review_digest_pass(*, now, secrets, app=None, state=None):
+    """Send the daily review-log digest when configured and due (opt-in via env).
+
+    Carries the fleet snapshot too: this is the only message the daemon sends that is not
+    a transition, so it is the only place a working fleet can say so out loud.
+    """
     token = secrets.get("telegram_token")
     chat = secrets.get("telegram_chat")
     if not token or not chat:
         return
+    health = None
+    if app is not None and state is not None:
+        try:
+            health = fleet_health_snapshot(app, state, now=now)
+        except Exception:  # noqa: BLE001 - a broken probe must not cost us the digest
+            log.warning("fleet health snapshot failed", exc_info=True)
     reviewdigest.run_if_due(
         now=now,
+        health=health,
         send_text=lambda text: notify.send_text(token, chat, text),
         # Digest photos are re-sent evidence, not alerts: keep them out of the sent log.
         send_photo=lambda path, caption: notify.send_photo(
@@ -1762,7 +1853,8 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     night = is_night()                    # one source of truth for this tick's night gate
     if control_due(last_control, now, control_interval):
         cam_clients.clear()
-        plans = run_control(app, now=now, connect=connect_factory(cam_clients, state, now))
+        plans = run_control(app, now=now, connect=connect_factory(cam_clients, state, now),
+                            repair_failures=state.repair_failures)
         if isinstance(plans, Mapping):
             state.desired_plans.update(plans)
         watchdog(app, cam_clients, state, now=now, secrets=secrets, night=night)
@@ -1776,7 +1868,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     sample(app, cam_clients, state, now=now, secrets=secrets, night=night)
     drain(app, cam_clients, state, now=now, secrets=secrets, night=night)
     guard(app, cam_clients, state, now=now, secrets=secrets, night=night)
-    digest(now=now, secrets=secrets)
+    digest(now=now, secrets=secrets, app=app, state=state)
     return last_control
 
 

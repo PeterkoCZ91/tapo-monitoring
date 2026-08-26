@@ -5,6 +5,15 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- A fleet block in the daily review digest, so one message a day says the fleet is alive.
+  Every other Telegram message is a transition, which left "everything works" expressed as
+  silence — indistinguishable from a dead host or an expired token. It reports camera
+  reachability, the daemon's tick, the shared scoring service (asked once a day; when it
+  dies, alerts stop at every site at once), the recorder's newest file, the day's alert
+  counts from the sent log, and any self-heal a camera is refusing. It claims `Fleet OK`
+  only for what it actually checked — an unchecked subsystem gets no line, an unknown
+  camera is named as unchecked — and any failed check removes the headline, because a
+  heartbeat that says OK while a camera is down is worse than no heartbeat.
 - `tapo-monitor version` and `tapo-monitor selfcheck`. Deployed hosts are rsync/tar copies
   rather than git checkouts, so a host could not say which code it was running; `version`
   answers that with a digest over the deployed module set, which also makes a half-copied
@@ -67,6 +76,15 @@ All notable changes to this project are documented here.
   now explicit, and test doubles accept the keywords the production caller actually sends.
 
 ### Fixed
+- A camera refusing one of the three bounded self-heals is reported instead of swallowed.
+  They are idempotent re-assertions sent every control pass inside bare excepts, so a
+  camera that rejects them looked exactly like one that accepted them — the same blindness
+  the preset recall had until it was made to speak, and with the same consequence: person
+  detection stuck off demotes every person to bare motion. Refusals are logged and counted
+  per repair so the daily digest can say so.
+- The digest's shadow-scan line reports segments *covered*, not merely present. A run that
+  spent its decode budget reported the same segment total as a complete one, so the line
+  read as full coverage while a camera had three quarters of its day unscanned.
 - The camera reachability probe sends more than one echo. These cameras drop 2-4 % of
   ICMP echoes on a radio whose own gateway drops none, and a single-packet probe on the
   60 s control pass turned each lost packet into a warning *and* a hole: a camera that

@@ -388,6 +388,152 @@ def test_apply_plan_logs_preset_recall_failure(monkeypatch, caplog):
     assert "MOTOR_LOCKED_ROTOR" in caplog.text
 
 
+def test_run_once_passes_the_repair_sink_through_to_apply_plan(monkeypatch):
+    # Per-call counting is only useful if it survives the call: the digest reads a day's
+    # worth off the state, so the control pass has to carry a sink down to apply_plan.
+    seen = {}
+
+    def fake_apply_plan(cam, plan, reliability_config=None, *, repair_failures=None):
+        seen["got"] = repair_failures
+        if repair_failures is not None:
+            repair_failures["smarttrack"] = repair_failures.get("smarttrack", 0) + 1
+        return True
+
+    monkeypatch.setattr(daemon, "apply_plan", fake_apply_plan)
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    sink = {}
+    daemon.run_once(app, now=1000, connect=lambda cfg_: (object(), None),
+                    is_night=lambda: False, repair_failures=sink)
+
+    assert seen["got"] is sink
+    assert sink == {"smarttrack": 1}
+
+
+def test_loop_step_gives_the_control_pass_the_state_repair_counter(monkeypatch):
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    state = daemon.MonitorState()
+    seen = {}
+
+    def fake_run_control(app_, *, now, connect, repair_failures=None):
+        seen["got"] = repair_failures
+        return {}
+
+    daemon.loop_step(app, {}, state, now=1000,
+                     secrets={"telegram_token": "", "telegram_chat": "", "groq_key": ""},
+                     last_control=0, control_interval=60, run_control=fake_run_control,
+                     watchdog=lambda *a, **k: None, monitor=lambda *a, **k: None,
+                     drain=lambda *a, **k: None, sample=lambda *a, **k: None)
+
+    assert seen["got"] is state.repair_failures
+
+
+def test_review_digest_pass_hands_the_digest_a_fleet_snapshot(monkeypatch):
+    # The renderer is useless unless the daemon actually feeds it: without this the digest
+    # keeps its old shape forever and the heartbeat never ships.
+    seen = {}
+    monkeypatch.setattr(daemon.reviewdigest, "run_if_due",
+                        lambda **kw: seen.update(kw) or True)
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    state = daemon.MonitorState()
+    state.network_reachable = {"a": True}
+
+    daemon._review_digest_pass(app=app, state=state, now=1000,
+                               secrets={"telegram_token": "t", "telegram_chat": "c"})
+
+    assert seen["health"]["cameras"] == {"a": {"reachable": True, "events": None}}
+
+
+def test_fleet_health_snapshot_reads_what_the_daemon_already_knows():
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "a", "host": "203.0.113.10",
+         "scorer": {"url": "http://127.0.0.1:1/score", "threshold": 0.5}},
+        {"name": "b", "host": "203.0.113.11",
+         "scorer": {"url": "http://127.0.0.1:1/score", "threshold": 0.5}},
+    ]})
+    state = daemon.MonitorState()
+    state.network_reachable = {"a": True, "b": False}
+    state.events_reachable = {"a": True, "b": False}
+    state.recorder_health = {"a": {"status": "ok", "latest_age_s": 47.25}}
+    state.repair_failures = {"smarttrack": 3}
+
+    def fetch_metrics(url):
+        assert url == "http://127.0.0.1:1/metrics"   # derived from the score endpoint
+        return {"requests": 4180, "failed": 0, "request_seconds_p95": 0.73}
+
+    snap = daemon.fleet_health_snapshot(app, state, now=1000,
+                                        fetch_metrics=fetch_metrics)
+
+    assert snap["cameras"] == {"a": {"reachable": True, "events": True},
+                               "b": {"reachable": False, "events": False}}
+    assert snap["tick"] == {"ok": True, "stalled_for": None}
+    assert snap["scorer"] == {"ok": True, "requests": 4180, "failed": 0, "p95": 0.73}
+    assert snap["recorder"] == {"status": "ok", "age_s": 47.25}
+    assert snap["repairs"] == {"smarttrack": 3}
+
+
+def test_fleet_health_snapshot_reports_a_stalled_tick():
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    state = daemon.MonitorState()
+    state.tick_fail_since = 400.0
+
+    snap = daemon.fleet_health_snapshot(app, state, now=1000, fetch_metrics=lambda u: None)
+
+    assert snap["tick"] == {"ok": False, "stalled_for": 600.0}
+
+
+def test_fleet_health_snapshot_marks_an_unreachable_scorer_without_raising():
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "a", "host": "203.0.113.10",
+         "scorer": {"url": "http://127.0.0.1:1/score", "threshold": 0.5}}]})
+    state = daemon.MonitorState()
+
+    def boom(url):
+        raise OSError("Connection refused")
+
+    snap = daemon.fleet_health_snapshot(app, state, now=1000, fetch_metrics=boom)
+
+    assert snap["scorer"]["ok"] is False
+    assert "OSError" in snap["scorer"]["error"]
+    # a host with no scorer configured must not get a scorer verdict at all
+    plain = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    assert daemon.fleet_health_snapshot(plain, state, now=1000,
+                                        fetch_metrics=boom)["scorer"] is None
+
+
+def test_apply_plan_reports_a_refused_self_heal(monkeypatch, caplog):
+    # The three bounded repairs were re-asserted every control pass inside bare excepts,
+    # so a camera that refuses them looked exactly like one that accepted them -- the same
+    # blindness the preset recall had until it was made to speak. A camera with person
+    # detection stuck off then demotes every person to bare motion, silently.
+    FakeCam, tracking = _nightvision_fakecam()
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+
+    class RefusingCam(FakeCam):
+        def setPersonDetection(self, enabled, sensitivity=False):
+            raise RuntimeError("DEVICE_BUSY")
+
+    cam = RefusingCam()
+    plan = daemon.plan_camera(_cam(), night=False, rain_active=False)
+    failures = {}
+    with caplog.at_level("WARNING", logger="tapo_monitor.daemon"):
+        daemon.apply_plan(cam, plan, repair_failures=failures)
+
+    assert "person_detection" in caplog.text
+    assert "DEVICE_BUSY" in caplog.text
+    assert failures == {"person_detection": 1}
+
+
+def test_apply_plan_records_no_failure_when_self_heal_is_accepted(monkeypatch):
+    FakeCam, tracking = _nightvision_fakecam()
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+
+    failures = {}
+    daemon.apply_plan(FakeCam(), daemon.plan_camera(_cam(), night=False, rain_active=False),
+                      repair_failures=failures)
+
+    assert failures == {}
+
+
 def test_apply_plan_smarttrack_is_last_config_before_autotrack(monkeypatch):
     # Live evidence (2026-06-23): one of setMotionDetection/setPersonDetection/
     # setVehicleDetection/setPreset resets the camera's smart_track_info to ALL-OFF.
@@ -660,7 +806,7 @@ def test_loop_step_decouples_control_from_event_poll():
     secrets = {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
     calls = {"control": 0, "watchdog": 0, "monitor": 0, "drain": 0}
 
-    def fake_control(app, now, connect):
+    def fake_control(app, now, connect, repair_failures=None):
         calls["control"] += 1
         connect(app.cameras[0])  # populate cam_clients like the real connect does
 
@@ -2880,8 +3026,10 @@ def test_loop_step_runs_review_digest_every_tick():
         run_control=lambda *a, **k: {}, watchdog=lambda *a, **k: None,
         monitor=lambda *a, **k: None, drain=lambda *a, **k: None,
         sample=lambda *a, **k: None,
-        digest=lambda *, now, secrets: calls.append((now, secrets["telegram_token"])))
-    assert calls == [(1000, "t")]
+        digest=lambda *, now, secrets, app=None, state=None: calls.append(
+            (now, secrets["telegram_token"], app is not None, state is not None)))
+    # app and state travel with it now: the digest carries the fleet snapshot
+    assert calls == [(1000, "t", True, True)]
 
 
 def test_pending_scorer_picks_frame_above_threshold(monkeypatch):

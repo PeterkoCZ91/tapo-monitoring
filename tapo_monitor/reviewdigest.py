@@ -18,7 +18,7 @@ import logging
 import os
 import time
 
-from . import sentlog
+from . import notify, sentlog
 from .shadowscan import SUMMARY_MAX_AGE, SUMMARY_NAME
 
 log = logging.getLogger(__name__)
@@ -142,6 +142,119 @@ def build_summary(entries):
     return "\n".join(lines)
 
 
+def alert_lines(sent_dir, now, window=WINDOW_SECONDS):
+    """What actually reached the phone in the window, from the sent-log index.
+
+    The index is the only durable record: an in-memory counter resets on every restart,
+    and a restart is exactly when you most want to know what the day looked like. A
+    refused delivery is counted apart, because an alert Telegram rejected did not happen.
+    Returns [] when there is no sent log — silence beats an invented zero.
+    """
+    if not sent_dir:
+        return []
+    delivered, refused = {}, 0
+    try:
+        with open(os.path.join(sent_dir, sentlog.INDEX_NAME), encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return []
+    for line in lines:
+        try:
+            record = json.loads(line)
+            ts = float(record["ts"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if now - ts > window or not record.get("file"):
+            continue
+        if record.get("delivered", True):
+            camera = str(record.get("camera", "cam"))
+            delivered[camera] = delivered.get(camera, 0) + 1
+        else:
+            refused += 1
+    total = sum(delivered.values())
+    if not total and not refused:
+        return ["alerts 24h: none"]
+    detail = ", ".join(f"{cam} {delivered[cam]}"
+                       for cam in sorted(delivered, key=lambda c: -delivered[c]))
+    line = f"alerts 24h: {total} sent"
+    if detail:
+        line += f" ({detail})"
+    if refused:
+        line += f", {refused} undelivered"
+    return [line]
+
+
+def fleet_lines(health):
+    """Render a fleet-health snapshot for the digest. Pure.
+
+    Two rules decide everything here. It may only claim "OK" for what it actually looked
+    at, so a subsystem the caller could not check (no recorder on this host, no scorer
+    metrics) produces no line at all rather than a reassuring one. And any failed check
+    takes the headline away: a heartbeat that says OK while a camera is unreachable is
+    worse than no heartbeat, because it converts a silence you might notice into a
+    confirmation you will trust.
+    """
+    if not isinstance(health, dict):
+        return []
+    problems, detail = [], []
+
+    cameras = health.get("cameras") or {}
+    # Three states, not two. Before the first control pass reachability is unknown, and
+    # neither "unreachable" (cries wolf) nor silence (lets OK cover it) is honest.
+    reachable = [n for n, s in sorted(cameras.items()) if (s or {}).get("reachable") is True]
+    unreachable = [n for n, s in sorted(cameras.items())
+                   if (s or {}).get("reachable") is False]
+    unchecked = [n for n, s in sorted(cameras.items())
+                 if (s or {}).get("reachable") is None]
+    no_events = [n for n, s in sorted(cameras.items())
+                 if (s or {}).get("reachable") is True and (s or {}).get("events") is False]
+    if unreachable:
+        problems.append(f"{', '.join(unreachable)} unreachable")
+    if no_events:
+        problems.append(f"{', '.join(no_events)} event API down")
+    if unchecked:
+        detail.append(f"not checked yet: {', '.join(unchecked)}")
+
+    tick = health.get("tick") or {}
+    if tick.get("ok") is False:
+        stalled = tick.get("stalled_for")
+        problems.append("daemon tick stalled"
+                        + (f" for {notify.format_duration(stalled)}" if stalled else ""))
+
+    scorer = health.get("scorer")
+    if isinstance(scorer, dict):
+        if scorer.get("ok"):
+            detail.append(
+                f"scorer {scorer.get('failed', 0)} failed / "
+                f"{scorer.get('requests', 0)} req, p95 {float(scorer.get('p95', 0.0)):.2f}s")
+            if scorer.get("failed"):
+                problems.append(f"scorer {scorer['failed']} failed request(s)")
+        else:
+            problems.append(f"scorer unreachable ({scorer.get('error', 'no answer')})")
+
+    recorder = health.get("recorder")
+    if isinstance(recorder, dict):
+        age = recorder.get("age_s")
+        shown = f"{int(age)}s old" if age is not None else "age unknown"
+        detail.append(f"recorder newest file {shown}")
+        if recorder.get("status") != "ok":
+            problems.append(f"recorder {recorder.get('status', 'unknown')}")
+
+    repairs = health.get("repairs") or {}
+    refused = {name: count for name, count in sorted(repairs.items()) if count}
+    if refused:
+        problems.append("self-heal refused: "
+                        + ", ".join(f"{name} {count}\u00d7" for name, count in refused.items()))
+
+    if problems:
+        head = "\U0001f7e0 Fleet degraded — " + "; ".join(problems)
+    elif not cameras:
+        return []
+    else:
+        head = "\U0001f49a Fleet OK — " + ", ".join(reachable) + " reachable"
+    return [head] + [f"   {line}" for line in detail]
+
+
 def scan_context_line(review_dir, now):
     """One-line shadow-scan status for the digest, or None to stay silent.
 
@@ -162,17 +275,24 @@ def scan_context_line(review_dir, now):
     cameras = summary.get("cameras")
     if not isinstance(cameras, dict):
         return None
-    segments = frames = matched = candidates = 0
+    segments = frames = matched = candidates = skipped = 0
     for stats in cameras.values():
         try:
             segments += int(stats.get("segments", 0) or 0)
             frames += int(stats.get("frames_scored", 0) or 0)
             matched += int(stats.get("matched", 0) or 0)
             candidates += int(stats.get("shadow_only", 0) or 0)
+            skipped += int(stats.get("segments_skipped", 0) or 0)
         except (AttributeError, TypeError, ValueError):
             return None
-    return (f"shadow scan {summary.get('date')}: {segments} segments, {frames} frames, "
-            f"{matched} matched, {candidates} candidate(s)")
+    # Covered, not merely present: a run that spent its decode budget reports the same
+    # segment total as a complete one, so reading only that total made a scan that had
+    # left 74 % of a camera's day untouched look finished.
+    line = (f"shadow scan {summary.get('date')}: {segments - skipped} of {segments} "
+            f"segments, {frames} frames, {matched} matched, {candidates} candidate(s)")
+    if skipped:
+        line += f" — {skipped} skipped (decode budget spent)"
+    return line
 
 
 def pick_photos(entries, review_dir, limit):
@@ -208,11 +328,16 @@ def photo_caption(entry):
     return f"{entry.get('verdict', 'hold')} {entry.get('camera', 'cam')} {score} {when}"
 
 
-def run_if_due(*, env=None, now=None, send_text, send_photo):
+def run_if_due(*, env=None, now=None, send_text, send_photo, health=None):
     """Send the daily digest when configured and due. Returns True when it went out.
 
     A failed text send leaves the day unmarked so the next tick retries; photos are
     best-effort on top of a delivered summary. Never raises.
+
+    ``health`` is an optional fleet snapshot from the caller. With it, this one message a
+    day is also the only positive "everything is alive" signal the fleet sends: every
+    other Telegram message is a transition, so without it a dead host and a quiet night
+    look identical. Omitting it keeps the previous message shape exactly.
     """
     env = os.environ if env is None else env
     hhmm = digest_time_from_env(env)
@@ -228,6 +353,13 @@ def run_if_due(*, env=None, now=None, send_text, send_photo):
         context = scan_context_line(review_dir, now)
         if context is not None:
             text = f"{text}\n{context}"
+        fleet = fleet_lines(health)
+        alerts = alert_lines(sentlog.archive_dir_from_env(env), now)
+        # Alerts belong under the fleet header when there is one: the indent is what says
+        # these numbers describe the fleet the header just vouched for.
+        sections = fleet + [f"   {line}" for line in alerts] if fleet else alerts
+        if sections:
+            text = text + "\n\n" + "\n".join(sections)
         if not send_text(text):
             log.warning("review digest delivery failed; will retry next tick")
             return False

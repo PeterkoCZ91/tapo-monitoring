@@ -284,6 +284,37 @@ export TAPO_REVIEW_DIGEST_TIME=20:45      # off when unset
 export TAPO_REVIEW_DIGEST_MAX_PHOTOS=4    # optional, default 4
 ```
 
+**It is also the only message that says the fleet is alive.** Every other Telegram message
+the daemon sends is a transition — camera lost, camera back, tick stalled, drift found — so
+with nothing else, "everything works" is expressed as silence, and silence is
+indistinguishable from a host that lost power or a Telegram token that stopped working. The
+digest therefore carries a fleet block: which cameras are reachable, the daemon's own tick,
+the shared scoring service (asked once a day, because when it dies alerts stop at *every*
+site at once), the local recorder's newest file, the day's alert counts from the sent log,
+and any self-heal a camera is refusing.
+
+Two rules keep it honest. It only claims `Fleet OK` for what it actually checked — a host
+with no recorder gets no recorder line rather than a reassuring one, and a camera whose
+state is not yet known is named as unchecked rather than counted either way. And any failed
+check takes the headline away entirely (`🟠 Fleet degraded — …`), because a heartbeat that
+says OK while a camera is down is worse than no heartbeat: it turns a silence you might
+have questioned into a confirmation you will trust.
+
+```text
+📋 Review digest: 3 suppressed frame(s) in the last 24h
+yard: 2 (max p0.61)
+shadow scan 2026-05-04: 192 of 192 segments, 1389 frames, 4 matched, 1 candidate(s)
+
+💚 Fleet OK — front, yard reachable
+   scorer 0 failed / 4180 req, p95 0.73s
+   recorder newest file 47s old
+   alerts 24h: 62 sent (yard 41, front 21), 1 undelivered
+```
+
+Note what this still cannot do: a heartbeat the host sends itself can never report that the
+host is dead. Noticing the *absence* of a daily message is a job for a human or an external
+dead-man's switch, not for this daemon.
+
 **Audit what the cameras never reported.** Cameras only prove the alerts they raised; a
 person the camera never flagged leaves no trace. When a host runs a 24/7 recorder
 (`RECORDING_ROOT`), the nightly shadow scan re-reads yesterday's segments with no camera
