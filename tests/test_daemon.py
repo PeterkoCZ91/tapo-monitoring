@@ -420,6 +420,38 @@ def test_run_once_passes_the_repair_sink_through_to_apply_plan(monkeypatch):
     assert sink == {"smarttrack": 1}
 
 
+def test_run_once_logs_when_auto_track_is_not_confirmed(monkeypatch, caplog):
+    # apply_plan asserts auto-track LAST and verifies it, then returns whether it stuck —
+    # but run_once dropped that answer on the floor. A camera refusing auto-track every
+    # tick produced no log line at all, which is the same silent failure the preset recall
+    # had before 0d988f4: the camera answers every other control call happily while the
+    # one setting that matters at night never takes.
+    monkeypatch.setattr(daemon, "apply_plan", lambda *a, **k: False)
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "front", "host": "203.0.113.10", "role": "tracking"}]})
+
+    with caplog.at_level("WARNING", logger="tapo_monitor.daemon"):
+        daemon.run_once(app, now=1000, connect=lambda cfg_: (object(), None),
+                        is_night=lambda: True, is_raining=lambda *a, **k: False)
+
+    assert "front" in caplog.text
+    assert "auto-track" in caplog.text
+    assert "on" in caplog.text            # says which state was asked for
+
+
+def test_run_once_stays_quiet_when_auto_track_is_confirmed(monkeypatch, caplog):
+    # The warning is only worth anything if the healthy path is silent.
+    monkeypatch.setattr(daemon, "apply_plan", lambda *a, **k: True)
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "front", "host": "203.0.113.10", "role": "tracking"}]})
+
+    with caplog.at_level("WARNING", logger="tapo_monitor.daemon"):
+        daemon.run_once(app, now=1000, connect=lambda cfg_: (object(), None),
+                        is_night=lambda: True, is_raining=lambda *a, **k: False)
+
+    assert caplog.text == ""
+
+
 def test_loop_step_gives_the_control_pass_the_state_repair_counter(monkeypatch):
     app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
     state = daemon.MonitorState()

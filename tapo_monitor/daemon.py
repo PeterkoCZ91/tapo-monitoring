@@ -250,8 +250,15 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
         if connect is not None:
             cam, _err = connect(cfg)
             if cam is not None:
-                apply_plan(cam, plan, app.reliability,
-                           repair_failures=repair_failures)
+                # apply_plan asserts auto-track last and verifies it. Dropping that answer
+                # made a camera that refuses auto-track indistinguishable from a healthy
+                # one: every other control call is accepted, and the one setting the night
+                # depends on never takes — with not a single log line to show for it.
+                if not apply_plan(cam, plan, app.reliability,
+                                  repair_failures=repair_failures):
+                    log.warning("auto-track %s not confirmed for %s: the camera took the "
+                                "call but read back the other state",
+                                "on" if plan.autotrack_on else "off", cfg.name)
     return plans
 
 
