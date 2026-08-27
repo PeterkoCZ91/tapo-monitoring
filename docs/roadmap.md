@@ -181,9 +181,11 @@ Status: **pilot v1 deployed (2026-08-25)**
   across live, sampler and follow-up paths, so giving below-threshold motion a recorder
   look multiplied its firing rate roughly sevenfold on the pilot pair — the same policy,
   a much larger effect, and no config change to point at.
-- [ ] Decide the preset policy for `role: static`. Such a camera is planned no preset
-  movement, so its configured preset is never recalled; a camera that has been physically
-  re-aimed once has no automatic way back.
+- [x] Decide the preset policy for `role: static`. Decided: such a camera is parked at its
+  `day_preset` and the recall is re-sent every control tick, around the clock. It is the
+  camera class nothing else ever moves, so the recall is its only automatic way back from a
+  nudge — and it costs nothing while the camera already holds the preset. `night_preset` is
+  unused for a static camera and now draws the startup warning instead.
 - Give PTZ handoffs a bounded lease and always restore the previous control policy.
 
 The first slice is deliberately limited to configured camera groups. It leaves camera

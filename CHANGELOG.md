@@ -28,11 +28,9 @@ All notable changes to this project are documented here.
 - `OnFailure=pi-failure-notify@%n.service` plus `StartLimitBurst=5`/300 s on both units.
   The notifier and its 30-minute cooldown were already in the repository, wired to nothing,
   so a crash loop retried forever in complete silence.
-- A startup warning naming static cameras whose configured preset is never recalled.
-  `role: static` plans no preset movement, so `day_preset` — which defaults to a real
-  preset — reads as if it were being held while nothing holds it. On a camera that has
-  been physically re-aimed once, that is the difference between "pointing where we think"
-  and blind.
+- A startup warning naming static cameras that configure a `night_preset`. A static camera
+  never tracks, so it stays parked at `day_preset` around the clock and the night key is
+  never recalled while the config reads as if a second view were being held.
 - An ffmpeg budget for the shadow scan (`--extract-budget`, default 18000 s), split as an
   even share per camera. The per-segment timeouts bound one call each, but a full day is 96
   segments per camera, so a slow host could otherwise decode all night. Skipped segments are
@@ -70,12 +68,22 @@ All notable changes to this project are documented here.
   the whole time.
 
 ### Changed
+- A `role: static` camera is parked at its `day_preset`, recalled every control tick. It
+  was planned no preset movement at all, which left the one camera class that nothing else
+  ever moves with no automatic way back from a nudge — the failure was live for two days
+  (2026-08-18..20) on a camera that ended up aimed at asphalt. The recall is a no-op while
+  the camera already holds the preset, so it only costs anything when it is needed.
+
 - `scorer.score_image` is called with `source_id` directly. Two reflective
   `inspect.signature` probes (in the daemon and in the shadow scan) asked at runtime
   whether a same-package function accepted the argument; the injected-callable contract is
   now explicit, and test doubles accept the keywords the production caller actually sends.
 
 ### Fixed
+- An auto-track assertion the camera refuses is logged. `apply_plan` asserts auto-track
+  last and verifies it, but the control pass discarded that answer, so a camera quietly
+  rejecting auto-track every tick produced no log line at all — the same silent failure the
+  preset recall had before it got its warning.
 - CI runs the scorer-service tests, which it had never run. `tests/test_scorer_service.py`
   opens with `pytest.importorskip("numpy")` and numpy lives in the `scorer` extra, while CI
   installed only `[dev]` — so 34 tests covering the one component whose death stops alerts

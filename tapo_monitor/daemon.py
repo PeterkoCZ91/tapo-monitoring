@@ -96,10 +96,12 @@ def plan_camera(cfg: CameraConfig, night: bool, rain_active: bool) -> CameraPlan
     sensitivity = tracking.decide_motion_sensitivity(
         rain_active, cfg.weather.motion_normal, cfg.weather.motion_rain, cfg.weather.strategy
     )
-    if cfg.role == "static":
-        preset = None
-    elif not autotrack_on:
-        preset = cfg.tracking.day_preset          # parked (day or rain) -> day preset
+    if not autotrack_on:
+        # Parked: day, rain, or role=static. A static camera never tracks, so this holds
+        # its view around the clock — and that recall is its only automatic way back from
+        # a nudge. One sat aimed at asphalt for two days (2026-08-18..20) with nothing in
+        # the system able to correct it.
+        preset = cfg.tracking.day_preset
     else:
         preset = cfg.tracking.night_preset        # tracking at night -> optional night preset
     night_vision = None
@@ -1055,19 +1057,18 @@ def close_hub_clients(state: MonitorState):
 
 
 def inert_preset_warning(app: AppConfig):
-    """The warning for a static camera that configures a preset, or None. Pure.
+    """The warning for a static camera that configures a ``night_preset``, or None. Pure.
 
-    ``plan_camera`` plans no preset for ``role: static``, so such a camera's
-    ``day_preset``/``night_preset`` is never recalled. The config still reads as if the
-    preset were being held — and on a camera that has been physically re-aimed once, that
-    is exactly the difference between "pointing where we think" and blind.
+    A static camera never tracks, so ``plan_camera`` parks it at ``day_preset`` around the
+    clock and its ``night_preset`` is never recalled. The config still reads as if a second
+    view were being held at night while nothing holds it.
     """
     names = [cfg.name for cfg in app.cameras
-             if cfg.role == "static" and (cfg.tracking.day_preset or cfg.tracking.night_preset)]
+             if cfg.role == "static" and cfg.tracking.night_preset]
     if not names:
         return None
-    return (f"preset not recalled for static camera(s) {', '.join(names)}: "
-            "role=static plans no preset movement, so the configured preset is inert")
+    return (f"night_preset not recalled for static camera(s) {', '.join(names)}: "
+            "role=static never tracks, so the camera stays parked at day_preset")
 
 
 def hubpoll_decoder_warning(app: AppConfig, available):

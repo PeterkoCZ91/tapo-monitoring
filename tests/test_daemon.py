@@ -49,10 +49,21 @@ def test_plan_static_never_tracks():
     assert plan.autotrack_on is False
 
 
-def test_plan_static_does_not_recall_day_preset():
+def test_plan_static_parks_at_day_preset():
+    # A static camera is the one that most needs the recall: nothing else ever moves it
+    # back. One sat aimed at asphalt for two days (2026-08-18..20) after being nudged,
+    # and re-sending its parked preset every control tick is the only automatic way home.
     cam = _cam(role="static", tracking={"day_preset": "4"})
     plan = daemon.plan_camera(cam, night=False, rain_active=False)
-    assert plan.preset is None
+    assert plan.preset == "4"
+
+
+def test_plan_static_holds_the_same_preset_at_night():
+    # A static camera never tracks, so there is no night position to hand over to —
+    # night_preset stays unused and the parked view is held around the clock.
+    cam = _cam(role="static", tracking={"day_preset": "4", "night_preset": "9"})
+    plan = daemon.plan_camera(cam, night=True, rain_active=False)
+    assert plan.preset == "4"
 
 
 def test_plan_night_vision_untouched_by_default():
@@ -4285,27 +4296,28 @@ def test_crop_for_subject_passes_the_pseudonymous_source_id(monkeypatch):
     assert calls[0]["source_id"] == daemon.scorer.source_id_for_camera("c")
 
 
-def test_inert_preset_warning_names_static_cameras_that_configure_one():
-    # plan_camera never recalls a preset for a static camera, so a day_preset on one is
-    # dead config that reads as if it were being held. Say so once instead of silently.
+def test_inert_preset_warning_names_static_cameras_that_set_a_night_preset():
+    # A static camera parks at day_preset around the clock, so night_preset is the key
+    # that never runs on one. It still reads as if a second view were being held.
     app = cfg.load_config_from_dict({"cameras": [
         {"name": "yard", "host": "203.0.113.10", "role": "static",
-         "tracking": {"day_preset": "4"}},
+         "tracking": {"day_preset": "4", "night_preset": "5"}},
         {"name": "front", "host": "203.0.113.11", "role": "tracking",
-         "tracking": {"day_preset": "1"}},
+         "tracking": {"day_preset": "1", "night_preset": "2"}},
         {"name": "gate", "host": "203.0.113.12", "role": "static",
-         "tracking": {"day_preset": None}},
+         "tracking": {"day_preset": "4"}},
     ]})
 
     warning = daemon.inert_preset_warning(app)
 
-    assert "static camera(s) yard:" in warning     # tracking role and no preset excluded
+    assert "static camera(s) yard:" in warning     # tracking role excluded
+    assert "gate" not in warning                   # day_preset on a static camera is held
 
 
-def test_inert_preset_warning_is_none_without_static_presets():
-    # day_preset defaults to a real preset, so a static camera that never mentions one
-    # still lost its recall — the warning is about the role, not about explicit config.
+def test_inert_preset_warning_is_none_when_no_static_camera_sets_a_night_preset():
     app = cfg.load_config_from_dict({"cameras": [
-        {"name": "front", "host": "203.0.113.11", "tracking": {"day_preset": "1"}}]})
+        {"name": "yard", "host": "203.0.113.10", "role": "static",
+         "tracking": {"day_preset": "4"}},
+        {"name": "front", "host": "203.0.113.11", "tracking": {"night_preset": "2"}}]})
 
     assert daemon.inert_preset_warning(app) is None

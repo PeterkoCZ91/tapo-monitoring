@@ -161,7 +161,7 @@ authentication pressure without improving event latency.
 | --- | --- | --- |
 | `name` | short unique string | Used in logs, state and notifications. Required. |
 | `host` | LAN address/DNS name | Required; keep real values private. |
-| `role` | `tracking`, `static` | Tracking cameras follow policy; static cameras remain parked. |
+| `role` | `tracking`, `static` | Tracking cameras follow policy; static cameras stay parked at `day_preset`, re-asserted every control tick. |
 | `schedule` | `astral`, `always_night`, `always_day` | Controls day/night plan selection. |
 | `night_only` | boolean | Drains events but suppresses all Telegram traffic during daytime. |
 | `night_vision` | `ir`, `auto`, unset | Force IR by schedule, re-assert camera auto mode, or leave untouched. |
