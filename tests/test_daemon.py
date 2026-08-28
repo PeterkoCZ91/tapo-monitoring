@@ -399,6 +399,58 @@ def test_apply_plan_logs_preset_recall_failure(monkeypatch, caplog):
     assert "MOTOR_LOCKED_ROTOR" in caplog.text
 
 
+def test_apply_plan_retries_a_preset_recall_once(monkeypatch, caplog):
+    # ERR_CODE_NULL_TRANSPORT means pytapo's session went stale, not that the motor
+    # refused: the next request re-authenticates, so the second attempt gets through.
+    # Seen live 2026-08-27 05:59 — one dropped recall left a camera off-target for a
+    # whole control pass, which pan_limit and the night preset now depend on.
+    FakeCam, tracking = _nightvision_fakecam()
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+
+    class FlakyCam(FakeCam):
+        def __init__(self):
+            super().__init__()
+            self.preset_calls = []
+
+        def setPreset(self, preset):
+            self.preset_calls.append(preset)
+            if len(self.preset_calls) == 1:
+                raise RuntimeError("Error: ERR_CODE_NULL_TRANSPORT")
+
+    cam = FlakyCam()
+    plan = daemon.plan_camera(_cam(role="tracking", tracking={"day_preset": "4"}),
+                              night=False, rain_active=False)
+    with caplog.at_level("WARNING", logger="tapo_monitor.daemon"):
+        daemon.apply_plan(cam, plan)
+    assert cam.preset_calls == ["4", "4"]
+    # The retry succeeded, so nothing here is worth a warning.
+    assert "failed to recall preset" not in caplog.text
+
+
+def test_apply_plan_still_reports_a_preset_recall_that_never_lands(monkeypatch, caplog):
+    # The retry must not turn a genuinely stuck camera back into a silent one: when both
+    # attempts are refused, the warning has to survive.
+    FakeCam, tracking = _nightvision_fakecam()
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+
+    class RefusingCam(FakeCam):
+        def __init__(self):
+            super().__init__()
+            self.preset_calls = []
+
+        def setPreset(self, preset):
+            self.preset_calls.append(preset)
+            raise RuntimeError("MOTOR_LOCKED_ROTOR")
+
+    cam = RefusingCam()
+    plan = daemon.plan_camera(_cam(role="tracking", tracking={"day_preset": "4"}),
+                              night=False, rain_active=False)
+    with caplog.at_level("WARNING", logger="tapo_monitor.daemon"):
+        daemon.apply_plan(cam, plan)
+    assert cam.preset_calls == ["4", "4"]
+    assert "MOTOR_LOCKED_ROTOR" in caplog.text
+
+
 def test_run_once_passes_the_repair_sink_through_to_apply_plan(monkeypatch):
     # Per-call counting is only useful if it survives the call: the digest reads a day's
     # worth off the state, so the control pass has to carry a sink down to apply_plan.

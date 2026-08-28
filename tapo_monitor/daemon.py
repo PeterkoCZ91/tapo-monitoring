@@ -153,6 +153,31 @@ def _repair(name, call, failures):
             failures[name] = failures.get(name, 0) + 1
 
 
+def _recall_preset(cam, preset) -> bool:
+    """Recall a preset, riding out one stale-transport refusal.
+
+    pytapo does not announce that its session went stale — the camera answers
+    motorMoveToPreset with ERR_CODE_NULL_TRANSPORT and error_code -1, and only
+    -64303 (cruise conflict) is retried inside the library, so that refusal
+    propagates. The next request re-authenticates the transport, which is why a
+    second attempt is worth making at all. Observed once on 2026-08-27 05:59,
+    leaving a camera off-target until the following control pass — cheap then,
+    less so now: pan_limit leans on preset recalls dozens of times a night, and
+    the night preset is the only thing that corrects tilt at all.
+    """
+    try:
+        cam.setPreset(preset)
+        return True
+    except Exception as first:  # noqa: BLE001 - a camera control failure must not stop polling
+        try:
+            cam.setPreset(preset)
+        except Exception as exc:  # noqa: BLE001 - same, after the retry also failed
+            log.warning("failed to recall preset %s: %s", preset, exc)
+            return False
+        log.info("preset %s recalled on retry after: %s", preset, first)
+        return True
+
+
 def apply_plan(cam, plan: CameraPlan, reliability_config=None, *, repair_failures=None):
     """Apply a CameraPlan to a connected camera in firmware-safe order.
 
@@ -197,10 +222,7 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *, repair_failure
     # healthy camera. One sat aimed at the ground for two days (2026-08-20) while this
     # very call was re-sent every tick.
     if plan.preset:
-        try:
-            cam.setPreset(plan.preset)
-        except Exception as exc:  # noqa: BLE001 - a camera control failure must not stop polling
-            log.warning("failed to recall preset %s: %s", plan.preset, exc)
+        _recall_preset(cam, plan.preset)
     # apply_smarttrack MUST be the LAST configuration call before ensure_autotrack.
     # Live evidence (2026-06-23) showed one of the calls above resets smart_track_info
     # to ALL-OFF; running SmartTrack first let those calls wipe the night people-only

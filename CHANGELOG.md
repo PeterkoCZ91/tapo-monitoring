@@ -80,6 +80,13 @@ All notable changes to this project are documented here.
   now explicit, and test doubles accept the keywords the production caller actually sends.
 
 ### Fixed
+- A preset recall is retried once through a stale transport. pytapo does not announce that
+  its session expired: the camera answers `motorMoveToPreset` with
+  `ERR_CODE_NULL_TRANSPORT`, and the library retries only the cruise-conflict code, so the
+  refusal propagated and the camera stayed off-target until the next control pass. The next
+  request re-authenticates, so a second attempt is worth making. A recall that both attempts
+  fail is still reported — the retry must not turn a genuinely stuck camera back into a
+  silent one.
 - An auto-track assertion the camera refuses is logged. `apply_plan` asserts auto-track
   last and verifies it, but the control pass discarded that answer, so a camera quietly
   rejecting auto-track every tick produced no log line at all — the same silent failure the
