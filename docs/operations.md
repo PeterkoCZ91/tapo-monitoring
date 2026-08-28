@@ -387,10 +387,79 @@ running daemon, so it is safe to run against production cameras.
 ## Debugging checklist
 
 1. Decide which process owns the symptom: monitor, scorer or recorder.
-2. Check scorer health before tuning thresholds.
-3. Check the audit summary before changing `scorer.threshold`.
-4. If an alert is missing, check whether it was dropped below threshold, deferred to SD,
+2. Check how far back the journal actually reaches before concluding anything from it
+   (see below). Silence in the journal is not evidence that the daemon was idle.
+3. Check scorer health before tuning thresholds.
+4. Check the audit summary before changing `scorer.threshold`.
+5. If an alert is missing, check whether it was dropped below threshold, deferred to SD,
    blocked by cooldown or failed at Telegram.
+
+### Make sure the journal survives
+
+`journalctl` is the only record of what the monitor did, so confirm it is written to disk
+rather than to RAM:
+
+```bash
+journalctl --header | grep -m1 'File path'   # /run/... means volatile
+journalctl --disk-usage
+journalctl -o short-iso | head -1            # oldest entry actually retained
+```
+
+A `File path` under `/run/log/journal` means journald is writing to RAM. It will not
+switch on its own: journald decides at start-up, so creating `/var/log/journal` on a
+running system leaves an empty directory and changes nothing. The runtime journal is
+capped at a fraction of `/run`, which on a small single-board host is a few megabytes —
+hours of history, all of it lost on reboot. That is the wrong trade-off here, because the
+failures worth investigating (a camera that stopped delivering, a daemon that died
+overnight) are usually noticed a day or more later.
+
+Check for a vendor drop-in before writing your own — Raspberry Pi OS ships
+`/usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf` with `Storage=volatile`,
+which is the real reason the journal is in RAM on those hosts:
+
+```bash
+ls /usr/lib/systemd/journald.conf.d/ /etc/systemd/journald.conf.d/ 2>/dev/null
+```
+
+systemd merges drop-ins by filename **across all directories**, so `/etc` does not
+automatically win: a file named `10-persistent.conf` sorts before the vendor's `40-` file
+and is silently overridden. Vendors take the low numbers, so give the administrator's
+drop-in a high one:
+
+```bash
+sudo mkdir -p /etc/systemd/journald.conf.d
+printf '[Journal]\nStorage=persistent\nSystemMaxUse=200M\nSystemMaxFileSize=20M\nSystemKeepFree=1G\n' \
+  | sudo tee /etc/systemd/journald.conf.d/99-persistent.conf
+sudo systemd-tmpfiles --create --prefix /var/log/journal
+sudo systemctl restart systemd-journald
+sudo journalctl --flush        # migrates the runtime journal into /var
+```
+
+Verify with `journalctl --header` rather than assuming — that is the check that catches a
+drop-in losing the merge.
+
+Cap `SystemMaxUse` deliberately on flash storage. A monitor host writes on the order of
+10-15 MB of journal per day, so 200M is roughly two weeks of history at modest wear.
+
+The flush preserves history but not always all of it: restarting journald rotates the
+active file, and if the runtime journal is already near its cap, the archived and the new
+file cannot both fit, so the oldest segment is vacuumed. Compare
+`journalctl -o short-iso | head -1` before and after to see what the switch actually cost.
+
+### A recorder that "fails" on a schedule
+
+A recorder rotated by a timer is stopped with `SIGTERM`, and a shell wrapper that traps it
+exits `143`. systemd reads that as `Failed with result 'exit-code'`, so the unit enters a
+failed state on every rotation while recording is in fact healthy. Declare the exit
+status instead of ignoring the noise: otherwise `systemctl --failed` is permanently dirty,
+any fleet-wide "is anything failed" check answers yes around the clock, and an `OnFailure=`
+hook attached to that unit would page on every rotation:
+
+```ini
+# /etc/systemd/system/<recorder>.service.d/10-clean-stop.conf
+[Service]
+SuccessExitStatus=143
+```
 
 ## Rollback
 
