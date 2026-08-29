@@ -197,6 +197,12 @@ def test_metrics_persist_across_restart(tmp_path):
             timeout=5,
         ):
             pass
+        # Settle before shutting the server down. The response is written before the
+        # request is booked, and it is booking that persists the counters, so tearing the
+        # server down the moment the client returns can race the write the second server
+        # is about to read. Once /metrics reports the request, finish() has released the
+        # lock it persists under, so the file is on disk.
+        _metrics_when_settled(f"http://127.0.0.1:{first.server_address[1]}")
     finally:
         first.shutdown()
 
