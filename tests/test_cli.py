@@ -222,6 +222,13 @@ def test_package_fingerprint_changes_with_module_contents(tmp_path):
     assert cli.package_fingerprint(str(first)) == cli.package_fingerprint(str(first))
 
 
+def _journal_tree(root, name="system.journal", size=2048):
+    machine = root / "9a3c1e5f"
+    machine.mkdir(parents=True, exist_ok=True)
+    (machine / name).write_bytes(b"\0" * size)
+    return root
+
+
 def test_selfcheck_reports_every_gate_and_succeeds(tmp_path, capsys, monkeypatch):
     config_path = tmp_path / "cameras.yaml"
     config_path.write_text(
@@ -234,6 +241,10 @@ def test_selfcheck_reports_every_gate_and_succeeds(tmp_path, capsys, monkeypatch
     monkeypatch.setenv("CAM_USER", "operator")
     monkeypatch.setenv("CAM_PASS", "secret")
     monkeypatch.setattr(cli.shutil, "which", lambda name: f"/usr/bin/{name}")
+    # Pinned, or the journal gate would answer from whatever the test host happens to do.
+    monkeypatch.setattr(cli, "RUN_JOURNAL_DIR", str(tmp_path / "run"))
+    monkeypatch.setattr(cli, "VAR_JOURNAL_DIR",
+                        str(_journal_tree(tmp_path / "var", size=1024 * 1024)))
 
     assert cli.main(["selfcheck", str(config_path)]) == 0
     out = capsys.readouterr().out
@@ -241,7 +252,65 @@ def test_selfcheck_reports_every_gate_and_succeeds(tmp_path, capsys, monkeypatch
     assert "config: ok (1 camera(s))" in out
     assert "credentials: ok" in out
     assert "ffmpeg: ok" in out
+    assert "journal: ok" in out
     assert "secret" not in out                        # never echo a credential
+
+
+def test_journal_storage_reads_persistent_when_files_are_on_disk(tmp_path):
+    run_dir = _journal_tree(tmp_path / "run", size=4096)
+    var_dir = _journal_tree(tmp_path / "var", size=8192)
+
+    # /var wins even while a runtime copy is still around: journald removes the runtime
+    # files once it has flushed, and a stale leftover must not read as volatile.
+    assert cli.journal_storage(str(run_dir), str(var_dir)) == ("persistent", 8192)
+
+
+def test_journal_storage_reads_volatile_when_only_ram_has_files(tmp_path):
+    run_dir = _journal_tree(tmp_path / "run", size=4096)
+    var_dir = tmp_path / "var"
+    var_dir.mkdir()
+
+    assert cli.journal_storage(str(run_dir), str(var_dir)) == ("volatile", 4096)
+
+
+def test_journal_storage_reads_absent_without_any_journal(tmp_path):
+    # A container or a host without journald: nothing to report, and nothing wrong.
+    assert cli.journal_storage(str(tmp_path / "run"), str(tmp_path / "var")) == ("absent", 0)
+
+
+def test_selfcheck_warns_about_a_journal_in_ram_without_failing(tmp_path, capsys,
+                                                                monkeypatch):
+    # Found on two hosts on 2026-08-29, one keeping only thirteen hours of history —
+    # and both had passed every earlier selfcheck. It must warn, never fail: a journal
+    # in RAM does not stop the daemon, so failing would block a rollout over a host
+    # that runs perfectly well.
+    config_path = tmp_path / "cameras.yaml"
+    config_path.write_text("cameras:\n  - name: front\n    host: 203.0.113.10\n",
+                           encoding="utf-8")
+    monkeypatch.setattr(cli.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(cli, "RUN_JOURNAL_DIR",
+                        str(_journal_tree(tmp_path / "run", size=3 * 1024 * 1024)))
+    monkeypatch.setattr(cli, "VAR_JOURNAL_DIR", str(tmp_path / "var"))
+
+    assert cli.main(["selfcheck", str(config_path)]) == 0
+    out = capsys.readouterr().out
+    assert "journal: WARNING held in RAM (3 MB)" in out
+    assert "selfcheck ok, with warning(s): journal" in out
+
+
+def test_selfcheck_stays_quiet_about_a_journal_on_disk(tmp_path, capsys, monkeypatch):
+    config_path = tmp_path / "cameras.yaml"
+    config_path.write_text("cameras:\n  - name: front\n    host: 203.0.113.10\n",
+                           encoding="utf-8")
+    monkeypatch.setattr(cli.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(cli, "RUN_JOURNAL_DIR", str(tmp_path / "run"))
+    monkeypatch.setattr(cli, "VAR_JOURNAL_DIR",
+                        str(_journal_tree(tmp_path / "var", size=5 * 1024 * 1024)))
+
+    assert cli.main(["selfcheck", str(config_path)]) == 0
+    out = capsys.readouterr().out
+    assert "journal: ok (on disk, 5 MB)" in out
+    assert "WARNING" not in out
 
 
 def test_selfcheck_fails_on_missing_camera_credentials(tmp_path, capsys, monkeypatch):

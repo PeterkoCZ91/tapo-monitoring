@@ -56,6 +56,44 @@ def _version():
     return 0
 
 
+
+RUN_JOURNAL_DIR = "/run/log/journal"
+VAR_JOURNAL_DIR = "/var/log/journal"
+
+
+def _journal_bytes(root):
+    """``(any_found, total_bytes)`` for the journal files under one journal root."""
+    found, total = False, 0
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            if not name.endswith((".journal", ".journal~")):
+                continue
+            found = True
+            try:
+                total += os.path.getsize(os.path.join(dirpath, name))
+            except OSError:  # rotated away mid-walk; the verdict does not depend on it
+                pass
+    return found, total
+
+
+def journal_storage(run_dir=RUN_JOURNAL_DIR, var_dir=VAR_JOURNAL_DIR):
+    """``(state, bytes)`` saying whether the systemd journal survives a reboot.
+
+    ``state`` is "persistent" (files under /var), "volatile" (only under /run, a tmpfs)
+    or "absent" (no journal at all — a container, or a host not running journald).
+    Reading the directories is enough: journald removes the runtime copy once it has
+    flushed to /var, so the presence of on-disk files is the answer, and no subprocess
+    is needed in a check that is meant to stay offline and fast.
+    """
+    on_disk, disk_bytes = _journal_bytes(var_dir)
+    if on_disk:
+        return "persistent", disk_bytes
+    in_ram, ram_bytes = _journal_bytes(run_dir)
+    if in_ram:
+        return "volatile", ram_bytes
+    return "absent", 0
+
+
 def _selfcheck(path):
     """Answer "can this host run the code that was just copied onto it?".
 
@@ -63,8 +101,14 @@ def _selfcheck(path):
     the way the daemon would but before the restart), loads the config, asserts the
     credential env vars named by that config are actually set, and looks for ffmpeg —
     the four ways a deploy has silently produced a running-but-useless daemon.
+
+    It also reports where the journal is written, as a warning rather than a failure.
+    That one is about observability, not runnability: a journal held in RAM does not
+    stop the daemon, it stops anyone investigating the daemon a day later, so failing
+    the check would break rollouts over a host that runs perfectly well.
     """
     failures = []
+    warnings = []
     print(f"tapo-monitor {package_fingerprint()} selfcheck")
 
     package = os.path.dirname(os.path.abspath(__file__))
@@ -122,9 +166,30 @@ def _selfcheck(path):
         failures.append("ffmpeg")
         print("  ffmpeg: FAILED (not on PATH)")
 
+    # Passed explicitly rather than left to the defaults: a default argument binds
+    # at import time, which would make the paths unreachable for a test.
+    state, retained = journal_storage(RUN_JOURNAL_DIR, VAR_JOURNAL_DIR)
+    megabytes = retained // (1024 * 1024)
+    if state == "volatile":
+        # Found on two hosts on 2026-08-29, one of them keeping thirteen hours of
+        # history. Nothing announces this: journald decides at start-up, so creating
+        # /var/log/journal on a running host changes nothing, and drop-ins merge by
+        # filename across directories, so a vendor Storage=volatile outranks an /etc
+        # drop-in that sorts before it. Both hosts had passed every earlier selfcheck.
+        warnings.append("journal")
+        print(f"  journal: WARNING held in RAM ({megabytes} MB), cleared on every reboot")
+        print("    see docs/operations.md - 'Make sure the journal survives'")
+    elif state == "persistent":
+        print(f"  journal: ok (on disk, {megabytes} MB)")
+    else:
+        print("  journal: skipped (no systemd journal on this host)")
+
     if failures:
         print(f"selfcheck FAILED: {', '.join(failures)}")
         return 1
+    if warnings:
+        print(f"selfcheck ok, with warning(s): {', '.join(warnings)}")
+        return 0
     print("selfcheck ok")
     return 0
 

@@ -5,6 +5,15 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `selfcheck` reports where the journal is written. Two hosts were found writing theirs to
+  RAM, one keeping thirteen hours of history and losing even that on reboot, after months
+  of passing every other gate. Nothing announces it: journald decides at start-up, so
+  creating `/var/log/journal` on a running host changes nothing, and drop-ins merge by
+  filename across directories, so a vendor `Storage=volatile` outranks an `/etc` drop-in
+  that sorts before it. It reads the two journal directories rather than shelling out, so
+  the check stays offline, and it warns instead of failing — a journal in RAM does not stop
+  the daemon, it stops anyone investigating the daemon a day later, and failing would block
+  a rollout over a host that runs perfectly well.
 - A fleet block in the daily review digest, so one message a day says the fleet is alive.
   Every other Telegram message is a transition, which left "everything works" expressed as
   silence — indistinguishable from a dead host or an expired token. It reports camera

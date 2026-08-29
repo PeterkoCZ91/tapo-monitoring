@@ -397,7 +397,8 @@ running daemon, so it is safe to run against production cameras.
 ### Make sure the journal survives
 
 `journalctl` is the only record of what the monitor did, so confirm it is written to disk
-rather than to RAM:
+rather than to RAM. `tapo-monitor selfcheck` reports this on every run — a `journal:
+WARNING held in RAM` line is this problem — and these are the commands behind it:
 
 ```bash
 journalctl --header | grep -m1 'File path'   # /run/... means volatile
