@@ -486,6 +486,19 @@ The guard reads current/preset pan positions over ONVIF and recalls the nearest 
 preset when auto-track moves outside their span. It does not create a hard motor limit.
 ONVIF errors are isolated from the event loop.
 
+Enable it per camera, not by default. The firmware already returns a camera to where its
+track started, after `back_time` seconds (30 on the C560WS), which covers the ordinary
+case on its own — and faster than a 60 s control pass. What it does not do is return the
+camera to an *absolute* position, so a home that has itself drifted stays drifted, and it
+never corrects tilt. That is the gap `pan_limit` and `night_preset` fill, and it is worth
+filling only where auto-track can actually reach somewhere useless.
+
+Check the span before enabling it. The bounds are the minimum and maximum pan over *all*
+the camera's presets, so on a camera with two presets flanking its useful view, the guard
+clamps to the gap between them and yanks the camera back mid-track. Measure the outermost
+still-usable positions by eye first, and add a preset for a bound that no existing preset
+marks — the bound is only as good as the presets it is derived from.
+
 ### Observation-only coordinator
 
 ```yaml
