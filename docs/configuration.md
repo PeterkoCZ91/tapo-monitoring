@@ -480,6 +480,9 @@ pan_limit:
   onvif_port: 2020
   onvif_user_env: CAM_ONVIF_USER
   onvif_password_env: CAM_ONVIF_PASSWORD
+  tilt: true          # also bound tilt (off by default)
+  tilt_min: -1.0      # only presets inside this window may become a tilt bound
+  tilt_max: -0.6
 ```
 
 The guard reads current/preset pan positions over ONVIF and recalls the nearest bounding
@@ -498,6 +501,20 @@ the camera's presets, so on a camera with two presets flanking its useful view, 
 clamps to the gap between them and yanks the camera back mid-track. Measure the outermost
 still-usable positions by eye first, and add a preset for a bound that no existing preset
 marks — the bound is only as good as the presets it is derived from.
+
+`tilt` extends the same guard to the vertical axis, and is off by default because that
+warning bites harder there. Auto-track moves tilt as well as pan, and nothing else brings
+it back: a recalled preset is the only thing that corrects it. But presets are also where
+people park a camera to look at something unusual, and a single one aimed high stretches
+the tilt bound over nearly the whole travel — on one camera here, six presets spanned 1.79
+of the 2.0 its motor can reach, purely because one pointed at the sky. `tilt_min` and
+`tilt_max` fix that by excluding presets outside the window from becoming a bound. They
+never invent a position: every bound stays a preset the camera can actually be recalled
+to, so a window that leaves fewer than two candidates disables the tilt guard rather than
+clamping to something made up.
+
+Pan is checked first and tilt only if pan is already inside its bounds, because recalling
+a preset restores both axes at once.
 
 ### Observation-only coordinator
 

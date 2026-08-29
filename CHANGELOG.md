@@ -5,6 +5,15 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- The soft PTZ guard can bound tilt, not just pan (`pan_limit.tilt`, off by default).
+  Auto-track moves tilt too, and nothing corrected it: `pan_limit` clamped one axis and a
+  recalled preset was the only thing that touched the other. Derived from presets the way
+  the pan bound is — with a window, because tilt needs one: presets are where people park a
+  camera to look at something unusual, and a single one aimed high stretches the bound over
+  nearly the whole travel. Six presets on one camera spanned 1.79 of the 2.0 its motor can
+  reach because one pointed at the sky. `tilt_min`/`tilt_max` exclude those from becoming a
+  bound without inventing a position: every bound stays a real preset, and a window leaving
+  fewer than two candidates disables the tilt guard rather than clamping to a guess.
 - Privacy mode is part of the digital twin. It is the one switch that stops a camera
   watching at all — the lens parks, nothing is recorded or detected, and every motor call
   comes back `MOTOR_BUSY` — and nothing in the package read it. Two cameras spent nine

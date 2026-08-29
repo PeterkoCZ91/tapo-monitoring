@@ -1802,12 +1802,23 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
                 g["ptz"], g["token"] = panlimit.build_ptz(cfg.host, pl.onvif_port, user, password)
                 g["bounds"] = panlimit.read_preset_bounds(g["ptz"], g["token"])
                 log.info("pan_limit %s: preset bounds %s", cfg.name, g["bounds"])
+                if pl.tilt:
+                    g["tilt_bounds"] = panlimit.read_preset_tilt_bounds(
+                        g["ptz"], g["token"], pl.tilt_min, pl.tilt_max)
+                    log.info("pan_limit %s: tilt bounds %s", cfg.name, g["tilt_bounds"])
             x = panlimit.read_pan_x(g["ptz"], g["token"])
             target = panlimit.limit_target(x, g.get("bounds"), pl.margin)
+            axis, value = "pan x", x
+            # Tilt only when pan is already within bounds: a preset sets both axes, so one
+            # recall fixes whichever is out and a second read would just cost a round trip.
+            if target is None and pl.tilt:
+                y = panlimit.read_tilt_y(g["ptz"], g["token"])
+                target = panlimit.limit_target(y, g.get("tilt_bounds"), pl.margin)
+                axis, value = "tilt y", y
             if target is not None:
                 panlimit.goto_preset(g["ptz"], g["token"], target)
-                log.info("pan_limit %s: pan x=%.4f out of bounds -> recall preset %s",
-                         cfg.name, x, target)
+                log.info("pan_limit %s: %s=%.4f out of bounds -> recall preset %s",
+                         cfg.name, axis, value, target)
         except Exception as e:  # noqa: BLE001 - an ONVIF hiccup must not kill the loop
             log.warning("pan_limit %s: %s", cfg.name, e)
             g.pop("ptz", None)          # force a clean rebuild on the next poll

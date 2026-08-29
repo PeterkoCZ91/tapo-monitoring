@@ -1993,6 +1993,69 @@ def test_pan_guard_noop_within_bounds(monkeypatch):
     assert gotos == []
 
 
+def _tilt_cam_dict(**pan_limit):
+    d = _raw_cam_dict()
+    d["pan_limit"].update({"tilt": True, "tilt_min": -1.0, "tilt_max": -0.6})
+    d["pan_limit"].update(pan_limit)
+    return d
+
+
+def _patch_tilt(monkeypatch, pan_x, tilt_y, gotos, reads=None):
+    monkeypatch.setattr(daemon.panlimit, "build_ptz", lambda *a, **k: ("PTZ", "tok"))
+    monkeypatch.setattr(daemon.panlimit, "read_preset_bounds",
+                        lambda ptz, tok: (0.39, "1", 0.61, "3"))
+    monkeypatch.setattr(daemon.panlimit, "read_preset_tilt_bounds",
+                        lambda ptz, tok, low, high: (-1.0, "1", -0.87, "4"))
+    monkeypatch.setattr(daemon.panlimit, "read_pan_x", lambda ptz, tok: pan_x)
+
+    def _tilt(ptz, tok):
+        if reads is not None:
+            reads.append("tilt")
+        return tilt_y
+
+    monkeypatch.setattr(daemon.panlimit, "read_tilt_y", _tilt)
+    monkeypatch.setattr(daemon.panlimit, "goto_preset",
+                        lambda ptz, tok, target: gotos.append(target))
+
+
+def test_pan_guard_recalls_when_tilt_leaves_its_bound(monkeypatch):
+    # pan_limit only ever clamped pan, so a camera auto-tracking upward was corrected by
+    # nothing but the night preset. Observed tilt -0.7067 on a camera whose working
+    # presets sit at -0.87 and below.
+    app = cfg.load_config_from_dict({"cameras": [_tilt_cam_dict()]})
+    gotos = []
+    _patch_tilt(monkeypatch, pan_x=0.50, tilt_y=-0.7067, gotos=gotos)
+    daemon._pan_guard_pass(app, {}, daemon.MonitorState(), now=100, secrets={}, night=True)
+    assert gotos == ["4"]
+
+
+def test_pan_guard_leaves_tilt_alone_within_its_bound(monkeypatch):
+    app = cfg.load_config_from_dict({"cameras": [_tilt_cam_dict()]})
+    gotos = []
+    _patch_tilt(monkeypatch, pan_x=0.50, tilt_y=-0.95, gotos=gotos)
+    daemon._pan_guard_pass(app, {}, daemon.MonitorState(), now=100, secrets={}, night=True)
+    assert gotos == []
+
+
+def test_pan_guard_does_not_read_tilt_when_pan_is_already_out(monkeypatch):
+    # A preset sets both axes, so the pan recall fixes tilt too; reading it would only
+    # cost another ONVIF round trip on a camera that is about to move anyway.
+    app = cfg.load_config_from_dict({"cameras": [_tilt_cam_dict()]})
+    gotos, reads = [], []
+    _patch_tilt(monkeypatch, pan_x=0.99, tilt_y=-0.7067, gotos=gotos, reads=reads)
+    daemon._pan_guard_pass(app, {}, daemon.MonitorState(), now=100, secrets={}, night=True)
+    assert gotos == ["3"] and reads == []
+
+
+def test_pan_guard_never_reads_tilt_when_tilt_is_off(monkeypatch):
+    d = _raw_cam_dict()                                   # tilt defaults to off
+    app = cfg.load_config_from_dict({"cameras": [d]})
+    gotos, reads = [], []
+    _patch_tilt(monkeypatch, pan_x=0.50, tilt_y=0.99, gotos=gotos, reads=reads)
+    daemon._pan_guard_pass(app, {}, daemon.MonitorState(), now=100, secrets={}, night=True)
+    assert gotos == [] and reads == []
+
+
 def test_pan_guard_throttles_by_poll_interval(monkeypatch):
     app = cfg.load_config_from_dict({"cameras": [_raw_cam_dict()]})
     calls = []

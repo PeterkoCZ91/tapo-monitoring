@@ -37,3 +37,31 @@ def test_limit_target_none_within_bounds_and_margin():
 def test_limit_target_none_without_bounds_or_position():
     assert panlimit.limit_target(0.7, None) is None
     assert panlimit.limit_target(None, (0.39, "1", 0.61, "3")) is None
+
+
+def test_bounds_window_keeps_a_stray_preset_from_becoming_the_bound():
+    # Real presets of a tracking camera, tilt axis: five sit at working heights and one
+    # points at the sky. Unfiltered it spans 1.79 of the 2.0 the motor can reach, which
+    # bounds nothing. The window drops that one and leaves a bound made of real presets.
+    tilts = [("1", -1.0), ("2", -1.0), ("3", -0.253333),
+             ("4", -0.866667), ("5", 0.786667), ("6", -1.0)]
+
+    wide = panlimit.bounds_from_presets(tilts)
+    assert wide == (-1.0, "1", 0.786667, "5")
+    assert wide[2] - wide[0] > 1.7
+
+    windowed = panlimit.bounds_from_presets(tilts, low=-1.0, high=-0.6)
+    assert windowed == (-1.0, "1", -0.866667, "4")
+
+
+def test_bounds_window_that_leaves_one_preset_gives_no_bounds():
+    # Better no guard than a guard clamping to a single point it inferred from nothing.
+    tilts = [("1", -1.0), ("5", 0.786667)]
+
+    assert panlimit.bounds_from_presets(tilts, low=-1.0, high=-0.6) is None
+
+
+def test_bounds_window_is_inclusive_at_its_edges():
+    tilts = [("1", -1.0), ("2", -0.6), ("3", 0.5)]
+
+    assert panlimit.bounds_from_presets(tilts, low=-1.0, high=-0.6) == (-1.0, "1", -0.6, "2")

@@ -103,6 +103,11 @@ class PanLimitConfig:
     onvif_port: int = 2020
     onvif_user_env: str | None = None       # names of env vars, not the secrets themselves
     onvif_password_env: str | None = None
+    # Tilt is opt-in per camera: derived from presets it is only meaningful when the
+    # presets sit at sensible heights, and one aimed at the sky makes the bound inert.
+    tilt: bool = False
+    tilt_min: float | None = None           # ignore presets outside this tilt window
+    tilt_max: float | None = None
 
 
 @dataclass
@@ -435,6 +440,15 @@ def _pan_limit(data, where):
             from None
     if poll_interval < 1:
         raise ConfigError(f"{where}: pan_limit poll_interval must be >= 1")
+    tilt_min = d.get("tilt_min")
+    tilt_max = d.get("tilt_max")
+    try:
+        tilt_min = None if tilt_min is None else float(tilt_min)
+        tilt_max = None if tilt_max is None else float(tilt_max)
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}: pan_limit tilt_min/tilt_max must be numbers") from None
+    if tilt_min is not None and tilt_max is not None and tilt_min >= tilt_max:
+        raise ConfigError(f"{where}: pan_limit tilt_min must be below tilt_max")
     return PanLimitConfig(
         enabled=bool(d.get("enabled", False)),
         margin=margin,
@@ -442,6 +456,9 @@ def _pan_limit(data, where):
         onvif_port=onvif_port,
         onvif_user_env=d.get("onvif_user_env"),
         onvif_password_env=d.get("onvif_password_env"),
+        tilt=bool(d.get("tilt", False)),
+        tilt_min=tilt_min,
+        tilt_max=tilt_max,
     )
 
 

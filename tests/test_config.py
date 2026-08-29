@@ -118,6 +118,29 @@ def test_pan_limit_parses():
     assert pl.onvif_user_env == "ONVIF_USER" and pl.onvif_port == 2020
 
 
+def test_pan_limit_parses_tilt_window():
+    data = {"cameras": [{"name": "f", "host": "192.0.2.50", "pan_limit": {
+        "enabled": True, "tilt": True, "tilt_min": -1.0, "tilt_max": -0.6}}]}
+    pl = cfg.load_config_from_dict(data).cameras[0].pan_limit
+    assert pl.tilt is True and pl.tilt_min == -1.0 and pl.tilt_max == -0.6
+
+
+def test_pan_limit_tilt_defaults_to_off():
+    # Derived from presets a tilt bound is only meaningful when the presets sit at
+    # sensible heights, so it is opted into per camera rather than assumed.
+    data = {"cameras": [{"name": "f", "host": "192.0.2.50",
+                         "pan_limit": {"enabled": True}}]}
+    pl = cfg.load_config_from_dict(data).cameras[0].pan_limit
+    assert pl.tilt is False and pl.tilt_min is None and pl.tilt_max is None
+
+
+def test_pan_limit_rejects_inverted_tilt_window():
+    data = {"cameras": [{"name": "f", "host": "192.0.2.50", "pan_limit": {
+        "tilt": True, "tilt_min": -0.6, "tilt_max": -1.0}}]}
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config_from_dict(data)
+
+
 def test_pan_limit_rejects_bad_poll_interval():
     data = {"cameras": [{"name": "f", "host": "192.0.2.50",
                          "pan_limit": {"poll_interval": 0}}]}
