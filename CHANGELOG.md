@@ -96,6 +96,14 @@ All notable changes to this project are documented here.
   now explicit, and test doubles accept the keywords the production caller actually sends.
 
 ### Fixed
+- A refused preset recall is logged once and then counted, not repeated every control
+  pass. A camera that refuses every recall wrote 1104 identical warnings in ten hours,
+  which buries the log it is supposed to be improving. Dropping the warning would be the
+  wrong repair — it exists because a silently refused recall once left a camera aimed at
+  the ground for two days — so identical refusals are counted and the count rides along
+  the next line, which comes when the reason changes, when the camera recovers, or after
+  half an hour. The warning also names the camera now; on a host with two of them it did
+  not, and the preset number was the only clue.
 - The capability snapshot derives its groups from the probe tables instead of repeating
   them. The hand-kept copy meant adding a probe in a new group raised `KeyError` deep
   inside `collect_snapshot` rather than simply working.

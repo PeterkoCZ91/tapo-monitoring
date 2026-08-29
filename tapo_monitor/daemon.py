@@ -153,7 +153,34 @@ def _repair(name, call, failures):
             failures[name] = failures.get(name, 0) + 1
 
 
-def _recall_preset(cam, preset) -> bool:
+RECALL_REPEAT_SECONDS = 1800
+
+# Keyed by (camera, preset): what the last logged refusal said, when it was logged, and
+# how many identical ones have been swallowed since.
+_recall_state = {}
+
+
+def recall_failure_repeat(state, key, message, now, repeat_after=RECALL_REPEAT_SECONDS):
+    """``(should_log, suppressed)`` for one refused recall. Mutates ``state``. Pure-ish.
+
+    A camera that refuses every recall wrote the same warning once a control pass: 1104
+    identical lines in ten hours, on two cameras someone had simply switched to privacy
+    mode, which parks the lens and answers every motor call with MOTOR_BUSY. Dropping the
+    warning is the wrong repair — it exists because a silently refused recall once left a
+    camera aimed at the ground for two days. So the first refusal is logged, identical
+    ones are counted rather than printed, and the count rides along the next line, which
+    comes when the message changes, when the camera recovers, or after ``repeat_after``.
+    """
+    previous = state.get(key)
+    same = previous is not None and previous["message"] == message
+    if previous is None or not same or now - previous["logged"] >= repeat_after:
+        state[key] = {"message": message, "logged": now, "count": 0}
+        return True, (previous["count"] if same else 0)
+    previous["count"] += 1
+    return False, previous["count"]
+
+
+def _recall_preset(cam, preset, camera=None) -> bool:
     """Recall a preset, riding out one stale-transport refusal.
 
     pytapo does not announce that its session went stale — the camera answers
@@ -164,21 +191,35 @@ def _recall_preset(cam, preset) -> bool:
     leaving a camera off-target until the following control pass — cheap then,
     less so now: pan_limit leans on preset recalls dozens of times a night, and
     the night preset is the only thing that corrects tilt at all.
+
+    A refusal that repeats is logged once and then counted, not repeated every pass;
+    see :func:`recall_failure_repeat`.
     """
+    key = (camera, str(preset))
+    where = f" on {camera}" if camera else ""
     try:
         cam.setPreset(preset)
-        return True
     except Exception as first:  # noqa: BLE001 - a camera control failure must not stop polling
         try:
             cam.setPreset(preset)
         except Exception as exc:  # noqa: BLE001 - same, after the retry also failed
-            log.warning("failed to recall preset %s: %s", preset, exc)
+            should_log, suppressed = recall_failure_repeat(
+                _recall_state, key, str(exc), _time.monotonic())
+            if should_log:
+                same_since = f" ({suppressed} identical since)" if suppressed else ""
+                log.warning("failed to recall preset %s%s: %s%s",
+                            preset, where, exc, same_since)
             return False
-        log.info("preset %s recalled on retry after: %s", preset, first)
-        return True
+        log.info("preset %s recalled%s on retry after: %s", preset, where, first)
+    recovered = _recall_state.pop(key, None)
+    if recovered is not None:
+        log.info("preset %s recalled again%s after %d refusal(s)",
+                 preset, where, recovered["count"] + 1)
+    return True
 
 
-def apply_plan(cam, plan: CameraPlan, reliability_config=None, *, repair_failures=None):
+def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
+               repair_failures=None, camera=None):
     """Apply a CameraPlan to a connected camera in firmware-safe order.
 
     SmartTrack / motion sensitivity / preset first; auto-track asserted LAST and verified.
@@ -222,7 +263,7 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *, repair_failure
     # healthy camera. One sat aimed at the ground for two days (2026-08-20) while this
     # very call was re-sent every tick.
     if plan.preset:
-        _recall_preset(cam, plan.preset)
+        _recall_preset(cam, plan.preset, camera)
     # apply_smarttrack MUST be the LAST configuration call before ensure_autotrack.
     # Live evidence (2026-06-23) showed one of the calls above resets smart_track_info
     # to ALL-OFF; running SmartTrack first let those calls wipe the night people-only
@@ -277,7 +318,7 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
                 # one: every other control call is accepted, and the one setting the night
                 # depends on never takes — with not a single log line to show for it.
                 if not apply_plan(cam, plan, app.reliability,
-                                  repair_failures=repair_failures):
+                                  repair_failures=repair_failures, camera=cfg.name):
                     log.warning("auto-track %s not confirmed for %s: the camera took the "
                                 "call but read back the other state",
                                 "on" if plan.autotrack_on else "off", cfg.name)

@@ -3,11 +3,24 @@ import os
 import sys
 from unittest.mock import sentinel
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tapo_monitor import config as cfg
 from tapo_monitor import daemon, notify, snapshot
 from tests.conftest import FakeResponse as _Resp
+
+
+@pytest.fixture(autouse=True)
+def _fresh_recall_state(monkeypatch):
+    """Give every test its own preset-recall throttle state.
+
+    The throttle is a module-level dict, so without this a test that logs a refusal
+    silences the next test that logs the same one — order-dependently, which is the
+    worst way to find out.
+    """
+    monkeypatch.setattr(daemon, "_recall_state", {})
 
 
 def _cam(**overrides):
@@ -399,6 +412,87 @@ def test_apply_plan_logs_preset_recall_failure(monkeypatch, caplog):
     assert "MOTOR_LOCKED_ROTOR" in caplog.text
 
 
+def test_recall_failure_repeat_logs_once_then_counts():
+    # 1104 identical warnings in ten hours, once a control pass, on two cameras somebody
+    # had switched to privacy mode. Silencing the warning is the wrong repair — it exists
+    # because a silently refused recall once left a camera aimed at the ground for two
+    # days — so the repeats are counted instead of printed.
+    state = {}
+    key = ("yard", "4")
+
+    assert daemon.recall_failure_repeat(state, key, "MOTOR_BUSY", now=0.0) == (True, 0)
+    assert daemon.recall_failure_repeat(state, key, "MOTOR_BUSY", now=60.0) == (False, 1)
+    assert daemon.recall_failure_repeat(state, key, "MOTOR_BUSY", now=120.0) == (False, 2)
+
+
+def test_recall_failure_repeat_speaks_up_again_when_the_reason_changes():
+    # A different refusal is a different fact and must not hide behind the running count.
+    state = {}
+    key = ("yard", "4")
+    daemon.recall_failure_repeat(state, key, "MOTOR_BUSY", now=0.0)
+    daemon.recall_failure_repeat(state, key, "MOTOR_BUSY", now=60.0)
+
+    assert daemon.recall_failure_repeat(
+        state, key, "ERR_CODE_NULL_TRANSPORT", now=120.0) == (True, 0)
+
+
+def test_recall_failure_repeat_reports_the_count_after_the_interval():
+    # A refusal that never ends still has to resurface, carrying what it swallowed.
+    state = {}
+    key = ("yard", "4")
+    daemon.recall_failure_repeat(state, key, "MOTOR_BUSY", now=0.0)
+    for tick in range(1, 5):
+        daemon.recall_failure_repeat(state, key, "MOTOR_BUSY", now=60.0 * tick)
+
+    assert daemon.recall_failure_repeat(
+        state, key, "MOTOR_BUSY", now=daemon.RECALL_REPEAT_SECONDS) == (True, 4)
+
+
+def test_apply_plan_names_the_camera_and_stops_repeating_a_refusal(monkeypatch, caplog):
+    # Two cameras share a host, so a warning that does not name one is a guess.
+    FakeCam, tracking = _nightvision_fakecam()
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+
+    class RefusingCam(FakeCam):
+        def setPreset(self, preset):
+            raise RuntimeError("MOTOR_BUSY")
+
+    cam = RefusingCam()
+    plan = daemon.plan_camera(_cam(role="tracking", tracking={"day_preset": "4"}),
+                              night=False, rain_active=False)
+    with caplog.at_level("WARNING", logger="tapo_monitor.daemon"):
+        for _ in range(5):
+            daemon.apply_plan(cam, plan, camera="yard")
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"
+                and "recall preset" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "on yard" in warnings[0].getMessage()
+
+
+def test_apply_plan_says_when_a_refused_recall_starts_working_again(monkeypatch, caplog):
+    FakeCam, tracking = _nightvision_fakecam()
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+
+    class FlakyCam(FakeCam):
+        refuse = True
+
+        def setPreset(self, preset):
+            if FlakyCam.refuse:
+                raise RuntimeError("MOTOR_BUSY")
+
+    cam = FlakyCam()
+    plan = daemon.plan_camera(_cam(role="tracking", tracking={"day_preset": "4"}),
+                              night=False, rain_active=False)
+    daemon.apply_plan(cam, plan, camera="yard")
+    daemon.apply_plan(cam, plan, camera="yard")
+    FlakyCam.refuse = False
+    with caplog.at_level("INFO", logger="tapo_monitor.daemon"):
+        daemon.apply_plan(cam, plan, camera="yard")
+
+    assert "recalled again on yard after 2 refusal(s)" in caplog.text
+
+
 def test_apply_plan_retries_a_preset_recall_once(monkeypatch, caplog):
     # ERR_CODE_NULL_TRANSPORT means pytapo's session went stale, not that the motor
     # refused: the next request re-authenticates, so the second attempt gets through.
@@ -456,7 +550,8 @@ def test_run_once_passes_the_repair_sink_through_to_apply_plan(monkeypatch):
     # worth off the state, so the control pass has to carry a sink down to apply_plan.
     seen = {}
 
-    def fake_apply_plan(cam, plan, reliability_config=None, *, repair_failures=None):
+    def fake_apply_plan(cam, plan, reliability_config=None, *, repair_failures=None,
+                        camera=None):
         seen["got"] = repair_failures
         if repair_failures is not None:
             repair_failures["smarttrack"] = repair_failures.get("smarttrack", 0) + 1
