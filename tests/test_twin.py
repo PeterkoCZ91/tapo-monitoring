@@ -165,3 +165,23 @@ def test_fleet_entry_carries_and_extends_the_previous_history():
     assert [item["at"] for item in entry["history"]] == [1.0, 2.0]
     assert entry["history"][-1] == {"at": 2.0, "kind": "health",
                                     "from": "ok", "to": "degraded"}
+
+
+def test_cameras_in_privacy_reports_only_a_confirmed_parked_lens():
+    # The control pass uses this to stop sending motor calls a parked lens will refuse,
+    # so only a switch the twin actually read may count. "unknown" is what a camera the
+    # probe never reached looks like, and treating that as privacy would silently stop
+    # repairing the aim of a camera that is merely unreachable.
+    fleet = {
+        "yard": {"actual": {"privacy.enabled": True}},
+        "gate": {"actual": {"privacy.enabled": False}},
+        "lane": {"actual": {"privacy.enabled": "unknown"}},
+        "shed": {"actual": {"privacy.enabled": "unsupported"}},
+        "barn": {},
+    }
+    assert twin.cameras_in_privacy(fleet) == {"yard"}
+
+
+def test_cameras_in_privacy_survives_a_missing_or_broken_fleet():
+    assert twin.cameras_in_privacy(None) == set()
+    assert twin.cameras_in_privacy({"yard": "not-a-mapping"}) == set()

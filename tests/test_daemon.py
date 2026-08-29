@@ -182,6 +182,45 @@ def test_run_once_applies_via_connect(monkeypatch):
     assert cam.sensitivity == 60         # sensitivity applied as int
 
 
+def test_run_once_skips_the_recall_for_a_camera_the_twin_saw_in_privacy_mode(monkeypatch):
+    # Wiring test on purpose: apply_plan can skip perfectly and still change nothing in
+    # production if the control pass never tells it which cameras are parked. This
+    # project has shipped that exact shape of dead code twice.
+    from tapo_monitor import tracking
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "yard", "host": "203.0.113.10", "tracking": {"day_preset": "4"}},
+    ]})
+    recalled = []
+
+    class FakeCam:
+        def executeFunction(self, *a, **k):
+            pass
+        def setMotionDetection(self, sensitivity=False):
+            pass
+        def setPersonDetection(self, enabled, sensitivity=False):
+            pass
+        def setVehicleDetection(self, enabled, sensitivity=False):
+            pass
+        def setPreset(self, preset):
+            recalled.append(preset)
+        def setAutoTrackTarget(self, enabled):
+            pass
+        def getAutoTrackTarget(self):
+            return {"enabled": "off"}
+
+    cam = FakeCam()
+    daemon.run_once(app, now=1, connect=lambda c: (cam, None),
+                    is_night=lambda: False, is_raining=lambda *a, **k: False,
+                    privacy={"yard"})
+    assert recalled == []
+
+    daemon.run_once(app, now=1, connect=lambda c: (cam, None),
+                    is_night=lambda: False, is_raining=lambda *a, **k: False,
+                    privacy=set())
+    assert recalled == ["4"]
+
+
 def test_apply_plan_self_heals_person_detection(monkeypatch):
     # Regression 2026-06-15: the camera's AI person detection (events_1 bit 19)
     # silently went 'off' after a daemon restart, so people arrived only as bare
@@ -412,6 +451,47 @@ def test_apply_plan_logs_preset_recall_failure(monkeypatch, caplog):
     assert "MOTOR_LOCKED_ROTOR" in caplog.text
 
 
+def test_apply_plan_skips_preset_recall_in_privacy_mode(monkeypatch):
+    # Privacy mode parks the lens and answers every motor call with MOTOR_BUSY, so the
+    # recall cannot land: two cameras produced 1140 refusals in ten hours on 2026-08-29.
+    # The twin already reads the switch, so the control pass must spend no call at all on
+    # a camera that physically cannot move.
+    FakeCam, tracking = _nightvision_fakecam()
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+    recalled = []
+
+    class CountingCam(FakeCam):
+        def setPreset(self, preset):
+            recalled.append(preset)
+
+    plan = daemon.plan_camera(_cam(role="tracking", tracking={"day_preset": "4"}),
+                              night=False, rain_active=False)
+    assert plan.preset == "4"
+
+    daemon.apply_plan(CountingCam(), plan, privacy_on=True)
+
+    assert recalled == []
+
+
+def test_apply_plan_recalls_preset_when_privacy_is_off(monkeypatch):
+    # The skip must be narrow: an unknown or disabled privacy switch keeps the recall,
+    # because a camera left off-target is the failure this call exists to repair.
+    FakeCam, tracking = _nightvision_fakecam()
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+    recalled = []
+
+    class CountingCam(FakeCam):
+        def setPreset(self, preset):
+            recalled.append(preset)
+
+    plan = daemon.plan_camera(_cam(role="tracking", tracking={"day_preset": "4"}),
+                              night=False, rain_active=False)
+
+    daemon.apply_plan(CountingCam(), plan, privacy_on=False)
+
+    assert recalled == ["4"]
+
+
 def test_recall_failure_repeat_logs_once_then_counts():
     # 1104 identical warnings in ten hours, once a control pass, on two cameras somebody
     # had switched to privacy mode. Silencing the warning is the wrong repair — it exists
@@ -551,7 +631,7 @@ def test_run_once_passes_the_repair_sink_through_to_apply_plan(monkeypatch):
     seen = {}
 
     def fake_apply_plan(cam, plan, reliability_config=None, *, repair_failures=None,
-                        camera=None):
+                        camera=None, privacy_on=False):
         seen["got"] = repair_failures
         if repair_failures is not None:
             repair_failures["smarttrack"] = repair_failures.get("smarttrack", 0) + 1
@@ -604,7 +684,7 @@ def test_loop_step_gives_the_control_pass_the_state_repair_counter(monkeypatch):
     state = daemon.MonitorState()
     seen = {}
 
-    def fake_run_control(app_, *, now, connect, repair_failures=None):
+    def fake_run_control(app_, *, now, connect, repair_failures=None, privacy=None):
         seen["got"] = repair_failures
         return {}
 
@@ -615,6 +695,28 @@ def test_loop_step_gives_the_control_pass_the_state_repair_counter(monkeypatch):
                      drain=lambda *a, **k: None, sample=lambda *a, **k: None)
 
     assert seen["got"] is state.repair_failures
+
+
+def test_loop_step_tells_the_control_pass_which_cameras_are_parked():
+    # The privacy state lives in the twin, which the tick refreshes; without this hand-off
+    # the control pass has no way to know and keeps sending motor calls into a parked lens.
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    state = daemon.MonitorState()
+    state.twin_fleet = {"a": {"actual": {"privacy.enabled": True}}}
+    seen = {}
+
+    def fake_run_control(app_, *, now, connect, repair_failures=None, privacy=None):
+        seen["privacy"] = privacy
+        return {}
+
+    daemon.loop_step(app, {}, state, now=1000,
+                     secrets={"telegram_token": "", "telegram_chat": "", "groq_key": ""},
+                     last_control=0, control_interval=60, run_control=fake_run_control,
+                     watchdog=lambda *a, **k: None, monitor=lambda *a, **k: None,
+                     drain=lambda *a, **k: None, sample=lambda *a, **k: None,
+                     inspect=lambda *a, **k: None)
+
+    assert seen["privacy"] == {"a"}
 
 
 def test_review_digest_pass_hands_the_digest_a_fleet_snapshot(monkeypatch):
@@ -996,7 +1098,7 @@ def test_loop_step_decouples_control_from_event_poll():
     secrets = {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
     calls = {"control": 0, "watchdog": 0, "monitor": 0, "drain": 0}
 
-    def fake_control(app, now, connect, repair_failures=None):
+    def fake_control(app, now, connect, repair_failures=None, privacy=None):
         calls["control"] += 1
         connect(app.cameras[0])  # populate cam_clients like the real connect does
 

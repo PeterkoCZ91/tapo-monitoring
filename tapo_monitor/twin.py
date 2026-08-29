@@ -70,6 +70,25 @@ def evaluate_snapshot(camera_name, plan, snapshot):
     return {"desired": desired, "actual": _json_actual(actual), "drift": report.to_dict()}
 
 
+def cameras_in_privacy(fleet):
+    """Names whose last snapshot read privacy mode as ON. Pure.
+
+    Only a value the probe actually returned counts: `unknown` is also what an
+    unreachable camera looks like, and a camera nobody could read still needs its aim
+    repaired. Callers use this to skip motor calls a parked lens can only refuse.
+    """
+    names = set()
+    if not isinstance(fleet, Mapping):
+        return names
+    for name, entry in fleet.items():
+        if not isinstance(entry, Mapping):
+            continue
+        actual = entry.get("actual")
+        if isinstance(actual, Mapping) and actual.get("privacy.enabled") is True:
+            names.add(str(name))
+    return names
+
+
 def _alertable_paths(entry):
     results = (entry or {}).get("drift", {}).get("results", [])
     return {str(item.get("path", "")) for item in results

@@ -219,7 +219,7 @@ def _recall_preset(cam, preset, camera=None) -> bool:
 
 
 def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
-               repair_failures=None, camera=None):
+               repair_failures=None, camera=None, privacy_on=False):
     """Apply a CameraPlan to a connected camera in firmware-safe order.
 
     SmartTrack / motion sensitivity / preset first; auto-track asserted LAST and verified.
@@ -262,7 +262,14 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
     # while sitting off-target, so a silent failure here is indistinguishable from a
     # healthy camera. One sat aimed at the ground for two days (2026-08-20) while this
     # very call was re-sent every tick.
-    if plan.preset:
+    # ...unless the lens is parked. Privacy mode answers every motor call with
+    # MOTOR_BUSY, so the recall cannot land however often it is re-sent: two cameras
+    # spent ten hours refusing it 1140 times on 2026-08-29. Skipping is safe precisely
+    # because it is narrow — only a privacy state the twin actually read turns it off,
+    # an unknown one still recalls, and the aim is restored on the first pass after the
+    # switch goes off. The camera is not silently un-repaired either: privacy.enabled is
+    # a critical drift key, so the twin reports the parked lens itself.
+    if plan.preset and not privacy_on:
         _recall_preset(cam, plan.preset, camera)
     # apply_smarttrack MUST be the LAST configuration call before ensure_autotrack.
     # Live evidence (2026-06-23) showed one of the calls above resets smart_track_info
@@ -277,12 +284,13 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
 
 
 def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=None,
-             repair_failures=None):
+             repair_failures=None, privacy=None):
     """One pass over all cameras. Dependencies injectable for testing.
 
     Returns a dict {camera_name: CameraPlan} of what was planned. ``repair_failures`` is
     the sink for refused self-heals, so a day of them can be reported rather than only
-    logged one line at a time.
+    logged one line at a time. ``privacy`` names the cameras whose lens the twin last saw
+    parked; they get every configuration call but no motor call.
     """
     now = now if now is not None else _time.time()
     is_night = is_night or scheduling.is_night
@@ -318,7 +326,8 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
                 # one: every other control call is accepted, and the one setting the night
                 # depends on never takes — with not a single log line to show for it.
                 if not apply_plan(cam, plan, app.reliability,
-                                  repair_failures=repair_failures, camera=cfg.name):
+                                  repair_failures=repair_failures, camera=cfg.name,
+                                  privacy_on=cfg.name in (privacy or ())):
                     log.warning("auto-track %s not confirmed for %s: the camera took the "
                                 "call but read back the other state",
                                 "on" if plan.autotrack_on else "off", cfg.name)
@@ -1925,7 +1934,8 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     if control_due(last_control, now, control_interval):
         cam_clients.clear()
         plans = run_control(app, now=now, connect=connect_factory(cam_clients, state, now),
-                            repair_failures=state.repair_failures)
+                            repair_failures=state.repair_failures,
+                            privacy=twin.cameras_in_privacy(state.twin_fleet))
         if isinstance(plans, Mapping):
             state.desired_plans.update(plans)
         watchdog(app, cam_clients, state, now=now, secrets=secrets, night=night)
