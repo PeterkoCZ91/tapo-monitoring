@@ -11,11 +11,12 @@ def _plan(**overrides):
     return types.SimpleNamespace(**values)
 
 
-def _snapshot(person="on", vehicle="off", motion="60", auto="on"):
+def _snapshot(person="on", vehicle="off", motion="60", auto="on", privacy="off"):
     def available(value):
         return {"state": "available", "value": value}
 
     return {"schema_version": 1, "groups": {
+        "privacy": {"lens_mask": available({"enabled": privacy})},
         "detection": {
             "person": available({"enabled": person}),
             "vehicle": available({"enabled": vehicle}),
@@ -41,6 +42,38 @@ def test_evaluate_snapshot_reports_critical_and_warning_drift():
     assert results["detection.vehicle.enabled"]["severity"] == "warning"
     assert results["tracking.auto.enabled"]["severity"] == "critical"
     assert len(twin.alertable_keys(evaluation)) == 3
+
+
+def test_privacy_mode_is_critical_drift():
+    # Privacy mode parks the lens: the camera records nothing, detects nothing and
+    # answers every motor call with MOTOR_BUSY. Two cameras sat like that for nine
+    # hours on 2026-08-29 and nothing in the system could say so, because nothing
+    # read the setting. Somebody switching it on is legitimate — being unable to
+    # tell that they did is not.
+    evaluation = twin.evaluate_snapshot("camera-a", _plan(), _snapshot(privacy="on"))
+
+    results = {item["path"]: item for item in twin.alertable_results(evaluation)}
+    assert results["privacy.enabled"]["severity"] == "critical"
+    assert len(twin.alertable_keys(evaluation)) == 1
+
+
+def test_privacy_mode_off_is_not_drift():
+    evaluation = twin.evaluate_snapshot("camera-a", _plan(), _snapshot(privacy="off"))
+
+    assert evaluation["drift"]["clean"] is True
+
+
+def test_a_camera_that_cannot_report_privacy_mode_is_not_drift():
+    # Older firmware without getPrivacyMode must not be reported as switched off.
+    snapshot = _snapshot()
+    snapshot["groups"]["privacy"]["lens_mask"] = {
+        "state": "unknown", "reason": "missing_method"}
+
+    evaluation = twin.evaluate_snapshot("camera-a", _plan(), snapshot)
+    statuses = {item["path"]: item["status"] for item in evaluation["drift"]["results"]}
+
+    assert statuses["privacy.enabled"] == "unsupported"
+    assert twin.alertable_keys(evaluation) == set()
 
 
 def test_unknown_and_missing_probes_do_not_create_drift():

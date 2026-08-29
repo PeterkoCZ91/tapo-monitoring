@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Privacy mode is part of the digital twin. It is the one switch that stops a camera
+  watching at all — the lens parks, nothing is recorded or detected, and every motor call
+  comes back `MOTOR_BUSY` — and nothing in the package read it. Two cameras spent nine
+  hours like that before anyone noticed, and the only trace was a preset recall failing
+  once a minute. Someone switching it on is legitimate; not being able to tell that they
+  did is not. Reported as critical drift, which fires on the transition rather than every
+  pass, so it says so once when it goes on and once when it comes back.
 - `selfcheck` reports where the journal is written. Two hosts were found writing theirs to
   RAM, one keeping thirteen hours of history and losing even that on reboot, after months
   of passing every other gate. Nothing announces it: journald decides at start-up, so
@@ -89,6 +96,9 @@ All notable changes to this project are documented here.
   now explicit, and test doubles accept the keywords the production caller actually sends.
 
 ### Fixed
+- The capability snapshot derives its groups from the probe tables instead of repeating
+  them. The hand-kept copy meant adding a probe in a new group raised `KeyError` deep
+  inside `collect_snapshot` rather than simply working.
 - A preset recall is retried once through a stale transport. pytapo does not announce that
   its session expired: the camera answers `motorMoveToPreset` with
   `ERR_CODE_NULL_TRANSPORT`, and the library retries only the cruise-conflict code, so the

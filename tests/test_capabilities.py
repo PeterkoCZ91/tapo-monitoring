@@ -23,6 +23,22 @@ class PartialCamera:
         raise AssertionError("unsafe raw-transport wrapper must never be called")
 
 
+def test_snapshot_has_a_group_for_every_probe():
+    # The group dict used to be a second, hand-kept list of the group names. Adding a
+    # probe in a new group then raised KeyError deep inside collect_snapshot instead of
+    # simply working, which is how privacy mode nearly did not get probed at all.
+    class Client:
+        def __getattr__(self, name):
+            return lambda *a, **k: {"enabled": "off"}
+
+    snapshot = capabilities.collect_snapshot(Client())
+    expected = {group for group, _n, _r in
+                (*capabilities._SAFE_PROBES, *capabilities._UNSAFE_PROBES)}
+    assert set(snapshot["groups"]) == expected
+    assert "privacy" in snapshot["groups"]
+    assert snapshot["groups"]["privacy"]["lens_mask"]["state"] == "available"
+
+
 def test_collect_snapshot_supports_partial_camera_without_raw_transport():
     camera = PartialCamera()
     twin = capabilities.collect_snapshot(camera)

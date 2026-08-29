@@ -31,6 +31,11 @@ _SAFE_PROBES = (
     ("storage", "record_plan", "getRecordPlan"),
     ("storage", "circular_recording", "getCircularRecordingConfig"),
     ("alerts", "event_types", "getAlertEventType"),
+    # The one switch that stops a camera watching altogether: privacy mode parks the
+    # lens and the camera records nothing, detects nothing and answers every motor
+    # call with MOTOR_BUSY. Two cameras sat like that for nine hours on 2026-08-29
+    # and nothing in the system could say so, because nothing read it.
+    ("privacy", "lens_mask", "getPrivacyMode"),
     ("detection", "motion", "getMotionDetection"),
     ("detection", "person", "getPersonDetection"),
     ("detection", "vehicle", "getVehicleDetection"),
@@ -90,9 +95,10 @@ def collect_snapshot(client):
     ``error``.  Error messages are never retained because vendor exceptions may embed
     endpoints, account data or session material.
     """
-    groups = {name: {} for name in (
-        "basic", "module", "firmware", "storage", "alerts", "detection", "track", "video"
-    )}
+    # Derived from the probe tables rather than listed again: a hand-kept copy of the
+    # group names silently desynchronises, and adding a probe in a new group then raises
+    # KeyError deep inside the snapshot instead of simply working.
+    groups = {group: {} for group, _name, _rest in (*_SAFE_PROBES, *_UNSAFE_PROBES)}
     for group, name, method_name in _SAFE_PROBES:
         groups[group][name] = _probe(client, method_name)
     for group, name, reason in _UNSAFE_PROBES:

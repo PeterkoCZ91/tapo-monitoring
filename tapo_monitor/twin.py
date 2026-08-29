@@ -36,12 +36,18 @@ def default_state_path(env=None, home=None):
 def evaluate_snapshot(camera_name, plan, snapshot):
     """Return desired/actual/drift dictionaries for one camera snapshot."""
     desired = {
+        # A camera in privacy mode is not monitoring anything. It is a legitimate thing
+        # for someone to switch on, which is exactly why it has to be reported: the
+        # drift report fires on the transition, so it says so once when it goes on and
+        # once when it comes back, instead of every control pass.
+        "privacy.enabled": False,
         "detection.person.enabled": True,
         "detection.vehicle.enabled": False,
         "detection.motion.sensitivity": int(plan.motion_sensitivity),
         "tracking.auto.enabled": bool(plan.autotrack_on),
     }
     actual = {
+        "privacy.enabled": _enabled(_probe_value(snapshot, "privacy", "lens_mask")),
         "detection.person.enabled": _enabled(_probe_value(snapshot, "detection", "person")),
         "detection.vehicle.enabled": _enabled(
             _probe_value(snapshot, "detection", "vehicle")
@@ -52,6 +58,7 @@ def evaluate_snapshot(camera_name, plan, snapshot):
         "tracking.auto.enabled": _enabled(_probe_value(snapshot, "track", "auto_target")),
     }
     severities = {
+        "privacy.enabled": "critical",
         "detection.person.enabled": "critical",
         "detection.vehicle.enabled": "warning",
         "detection.motion.sensitivity": "warning",
