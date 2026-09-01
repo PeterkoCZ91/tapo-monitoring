@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 
 ENV_TIME = "TAPO_REVIEW_DIGEST_TIME"
 ENV_MAX_PHOTOS = "TAPO_REVIEW_DIGEST_MAX_PHOTOS"
+ENV_EXPECTED_FINGERPRINT = "TAPO_EXPECTED_FINGERPRINT"
 DEFAULT_MAX_PHOTOS = 4
 WINDOW_SECONDS = 86400.0
 STATE_NAME = ".digest-sent"
@@ -50,6 +51,17 @@ def max_photos_from_env(env=None):
         return max(0, int(env[ENV_MAX_PHOTOS]))
     except (KeyError, TypeError, ValueError):
         return DEFAULT_MAX_PHOTOS
+
+
+def expected_fingerprint_from_env(env=None):
+    """Fingerprint of the intended release, or None when no expectation is set. Pure.
+
+    Whitespace is stripped because the value is typically pasted from ``tapo-monitor
+    version`` output into a unit file; the compare itself happens case-insensitively in
+    ``fleet_lines``.
+    """
+    env = os.environ if env is None else env
+    return (env.get(ENV_EXPECTED_FINGERPRINT) or "").strip() or None
 
 
 def _day(now):
@@ -245,6 +257,18 @@ def fleet_lines(health):
     if refused:
         problems.append("self-heal refused: "
                         + ", ".join(f"{name} {count}\u00d7" for name, count in refused.items()))
+
+    # Which code the host runs. Deploys are rsync copies, so this fingerprint is the only
+    # version statement a host can make \u2014 and silent drift has twice been found only by
+    # manual inventory, after the fact. With an expectation configured, drift is a failed
+    # check like any other; without one the line is informational.
+    package = health.get("package") or {}
+    running = package.get("running")
+    if running:
+        detail.append(f"package {running}")
+        expected = package.get("expected")
+        if expected and expected.lower() != str(running).lower():
+            problems.append(f"package {running} != expected {expected}")
 
     if problems:
         head = "\U0001f7e0 Fleet degraded — " + "; ".join(problems)

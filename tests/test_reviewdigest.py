@@ -42,6 +42,14 @@ def test_max_photos_default_and_override():
         {"TAPO_REVIEW_DIGEST_MAX_PHOTOS": "junk"}) == reviewdigest.DEFAULT_MAX_PHOTOS
 
 
+def test_expected_fingerprint_strips_and_is_off_when_unset():
+    assert reviewdigest.expected_fingerprint_from_env(
+        {"TAPO_EXPECTED_FINGERPRINT": " abc123def456 \n"}) == "abc123def456"
+    assert reviewdigest.expected_fingerprint_from_env({}) is None
+    assert reviewdigest.expected_fingerprint_from_env(
+        {"TAPO_EXPECTED_FINGERPRINT": "   "}) is None
+
+
 # ── due / sent-state ─────────────────────────────────────────────────────────
 
 def test_due_only_after_configured_time():
@@ -429,6 +437,56 @@ def test_fleet_lines_reports_a_stalled_daemon():
     text = "\n".join(lines)
     assert "Fleet OK" not in text
     assert "tick" in text or "stalled" in text
+
+
+def test_fleet_lines_reports_the_running_package_fingerprint():
+    # Which code a host runs has twice been established only by manual inventory, after
+    # the drift had already cost something. The digest is the one message the fleet sends
+    # every day, so it is where the running fingerprint belongs. Without an expectation
+    # the line is informational and must not touch the OK headline.
+    lines = reviewdigest.fleet_lines({
+        "cameras": {"front": {"reachable": True, "events": True}},
+        "tick": {"ok": True}, "scorer": None, "recorder": None, "repairs": {},
+        "package": {"running": "abc123def456", "expected": None},
+    })
+    text = "\n".join(lines)
+    assert text.startswith("\U0001f49a Fleet OK")
+    assert "package abc123def456" in text
+
+
+def test_fleet_lines_fails_the_check_on_fingerprint_drift():
+    # An expectation that is set and missed is a failed check like any other: it takes
+    # the OK headline away and the drift line names running vs expected.
+    lines = reviewdigest.fleet_lines({
+        "cameras": {"front": {"reachable": True, "events": True}},
+        "tick": {"ok": True}, "scorer": None, "recorder": None, "repairs": {},
+        "package": {"running": "abc123def456", "expected": "987fedcba654"},
+    })
+    text = "\n".join(lines)
+    assert "Fleet OK" not in text
+    assert "abc123def456" in lines[0]
+    assert "987fedcba654" in lines[0]
+    assert "expected" in lines[0]
+
+
+def test_fleet_lines_compares_fingerprints_case_insensitively():
+    lines = reviewdigest.fleet_lines({
+        "cameras": {"front": {"reachable": True, "events": True}},
+        "tick": {"ok": True}, "scorer": None, "recorder": None, "repairs": {},
+        "package": {"running": "abc123def456", "expected": "ABC123DEF456"},
+    })
+    assert lines[0].startswith("\U0001f49a Fleet OK")
+
+
+def test_fleet_lines_stays_silent_about_an_unknown_fingerprint():
+    # Same rule as the recorder and the scorer: a fingerprint nobody computed gets no
+    # line, because an invented one would be vouched for by the OK headline.
+    lines = reviewdigest.fleet_lines({
+        "cameras": {"front": {"reachable": True, "events": True}},
+        "tick": {"ok": True}, "scorer": None, "recorder": None, "repairs": {},
+        "package": None,
+    })
+    assert "package" not in "\n".join(lines)
 
 
 def test_alert_lines_counts_what_actually_went_out(tmp_path):

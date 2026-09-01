@@ -792,6 +792,38 @@ def test_fleet_health_snapshot_marks_an_unreachable_scorer_without_raising():
                                         fetch_metrics=boom)["scorer"] is None
 
 
+def test_fleet_health_snapshot_carries_the_package_fingerprint():
+    # Deploys are rsync copies, so "which code is this host running" has no answer on the
+    # host except the fingerprint — and silent drift has twice been found only by manual
+    # inventory. The snapshot carries it so the digest can say it once a day.
+    from tapo_monitor import cli
+
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    state = daemon.MonitorState()
+
+    snap = daemon.fleet_health_snapshot(app, state, now=1000,
+                                        fetch_metrics=lambda u: None, env={})
+    assert snap["package"] == {"running": cli.package_fingerprint(), "expected": None}
+
+    snap = daemon.fleet_health_snapshot(
+        app, state, now=1000, fetch_metrics=lambda u: None,
+        env={"TAPO_EXPECTED_FINGERPRINT": " abc123def456 "})
+    assert snap["package"]["expected"] == "abc123def456"
+
+
+def test_fleet_health_snapshot_omits_a_fingerprint_it_could_not_compute(monkeypatch):
+    def boom():
+        raise OSError("unreadable package dir")
+
+    monkeypatch.setattr(daemon.cli, "package_fingerprint", boom)
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+
+    snap = daemon.fleet_health_snapshot(app, daemon.MonitorState(), now=1000,
+                                        fetch_metrics=lambda u: None, env={})
+
+    assert snap["package"] is None
+
+
 def test_apply_plan_reports_a_refused_self_heal(monkeypatch, caplog):
     # The three bounded repairs were re-asserted every control pass inside bare excepts,
     # so a camera that refuses them looked exactly like one that accepted them -- the same

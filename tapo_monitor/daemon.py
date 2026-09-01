@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 
 from . import (
     capabilities,
+    cli,
     dnsfix,
     drift,
     enrich,
@@ -1940,13 +1941,17 @@ def _fetch_scorer_metrics(url, timeout=5.0):  # pragma: no cover - network I/O
 
 
 def fleet_health_snapshot(app: AppConfig, state: MonitorState, *, now,
-                          fetch_metrics=None):
+                          fetch_metrics=None, env=None):
     """Assemble the fleet snapshot the daily digest renders. Never raises.
 
     Everything here is already known to the daemon except the shared scorer, which is
     asked once a day: when it dies, alerts stop at every site at once, and today the only
     symptom is suspicious quiet. A subsystem that cannot be established stays ``None`` so
     the digest can omit it rather than vouch for it.
+
+    The snapshot also carries the running package fingerprint (the value ``tapo-monitor
+    version`` prints) and the expectation from ``TAPO_EXPECTED_FINGERPRINT``, so the
+    digest can say which code the host runs and flag drift from the intended release.
     """
     fetch_metrics = fetch_metrics or _fetch_scorer_metrics
     cameras = {}
@@ -1989,8 +1994,18 @@ def fleet_health_snapshot(app: AppConfig, state: MonitorState, *, now,
         if recorder is None or candidate["status"] != "ok":
             recorder = candidate
 
+    try:
+        fingerprint = cli.package_fingerprint()
+    except OSError:
+        fingerprint = None
+    package = None if fingerprint is None else {
+        "running": fingerprint,
+        "expected": reviewdigest.expected_fingerprint_from_env(env),
+    }
+
     return {"cameras": cameras, "tick": tick, "scorer": scorer_health,
-            "recorder": recorder, "repairs": dict(state.repair_failures)}
+            "recorder": recorder, "repairs": dict(state.repair_failures),
+            "package": package}
 
 
 def _review_digest_pass(*, now, secrets, app=None, state=None):
