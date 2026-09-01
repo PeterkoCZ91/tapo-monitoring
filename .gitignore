@@ -67,3 +67,4 @@ docs/production-readiness-review-*.md
 
 # Local drafts and patch backups
 *.orig
+ha-forum-post.md
