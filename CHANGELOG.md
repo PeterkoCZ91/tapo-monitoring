@@ -28,6 +28,14 @@ All notable changes to this project are documented here.
   flags, which is the arrangement that turns an undefined `${VAR}` into an argparse exit
   before the model loads.
 
+### Fixed
+- `check_monitor_rollout.sh` finds the config under the release layout. It tested for
+  `cameras.yaml` through one path and then recorded another: the kernel resolves `..`
+  against the directory `current` points at, bash's logical `cd` against the symlink's own
+  parent. The walk-up therefore located the file and handed the selfcheck a path with none,
+  so every post-deploy check on a release-layout host reported a config failure the host
+  did not have — the one check meant to catch a bad deploy, failing on good ones.
+
 ### Removed
 - `systemd/tapo-scorer@.service`. The instance form promised a unit that could be enabled
   per service user, but its paths still had to be hand-edited, and no host ran it —

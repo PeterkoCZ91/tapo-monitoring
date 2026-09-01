@@ -24,8 +24,13 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 config="${TAPO_MONITOR_CONFIG:-$root/cameras.yaml}"
 if [[ ! -e "$config" && -z "${TAPO_MONITOR_CONFIG:-}" ]]; then
     for up in "$root/.." "$root/../.."; do
-        if [[ -e "$up/cameras.yaml" ]]; then
-            config="$(cd "$up" && pwd)/cameras.yaml"
+        # Resolve physically, then test: `current` is a symlink, and the kernel resolves
+        # `..` against the directory the link points at while bash's logical `cd` resolves
+        # it against the link's own parent. Mixing the two made this walk find the config
+        # through one path and then hand the selfcheck a different one that has none.
+        candidate="$(cd -P "$up" 2>/dev/null && pwd)" || continue
+        if [[ -e "$candidate/cameras.yaml" ]]; then
+            config="$candidate/cameras.yaml"
             break
         fi
     done
