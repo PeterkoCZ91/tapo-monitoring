@@ -1,0 +1,17 @@
+[Unit]
+Description=Run the mutual host watch every two minutes
+
+[Timer]
+# OnUnitActiveSec alone never fires on a fresh boot — it is relative to the service's
+# last activation — so OnBootSec provides the first run.
+OnBootSec=2min
+OnUnitActiveSec=2min
+# Loose enough to let the scheduler coalesce wakeups on a small host, tight enough
+# that WATCH_FAILS consecutive misses still means roughly six minutes, not ten.
+AccuracySec=30s
+# No catch-up run for missed windows: the check is only meaningful at "now", and the
+# OnBootSec run already covers the watcher having been down itself.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

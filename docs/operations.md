@@ -318,7 +318,8 @@ shadow scan 2026-05-04: 192 of 192 segments, 1389 frames, 4 matched, 1 candidate
 
 Note what this still cannot do: a heartbeat the host sends itself can never report that the
 host is dead. Noticing the *absence* of a daily message is a job for a human or an external
-dead-man's switch, not for this daemon.
+dead-man's switch, not for this daemon — that switch is
+[watching the hosts themselves](#watching-the-hosts-themselves).
 
 **Audit what the cameras never reported.** Cameras only prove the alerts they raised; a
 person the camera never flagged leaves no trace. When a host runs a 24/7 recorder
@@ -388,6 +389,64 @@ default 2, mirrors what tiled inference would see) and saves each frame with its
 the filename under `--archive-dir` (default `~/tapo-monitor/probe-log`; `--no-archive`
 prints only). It reuses the daemon's snapshot and scorer helpers and does not touch a
 running daemon, so it is safe to run against production cameras.
+
+## Watching the hosts themselves
+
+Everything above reports from inside the host: the daemon's outage messages, `OnFailure`
+hooks and the daily digest are all written by the machine they describe. A host that loses
+power, its network or its disk sends nothing — and nothing is exactly what a healthy quiet
+day looks like. Closing that gap needs a dead-man's switch where the alarm is raised by
+something other than the host being watched.
+
+`tools/host_watch.sh` is that switch. It runs on a *peer* host under a two-minute timer,
+pings each target named in its env file (optionally probing an HTTP health endpoint too)
+and alerts over the Telegram credentials the host already has for `pi_notify.sh`. One
+watcher still leaves one unwatched host — the watcher itself — so point two hosts at each
+other and the loop is closed. Which host watches which is deliberately configuration, not
+code: it lives in `/etc/tapo-monitor/host-watch.env` on each host and never in this
+repository.
+
+```env
+# /etc/tapo-monitor/host-watch.env — example values, addresses from RFC 5737
+WATCH_TARGETS="alpha=192.0.2.10 beta=198.51.100.20,health=http://198.51.100.20:8766/health"
+WATCH_FAILS=3
+WATCH_COOLDOWN=1800
+TAPO_ENV_FILE=/etc/tapo-monitor/secrets.env
+```
+
+The quotes around `WATCH_TARGETS` matter: it is a space-separated list. Each entry is
+`name=ping_addr`, optionally followed by `,health=URL` for a service worth checking
+separately — the scorer's `/health` is the natural candidate, because when it dies alerts
+stop at every site at once. Ping and health are separate findings with separate state: a
+failing health URL on a host that still answers ping alerts on its own ("service dead,
+host alive"), while an unreachable host costs exactly one alert — the health check is
+skipped until ping returns, since a dead host fails HTTP trivially.
+
+The alerting rules are the ones the rest of the project already uses. A single miss never
+alerts (`WATCH_FAILS` consecutive misses first — three at the two-minute cadence is about
+six minutes); once alerted, the same finding repeats at most once per `WATCH_COOLDOWN`
+seconds; a target that returns gets a recovery message carrying how long it was down.
+Every send is confirmed against Telegram's `"ok":true` before it arms a cooldown or
+closes an episode, so an unconfirmed message is retried on the next pass rather than
+lost. Counters and cooldown stamps live under `/var/tmp/host-watch/`, which survives a
+reboot of the watcher — a reboot must not forget that a peer is down.
+
+Install on each watching host:
+
+```bash
+sudo install -m 0755 tools/host_watch.sh /usr/local/bin/host_watch.sh
+sudoedit /etc/tapo-monitor/host-watch.env      # the four variables above
+sudo cp systemd/host-watch.service systemd/host-watch.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now host-watch.timer
+sudo systemctl start host-watch.service        # one manual pass
+systemctl status host-watch.service            # should be inactive (dead), exit 0
+```
+
+A down peer is a finding, not a failure: the script exits non-zero only when the watcher
+itself is broken (unparseable target, unconfirmed Telegram send), which the unit's
+`OnFailure=pi-failure-notify@%n.service` hook then reports — a blind watchman is worse
+than none, because it converts silence into false reassurance.
 
 ## Debugging checklist
 

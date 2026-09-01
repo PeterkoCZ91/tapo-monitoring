@@ -1,0 +1,16 @@
+[Unit]
+Description=Mutual host watch — dead-man's switch for peer hosts
+# A pass before the network is up would read every peer as a miss; three of those in a
+# row is an alert, so do not start counting until the host can actually reach anyone.
+After=network-online.target
+Wants=network-online.target
+# A watcher that cannot run or cannot send is a blind watchman: report it. Down peers
+# are findings, not failures — host_watch.sh exits non-zero only for its own breakage.
+OnFailure=pi-failure-notify@%n.service
+
+[Service]
+Type=oneshot
+# WATCH_TARGETS / WATCH_FAILS / WATCH_COOLDOWN / TAPO_ENV_FILE. Who watches whom lives
+# in this file on each host, never in the repository — see docs/operations.md.
+EnvironmentFile=/etc/tapo-monitor/host-watch.env
+ExecStart=/usr/local/bin/host_watch.sh
