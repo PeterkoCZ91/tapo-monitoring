@@ -19,7 +19,17 @@ python_bin="${TAPO_MONITOR_PYTHON:-python3}"
 # A deployed host is an rsync copy, not an installed package: tools/ sits beside
 # tapo_monitor/, so the package root is one level up from this script.
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Under the release layout the package root is current/ or releases/<ts>/ while the
+# config deliberately stays above the releases tree — walk up before failing.
 config="${TAPO_MONITOR_CONFIG:-$root/cameras.yaml}"
+if [[ ! -e "$config" && -z "${TAPO_MONITOR_CONFIG:-}" ]]; then
+    for up in "$root/.." "$root/../.."; do
+        if [[ -e "$up/cameras.yaml" ]]; then
+            config="$(cd "$up" && pwd)/cameras.yaml"
+            break
+        fi
+    done
+fi
 failures=()
 
 # Assert the credentials the service actually gets: read the env file from the unit
