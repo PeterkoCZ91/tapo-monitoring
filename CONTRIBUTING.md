@@ -17,7 +17,7 @@ cd tapo-monitoring
 
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"          # package + dev tools (pytest, ruff)
+pip install -e ".[dev]"          # package + dev tools (pytest, pytest-cov, mypy, ruff)
 
 cp cameras.example.yaml cameras.yaml
 # Edit cameras.yaml: hosts, coordinates, capabilities. Secrets are referenced by
@@ -34,8 +34,17 @@ tapo-monitor check cameras.yaml   # validate config + print a summary
 pytest -q                          # run the test suite
 bats tests/tools                   # the deploy/rollback/check scripts (apt install bats)
 ruff check .                       # lint
+mypy                               # types, configured in pyproject.toml
 shellcheck tools/*.sh pi_notify.sh tests/tools/helper.bash
+pytest -q --cov                    # coverage, floor 86 % (today: 88 %)
 ```
+
+`mypy` runs at its first useful rung, not in strict mode: the package carries almost no
+annotations, so it reports what survives without them — a name that cannot hold what is
+assigned to it, a call that cannot match its signature. That is the fault that has
+actually reached production here, and no test catches it on a branch the tests never
+take. Coverage is read the same way: as a map of what the suite never enters. The floor
+exists only so that a module's tests cannot quietly stop running, which has happened.
 
 The pure logic (config parsing, scheduling, weather, tracking decisions, detection
 classification, notification gating) is unit-tested without hardware. I/O collaborators

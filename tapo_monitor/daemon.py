@@ -166,7 +166,7 @@ RECALL_REPEAT_SECONDS = 1800
 
 # Keyed by (camera, preset): what the last logged refusal said, when it was logged, and
 # how many identical ones have been swallowed since.
-_recall_state = {}
+_recall_state: dict = {}
 
 
 def recall_failure_repeat(state, key, message, now, repeat_after=RECALL_REPEAT_SECONDS):
@@ -1979,7 +1979,9 @@ def fleet_health_snapshot(app: AppConfig, state: MonitorState, *, now,
                                                             now - state.tick_fail_since)
     tick = {"ok": state.tick_fail_since is None, "stalled_for": stalled}
 
-    scorer_health = None
+    # object, not float: the failure branch reports an exception name, and inference
+    # from the success branch alone would make that a type error.
+    scorer_health: dict[str, object] | None = None
     urls = [c.scorer.url for c in app.cameras if c.scorer.url]
     if urls:
         # One /metrics per distinct endpoint: the sites share a scorer, so asking per

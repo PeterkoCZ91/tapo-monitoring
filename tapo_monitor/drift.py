@@ -181,7 +181,9 @@ def evaluate_drift(
         if support is False or observed is UNSUPPORTED:
             status = "unsupported"
             actual_value = None
-            reason = "capability is not supported"
+            # Annotated at its first binding: a matching value carries no reason, so the
+            # name is optional even though every branch above sets a string.
+            reason: str | None = "capability is not supported"
         elif observed is _MISSING or observed is UNKNOWN or support is UNKNOWN:
             status = "unknown"
             actual_value = None

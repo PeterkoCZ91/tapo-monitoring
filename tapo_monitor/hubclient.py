@@ -32,7 +32,7 @@ import uuid
 log = logging.getLogger(__name__)
 
 # Ask the hub which cameras are bound to it for recording.
-DEVICE_LIST_PARAMS = {"general_camera_manage": {"paired_general_device_list": {}}}
+DEVICE_LIST_PARAMS: dict[str, dict] = {"general_camera_manage": {"paired_general_device_list": {}}}
 
 DEVICE_LIST_METHOD = "getGeneralDeviceList"
 DAY_SEARCH_METHOD = "searchDateWithVideo"

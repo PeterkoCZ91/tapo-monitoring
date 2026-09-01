@@ -19,6 +19,10 @@ cameras.yaml.*
 __pycache__/
 *.py[cod]
 .pytest_cache/
+# Coverage writes its data file and HTML report into the checkout.
+.coverage
+.coverage.*
+htmlcov/
 .venv/
 *.egg-info/
 venv/

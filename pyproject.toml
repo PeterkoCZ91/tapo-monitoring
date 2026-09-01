@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff"]
+dev = ["pytest", "pytest-cov", "mypy", "ruff"]
 scorer = ["onnxruntime", "numpy", "Pillow"]
 # pan_limit reads PTZ position over ONVIF; the import is lazy (guard's first poll), so
 # selfcheck passes without it while the guard sits inert. Install where pan_limit is on.
@@ -46,3 +46,46 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# Type checking is deliberately at its first rung: the package carries almost no
+# annotations, so the goal here is the errors that survive without them — a name that
+# cannot hold what is assigned to it, a call that cannot match its signature. That is
+# the class of fault that has actually reached production (a package copied without one
+# module produced AttributeError for hours), and it is invisible to tests that never
+# take the branch.
+[tool.mypy]
+files = ["tapo_monitor"]
+# Deliberately not pinned to the package's own floor (3.10): numpy ships stubs written
+# with 3.12 `type` statements, and analysing them under 3.10 semantics is a syntax error
+# that stops the run before a single module of ours is checked. mypy therefore follows
+# the interpreter it runs on, which in CI is the same 3.12 leg as ruff and shellcheck.
+# Third-party packages here ship no stubs (pytapo, astral, onnxruntime); without this,
+# every import would drown the real findings.
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+# The next rung, when someone has an afternoon: check_untyped_defs = true. It finds ~30
+# more, mostly missing annotations on empty collections, plus false positives on
+# SubjectScore(float) and Frame(str), which assign attributes in __new__ where mypy
+# cannot see them. Annotate those two classes first, or the noise buries the signal.
+
+# Coverage is read as a map of what the tests never enter, not as a score to raise.
+# The floor only stops it from silently sliding: it sits just under today's number, so
+# deleting tests fails while ordinary work does not.
+[tool.coverage.run]
+source = ["tapo_monitor"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+# Today's number is 88 % with every test running. The floor sits below it so ordinary
+# work has room, but deleting a module's tests — which is how the scorer's 34 silently
+# stopped running once already — cannot pass unnoticed.
+fail_under = 86
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    # Entry points that need a real camera, a model file or a terminal.
+    "if __name__ == .__main__.:",
+]

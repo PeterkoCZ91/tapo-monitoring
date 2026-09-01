@@ -5,6 +5,15 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Type checking and coverage, both wired into CI. `mypy` runs at the rung an unannotated
+  package can hold — assignments a name cannot keep, calls that cannot match a signature —
+  which is the fault class that has reached production here (a package copied without one
+  module raised `AttributeError` for hours while the tests, which never took that branch,
+  stayed green). Four findings were real enough to annotate: a `reason` that is `None` on
+  a match, a telemetry dict whose failure branch reports a string where the success branch
+  reports floats, and two untyped empty collections. Coverage reports at 88 % with a floor
+  of 86 %, present so a module's tests cannot silently stop running — which is exactly what
+  happened to the scorer's 34 tests before the `[dev,scorer]` install was fixed.
 - The shell layer has tests. Nearly a thousand lines of bash deploy, roll back, provision
   and verify the fleet, and the only thing standing behind them was shellcheck, which
   reads syntax and not intent — the config-path bug below shipped past it and was found by

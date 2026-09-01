@@ -46,6 +46,13 @@ jobs:
         if: matrix.python-version == '3.12'
         run: ruff check .
 
+      # Types, at the rung an unannotated package can actually hold: a name that cannot
+      # keep what is assigned to it, a call that cannot match its signature. Tests only
+      # cover the branches they take; this reads the ones they never enter.
+      - name: Types (mypy)
+        if: matrix.python-version == '3.12'
+        run: mypy
+
       - name: Lint (shellcheck)
         if: matrix.python-version == '3.12'
         run: |
@@ -64,5 +71,9 @@ jobs:
           sudo apt-get install -y -qq bats
           bats tests/tools
 
+      # --cov on both legs on purpose: the floor is about the suite as a whole, and the
+      # two versions do not run identical branches (3.13 takes different stdlib paths).
+      # Coverage here is a regression brake, not a target — see [tool.coverage] in
+      # pyproject.toml for what the number is and is not for.
       - name: Test (pytest)
-        run: pytest -q
+        run: pytest -q --cov
