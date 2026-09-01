@@ -131,8 +131,15 @@ def effective_night(cfg: CameraConfig, astronomical_night: bool) -> bool:
 
 
 def _repair_allowed(policy, name):
-    """Return whether one bounded camera repair may run this control pass."""
-    if policy is None:
+    """Return whether one bounded camera repair may run this control pass.
+
+    The guard repairs predate the reliability feature and always ran every pass, so
+    ``auto_fix``/``allowed_repairs`` bound them only while ``reliability.enabled`` is
+    true. A disabled reliability block is inert: trimming the allow-list of a feature
+    that is off must not silently switch off the repairs that guard known regressions
+    (person detection stuck off, auto-track without the people-only filter).
+    """
+    if policy is None or not policy.enabled:
         return True
     return bool(policy.auto_fix and name in policy.allowed_repairs)
 

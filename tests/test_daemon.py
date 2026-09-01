@@ -429,6 +429,61 @@ def test_apply_plan_disables_vehicle_detection(monkeypatch):
     assert cam.vehicle is False
 
 
+def test_repair_policy_is_inert_while_reliability_is_disabled():
+    # The person/vehicle/SmartTrack re-assertions predate the reliability feature and
+    # have always run every control pass. With `reliability.enabled: false` the whole
+    # block is off, so its `auto_fix`/`allowed_repairs` knobs must be inert — otherwise
+    # trimming the allow-list of a DISABLED feature silently switches off the repairs
+    # that guard known regressions (person detection stuck off, track without the
+    # people-only filter).
+    policy = cfg.ReliabilityConfig(enabled=False, auto_fix=False, allowed_repairs=())
+    assert daemon._repair_allowed(policy, "person_detection") is True
+    assert daemon._repair_allowed(policy, "smarttrack") is True
+    assert daemon._repair_allowed(None, "person_detection") is True
+
+
+def test_repair_policy_bounds_repairs_only_when_reliability_is_enabled():
+    # Once the operator turns reliability on, the policy means exactly what the docs
+    # say: auto_fix is the master switch and only allow-listed repairs may write.
+    trimmed = cfg.ReliabilityConfig(enabled=True, allowed_repairs=("smarttrack",))
+    assert daemon._repair_allowed(trimmed, "smarttrack") is True
+    assert daemon._repair_allowed(trimmed, "person_detection") is False
+    no_fix = cfg.ReliabilityConfig(enabled=True, auto_fix=False)
+    assert daemon._repair_allowed(no_fix, "person_detection") is False
+
+
+def test_apply_plan_keeps_guard_repairs_when_reliability_is_off(monkeypatch):
+    # Behavior-level guarantee of the same rule: a config that never opted into
+    # reliability still gets person detection re-asserted ON and vehicle detection
+    # OFF, whatever its (inactive) policy keys say.
+    from tapo_monitor import tracking
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+
+    class FakeCam:
+        def __init__(self):
+            self.person = None
+            self.vehicle = None
+        def executeFunction(self, *a, **k):
+            pass
+        def setMotionDetection(self, sensitivity=False):
+            pass
+        def setPersonDetection(self, enabled, sensitivity=False):
+            self.person = enabled
+        def setVehicleDetection(self, enabled, sensitivity=False):
+            self.vehicle = enabled
+        def setAutoTrackTarget(self, enabled):
+            pass
+        def getAutoTrackTarget(self):
+            return {"enabled": "off"}
+
+    cam = FakeCam()
+    plan = daemon.plan_camera(_cam(), night=False, rain_active=False)
+    policy = cfg.ReliabilityConfig(enabled=False, auto_fix=False, allowed_repairs=())
+    daemon.apply_plan(cam, plan, policy)
+    assert cam.person is True
+    assert cam.vehicle is False
+
+
 def test_apply_plan_logs_preset_recall_failure(monkeypatch, caplog):
     # A refused preset recall used to be swallowed by a bare except, so a camera stuck
     # off-target looked exactly like a healthy one. Live cost (2026-08-20): a camera sat

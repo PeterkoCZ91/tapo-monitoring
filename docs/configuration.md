@@ -577,9 +577,12 @@ reliability:
 ```
 
 - `enabled` adds layered health, recorder continuity and aggregate latency observations to
-  the Digital Twin state.
+  the Digital Twin state, and is what makes the repair policy below take effect.
 - `auto_fix` is limited by `allowed_repairs`; unknown or unsupported capabilities never
-  trigger a write.
+  trigger a write. Both keys apply only while `enabled` is true: with reliability off the
+  daemon keeps its built-in guard repairs (person detection on, vehicle detection off,
+  SmartTrack people filter) exactly as it did before this feature existed, so trimming the
+  allow-list of a disabled block cannot silently switch them off.
 - The allow-list covers only person detection, vehicle detection and SmartTrack. Firmware,
   network, credentials, storage formatting and PTZ calibration are never self-healed.
 - `recorder_max_age` marks a local recorder stale after the configured number of seconds;

@@ -57,6 +57,8 @@ observability:
 reliability:
   enabled: false       # enable layered health, recorder continuity and latency metrics
   auto_fix: true       # only the allow-list below may write camera settings
+  # auto_fix/allowed_repairs take effect only while enabled is true; with reliability
+  # off, the built-in guard repairs keep running every control pass as they always have.
   allowed_repairs: [person_detection, vehicle_detection, smarttrack]
   storage_health: true
   latency_metrics: true
