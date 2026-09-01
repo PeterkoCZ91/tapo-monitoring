@@ -203,11 +203,15 @@ production pilot uses two cameras with overlapping views.
 
 ## Phase 6 — Deployment and fleet integrity
 
-Status: **partially shipped**
+Status: **shipped; two scorer-side items remain**
 
-Deployed hosts are rsync copies of the package, not git checkouts, and a partial copy has
-twice produced a daemon that ran for hours while alerting on nothing. The work here is
-about making a deploy verifiable rather than hopeful.
+Deployed hosts were rsync copies of the package, not git checkouts, and a partial copy
+twice produced a daemon that ran for hours while alerting on nothing. The work here made
+a deploy verifiable rather than hopeful; the monitor fleet now runs from release
+directories switched by a symlink. A host whose unit cannot be edited without privileges
+gets the same layout by replacing the loose package directory with a symlink into
+`current/` — the unit keeps its old working directory and imports the release through it,
+so the canonical unit edit becomes cosmetic rather than blocking.
 
 - [x] `tapo-monitor version`: release plus a fingerprint over the deployed module set, so a
   host can state which code it runs and a half-copied package differs visibly from its source.
@@ -228,8 +232,8 @@ about making a deploy verifiable rather than hopeful.
 - [x] One deploy path: full-package transfer into a timestamped release directory, a
   `selfcheck` inside it, then an atomic symlink switch and a per-host restart. Rollback
   becomes re-pointing the symlink instead of finding the right tarball. The unit starts
-  from an absolute interpreter through the new `__main__` entry point; hosts migrate per
-  the runbook in docs/operations.md.
+  from an absolute interpreter through the new `__main__` entry point; the whole monitor
+  fleet has been migrated per the runbook in docs/operations.md and runs this layout.
 - [x] Snapshot each host's config and env file into the release directory it belongs to,
   so a rollback can restore the configuration that matched that code.
 - [x] Reject unknown configuration keys (warn first, then fail). A mistyped key silently
@@ -242,8 +246,9 @@ about making a deploy verifiable rather than hopeful.
   mismatch is a failed check that removes the OK headline. Manual inventory found exactly
   this drift twice after a change had already shipped.
 - [ ] Make the repository's unit templates match a real host, or ship a provisioning
-  script. The shared scorer currently runs a hand-written unit with hardcoded paths, so a
-  replacement cannot be built from the repository alone.
+  script. The monitor template now describes the release layout the fleet actually runs;
+  what remains is the shared scorer, which still runs a hand-written unit with hardcoded
+  paths, so a replacement scorer host cannot be built from the repository alone.
 - [ ] Failure notification on the scorer host. It is the single point of failure for every
   camera's alerts and the only host with no Telegram credentials, so its crash loop is the
   one that cannot report itself. Softened by the mutual host watch, which polls the
