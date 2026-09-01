@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-01
+
 ### Added
 - Deploys land in timestamped release directories and a symlink switch makes them live:
   `tools/deploy_release.sh` stages from `git archive` (never the working copy), snapshots
@@ -81,7 +83,7 @@ All notable changes to this project are documented here.
   only for what it actually checked — an unchecked subsystem gets no line, an unknown
   camera is named as unchecked — and any failed check removes the headline, because a
   heartbeat that says OK while a camera is down is worse than no heartbeat.
-- `tapo-monitor version` and `tapo-monitor selfcheck`. Deployed hosts are rsync/tar copies
+- `tapo-monitor version` and `tapo-monitor selfcheck`. Deployed hosts were rsync/tar copies
   rather than git checkouts, so a host could not say which code it was running; `version`
   answers that with a digest over the deployed module set, which also makes a half-copied
   package visibly different from the tree it came from. `selfcheck` imports every module,
@@ -154,8 +156,9 @@ All notable changes to this project are documented here.
   reliability block is now inert: the guard repairs run as they always had, and the two
   keys constrain them only while the block is enabled.
 - The scorer's metrics journal rotates on size (32 MiB default) as well as age, so a
-  burst of fat records cannot outgrow a disk between two age checks. Rotation never
-  touches the state sidecar, so cumulative counters still survive restarts.
+  burst of fat records cannot outgrow a disk between two age checks — the second repair
+  to this rotation; the age check itself was fixed earlier in this release. Rotation
+  never touches the state sidecar, so cumulative counters still survive restarts.
 - The ledger sanitiser scrubs IPv4 addresses and session-token shapes itself instead of
   trusting every caller to do it first. pytapo error strings carry the camera address and
   the session token, and one unsanitised call site is all it takes; floats, versions and
