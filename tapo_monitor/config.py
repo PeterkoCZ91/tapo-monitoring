@@ -11,10 +11,14 @@ operator keeps outside the repository.
 
 from __future__ import annotations
 
+import difflib
+import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 
 from . import reliability
+
+log = logging.getLogger(__name__)
 
 ROLES = {"tracking", "static"}
 SCHEDULES = {"astral", "always_night", "always_day"}
@@ -332,6 +336,36 @@ def _check_subset(values, allowed, key, where):
     return values
 
 
+def _field_names(cls):
+    """The set of keys a section's dataclass actually reads — never a hand-kept list."""
+    return frozenset(f.name for f in fields(cls))
+
+
+def _warn_unknown_keys(mapping, known, where):
+    """Log one warning per key in ``mapping`` that no parser reads. Warn only, never fail.
+
+    A mistyped key silently takes its default — a dropped ``rotate`` costs about a third
+    of the person score — so every parse site names the stray key with its full path
+    (``cameras[0].scorer.tresh``) and, when ``difflib`` finds one, the real key it
+    resembles. ``known`` is derived from the section's dataclass fields via
+    :func:`_field_names`, so the check cannot rot behind the schema.
+
+    Intentionally free-form sections are exempt and never routed through here:
+    ``telegram``, ``groq`` and ``faces`` are pass-through dicts on :class:`AppConfig`
+    (their consumers pick the env-var-name entries they need and ignore the rest),
+    so there is no schema to hold their contents against.
+    """
+    if not isinstance(mapping, dict):
+        return
+    for key in mapping:
+        if key in known:
+            continue
+        path = f"{where}.{key}" if where else str(key)
+        matches = difflib.get_close_matches(str(key), sorted(known), n=1)
+        hint = f" (did you mean {matches[0]!r}?)" if matches else ""
+        log.warning("%s: unknown key%s", path, hint)
+
+
 def _weather(data, where):
     d = data or {}
     strategy = _check_enum(d.get("strategy", "none"), WEATHER_STRATEGIES, "weather.strategy", where)
@@ -489,6 +523,15 @@ def _reliability(data, where):
 def _camera(data, index):
     if not isinstance(data, dict):
         raise ConfigError(f"cameras[{index}]: must be a mapping")
+    path = f"cameras[{index}]"
+    _warn_unknown_keys(data, _field_names(CameraConfig), path)
+    # Each dataclass-typed field is a nested section (scorer, sampler, coordinator,
+    # pan_limit, weather, detection, tracking, enrich); walking the fields keeps this
+    # in lockstep with the schema instead of a second list of section names.
+    for f in fields(CameraConfig):
+        if is_dataclass(f.default_factory):
+            _warn_unknown_keys(data.get(f.name), _field_names(f.default_factory),
+                               f"{path}.{f.name}")
     name = _require(data, "name", f"cameras[{index}]")
     where = f"camera {name!r}"
     host = _require(data, "host", where)
@@ -621,6 +664,13 @@ def load_config_from_dict(data) -> AppConfig:
     """Validate a parsed config mapping and return an AppConfig. Pure (no I/O)."""
     if not isinstance(data, dict):
         raise ConfigError("config root must be a mapping")
+    _warn_unknown_keys(data, _field_names(AppConfig), "")
+    # Dataclass-typed top-level fields are the checked sections (location, alerts, loop,
+    # observability, reliability); telegram/groq/faces are plain dicts and stay opaque,
+    # and the cameras list is checked entry by entry in _camera.
+    for f in fields(AppConfig):
+        if is_dataclass(f.default_factory):
+            _warn_unknown_keys(data.get(f.name), _field_names(f.default_factory), f.name)
     raw_cameras = data.get("cameras")
     if not raw_cameras or not isinstance(raw_cameras, list):
         raise ConfigError("config must define a non-empty 'cameras' list")

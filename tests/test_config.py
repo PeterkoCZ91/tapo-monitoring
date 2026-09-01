@@ -755,3 +755,158 @@ def test_hubpoll_rejects_crop_from_native_it_cannot_honour():
     with pytest.raises(cfg.ConfigError, match="crop_from_native"):
         cfg.load_config_from_dict(_hubpoll_camera(crop_to_subject=True,
                                                  crop_from_native=True))
+
+
+# ── unknown keys: warn (never fail), full path + did-you-mean ─────────────────
+# A mistyped key silently takes its default — a dropped 'rotate' costs about a
+# third of the person score — so every parse site names the key nothing reads.
+
+def _unknown_key_warnings(caplog):
+    return [r.getMessage() for r in caplog.records
+            if r.name == "tapo_monitor.config" and r.levelname == "WARNING"]
+
+
+def _load_capturing(caplog, data):
+    with caplog.at_level("WARNING", logger="tapo_monitor.config"):
+        return cfg.load_config_from_dict(data)
+
+
+def test_unknown_top_level_key_warns_with_did_you_mean(caplog):
+    data = _minimal()
+    data["observabilty"] = {"digital_twin": True}
+
+    app = _load_capturing(caplog, data)
+
+    # Loading still succeeds and the typo key silently took the default — the warning
+    # is the only trace of it.
+    assert app.observability.digital_twin is False
+    assert _unknown_key_warnings(caplog) == [
+        "observabilty: unknown key (did you mean 'observability'?)"
+    ]
+
+
+def test_unknown_camera_key_warns_with_the_indexed_path(caplog):
+    data = {"cameras": [
+        {"name": "front", "host": "192.0.2.50"},
+        {"name": "yard", "host": "192.0.2.51", "rotat": 90},
+    ]}
+
+    app = _load_capturing(caplog, data)
+
+    assert app.cameras[1].rotate == 0
+    assert _unknown_key_warnings(caplog) == [
+        "cameras[1].rotat: unknown key (did you mean 'rotate'?)"
+    ]
+
+
+def test_unknown_scorer_key_warns_with_the_full_nested_path(caplog):
+    data = {"cameras": [{"name": "front", "host": "192.0.2.50",
+                         "scorer": {"url": "http://scorer/score", "tresh": 0.7}}]}
+
+    app = _load_capturing(caplog, data)
+
+    assert app.cameras[0].scorer.threshold == 0.4
+    assert _unknown_key_warnings(caplog) == [
+        "cameras[0].scorer.tresh: unknown key (did you mean 'threshold'?)"
+    ]
+
+
+@pytest.mark.parametrize("section, typo, real", [
+    ("detection", "sourcess", "sources"),
+    ("tracking", "day_presett", "day_preset"),
+    ("weather", "stategy", "strategy"),
+    ("enrich", "snapshotz", "snapshot"),
+    ("sampler", "intervall", "interval"),
+    ("scorer", "treshold", "threshold"),
+    ("coordinator", "grup", "group"),
+    ("pan_limit", "marginn", "margin"),
+])
+def test_every_nested_camera_section_reports_its_unknown_keys(caplog, section, typo, real):
+    data = {"cameras": [{"name": "front", "host": "192.0.2.50", section: {typo: 1}}]}
+
+    _load_capturing(caplog, data)
+
+    assert _unknown_key_warnings(caplog) == [
+        f"cameras[0].{section}.{typo}: unknown key (did you mean '{real}'?)"
+    ]
+
+
+@pytest.mark.parametrize("section, typo, real", [
+    ("location", "latt", "lat"),
+    ("alerts", "cooldwn", "cooldown"),
+    ("loop", "event_intervall", "event_interval"),
+    ("observability", "ledgr", "ledger"),
+    ("reliability", "auto_fixx", "auto_fix"),
+])
+def test_every_top_level_section_reports_its_unknown_keys(caplog, section, typo, real):
+    data = _minimal()
+    data[section] = {typo: 1}
+
+    _load_capturing(caplog, data)
+
+    assert _unknown_key_warnings(caplog) == [
+        f"{section}.{typo}: unknown key (did you mean '{real}'?)"
+    ]
+
+
+def test_unknown_key_with_no_close_match_warns_without_a_suggestion(caplog):
+    data = _minimal()
+    data["cameras"][0]["frobnicator"] = True
+
+    _load_capturing(caplog, data)
+
+    assert _unknown_key_warnings(caplog) == ["cameras[0].frobnicator: unknown key"]
+
+
+def test_free_form_sections_stay_opaque(caplog):
+    # telegram/groq/faces are pass-through dicts by design: their consumers pick the
+    # env-var-name entries they need and ignore the rest, so nothing warns inside them.
+    data = _minimal()
+    data["telegram"] = {"token_env": "TG_TOKEN", "operator_note": "rotate weekly"}
+    data["groq"] = {"api_key_env": "GROQ_KEY", "model": "llava"}
+    data["faces"] = {"names_env": "FACE_NAMES", "extra": {"nested": True}}
+
+    app = _load_capturing(caplog, data)
+
+    assert app.telegram["operator_note"] == "rotate weekly"
+    assert _unknown_key_warnings(caplog) == []
+
+
+def test_fully_specified_valid_config_warns_nothing(caplog):
+    data = {
+        "location": {"lat": 50.0, "lon": 14.0, "tz": "Europe/Prague"},
+        "alerts": {"cooldown": 60, "outage_threshold": 600},
+        "loop": {"event_interval": 5, "control_interval": 90},
+        "observability": {"digital_twin": True, "ledger": True},
+        "reliability": {"enabled": True, "recorder_max_age": 120},
+        "cameras": [{
+            "name": "front", "host": "192.0.2.50", "role": "static",
+            "rotate": 90, "night_only": True,
+            "detection": {"sources": ["onvif"], "strict_people": False},
+            "tracking": {"smarttrack": ["people"], "day_preset": "1"},
+            "weather": {"strategy": "lower_sensitivity"},
+            "enrich": {"snapshot": "rtsp", "groq": False},
+            "sampler": {"enabled": True, "interval": 20},
+            "scorer": {"url": "http://scorer/score", "threshold": 0.5},
+            "coordinator": {"group": "yard-group", "scene_window": 10},
+            "pan_limit": {"enabled": True, "margin": 0.02},
+        }],
+    }
+
+    _load_capturing(caplog, data)
+
+    assert _unknown_key_warnings(caplog) == []
+
+
+def test_each_unknown_key_warns_exactly_once_and_loading_succeeds(caplog):
+    data = _minimal()
+    data["cameras"][0]["rotat"] = 90
+    data["cameras"][0]["scorer"] = {"tresh": 0.7}
+
+    app = _load_capturing(caplog, data)
+
+    assert app.cameras[0].name == "front"
+    assert sorted(_unknown_key_warnings(caplog)) == [
+        "cameras[0].rotat: unknown key (did you mean 'rotate'?)",
+        "cameras[0].scorer.tresh: unknown key (did you mean 'threshold'?)",
+    ]
