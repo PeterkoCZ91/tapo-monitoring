@@ -19,6 +19,10 @@ A single event can carry several bits at once — e.g. `events_1 = 524290` is bi
 | 5   | 32       | PIR sensor      | named by the firmware docs, but **never once observed firing** in our `getEvents` captures |
 | 19  | 524288   | AI person       | the on-device AI confirmed a person — this is what `strict_people` alerts on |
 
+Where other docs mention hardware PIR, that confirmation arrives via `alarm_type`, not
+via this never-observed bit 5 — the decoder still maps the bit, and `alarm_type` is
+logged with every event so the mapping stays checkable against real traffic.
+
 ## Observed but not yet ground-truthed
 
 Reported as `unknown_bits` rather than guessed at:

@@ -35,10 +35,12 @@ camera names, addresses, credentials, coordinates and observations do not belong
 | Local HTTP scorer and subject crop | Operational, optional | Fails open if unavailable. |
 | Weather, day/night and PTZ control | Operational | Model/firmware behavior can differ. |
 | Network uptime and outage alerts | Operational | State persists across restarts. |
-| Camera Digital Twin | Foundation, opt-in | Read-only probes, layered health and drift. |
-| Shadow Detection Auditor | Foundation, opt-in | Ledger/reporting complete; independent watcher planned. |
+| Camera Digital Twin | Operational, opt-in | Read-only probes, layered health, drift and allow-listed self-healing. |
+| Shadow Detection Auditor | Operational, opt-in | Ledger/reporting complete; the nightly `shadow-scan` batch is the independent watcher (v1). |
+| Battery/hub cameras (`hubpoll`) | Operational, opt-in | Detections polled from the hub, frames from a go2rtc sidecar. |
+| Deployment and fleet integrity | Operational | Fingerprinted release directories, symlink rollback, selfcheck, digest heartbeat. |
 | ONVIF event source | Researched, not daemon-wired | Do not select it as the only event source. |
-| Multi-camera handoff coordinator | Planned | Config fields are reserved but no runtime handoff exists. |
+| Multi-camera coordinator | Duplicate gate operational; handoff planned | `group`/`scene_window` suppress cross-camera duplicates; `handoff_preset` is reserved and no runtime handoff exists. |
 | Siren/light/speaker actions | Deliberately excluded | Observe-and-notify safety boundary. |
 
 ## Documentation rules

@@ -91,6 +91,11 @@ cameras:
     rtsp_password_env: CAM_RTSP_PASSWORD  # env var holding the RTSP password
     # rtsp_port: 554             # optional; RTSP port (default 554)
     # rtsp_stream: stream1       # optional; stream1 (HD) | stream2 (SD)
+    # rtsp_timeout: 15           # optional; seconds per grab — raise on slow hosts or
+    #                            # streams with a long keyframe interval
+    # rotate: 0                  # optional; 0/90/180/270 clockwise. Straightens a physically
+    #                            # mis-mounted camera at frame capture, across every source,
+    #                            # so the scorer, crop and Telegram see an upright frame.
     # Optional local-recorder tree is deployment-wide, not per camera: set RECORDING_ROOT
     # (e.g. /srv/recordings) and RECORDING_MAX_AGE in the daemon environment only if you
     # continuously record RTSP under <root>/<camera-host>/<YYYY-MM-DD>/<HH>/. It powers
@@ -129,7 +134,7 @@ cameras:
     #                          # that only care about after-hours intruders.
 
     detection:
-      sources: [getevents]   # subset of: onvif, getevents, motion
+      sources: [getevents]   # subset of: getevents, hubpoll, onvif, motion
       strict_people: true    # only alert on confirmed people (ignore generic motion)
 
     tracking:
@@ -151,6 +156,11 @@ cameras:
     #   onvif_port: 2020
     #   onvif_user_env: CAM_ONVIF_USER       # env var NAMES, not the secrets
     #   onvif_password_env: CAM_ONVIF_PASSWORD
+    #   tilt: false            # also bound tilt — auto-track moves it and only a preset
+    #   tilt_min: -1.0         # recall brings it back. Presets outside [tilt_min, tilt_max]
+    #   tilt_max: -0.6         # cannot become a bound (one preset aimed at the sky would
+    #                          # stretch the bound over nearly the whole travel); a window
+    #                          # leaving <2 candidates disables the tilt guard.
 
     weather:
       strategy: lower_sensitivity   # none | disable_tracking | lower_sensitivity
@@ -178,11 +188,17 @@ cameras:
       low_score: 0.15        # "nothing there" score for the early-exit streak
 
     scorer:
-      url:                   # e.g. http://127.0.0.1:8765/score; empty = Groq arbiter
-      threshold: 0.4         # min person/animal confidence to send a frame
+      url:                   # e.g. http://127.0.0.1:8766/score; empty = Groq arbiter
+      threshold: 0.4         # min PERSON confidence to send a frame; animal confidence
+                             # never alerts by itself, it only marks the caption
       timeout: 10            # seconds per scoring request
       tiles: 1               # 1 = whole frame only; 2+ also scores a tile grid so a
                              # distant subject is not lost when the wide view is resized
+      # motion_send_threshold: 0.6  # optional; corroboration for bare (non-PIR) motion.
+                             # A frame >= this sends at once; one in [threshold, this) is
+                             # held until a second frame in the band corroborates it within
+                             # the sampler window (needs sampler.enabled). Confirmed people
+                             # and PIR-backed motion always keep the immediate path.
     # crop_to_subject: true   # optional padded zoom around the scorer's best person box,
                              # widened just enough that a standing figure is not a sliver;
                              # keeps the full frame if no usable box is available
@@ -197,10 +213,14 @@ cameras:
                              # it automatically — see
                              # docs/configuration.md#cropping-at-native-resolution
 
-    # Reserved for the planned multi-camera handoff coordinator; parsed but not yet
-    # executed by the daemon. Leave empty in production configs.
+    # Multi-camera coordinator. `group` + `scene_window` run the shipped observation-only
+    # duplicate gate: once one camera in the group gets a detection DELIVERED, peers
+    # suppress duplicates whose event time falls within scene_window seconds; live, sampler
+    # and SD paths share the gate. It never moves a camera. `handoff_preset` stays reserved
+    # for the planned handoff and is not executed yet.
     # coordinator:
-    #   group:
+    #   group: overlap-group
+    #   scene_window: 15
     #   handoff_preset:
 
   - name: yard

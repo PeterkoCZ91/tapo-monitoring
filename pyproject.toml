@@ -21,6 +21,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
 scorer = ["onnxruntime", "numpy", "Pillow"]
+# pan_limit reads PTZ position over ONVIF; the import is lazy (guard's first poll), so
+# selfcheck passes without it while the guard sits inert. Install where pan_limit is on.
+onvif = ["onvif-zeep"]
 
 [project.scripts]
 tapo-monitor = "tapo_monitor.cli:main"

@@ -389,6 +389,12 @@ Unset (the default) keeps the legacy behaviour: any motion frame `>= threshold` 
 - `crop_min_frac` sets the smallest crop the zoom may produce (see below).
 - Scorer errors fail open (one automatic retry, then raw passthrough — never a silent drop).
 
+One honest note on exposure: the scorer *service* binds `0.0.0.0` and has no
+authentication — unlike the status endpoint, there is no localhost default. Anyone who
+can reach the port can submit frames and read `/metrics`. Run it on a trusted network or
+firewall the port; pointing `scorer.url` at `127.0.0.1` changes nothing about what the
+service listens on.
+
 ### How small the zoom may get
 
 ```yaml
@@ -488,6 +494,20 @@ pan_limit:
 The guard reads current/preset pan positions over ONVIF and recalls the nearest bounding
 preset when auto-track moves outside their span. It does not create a hard motor limit.
 ONVIF errors are isolated from the event loop.
+
+The guard needs the `onvif-zeep` package: `pip install -e ".[onvif]"` (or
+`pip install onvif-zeep`) into the daemon's venv. The import is deliberately lazy — it
+happens on the guard's first poll, not at startup — so `selfcheck` passes without the
+package while the guard sits inert, logging a warning every poll. Install it on every
+host where `pan_limit` is enabled.
+
+Each intervention archives the out-of-bounds frame — the view the recall is about to
+erase — into a `panlimit-log` directory beside the review log or sent log, kept for
+2 days (see [Inspecting alert frames](operations.md#inspecting-alert-frames)). And
+because a recall physically removes the subject a held marginal motion frame was waiting
+to corroborate (`motion_send_threshold`), a hold broken by a recall is sent when it
+expires instead of being dropped — audited as `hold_rescue_recall`; it needs the review
+log configured, which is where the held frame lives.
 
 Enable it per camera, not by default. The firmware already returns a camera to where its
 track started, after `back_time` seconds (30 on the C560WS), which covers the ordinary
@@ -624,6 +644,13 @@ Run after every edit:
 ```bash
 tapo-monitor check cameras.yaml
 ```
+
+Unknown keys are warned about, not rejected: every load logs the full key path plus the
+closest known key (`cameras[0].scorer.treshold: unknown key (did you mean 'threshold'?)`),
+derived from the config dataclasses so the check cannot rot. A mistyped key silently takes
+its default — a dropped `rotate` costs roughly a third of the person score — so treat any
+such warning as a typo until proven otherwise. The hard fail deliberately waits until the
+warnings have soaked in production.
 
 Change one capability at a time. Observe logs and status before enabling the next, because
 model/firmware support and camera resource limits differ. The full annotated schema remains

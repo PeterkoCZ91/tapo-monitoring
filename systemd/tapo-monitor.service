@@ -10,10 +10,11 @@ OnFailure=pi-failure-notify@%n.service
 
 [Service]
 Type=simple
-# Adjust the user. %h below is the home of the user the *manager* runs as, so it is
-# only right for a user unit (`systemctl --user`); in a system unit spell the service
-# user's home out absolutely instead.
-User=%i
+# For a system unit, set the concrete service user (%i would expand to nothing in a
+# non-template unit); a user unit (`systemctl --user`) needs no User= at all. %h below
+# is the home of the user the *manager* runs as, so it is only right for a user unit;
+# in a system unit spell the service user's home out absolutely instead.
+#User=tapo
 EnvironmentFile=-/etc/tapo-monitor/secrets.env
 # The release layout maintained by tools/deploy_release.sh: `current` is a symlink to
 # one release directory under ~/tapo-monitor/releases/, switched by a single rename —

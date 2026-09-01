@@ -72,14 +72,14 @@ The package modules follow these boundaries:
 | Area | Main modules | Responsibility |
 | --- | --- | --- |
 | Configuration | `config.py` | Parse and validate YAML; resolve secret values from named environment variables. |
-| Camera transport | `camera.py` | Ping, lockout-aware connect and event watermark helpers. |
+| Camera transport | `camera.py`, `hubclient.py` | Ping, lockout-aware connect and event watermark helpers; one held, rate-limit-aware session per hub for battery cameras. |
 | Control policy | `scheduling.py`, `weather.py`, `tracking.py`, `panlimit.py` | Build and safely apply camera plans. |
 | Detection | `detection.py`, `monitor.py`, `daemon.py` | Classify events, gate alerts and coordinate retries. |
 | Media | `snapshot.py`, `sdclip.py`, `recclip.py`, `sampler.py` | Capture live or event-aligned candidate frames. |
 | Enrichment | `scorer.py`, `scorer_service.py`, `enrich.py` | Local subject confidence/boxes and optional captions. |
 | Delivery | `notify.py` | Telegram API and delivery-aware state transitions. |
-| Health | `health.py`, `capabilities.py`, `drift.py`, `twin.py` | Uptime, safe capability snapshots, layered health and desired-state drift. |
-| Audit | `audit.py`, `ledger.py` | Human log summaries and media-free camera/shadow correlation. |
+| Health | `health.py`, `capabilities.py`, `drift.py`, `twin.py`, `statusd.py` | Uptime, safe capability snapshots, layered health, desired-state drift and the opt-in JSON status endpoint. |
+| Audit | `audit.py`, `ledger.py`, `sentlog.py`, `reviewdigest.py`, `shadowscan.py` | Human log summaries, media-free camera/shadow correlation, sent/review frame archives, the daily digest and the nightly shadow scan. |
 | CLI | `cli.py` | Daemon entry point and offline status/report commands. |
 
 ## Two loop cadences

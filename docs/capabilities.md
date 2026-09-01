@@ -13,6 +13,7 @@ documented below as *available* but intentionally **not implemented** — see "A
 |---|---|---|
 | ONVIF pull-point events | Researched, not daemon-wired | Transport exists, but tested firmware reliability varies; do not configure as the only production source. |
 | Camera AI (`getEvents`) | Poll recent events | Person bit (events_1 bit 19), `face_id`, vehicle/pet classification. Logged to SD regardless of detection toggles. |
+| Hub clip index (`hubpoll`) | Poll the hub a battery camera records to | A sleeping battery camera keeps no event index of its own; clips are read off the hub and the alert frame comes from a go2rtc sidecar. See [battery cameras on a hub](battery-cameras-on-a-hub.md). |
 | Motion detection | Camera setting / classifier support | `digital_sensitivity` 0–100 (or low/normal/high). Tunable per weather; not a standalone daemon event source today. |
 | Person detection | AI, separate sensitivity | Drives people-only auto-tracking. |
 | PIR sensor | `alarm_type` | Hardware PIR confirmation where present. |
@@ -28,6 +29,8 @@ documented below as *available* but intentionally **not implemented** — see "A
   readout, so the daemon reads the pan via ONVIF and recalls the camera to its bounding
   preset when it drifts past the leftmost/rightmost preset (e.g. auto-track swinging into a
   wall). The presets define the allowed range; ONVIF errors never stall the loop.
+  `pan_limit.tilt` extends the same guard to the tilt axis, with `tilt_min`/`tilt_max`
+  keeping an outlier preset (one aimed at the sky) from stretching the bound.
 - **Day/night scheduling** — astral sunset/sunrise (coordinates from config) with a
   fixed HH:MM fallback. One source of truth shared by all components.
 - **Night vision mode** (optional, per camera) — `night_vision: ir` forces IR/B&W night
@@ -88,10 +91,15 @@ Rain makes auto-tracking cameras chase raindrops and IR reflections. Using open-
 - Run any number of cameras from one config.
 - `night_only` cameras drain daytime events silently and alert only during the astral
   night window, while camera control still runs all day.
-- **Perimeter coordination** (planned) — when one camera in a group detects a person,
+- **Coordinator duplicate gate** (shipped, observation-only) — cameras sharing a
+  `coordinator.group` suppress duplicate alerts for the same passage: once one camera's
+  detection is *delivered*, peers stay quiet for events inside `scene_window` seconds.
+  Live, sampler and SD paths share the gate; it never moves a camera.
+- **Perimeter handoff** (planned) — when one camera in a group detects a person,
   peers turn to a hand-off preset so overlapping/adjacent views cover the same target.
-  Constraint: `getEvents` reports *that* a person was seen, not *where* — so direction
-  is handled by each camera's own auto-tracking, not by the coordinator.
+  `handoff_preset` is reserved for this and not executed yet. Constraint: `getEvents`
+  reports *that* a person was seen, not *where* — so direction is handled by each
+  camera's own auto-tracking, not by the coordinator.
 
 ## 6. Operations
 
@@ -105,6 +113,18 @@ Rain makes auto-tracking cameras chase raindrops and IR reflections. Using open-
   tick — not a hung one, and not a crash loop, which reset the timer on restart.
 - Reconnect handling and lockout-aware sessions (see below).
 - Structured audit logs plus `tapo-monitor audit-log` for threshold calibration.
+- Daily digest heartbeat: the review digest carries a fleet block — camera reachability,
+  the daemon's tick, the shared scorer, recorder freshness, alert counts, refused
+  self-heals and the running package fingerprint. It claims OK only for what it actually
+  checked; any failed check removes the headline.
+- JSON status endpoint (`observability.status_port`): daemon + fleet summary as one GET,
+  localhost-first because it has no authentication.
+- Mutual host watch (`tools/host_watch.sh`): peers ping each other (optionally a `/health`
+  URL too), so a dead host is noticed by a machine other than itself.
+- Release deploys (`tools/deploy_release.sh`): fingerprinted release directories behind a
+  `current` symlink, selfcheck before the switch, rollback by re-pointing the link.
+  `tapo-monitor version` and `tapo-monitor selfcheck` state what a host runs and whether
+  it can run.
 - systemd templates for the monitor daemon and shared scorer service.
 - Deployment, health and calibration runbook ([`operations.md`](operations.md)), including
   setups that share one scorer across several caller services.
@@ -157,4 +177,5 @@ lacks:
   long-running poller ("Cannot run the event loop while another loop is running"). This
   project runs the download in a fresh subprocess with its own client, pre-warms
   `getUserID()` before the download loop, and caps `window_size` at 50 (the C560WS stalls
-  at pytapo's default 200). See the *Hard-won gotchas* section of the README.
+  at pytapo's default 200). See
+  [SD-card download returns no frames](troubleshooting.md#sd-card-download-returns-no-frames).

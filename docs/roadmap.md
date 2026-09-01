@@ -203,7 +203,7 @@ production pilot uses two cameras with overlapping views.
 
 ## Phase 6 — Deployment and fleet integrity
 
-Status: **shipped; two scorer-side items remain**
+Status: **shipped; the unknown-key hard fail and two scorer-side items remain**
 
 Deployed hosts were rsync copies of the package, not git checkouts, and a partial copy
 twice produced a daemon that ran for hours while alerting on nothing. The work here made
@@ -236,11 +236,12 @@ so the canonical unit edit becomes cosmetic rather than blocking.
   fleet has been migrated per the runbook in docs/operations.md and runs this layout.
 - [x] Snapshot each host's config and env file into the release directory it belongs to,
   so a rollback can restore the configuration that matched that code.
-- [x] Reject unknown configuration keys (warn first, then fail). A mistyped key silently
-  took its default, and a dropped `rotate` costs roughly a third of the person score — a
-  silent alert killer. The warn phase is shipped: full key path plus the closest real key,
-  derived from the dataclasses so the check cannot rot. The hard fail deliberately waits
-  until the warnings have soaked in production.
+- [x] Warn on unknown configuration keys. A mistyped key silently took its default, and a
+  dropped `rotate` costs roughly a third of the person score — a silent alert killer. The
+  warning carries the full key path plus the closest real key, derived from the dataclasses
+  so the check cannot rot.
+- [ ] Promote the unknown-key warning to a hard fail. Deliberately waiting until the
+  warnings have soaked in production.
 - [x] Nightly fleet-drift report: the daily digest's fleet block carries the running
   package fingerprint, and when `TAPO_EXPECTED_FINGERPRINT` names the intended release a
   mismatch is a failed check that removes the OK headline. Manual inventory found exactly

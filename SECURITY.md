@@ -23,8 +23,12 @@ You will receive an acknowledgement within **7 days**.
 - Redaction and private permissions of health, Digital Twin and Shadow ledger state
 - Leakage of camera identifiers, credentials or media through observability output
 
+Known and deliberate: the scorer service binds `0.0.0.0` with no authentication — it is
+meant to be shared across hosts on a trusted network. Run it behind a firewall; do not
+expose the port. The JSON status endpoint, by contrast, defaults to `127.0.0.1`.
+
 ## Out of scope
 
 - Physical access to the camera or Raspberry Pi
-- Vulnerabilities in third-party libraries (onvif-zeep, pytapo, opencv) — report those to their maintainers
+- Vulnerabilities in third-party libraries (onvif-zeep, pytapo, onnxruntime, Pillow) — report those to their maintainers
 - Tapo camera firmware — report to TP-Link

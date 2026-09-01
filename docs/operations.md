@@ -91,8 +91,8 @@ state paths, CLI commands, privacy boundaries and rollout guidance are in
 
 ## Deploy the scorer
 
-1. Install the package with scorer dependencies (`pip install tapo-monitor[scorer]`) in
-   the scorer venv and put the ONNX model on local disk.
+1. Install the package with scorer dependencies (`pip install -e ".[scorer]"` from the
+   checkout) in the scorer venv and put the ONNX model on local disk.
 2. Adjust `WorkingDirectory`/`ExecStart` in `systemd/tapo-scorer@.service` to that
    checkout and venv, then create `/etc/tapo-monitor/scorer.env`:
 
@@ -348,6 +348,15 @@ export TAPO_REVIEW_LOG_DIR=~/tapo-monitor/review-log
 export TAPO_REVIEW_LOG_RETENTION_DAYS=7   # optional, default 7
 ```
 
+**Archive what the pan guard saw.** Each `pan_limit` intervention saves one frame — the
+out-of-bounds view, grabbed just before the recall erases it — into a `panlimit-log`
+directory beside the review log (or the sent log, whichever is configured; with neither
+there is nowhere sane to write and nothing is kept). The filename carries the camera, axis
+and position, so a night of recalls is skimmable without an index. Deliberately its own
+directory rather than the review log: the digest reads the review log, and twenty guard
+recalls a night must not flood it. Retention is fixed at 2 days; archiving is best-effort
+and never costs a recall.
+
 **Get the suppressed frames delivered daily.** An archive nobody opens is not review — set
 `TAPO_REVIEW_DIGEST_TIME` (local `HH:MM`) and once a day at that time the daemon sends a
 Telegram summary of the review log's last 24 hours (per-camera counts with the top person
@@ -369,7 +378,10 @@ indistinguishable from a host that lost power or a Telegram token that stopped w
 digest therefore carries a fleet block: which cameras are reachable, the daemon's own tick,
 the shared scoring service (asked once a day, because when it dies alerts stop at *every*
 site at once), the local recorder's newest file, the day's alert counts from the sent log,
-and any self-heal a camera is refusing.
+and any self-heal a camera is refusing. It also names the running package fingerprint (the
+value `tapo-monitor version` prints); set `TAPO_EXPECTED_FINGERPRINT=<fingerprint>` in the
+daemon's environment file after a deploy and a mismatch becomes a failed check like any
+other — silent code drift has twice been found only by manual inventory, after the fact.
 
 Two rules keep it honest. It only claims `Fleet OK` for what it actually checked — a host
 with no recorder gets no recorder line rather than a reassuring one, and a camera whose
@@ -431,16 +443,18 @@ time ffmpeg -hide_banner -skip_frame nokey -i <segment>.mkv \
   -vf "scale=1280:-2,select='gt(scene,0.04)',showinfo" -vsync vfr -an -frames:v 8 -f null -
 ```
 
-Schedule it with a systemd timer in the small hours, niced, with the same environment
-file as the daemon:
+Schedule it with a systemd timer in the small hours, niced, from the same release layout
+and environment file as the daemon (the console script does not exist in an extracted
+release — use the venv interpreter with `-m`, as the unit does):
 
 ```ini
 [Service]
 Type=oneshot
 Nice=15
 IOSchedulingClass=idle
-EnvironmentFile=%h/tapo/tapo-camera.env
-ExecStart=%h/tapo-env/bin/tapo-monitor shadow-scan %h/tapo-monitor/cameras.yaml
+EnvironmentFile=-/etc/tapo-monitor/secrets.env
+WorkingDirectory=%h/tapo-monitor/current
+ExecStart=%h/tapo-env/bin/python -m tapo_monitor shadow-scan %h/tapo-monitor/cameras.yaml
 
 [Timer]
 OnCalendar=*-*-* 03:00

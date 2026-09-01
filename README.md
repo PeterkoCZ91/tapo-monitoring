@@ -10,9 +10,10 @@ optional local scoring, Telegram delivery and layered health monitoring in one t
 Python daemon.
 
 > **Project status:** the core daemon and alert pipeline are operational and validated on
-> the C560WS. Camera Digital Twin and Shadow Detection Auditor foundations are implemented
-> behind opt-in flags. Camera models and firmware differ; unsupported capabilities degrade
-> to `unknown` instead of being guessed.
+> the C560WS. The Camera Digital Twin (layered health, drift and allow-listed self-healing)
+> and the Shadow Detection Auditor run in production behind opt-in flags; a nightly
+> recorder scan measures camera miss candidates. Camera models and firmware differ;
+> unsupported capabilities degrade to `unknown` instead of being guessed.
 
 ## Why this project exists
 
@@ -27,7 +28,7 @@ is a complete local AI NVR. This project occupies a narrower space:
   SmartTrack ordering and SD recording freshness;
 - treat an alert as successful only after the notification is delivered;
 - distinguish network, API, events, RTSP and storage failures;
-- measure desired configuration drift and, eventually, camera detection misses.
+- measure desired configuration drift and, nightly, camera detection misses.
 
 It is not a full NVR, video-management UI or replacement for Frigate. An optional local
 recorder and scorer can complement the daemon, but neither is required for the basic flow.
@@ -43,6 +44,8 @@ recorder and scorer can complement the daemon, but neither is required for the b
 - **Reliable event media** — live RTSP first, then an event-time SD-card or local-recorder
   follow-up when the first frame misses the subject; the subject zoom can be cropped from
   a native-resolution grab so a distant figure stays legible.
+- **Battery cameras on a hub** — `hubpoll` reads a sleeping camera's detections off the
+  hub it records to; the alert frame comes from a go2rtc sidecar.
 - **Optional local scorer** — a small HTTP YOLO service can gate frames and return subject
   boxes; Groq remains optional caption enrichment.
 - **Confirmed Telegram semantics** — failed sends do not arm cooldowns; recovery, SD and
@@ -52,6 +55,12 @@ recorder and scorer can complement the daemon, but neither is required for the b
   like a quiet night.
 - **Event-API watchdog** — separates `getEvents` failures from network reachability, reports
   recovery and can request one bounded API reboot per failure episode.
+- **Daily fleet heartbeat** — one digest a day says the fleet is alive: cameras, tick,
+  scorer, recorder, alert counts. It claims OK only for what it checked, and any failed
+  check removes the headline.
+- **Verifiable deploys** — releases ship as fingerprinted directories behind a symlink, so
+  rollback is re-pointing the link; an opt-in localhost-first JSON status endpoint answers
+  "how is this host doing" without log parsing.
 - **Camera Digital Twin** — redacted safe-getter snapshots, desired/actual drift and
   layered health without a second login loop.
 - **Shadow Detection Auditor** — a private, media-free SQLite ledger correlates camera
@@ -142,6 +151,7 @@ available frame contains the subject.
 | `tapo-monitor probe [cameras.yaml] [--camera N] [--json]` | Probe cameras now; opens its own authenticated session. |
 | `tapo-monitor shadow-record ...` | Ingest one independent media-free observation. |
 | `tapo-monitor shadow-report ...` | Correlate camera and shadow observations. |
+| `tapo-monitor shadow-scan ...` | Nightly recorder audit: re-score yesterday's segments for miss candidates. |
 
 ## Optional local scorer
 
@@ -201,8 +211,9 @@ ruff check .
 ```
 
 Pure planning, classification, drift, matching and persistence logic is tested without
-camera hardware; I/O collaborators are injected in tests. CI runs tests and Ruff for every
-push to `main` and every pull request.
+camera hardware; I/O collaborators are injected in tests. CI runs tests and Ruff on
+Python 3.12 and 3.13 (the versions the fleet runs; `requires-python` stays 3.10+) for
+every push to `main` and every pull request.
 
 See [Contributing](CONTRIBUTING.md), [Security](SECURITY.md), the [changelog](CHANGELOG.md)
 and the [MIT license](LICENSE).

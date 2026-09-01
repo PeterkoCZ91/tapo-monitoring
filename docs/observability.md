@@ -149,8 +149,11 @@ The report pairs same-type observations one-to-one within the symmetric time win
 
 In particular, `shadow_only` is a review candidate, not an automatically proven camera
 miss. Clock alignment, worker coverage and detector calibration must be checked first.
-The independent always-watching worker is the next major phase; the foundation delivered
-here is its privacy-safe ingestion, storage and reporting contract.
+The independent worker is shipped: the nightly `tapo-monitor shadow-scan` batch is that
+worker's v1 — it re-reads yesterday's segments on a single recorder host, scores motion
+candidates through the same scoring service, and feeds the ledger through exactly this
+ingestion, storage and reporting contract (see
+[operations](operations.md#inspecting-alert-frames)).
 
 ## JSON status endpoint
 

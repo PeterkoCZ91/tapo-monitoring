@@ -227,8 +227,10 @@ Do not infer delivery from “alert decision accepted”; look for the explicit 
 
 The soft pan limit derives allowed bounds from ONVIF preset positions. Verify presets
 represent the intended left/right range and increase `margin` slightly if tracking near a
-boundary oscillates. An ONVIF error invalidates the cached client and retries later; it
-does not stop the main loop.
+boundary oscillates. With `pan_limit.tilt` the same applies to the vertical axis — check
+that the `tilt_min`/`tilt_max` window keeps an outlier preset from becoming a bound. An
+ONVIF error invalidates the cached client and retries later; it does not stop the main
+loop.
 
 ## Digital Twin shows unknown values
 
@@ -249,7 +251,8 @@ tested firmware. Do not replace unknown values with assumptions or automatic set
 - `shadow_only` may be a camera miss, clock skew or incomplete watcher coverage.
 
 Treat the report as calibration evidence, not labelled ground truth. The independent
-always-watching shadow worker is still a roadmap item.
+shadow worker is the nightly `tapo-monitor shadow-scan` batch (v1, single recorder
+host); a host without a 24/7 recorder contributes no shadow observations at all.
 
 ## Collecting a safe bug report
 
