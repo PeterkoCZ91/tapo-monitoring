@@ -150,29 +150,102 @@ scorer:
   timeout: 10
 ```
 
-## Deploy the monitor
+## Release deploys and rollback
 
 Deploy the **whole package**, never a subset of changed files: modules are versioned
 together and a partial copy fails at import, which `Restart=always` then retries forever.
+`tools/deploy_release.sh` enforces that by construction — it ships `git archive` output,
+so what lands on the host is always one complete, committed tree.
 
-```bash
-tapo-monitor version                                # fingerprint of the tree to be copied
-# ... copy the full package to the host ...
-tapo-monitor selfcheck /etc/tapo-monitor/cameras.yaml   # imports, config, credentials, ffmpeg
-sudo systemctl restart tapo-monitor
-tools/check_monitor_rollout.sh <FINGERPRINT>        # on the host, after the restart
-journalctl -u tapo-monitor -f
+### Layout on the host
+
+Each deploy is its own directory; the unit runs whatever `current` points at:
+
+```text
+~/tapo-monitor/
+  cameras.yaml                          # host-owned config, shared by all releases
+  current -> releases/20260901T101500Z-3f9c2d81a0b4/
+  releases/
+    20260901T101500Z-3f9c2d81a0b4/      # <UTC timestamp>-<package fingerprint>
+      tapo_monitor/  tools/  systemd/ ...
+      config-snapshot/                  # cameras.yaml + env file as this release saw them (0600)
 ```
 
-`version` prints the release plus a short digest over the deployed module set, so a host
-can answer "which code am I running" without being a git checkout — and a half-copied
-package reports a different fingerprint than the tree it came from. `selfcheck` imports
-every module, loads the config, asserts that the credential env vars named by that config
-are actually set, and looks for `ffmpeg`; it prints env var *names*, never values.
-`tools/check_monitor_rollout.sh` re-checks the unit state (an `auto-restart` sub-state is
-the crash loop `is-active` hides), the fingerprint, `selfcheck`, and the journal since the
-restart. It reports rather than asserts liveness: the daemon logs per decision, not per
-poll, so a quiet camera is not a failure.
+The directory name carries the package fingerprint (the digest `tapo-monitor version`
+prints), so "which code is that release" is answered by `ls`. `config-snapshot/` holds
+the config and the unit's `EnvironmentFile` exactly as they were when the release passed
+its selfcheck: `cameras.yaml` is shared across releases, so without the copy a rolled-back
+release could not say what configuration it was validated against.
+
+The unit must start from the release layout: `WorkingDirectory=%h/tapo-monitor/current`
+and an **absolute venv interpreter** running `python -m tapo_monitor` (see
+`systemd/tapo-monitor.service`). systemd activates no venv and searches no PATH, and the
+`tapo-monitor` console script only exists where pip generated it — an extracted archive
+has none. With `-m`, Python finds the package in the working directory, i.e. in whichever
+release `current` points at, so neither deploy nor rollback ever edits the unit.
+
+### Deploy
+
+From the workstation, inside the repo checkout:
+
+```bash
+tools/deploy_release.sh <ssh-host>                       # ship HEAD
+tools/deploy_release.sh <ssh-host> v0.4.0                # or any committed ref
+tools/deploy_release.sh <ssh-host> --restart-cmd 'systemctl --user restart tapo-monitor'
+```
+
+The script stages the ref with `git archive`, fingerprints the staged tree with its own
+CLI, extracts it into `releases/<UTC-ts>-<fingerprint>/`, snapshots `cameras.yaml` plus
+the unit's env file, and runs `selfcheck` **from inside the new release** under that env —
+imports, config, credentials, ffmpeg, all checked before the release can take over. Only
+then does it switch `current` (a temp symlink renamed over with `mv -T`: one atomic
+rename, never an unlink/relink window), restart the unit (`--restart-cmd` for hosts where
+the operator has no sudo), verify that `current` now reports the staged fingerprint, and
+prune to the last 5 releases — never the one `current` points to. A failed selfcheck
+aborts before the switch and leaves the release directory in place for inspection.
+
+Follow up on the host with `~/tapo-monitor/current/tools/check_monitor_rollout.sh
+<FINGERPRINT>`: it re-checks the unit state (an `auto-restart` sub-state is the crash
+loop `is-active` hides), the fingerprint, `selfcheck`, and the journal since the restart.
+It reports rather than asserts liveness: the daemon logs per decision, not per poll, so a
+quiet camera is not a failure.
+
+To rehearse the deploy path without a production host, point the script at any
+ssh-reachable account whose `~/tapo-monitor` is expendable, seed a `cameras.yaml` and an
+env file carrying the credential vars it names, and pass `--restart-cmd true
+--env-file <that file>` — everything short of the systemd restart runs for real.
+
+### Rollback
+
+```bash
+tools/rollback_release.sh <ssh-host>                     # list releases, current marked
+tools/rollback_release.sh <ssh-host> 20260901T101500Z-3f9c2d81a0b4
+```
+
+Rollback is re-pointing `current` at a release that already passed its deploy-time
+selfcheck, restarting, and verifying the fingerprint — nothing is copied or rebuilt.
+Note what it deliberately does *not* roll back: `cameras.yaml` and the env file are
+host-owned and shared. If the bad deploy also changed them, diff against the target
+release's `config-snapshot/` and restore by hand.
+
+### Migrating a host from the rsync layout
+
+An rsync-layout host keeps the package files (`tapo_monitor/`, `tools/`, ...) directly in
+`~/tapo-monitor/` and a unit with `WorkingDirectory` pointing there. The release layout
+lives in the same directory, so migration is additive:
+
+1. Run `tools/deploy_release.sh <host>` once — it creates `releases/` and the `current`
+   symlink beside the old files without touching them (`cameras.yaml` already being at
+   `~/tapo-monitor/cameras.yaml` is exactly what the layout expects).
+2. Update the unit to the template's `WorkingDirectory=.../tapo-monitor/current` and
+   absolute-interpreter `ExecStart`, then `daemon-reload` and restart.
+3. Once `check_monitor_rollout.sh` passes from `current`, delete the loose package
+   directories from `~/tapo-monitor/` — they are now dead code that only invites
+   confusion about what is running.
+
+Until step 2 the running unit still uses the old files, so a failed first deploy changes
+nothing; and `deploy_release.sh` refuses to run where `~/tapo-monitor/current` exists as
+a real directory rather than a symlink.
 
 Both units carry `OnFailure=pi-failure-notify@%n.service` with `StartLimitBurst=5` per 300
 seconds, so a crash loop stops retrying and sends one Telegram message instead of failing
@@ -528,6 +601,7 @@ SuccessExitStatus=143
 
 ## Rollback
 
-- Monitor: restore the previous package/files and `sudo systemctl restart tapo-monitor`.
+- Monitor: `tools/rollback_release.sh <ssh-host> <release-name>` re-points the `current`
+  symlink and restarts — see [Release deploys and rollback](#release-deploys-and-rollback).
 - Scorer: restore the previous venv/model, or set `scorer.url` empty to fall back to
   raw/Groq gating.

@@ -12,6 +12,10 @@ Usage:
   tapo-monitor audit-log [logfile|-]    # summarize scorer/Telegram audit lines
   tapo-monitor version                  # release plus a fingerprint of the deployed package
   tapo-monitor selfcheck [cameras.yaml] # is this host able to run? (imports, config, deps)
+
+Every command is also reachable as ``python -m tapo_monitor ...``: the console script
+exists only where pip generated it, and a release directory is an extracted archive, so
+that is the spelling the systemd unit uses.
 """
 
 import argparse

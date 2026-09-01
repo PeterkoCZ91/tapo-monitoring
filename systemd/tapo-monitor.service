@@ -10,10 +10,19 @@ OnFailure=pi-failure-notify@%n.service
 
 [Service]
 Type=simple
-# Adjust the user and the path to your (git-ignored) cameras.yaml.
+# Adjust the user. %h below is the home of the user the *manager* runs as, so it is
+# only right for a user unit (`systemctl --user`); in a system unit spell the service
+# user's home out absolutely instead.
 User=%i
 EnvironmentFile=-/etc/tapo-monitor/secrets.env
-ExecStart=tapo-monitor run /etc/tapo-monitor/cameras.yaml
+# The release layout maintained by tools/deploy_release.sh: `current` is a symlink to
+# one release directory under ~/tapo-monitor/releases/, switched by a single rename —
+# so a rollback is re-pointing the link, and this unit never needs an edit for either.
+WorkingDirectory=%h/tapo-monitor/current
+# The interpreter must be an absolute path into the service venv (adjust it): systemd
+# activates no venv and searches no PATH. With `-m`, Python finds the package in the
+# working directory, i.e. in whichever release `current` points at right now.
+ExecStart=%h/tapo-env/bin/python -m tapo_monitor run %h/tapo-monitor/cameras.yaml
 Restart=always
 RestartSec=10
 
