@@ -5,6 +5,23 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- A hold that a pan-limit recall broke is sent instead of dropped. A marginal motion
+  frame waits for a second candidate before it may alert; when the guard recalls the
+  camera mid-wait, the subject leaves the frame and the second candidate structurally
+  cannot arrive — the hold then expired as if the scene had been empty, and a real person
+  at p0.62 was lost exactly this way (2026-08-31 19:57). The group now remembers the
+  archived review-log copy of its held frame, and an expiring hold whose camera was
+  recalled between the hold and the expiry sends that copy through the normal alert path
+  — same cooldown gate, same delivery accounting, audited as `send`/`hold_rescue_recall`.
+  No knob: only cameras running `pan_limit` ever record a recall.
+- The pan-limit guard archives one frame per intervention. Deep-night recalls were
+  undecidable after the fact: nothing below threshold is archived, so whether the guard
+  pulled the camera off a wall or off a person was guesswork. Just before recalling, it
+  grabs the out-of-bounds view (the recall is what erases the evidence) into a
+  `panlimit-log` directory next to the review log — deliberately not *into* the review
+  log, which the daily digest reads and twenty guard frames a night would flood — named
+  by camera, axis and position, kept two days. Best-effort: a failed grab is a debug
+  line, never a skipped or delayed recall.
 - The soft PTZ guard can bound tilt, not just pan (`pan_limit.tilt`, off by default).
   Auto-track moves tilt too, and nothing corrected it: `pan_limit` clamped one axis and a
   recalled preset was the only thing that touched the other. Derived from presets the way

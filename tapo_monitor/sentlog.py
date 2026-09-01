@@ -30,6 +30,12 @@ ENV_REVIEW_DIR = "TAPO_REVIEW_LOG_DIR"
 ENV_REVIEW_RETENTION = "TAPO_REVIEW_LOG_RETENTION_DAYS"
 DEFAULT_REVIEW_RETENTION_DAYS = 7.0
 
+# Pan-limit log: one frame per guard intervention — the out-of-bounds view, grabbed just
+# before the recall erases it. Deliberately its own directory: the review digest reads
+# the review log, and twenty guard recalls a night must not flood it.
+PANLIMIT_DIR_NAME = "panlimit-log"
+PANLIMIT_RETENTION_DAYS = 2.0
+
 
 def archive_dir_from_env(env=None):
     """Configured archive directory, or None when the feature is off. Pure."""
@@ -124,6 +130,42 @@ def archive_if_configured(image_bytes, caption, *, delivered=True, now=None, env
     return archive_sent(archive_dir, image_bytes, caption, now=now,
                         retention_days=retention_days_from_env(env), delivered=delivered,
                         camera=camera, score=score)
+
+
+def panlimit_dir_from_env(env=None):
+    """``panlimit-log`` directory next to the review-log (or sent-log) dir, or None. Pure.
+
+    No knob of its own: the guard's evidence lands beside whichever archive the host
+    already keeps; with neither configured there is nowhere sane to write.
+    """
+    env = os.environ if env is None else env
+    for key in (ENV_REVIEW_DIR, ENV_DIR):
+        base = (env.get(key) or "").strip().rstrip("/")
+        if base:
+            return os.path.join(os.path.dirname(base), PANLIMIT_DIR_NAME)
+    return None
+
+
+def archive_panlimit_frame(archive_dir, image_path, camera, axis, value, *, now):
+    """Copy one guard-intervention frame into ``archive_dir``; prune files past 2 days.
+
+    The filename carries the camera, axis and out-of-bounds position, so a night of
+    recalls is skimmable without an index. Returns the saved path, or None on any
+    failure — evidence is best-effort and must never cost a recall.
+    """
+    try:
+        with open(image_path, "rb") as f:
+            image_bytes = f.read()
+        os.makedirs(archive_dir, exist_ok=True)
+        name = f"panlimit_{camera}_{axis}{float(value):+.4f}_{_stamp(now)}.jpg"
+        path = os.path.join(archive_dir, name)
+        with open(path, "wb") as f:
+            f.write(image_bytes)
+        prune_old(archive_dir, now, PANLIMIT_RETENTION_DAYS)
+        return path
+    except (OSError, TypeError, ValueError):
+        log.debug("sentlog: panlimit archiving failed", exc_info=True)
+        return None
 
 
 def review_meta(camera, verdict, etype, score):

@@ -419,6 +419,10 @@ class MonitorState:
     groups: dict = field(default_factory=dict)
     scene_coordinator: object = field(default_factory=scene.SceneCoordinator)
     pan_guard: dict = field(default_factory=dict)   # per-camera ONVIF pan-limit state
+    # Wall time of the last pan_limit recall per camera (the tick's own `now`, so it is
+    # directly comparable to the sampler's): lets an expiring hold tell "no second frame
+    # ever came" from "the guard yanked the subject out of view mid-corroboration".
+    pan_limit_recall_at: dict = field(default_factory=dict)
     # ── hubpoll (battery cameras indexed on a hub) ───────────────────────────
     # Sessions are keyed by hub host, not camera: two cameras on one hub share the single
     # session that hub tolerates. Kept here rather than in ``cam_clients`` because that
@@ -1013,6 +1017,17 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                 window=_cfg.coordinator.scene_window,
             )
 
+        def hold_archive(image, etype, s, _name=name):
+            path = sentlog.archive_review_if_configured(
+                image, sentlog.review_meta(_name, "hold", etype, s))
+            g = state.groups.get(_name)
+            if path and g is not None:
+                # Remembered so the sampler's expiry can tell "no second frame ever came"
+                # from "a pan_limit recall yanked the subject out of view mid-wait".
+                g["last_hold_path"] = path
+                g["last_hold_at"] = now
+            return path
+
         def burst_sent(_name=name, _cfg=cfg):
             # Only a real delivery suppresses a follow-up: "sent" also means "queued for
             # SD" or "Telegram refused it", and dropping a confirmed person on either
@@ -1071,6 +1086,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             poll_observe=poll_observe,
             media_observe=media_observe,
             scene_alert=scene_alert,
+            hold_archive=hold_archive,
             mute=cfg.night_only and not night,
         )
         state.last_seen[cfg.name] = watermark
@@ -1547,7 +1563,7 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
 
 
 
-def _suppress_sampler_frame(cfg, group, etype, s, scfg, image, verdict):
+def _suppress_sampler_frame(cfg, group, etype, s, scfg, image, verdict, *, now):
     """Log/audit one sampler frame that will not be sent and fold it into the group.
 
     ``verdict`` is "drop" (below threshold) or "hold" (marginal, awaiting corroboration);
@@ -1559,8 +1575,12 @@ def _suppress_sampler_frame(cfg, group, etype, s, scfg, image, verdict):
                  cfg.name, group["frames"], scfg.max_frames, s)
         monitor.audit_event(cfg, group["event"], etype, "sampler", "hold", score=s,
                             threshold=cfg.scorer.threshold, reason="awaiting_corroboration")
-        sentlog.archive_review_if_configured(
+        path = sentlog.archive_review_if_configured(
             image, sentlog.review_meta(cfg.name, "hold", etype, s))
+        if path:
+            # Same stamps the live pass leaves via hold_archive: the expiry rescue reads them.
+            group["last_hold_path"] = path
+            group["last_hold_at"] = now
     else:
         log.info("sampler %s frame %d/%d: score %.2f below threshold %.2f",
                  cfg.name, group["frames"], scfg.max_frames, s, cfg.scorer.threshold)
@@ -1571,6 +1591,52 @@ def _suppress_sampler_frame(cfg, group, etype, s, scfg, image, verdict):
                  cfg.name, group["low_streak"])
         monitor.audit_event(cfg, group["event"], etype, "sampler", "early_exit",
                             score=s, threshold=scfg.low_score, reason="low_score_streak")
+
+
+def _rescue_expired_hold(app, cfg, state, group, *, now, secrets, time_str):
+    """Send the archived held frame when a pan_limit recall broke its corroboration.
+
+    A held marginal motion frame waits for a second candidate; a pan-limit recall in
+    that window physically removes the subject, so the second frame can never come and
+    the hold dies as hold_expired (a real person at p0.62 was lost exactly this way,
+    2026-08-31 19:57). When this camera was recalled between the hold and now, the
+    archived hold frame is the best remaining evidence — send it through the normal
+    alert path. Returns True when a rescue send was attempted (and audited); False
+    hands the expiry back to the plain hold_expired accounting.
+    """
+    path = group.get("last_hold_path")
+    held_at = group.get("last_hold_at")
+    recalled_at = state.pan_limit_recall_at.get(cfg.name)
+    if not path or held_at is None or recalled_at is None:
+        return False
+    if not (held_at < recalled_at <= now):
+        return False
+    if not os.path.exists(path):
+        return False                      # review-log retention got there first
+    can_alert, on_alert = alert_gate(state, cfg.name, app.alerts.cooldown, now)
+    if not can_alert("motion"):
+        return False
+    s = group.get("last_hold_score")
+    description = _caption_describe(cfg, secrets["groq_key"], path)
+    caption = notify.build_caption(
+        monitor.TYPE_EMOJI.get("motion", "👁"), time_str(group["event"]),
+        description=description or None, score=s)
+    ok = send_alert_photo(cfg, secrets, path, caption, score=s)
+    monitor.audit_event(cfg, group["event"], "motion", "sampler", "send", score=s,
+                        threshold=cfg.scorer.threshold, telegram=ok,
+                        reason="hold_rescue_recall")
+    if ok:
+        log.info("rescue %s: pan_limit recall broke corroboration, held frame sent (score=%s)",
+                 cfg.name, f"{s:.2f}" if s is not None else "n/a")
+        on_alert("motion")
+        group["sent"] = True
+        group["delivered"] = True
+        state.scene_coordinator.record_delivery(
+            cfg.coordinator.group, cfg.name, "motion", group["event"], now,
+            window=cfg.coordinator.scene_window)
+    else:
+        log.warning("rescue %s: Telegram delivery failed", cfg.name)
+    return True
 
 
 def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
@@ -1596,11 +1662,14 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
         scfg = cfg.sampler
         if sampler.expired(group, now, scfg):
             if group.get("motion_candidates") and not group["sent"]:
-                # A held marginal motion never got its corroborating frame: make the discard
-                # visible so threshold tuning can count expired holds like any other outcome.
-                monitor.audit_event(cfg, group["event"], "motion", "sampler", "drop",
-                                    score=group.get("last_hold_score"),
-                                    threshold=cfg.scorer.threshold, reason="hold_expired")
+                if not _rescue_expired_hold(app, cfg, state, group, now=now,
+                                            secrets=secrets, time_str=time_str):
+                    # A held marginal motion never got its corroborating frame: make the
+                    # discard visible so threshold tuning can count expired holds like any
+                    # other outcome.
+                    monitor.audit_event(cfg, group["event"], "motion", "sampler", "drop",
+                                        score=group.get("last_hold_score"),
+                                        threshold=cfg.scorer.threshold, reason="hold_expired")
             log.info("close group %s: %d follow-up frame(s), sent=%s",
                      cfg.name, group["frames"], group["sent"])
             del state.groups[cfg.name]
@@ -1628,7 +1697,7 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                            if motion_corr
                            else ("drop" if s < cfg.scorer.threshold else "send"))
             if verdict != "send":
-                _suppress_sampler_frame(cfg, group, etype, s, scfg, image, verdict)
+                _suppress_sampler_frame(cfg, group, etype, s, scfg, image, verdict, now=now)
                 continue
             if score is not None and s is None:
                 log.warning("scorer unavailable; sampler passes %s frame through", cfg.name)
@@ -1787,6 +1856,34 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
     return state.twin_fleet
 
 
+def _archive_panlimit_frame(cfg, axis, value, *, now):
+    """Best-effort frame of the out-of-bounds view, grabbed before the recall erases it.
+
+    Deep-night guard interventions were undecidable after the fact — nothing below
+    threshold is archived, so whether the guard pulled the camera off a wall or off a
+    person was guesswork. Straight RTSP with the config credentials (no pytapo client
+    needed); any failure is a debug line, never a reason to skip or delay the recall.
+    """
+    out_dir = sentlog.panlimit_dir_from_env()
+    if out_dir is None:
+        return
+    try:
+        user, password = resolve_rtsp_credentials(cfg)
+        url = snapshot.rtsp_url(cfg.host, user, password,
+                                stream=cfg.rtsp_stream, port=cfg.rtsp_port)
+        image = snapshot.capture_rtsp(url, timeout=cfg.rtsp_timeout, rotate=cfg.rotate)
+        if not image:
+            log.debug("pan_limit %s: evidence grab returned nothing", cfg.name)
+            return
+        try:
+            sentlog.archive_panlimit_frame(out_dir, image, cfg.name,
+                                           str(axis).split()[0], value, now=now)
+        finally:
+            _safe_unlink(image)
+    except Exception:  # noqa: BLE001 - evidence must never block the recall
+        log.debug("pan_limit %s: evidence grab failed", cfg.name, exc_info=True)
+
+
 def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
                     night=True):
     """Soft pan-limit: recall a camera that auto-tracked past its preset span (see
@@ -1824,7 +1921,9 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
                 target = panlimit.limit_target(y, g.get("tilt_bounds"), pl.margin)
                 axis, value = "tilt y", y
             if target is not None:
+                _archive_panlimit_frame(cfg, axis, value, now=now)
                 panlimit.goto_preset(g["ptz"], g["token"], target)
+                state.pan_limit_recall_at[cfg.name] = now
                 log.info("pan_limit %s: %s=%.4f out of bounds -> recall preset %s",
                          cfg.name, axis, value, target)
         except Exception as e:  # noqa: BLE001 - an ONVIF hiccup must not kill the loop

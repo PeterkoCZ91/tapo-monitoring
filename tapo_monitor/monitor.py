@@ -166,7 +166,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 defer=None, score=None, observe=None, poll_observe=None,
                 media_observe=None, latency_observe=None, mute=False, corroborate=None,
                 burst_sent=None,
-                send_alert=None, scene_alert=None):
+                send_alert=None, scene_alert=None, hold_archive=None):
     """Poll one camera once and alert on new detections. Returns the new watermark.
 
     ``mute`` polls and advances the watermark but skips all grabbing/scoring/alerting.
@@ -198,6 +198,10 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         frame as-is, so a caller that does not care keeps the old behaviour.
       scene_alert(etype, event) -> bool — optional cross-camera group gate checked after
         the per-camera cooldown and before snapshot capture.
+      hold_archive(image, etype, score) -> archives one held (corroboration-suppressed)
+        frame, replacing the inline review-log write. The daemon passes one that also
+        remembers the archived path on the sampler group, so an expiring hold broken by
+        a pan-limit recall can still send its evidence.
     """
     started = _time.monotonic()
     try:
@@ -325,8 +329,11 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                     log.info("hold %s: score %.2f awaiting corroboration", etype, s)
                     audit_event(cfg, event, etype, "live", "hold", score=s,
                                 threshold=cfg.scorer.threshold, reason="awaiting_corroboration")
-                    sentlog.archive_review_if_configured(
-                        image, sentlog.review_meta(cfg.name, "hold", etype, s))
+                    if hold_archive is not None:
+                        hold_archive(image, etype, s)
+                    else:
+                        sentlog.archive_review_if_configured(
+                            image, sentlog.review_meta(cfg.name, "hold", etype, s))
                     _observe(observe, event, etype, False)
                     continue
                 if verdict == "drop":

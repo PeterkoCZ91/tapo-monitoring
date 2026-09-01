@@ -847,6 +847,28 @@ def test_run_monitor_hold_archives_review_frame(monkeypatch):
     assert reviews[0][1]["camera"] == "a"
 
 
+def test_run_monitor_hold_uses_injected_hold_archive(monkeypatch):
+    # The daemon injects an archiver that also remembers the archived path on the
+    # sampler group; when it is passed, the inline review-log write must stand down
+    # or every hold would be archived twice.
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: None)
+    monkeypatch.setattr(monitor.sentlog, "archive_review_if_configured",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("inline archive")))
+    archived = []
+
+    class Cam:
+        def getEvents(self):
+            return [_motion_event(100)]
+
+    monitor.run_monitor(
+        Cam(), _cfg_with_scorer(threshold=0.3), 0, now=1000, groq_key="k",
+        telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        score=lambda img: 0.4, corroborate=lambda ev, s: "hold",
+        hold_archive=lambda image, etype, s: archived.append((image, etype, s)))
+    assert archived == [("/tmp/live.jpg", "motion", 0.4)]
+
+
 def test_run_monitor_motion_sends_on_corroborate_send(monkeypatch):
     sent = []
     monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a) or True)

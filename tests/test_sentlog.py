@@ -189,3 +189,52 @@ def test_prune_old_keeps_a_fresh_index(tmp_path):
     index.write_text('{"ts": 1}\n')
     sentlog.prune_old(str(tmp_path), now=1785200000.0, retention_days=2.0)
     assert index.exists()
+
+
+# ── pan-limit log: one frame per guard intervention ───────────────────────────
+
+def test_panlimit_dir_is_sibling_of_review_log():
+    env = {sentlog.ENV_REVIEW_DIR: "/data/tapo/review-log"}
+    assert sentlog.panlimit_dir_from_env(env) == "/data/tapo/panlimit-log"
+
+
+def test_panlimit_dir_falls_back_to_sent_log_sibling():
+    env = {sentlog.ENV_DIR: "/data/tapo/sent-log/"}
+    assert sentlog.panlimit_dir_from_env(env) == "/data/tapo/panlimit-log"
+
+
+def test_panlimit_dir_none_when_no_archive_configured():
+    assert sentlog.panlimit_dir_from_env({}) is None
+
+
+def test_archive_panlimit_frame_writes_named_frame(tmp_path):
+    src = tmp_path / "snap.jpg"
+    src.write_bytes(b"\xff\xd8IMG")
+    out = tmp_path / "panlimit-log"
+    path = sentlog.archive_panlimit_frame(str(out), str(src), "yard", "pan", 0.63,
+                                          now=1785200000.5)
+    assert path is not None
+    saved = out / os.path.basename(path)
+    assert saved.read_bytes() == b"\xff\xd8IMG"
+    assert saved.name.startswith("panlimit_yard_pan+0.6300_")
+    assert saved.name.endswith(".jpg")
+
+
+def test_archive_panlimit_frame_prunes_older_than_two_days(tmp_path):
+    src = tmp_path / "snap.jpg"
+    src.write_bytes(b"\xff\xd8IMG")
+    out = tmp_path / "panlimit-log"
+    out.mkdir()
+    now = 1785200000.0
+    stale = out / "panlimit_yard_pan+0.7000_old.jpg"
+    stale.write_bytes(b"old")
+    os.utime(stale, (now - 3 * 86400, now - 3 * 86400))
+
+    sentlog.archive_panlimit_frame(str(out), str(src), "yard", "tilt", -0.71, now=now)
+
+    assert not stale.exists()
+
+
+def test_archive_panlimit_frame_best_effort_on_missing_source(tmp_path):
+    assert sentlog.archive_panlimit_frame(str(tmp_path), "/no/such/frame.jpg",
+                                          "yard", "pan", 0.63, now=1.0) is None

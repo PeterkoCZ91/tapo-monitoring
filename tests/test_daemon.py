@@ -2102,6 +2102,83 @@ def test_pan_guard_disabled_does_nothing(monkeypatch):
     daemon._pan_guard_pass(app, {}, daemon.MonitorState(), now=1, secrets={}, night=True)
 
 
+def test_pan_guard_recall_stamps_recall_time(monkeypatch):
+    # The sampler's hold-rescue needs to know *when* this camera was last recalled; the
+    # stamp shares the tick's wall-clock `now`, so the two are directly comparable.
+    app = cfg.load_config_from_dict({"cameras": [_raw_cam_dict()]})
+    _patch_panlimit(monkeypatch, pan_x=0.63, gotos=[])
+    state = daemon.MonitorState()
+    daemon._pan_guard_pass(app, {}, state, now=100, secrets={}, night=True)
+    assert state.pan_limit_recall_at["camera-a"] == 100
+
+
+def test_pan_guard_within_bounds_stamps_nothing(monkeypatch):
+    app = cfg.load_config_from_dict({"cameras": [_raw_cam_dict()]})
+    _patch_panlimit(monkeypatch, pan_x=0.58, gotos=[])
+    state = daemon.MonitorState()
+    daemon._pan_guard_pass(app, {}, state, now=100, secrets={}, night=True)
+    assert state.pan_limit_recall_at == {}
+
+
+def test_pan_guard_recall_archives_evidence_before_moving(monkeypatch, tmp_path):
+    # The out-of-bounds view IS the evidence — after the recall it is gone — so the grab
+    # must happen before goto_preset, and land outside the review log (the digest reads
+    # that dir; twenty guard frames a night must not flood it).
+    monkeypatch.setenv("TAPO_REVIEW_LOG_DIR", str(tmp_path / "review-log"))
+    app = cfg.load_config_from_dict({"cameras": [_raw_cam_dict()]})
+    calls = []
+
+    def fake_capture(url, out_dir="/tmp", timeout=15, rotate=0, scale=True, **k):
+        calls.append("grab")
+        frame = tmp_path / "snap.jpg"
+        frame.write_bytes(b"\xff\xd8EVIDENCE")
+        return str(frame)
+
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp", fake_capture)
+    monkeypatch.setattr(daemon.panlimit, "build_ptz", lambda *a, **k: ("PTZ", "tok"))
+    monkeypatch.setattr(daemon.panlimit, "read_preset_bounds",
+                        lambda ptz, tok: (0.39, "1", 0.61, "3"))
+    monkeypatch.setattr(daemon.panlimit, "read_pan_x", lambda ptz, tok: 0.63)
+    monkeypatch.setattr(daemon.panlimit, "goto_preset",
+                        lambda ptz, tok, target: calls.append(target))
+
+    daemon._pan_guard_pass(app, {}, daemon.MonitorState(), now=100, secrets={}, night=True)
+
+    assert calls == ["grab", "3"]
+    saved = list((tmp_path / "panlimit-log").glob("panlimit_camera-a_pan+0.6300_*.jpg"))
+    assert len(saved) == 1
+    assert saved[0].read_bytes() == b"\xff\xd8EVIDENCE"
+
+
+def test_pan_guard_evidence_failure_never_blocks_recall(monkeypatch, tmp_path):
+    monkeypatch.setenv("TAPO_REVIEW_LOG_DIR", str(tmp_path / "review-log"))
+    app = cfg.load_config_from_dict({"cameras": [_raw_cam_dict()]})
+    gotos = []
+    _patch_panlimit(monkeypatch, pan_x=0.63, gotos=gotos)
+
+    def broken_capture(*a, **k):
+        raise RuntimeError("rtsp timeout")
+
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp", broken_capture)
+    state = daemon.MonitorState()
+    daemon._pan_guard_pass(app, {}, state, now=100, secrets={}, night=True)
+    assert gotos == ["3"]
+    assert state.pan_limit_recall_at["camera-a"] == 100
+    assert "ptz" in state.pan_guard["camera-a"]   # not treated as an ONVIF failure
+
+
+def test_pan_guard_skips_grab_without_archive_dir(monkeypatch):
+    monkeypatch.delenv("TAPO_REVIEW_LOG_DIR", raising=False)
+    monkeypatch.delenv("TAPO_SENT_LOG_DIR", raising=False)
+    app = cfg.load_config_from_dict({"cameras": [_raw_cam_dict()]})
+    gotos = []
+    _patch_panlimit(monkeypatch, pan_x=0.63, gotos=gotos)
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no grab")))
+    daemon._pan_guard_pass(app, {}, daemon.MonitorState(), now=100, secrets={}, night=True)
+    assert gotos == ["3"]
+
+
 # ── crop_to_subject (zoom) ────────────────────────────────────────────────────
 
 def test_compute_crop_pads_and_centres_on_box():
@@ -3256,6 +3333,51 @@ def test_process_sampler_hold_archives_review_frame(monkeypatch):
     assert len(reviews) == 1 and reviews[0]["verdict"] == "hold"
 
 
+def test_sampler_hold_remembers_archived_frame(monkeypatch):
+    # The expiry rescue can only send what it can still find: the group keeps the
+    # archived hold frame's path and the time the hold was taken.
+    reviews = []
+    monkeypatch.setattr(daemon.sentlog, "archive_review_if_configured",
+                        lambda path, meta, **k: reviews.append(meta) or "/rl/a_hold_p0.40_x.jpg")
+    sent = []
+    app = _sampler_app(threshold=0.3, motion_send=0.6)
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    _run_sampler(app, state, 1035, sent, monkeypatch, score=0.4)
+    assert sent == []
+    g = state.groups["a"]
+    assert g["last_hold_path"] == "/rl/a_hold_p0.40_x.jpg"
+    assert g["last_hold_at"] == 1035
+    assert len(reviews) == 1
+
+
+def test_live_hold_remembers_archived_frame(monkeypatch):
+    # The proven loss (p0.62, 2026-08-31 19:57) held on the *live* pass and the follow-up
+    # frames only dropped, so the live hold must stamp the group exactly like the sampler.
+    from tapo_monitor import monitor as mon
+    monkeypatch.setattr(mon.notify, "send_photo", lambda *a, **k: True)
+    monkeypatch.setattr(mon.enrich, "groq_describe", lambda *a, **k: "x")
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, img, timeout=10, tiles=1, **kw: {"person": 0.4, "animal": 0.0})
+    reviews = []
+    monkeypatch.setattr(daemon.sentlog, "archive_review_if_configured",
+                        lambda path, meta, **k: reviews.append(meta) or "/rl/a_hold_p0.40_x.jpg")
+    app = _corroboration_app(motion_send=0.6)
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": "k", "face_names": {}}
+    cam = _FakeEventCam([[{"start_time": 1000, "events_1": 2}]])   # bare non-PIR motion
+
+    daemon.run_monitor_pass(app, {"a": cam}, state, now=1005, secrets=secrets,
+                            snapshot_for=lambda c: (lambda cam_, ev: "/tmp/x.jpg"),
+                            time_str=lambda e: "t")
+
+    g = state.groups["a"]
+    assert g["motion_candidates"] == 1
+    assert g["last_hold_path"] == "/rl/a_hold_p0.40_x.jpg"
+    assert g["last_hold_at"] == 1005
+    assert len(reviews) == 1                  # archived once, not once per module
+
+
 def test_process_sampler_hold_clears_low_score_streak(monkeypatch):
     # A marginal (held) frame is evidence the group is not empty, so it must clear the
     # low-score streak like any other above-low frame — otherwise low/low/hold/low closes
@@ -3344,6 +3466,110 @@ def test_sampler_expired_group_without_candidates_not_audited(monkeypatch, caplo
     assert "a" not in state.groups
     assert sent == []
     assert "hold_expired" not in caplog.text
+
+
+# ── hold rescue: a pan_limit recall broke the corroboration wait ──────────────
+
+def _rescue_group(tmp_path, held_at=1100, score=0.62):
+    frame = tmp_path / "a_hold_p0.62_x.jpg"
+    frame.write_bytes(b"\xff\xd8HELD")
+    g = _group()
+    g["motion_candidates"] = 1
+    g["last_hold_score"] = score
+    g["last_hold_path"] = str(frame)
+    g["last_hold_at"] = held_at
+    return g, str(frame)
+
+
+def test_expired_hold_rescued_after_pan_limit_recall(monkeypatch, tmp_path, caplog):
+    # A held marginal motion waits for a second frame; a pan_limit recall mid-wait yanks
+    # the subject out of view, so the second frame can never come. The archived hold frame
+    # is the best remaining evidence: send it instead of dropping it as hold_expired.
+    sent = []
+    app = _sampler_app(threshold=0.3, motion_send=0.6)
+    state = daemon.MonitorState()
+    g, frame = _rescue_group(tmp_path)
+    state.groups["a"] = g
+    state.pan_limit_recall_at["a"] = 1150     # recall landed mid-hold
+    with caplog.at_level("INFO", logger="tapo_monitor.monitor"):
+        _run_sampler(app, state, 1271, sent, monkeypatch)  # past window+gap
+    assert [img for img, _cap in sent] == [frame]
+    assert state.last_alert[("a", "motion")] == 1271      # cooldown recorded
+    assert "a" not in state.groups
+    assert "action=send" in caplog.text
+    assert "reason=hold_rescue_recall" in caplog.text
+    assert "score=0.6200" in caplog.text
+    assert "hold_expired" not in caplog.text
+
+
+def test_expired_hold_without_recall_stays_hold_expired(monkeypatch, tmp_path, caplog):
+    sent = []
+    app = _sampler_app(threshold=0.3, motion_send=0.6)
+    state = daemon.MonitorState()
+    g, _frame = _rescue_group(tmp_path)
+    state.groups["a"] = g                     # no recall stamped for this camera
+    with caplog.at_level("INFO", logger="tapo_monitor.monitor"):
+        _run_sampler(app, state, 1271, sent, monkeypatch)
+    assert sent == []
+    assert "reason=hold_expired" in caplog.text
+
+
+def test_expired_hold_ignores_recall_before_the_hold(monkeypatch, tmp_path, caplog):
+    # A recall that happened before the frame was held cannot have broken its
+    # corroboration — only a recall inside (last_hold_at, now) rescues.
+    sent = []
+    app = _sampler_app(threshold=0.3, motion_send=0.6)
+    state = daemon.MonitorState()
+    g, _frame = _rescue_group(tmp_path, held_at=1100)
+    state.groups["a"] = g
+    state.pan_limit_recall_at["a"] = 1050
+    with caplog.at_level("INFO", logger="tapo_monitor.monitor"):
+        _run_sampler(app, state, 1271, sent, monkeypatch)
+    assert sent == []
+    assert "reason=hold_expired" in caplog.text
+
+
+def test_expired_hold_rescue_respects_cooldown(monkeypatch, tmp_path, caplog):
+    sent = []
+    app = _sampler_app(threshold=0.3, motion_send=0.6)
+    state = daemon.MonitorState()
+    g, _frame = _rescue_group(tmp_path)
+    state.groups["a"] = g
+    state.pan_limit_recall_at["a"] = 1150
+    state.last_alert[("a", "motion")] = 1200  # inside the 120 s cooldown at now=1271
+    with caplog.at_level("INFO", logger="tapo_monitor.monitor"):
+        _run_sampler(app, state, 1271, sent, monkeypatch)
+    assert sent == []
+    assert "reason=hold_expired" in caplog.text
+
+
+def test_expired_hold_rescue_missing_file_falls_back(monkeypatch, tmp_path, caplog):
+    sent = []
+    app = _sampler_app(threshold=0.3, motion_send=0.6)
+    state = daemon.MonitorState()
+    g, frame = _rescue_group(tmp_path)
+    os.unlink(frame)                          # review-log retention beat us to it
+    state.groups["a"] = g
+    state.pan_limit_recall_at["a"] = 1150
+    with caplog.at_level("INFO", logger="tapo_monitor.monitor"):
+        _run_sampler(app, state, 1271, sent, monkeypatch)
+    assert sent == []
+    assert "reason=hold_expired" in caplog.text
+
+
+def test_expired_hold_rescue_failed_delivery_not_recorded(monkeypatch, tmp_path, caplog):
+    sent = []
+    app = _sampler_app(threshold=0.3, motion_send=0.6)
+    state = daemon.MonitorState()
+    g, frame = _rescue_group(tmp_path)
+    state.groups["a"] = g
+    state.pan_limit_recall_at["a"] = 1150
+    with caplog.at_level("INFO", logger="tapo_monitor.monitor"):
+        _run_sampler(app, state, 1271, sent, monkeypatch, delivered=False)
+    assert [img for img, _cap in sent] == [frame]         # attempted
+    assert ("a", "motion") not in state.last_alert        # but no cooldown for a failure
+    assert "telegram=false" in caplog.text
+    assert "reason=hold_rescue_recall" in caplog.text
 
 
 def test_sampler_grab_failure_counts_attempt(monkeypatch):
