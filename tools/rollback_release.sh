@@ -20,6 +20,8 @@ set -euo pipefail
 
 die() { echo "rollback_release: $*" >&2; exit 1; }
 
+# shellcheck disable=SC2088  # the tilde is deliberately literal here: the remote side
+# expands it against the host's $HOME, not the workstation's.
 host="" release="" unit="tapo-monitor.service" python_bin="~/tapo-env/bin/python" restart_cmd=""
 while (($#)); do
     case "$1" in
@@ -37,6 +39,8 @@ restart_cmd="${restart_cmd:-sudo systemctl restart $unit}"
 
 # ── no release named: show what the host has to offer ─────────────────────────────────
 if [[ -z "$release" ]]; then
+    # shellcheck disable=SC2029  # client-side expansion is the point: the arguments are
+    # %q-quoted (or a literal command) composed here and executed on the host.
     ssh "$host" bash -s <<'REMOTE'
 set -euo pipefail
 root="$HOME/tapo-monitor"
@@ -60,6 +64,8 @@ fi
 
 # ── re-point, restart, verify ──────────────────────────────────────────────────────────
 remote_args="$(printf ' %q' "$release")"
+# shellcheck disable=SC2029  # client-side expansion is the point: the arguments are
+# %q-quoted (or a literal command) composed here and executed on the host.
 ssh "$host" "bash -s --$remote_args" <<'REMOTE'
 set -euo pipefail
 release="$1"
@@ -78,9 +84,13 @@ echo "rollback_release: current -> releases/$release"
 REMOTE
 
 echo "rollback_release: restarting via: $restart_cmd"
+# shellcheck disable=SC2029  # client-side expansion is the point: the arguments are
+# %q-quoted (or a literal command) composed here and executed on the host.
 ssh "$host" "$restart_cmd"
 
 remote_args="$(printf ' %q' "$release" "$python_bin")"
+# shellcheck disable=SC2029  # client-side expansion is the point: the arguments are
+# %q-quoted (or a literal command) composed here and executed on the host.
 ssh "$host" "bash -s --$remote_args" <<'REMOTE'
 set -euo pipefail
 release="$1" python_bin="$2"

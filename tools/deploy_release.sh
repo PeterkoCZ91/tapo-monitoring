@@ -37,6 +37,8 @@ KEEP_RELEASES=5   # per host, newest first; the one `current` points to is never
 
 die() { echo "deploy_release: $*" >&2; exit 1; }
 
+# shellcheck disable=SC2088  # the tilde is deliberately literal here: the remote side
+# expands it against the host's $HOME, not the workstation's.
 host="" ref="HEAD" unit="tapo-monitor.service" python_bin="~/tapo-env/bin/python"
 restart_cmd="" env_file=""
 while (($#)); do
@@ -71,12 +73,16 @@ release="$(date -u +%Y%m%dT%H%M%SZ)-$fingerprint"
 echo "deploy_release: shipping $ref as releases/$release to $host"
 
 # ── transfer: full package into its own directory, touching nothing that runs ─────────
+# shellcheck disable=SC2029  # the release name is generated locally on purpose; only
+# $HOME stays escaped for the host.
 tar -C "$stage" -cf - . | ssh "$host" "set -e
     dir=\"\$HOME/tapo-monitor/releases/$release\"
     mkdir -p \"\$dir\" && tar -C \"\$dir\" -xf -"
 
 # ── on the host: snapshot config+env, selfcheck inside the release, atomic switch ─────
 remote_args="$(printf ' %q' "$release" "$unit" "$python_bin" "$env_file")"
+# shellcheck disable=SC2029  # client-side expansion is the point: the arguments are
+# %q-quoted (or a literal command) composed here and executed on the host.
 ssh "$host" "bash -s --$remote_args" <<'REMOTE'
 set -euo pipefail
 release="$1" unit="$2" python_bin="$3" env_file="$4"
@@ -136,9 +142,13 @@ REMOTE
 
 # ── restart, then believe only what the host reports back ─────────────────────────────
 echo "deploy_release: restarting via: $restart_cmd"
+# shellcheck disable=SC2029  # client-side expansion is the point: the arguments are
+# %q-quoted (or a literal command) composed here and executed on the host.
 ssh "$host" "$restart_cmd"
 
 remote_args="$(printf ' %q' "$fingerprint" "$python_bin" "$KEEP_RELEASES")"
+# shellcheck disable=SC2029  # client-side expansion is the point: the arguments are
+# %q-quoted (or a literal command) composed here and executed on the host.
 ssh "$host" "bash -s --$remote_args" <<'REMOTE'
 set -euo pipefail
 expected="$1" python_bin="$2" keep="$3"
