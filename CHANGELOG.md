@@ -5,6 +5,16 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Unknown configuration keys are warned about, with the full key path and the closest
+  real key. A mistyped key silently took its default — a dropped `rotate` costs about a
+  third of the person score, which is a silent alert killer. The known keys are derived
+  from the dataclasses themselves so the check cannot rot, and the free-form sections
+  (`telegram`, `groq`, `faces`) stay opaque on purpose. Warn-only for now; the hard fail
+  waits until the warnings have soaked in production.
+- The daily digest's fleet block carries the running package fingerprint, and when
+  `TAPO_EXPECTED_FINGERPRINT` names the intended release a mismatch is a failed check
+  that takes the OK headline with it. Silent fingerprint drift has been found by hand
+  twice; the digest is where it should have been visible.
 - A hold that a pan-limit recall broke is sent instead of dropped. A marginal motion
   frame waits for a second candidate before it may alert; when the guard recalls the
   camera mid-wait, the subject leaves the frame and the second candidate structurally
@@ -122,6 +132,19 @@ All notable changes to this project are documented here.
   now explicit, and test doubles accept the keywords the production caller actually sends.
 
 ### Fixed
+- The repair allow-list means one thing. `auto_fix` and `allowed_repairs` bounded the
+  guard repairs even while `reliability.enabled` was false, so trimming the list under a
+  disabled block silently switched off re-assertions that predate the whole feature —
+  person detection on, vehicle detection off, the people-only tracking filter. A disabled
+  reliability block is now inert: the guard repairs run as they always had, and the two
+  keys constrain them only while the block is enabled.
+- The scorer's metrics journal rotates on size (32 MiB default) as well as age, so a
+  burst of fat records cannot outgrow a disk between two age checks. Rotation never
+  touches the state sidecar, so cumulative counters still survive restarts.
+- The ledger sanitiser scrubs IPv4 addresses and session-token shapes itself instead of
+  trusting every caller to do it first. pytapo error strings carry the camera address and
+  the session token, and one unsanitised call site is all it takes; floats, versions and
+  camera names are provably untouched.
 - Every delivered Telegram text notification leaves a journal line — drift alerts and
   recoveries, camera outage 🔴/🟢, the daemon's own stall watchdog and the event-API
   notices. Only failed deliveries were logged, so from the host a delivered drift alert

@@ -146,14 +146,16 @@ Status: **core v1 shipped; optional exporters remain planned**
 - [ ] Close the one gap a self-reported heartbeat cannot: a host cannot report that it is
   dead, and nobody notices an absent message. This needs an external dead-man's switch
   where the alarm is raised by something other than the host being watched.
-- [ ] Make the repair policy consistent: `auto_fix` and `allowed_repairs` take effect even
-  when `reliability.enabled` is false, so trimming the allow-list silently disables
+- [x] Make the repair policy consistent: `auto_fix` and `allowed_repairs` took effect even
+  when `reliability.enabled` was false, so trimming the allow-list silently disabled
   repairs that guard known regressions (person detection off, auto-track without the
-  people-only filter).
-- [ ] Rotate the metrics journal on size as well as age, so a burst cannot outgrow a disk
-  between two age checks.
-- [ ] Sanitise addresses in the ledger at the sanitiser, not only at each caller: extend
-  the sensitive-value pattern with IPv4 and session-token shapes as defence in depth.
+  people-only filter). Decided: a disabled reliability block is inert — the guard repairs
+  run as they always had, and the two keys constrain them only while the block is enabled.
+- [x] Rotate the metrics journal on size as well as age, so a burst cannot outgrow a disk
+  between two age checks. Size rotation never touches the state sidecar, so cumulative
+  counters still survive restarts.
+- [x] Sanitise addresses in the ledger at the sanitiser, not only at each caller: the
+  sensitive-value pattern now covers IPv4 and session-token shapes as defence in depth.
 
 The remaining exporter item is operationally optional: the CLI, twin state and scorer
 `/health`/`/metrics` endpoints already provide machine-readable status without opening a
@@ -223,12 +225,15 @@ about making a deploy verifiable rather than hopeful.
   to start from an absolute interpreter and a `__main__` entry point.
 - [ ] Snapshot each host's config and env file into the release directory it belongs to,
   so a rollback restores the configuration that matched that code.
-- [ ] Reject unknown configuration keys (warn first, then fail). A mistyped key currently
-  takes its default silently, and a dropped `rotate` costs roughly a third of the person
-  score — a silent alert killer.
-- [ ] Nightly fleet-drift report: compare each host's fingerprint against the intended
-  release and say so once when a host has diverged. Manual inventory found exactly this
-  drift after a header change had already shipped.
+- [x] Reject unknown configuration keys (warn first, then fail). A mistyped key silently
+  took its default, and a dropped `rotate` costs roughly a third of the person score — a
+  silent alert killer. The warn phase is shipped: full key path plus the closest real key,
+  derived from the dataclasses so the check cannot rot. The hard fail deliberately waits
+  until the warnings have soaked in production.
+- [x] Nightly fleet-drift report: the daily digest's fleet block carries the running
+  package fingerprint, and when `TAPO_EXPECTED_FINGERPRINT` names the intended release a
+  mismatch is a failed check that removes the OK headline. Manual inventory found exactly
+  this drift twice after a change had already shipped.
 - [ ] Make the repository's unit templates match a real host, or ship a provisioning
   script. The shared scorer currently runs a hand-written unit with hardcoded paths, so a
   replacement cannot be built from the repository alone.
