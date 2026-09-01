@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Changed
+- `deploy_release.sh` and `rollback_release.sh` keep `TAPO_EXPECTED_FINGERPRINT` current
+  when the host has opted in: the release they just switched to is by definition the
+  intended one, and a manual update step that must follow every deploy is a step that
+  will eventually be forgotten — turning the drift check into a false alarm the day
+  after it was needed most. Update-only; a host without the line stays unenrolled.
+
 ## [0.5.0] - 2026-09-01
 
 ### Added

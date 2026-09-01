@@ -138,6 +138,16 @@ tmp_link="$root/.current.next.$$"
 ln -s "releases/$release" "$tmp_link"
 mv -T "$tmp_link" "$root/current"
 echo "deploy_release: current -> releases/$release"
+
+# Keep the digest's drift check pointing at what this deploy intended — the fingerprint
+# is the release name's own suffix. Update-only: a host that never opted into
+# TAPO_EXPECTED_FINGERPRINT stays unenrolled, and the daemon reads the new value on the
+# restart that follows.
+if [[ -n "$env_file" && -w "$env_file" ]] \
+        && grep -q '^TAPO_EXPECTED_FINGERPRINT=' "$env_file"; then
+    sed -i "s/^TAPO_EXPECTED_FINGERPRINT=.*/TAPO_EXPECTED_FINGERPRINT=${release##*-}/" "$env_file"
+    echo "deploy_release: TAPO_EXPECTED_FINGERPRINT -> ${release##*-}"
+fi
 REMOTE
 
 # ── restart, then believe only what the host reports back ─────────────────────────────

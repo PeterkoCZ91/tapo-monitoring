@@ -379,9 +379,12 @@ digest therefore carries a fleet block: which cameras are reachable, the daemon'
 the shared scoring service (asked once a day, because when it dies alerts stop at *every*
 site at once), the local recorder's newest file, the day's alert counts from the sent log,
 and any self-heal a camera is refusing. It also names the running package fingerprint (the
-value `tapo-monitor version` prints); set `TAPO_EXPECTED_FINGERPRINT=<fingerprint>` in the
-daemon's environment file after a deploy and a mismatch becomes a failed check like any
-other — silent code drift has twice been found only by manual inventory, after the fact.
+value `tapo-monitor version` prints); set `TAPO_EXPECTED_FINGERPRINT=<fingerprint>` once in
+the daemon's environment file and a mismatch becomes a failed check like any other — silent
+code drift has twice been found only by manual inventory, after the fact. From then on
+`deploy_release.sh` and `rollback_release.sh` keep the value current themselves: whatever
+they just switched `current` to is by definition the intended release. They only ever
+update an existing line — a host without one stays unenrolled.
 
 Two rules keep it honest. It only claims `Fleet OK` for what it actually checked — a host
 with no recorder gets no recorder line rather than a reassuring one, and a camera whose

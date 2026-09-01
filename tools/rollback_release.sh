@@ -63,12 +63,12 @@ REMOTE
 fi
 
 # ── re-point, restart, verify ──────────────────────────────────────────────────────────
-remote_args="$(printf ' %q' "$release")"
+remote_args="$(printf ' %q' "$release" "$unit")"
 # shellcheck disable=SC2029  # client-side expansion is the point: the arguments are
 # %q-quoted (or a literal command) composed here and executed on the host.
 ssh "$host" "bash -s --$remote_args" <<'REMOTE'
 set -euo pipefail
-release="$1"
+release="$1" unit="$2"
 root="$HOME/tapo-monitor"
 [[ -d "$root/releases/$release" ]] || { echo "rollback_release: no $root/releases/$release on this host — run without a release name to list them" >&2; exit 1; }
 if [[ -e "$root/current" && ! -L "$root/current" ]]; then
@@ -81,6 +81,16 @@ tmp_link="$root/.current.next.$$"
 ln -s "releases/$release" "$tmp_link"
 mv -T "$tmp_link" "$root/current"
 echo "rollback_release: current -> releases/$release"
+
+# A rollback is the new intent: without this, the next digest would report the release
+# the operator deliberately returned to as drift. Update-only, same as the deploy.
+env_file="$(systemctl show -p EnvironmentFiles --value "$unit" 2>/dev/null \
+    | tr ' ' '\n' | sed 's/^-//' | grep -m1 '^/' || true)"
+if [[ -n "$env_file" && -w "$env_file" ]] \
+        && grep -q '^TAPO_EXPECTED_FINGERPRINT=' "$env_file"; then
+    sed -i "s/^TAPO_EXPECTED_FINGERPRINT=.*/TAPO_EXPECTED_FINGERPRINT=${release##*-}/" "$env_file"
+    echo "rollback_release: TAPO_EXPECTED_FINGERPRINT -> ${release##*-}"
+fi
 REMOTE
 
 echo "rollback_release: restarting via: $restart_cmd"
