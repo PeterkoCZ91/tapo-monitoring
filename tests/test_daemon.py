@@ -1301,6 +1301,33 @@ def test_stall_watchdog_alerts_once_then_recovers(monkeypatch):
     assert len(sent) == 2 and sent[1].startswith("🟢")
 
 
+def test_tick_records_a_completed_tick(monkeypatch):
+    # The status endpoint reports "last tick result/time"; the tick has to write it.
+    app = _app_with_stall_threshold(900)
+    state = daemon.MonitorState()
+    monkeypatch.setattr(daemon.notify, "send_text", lambda *a, **k: True)
+    monkeypatch.setattr(daemon, "loop_step", lambda *a, **k: 1000)
+    daemon.tick(app, {}, state, now=1000, secrets={"telegram_token": "t", "telegram_chat": "c"},
+                last_control=None, control_interval=60)
+    assert state.last_tick_ok is True
+    assert state.last_tick_at == 1000
+
+
+def test_tick_records_a_failed_tick(monkeypatch):
+    app = _app_with_stall_threshold(900)
+    state = daemon.MonitorState()
+    monkeypatch.setattr(daemon.notify, "send_text", lambda *a, **k: True)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(daemon, "loop_step", boom)
+    daemon.tick(app, {}, state, now=1060, secrets={"telegram_token": "t", "telegram_chat": "c"},
+                last_control=None, control_interval=60)
+    assert state.last_tick_ok is False
+    assert state.last_tick_at == 1060
+
+
 def test_stall_watchdog_retries_undelivered_alert(monkeypatch):
     # A swallowed Telegram message must not permanently mute an outage whose whole
     # symptom is silence — the alert is due again on the next tick.

@@ -397,6 +397,36 @@ def test_observability_rejects_unsafe_ranges(key, value):
         cfg.load_config_from_dict(data)
 
 
+def test_status_endpoint_defaults_off_and_localhost():
+    obs = cfg.load_config_from_dict(_minimal()).observability
+    assert obs.status_port == 0
+    assert obs.status_bind == "127.0.0.1"
+
+
+def test_status_endpoint_opt_in_round_trip():
+    data = {
+        "observability": {"status_port": 8730, "status_bind": "192.0.2.20"},
+        "cameras": [{"name": "front", "host": "192.0.2.50"}],
+    }
+    obs = cfg.load_config_from_dict(data).observability
+    assert obs.status_port == 8730
+    assert obs.status_bind == "192.0.2.20"
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("status_port", -1), ("status_port", 65536), ("status_port", "web"),
+     ("status_bind", ""), ("status_bind", 42)],
+)
+def test_status_endpoint_rejects_invalid_values(key, value):
+    data = {
+        "observability": {key: value},
+        "cameras": [{"name": "front", "host": "192.0.2.50"}],
+    }
+    with pytest.raises(cfg.ConfigError, match=key):
+        cfg.load_config_from_dict(data)
+
+
 # ── resolve_camera_credentials (monkeypatched env) ───────────────────────────
 
 def _cred_cam(**overrides):

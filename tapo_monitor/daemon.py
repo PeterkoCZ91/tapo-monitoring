@@ -50,6 +50,7 @@ from . import (
     sdclip,
     sentlog,
     snapshot,
+    statusd,
     tracking,
     twin,
     weather,
@@ -386,6 +387,8 @@ class MonitorState:
     ``rtsp_reachable``    latest event-triggered RTSP snapshot outcome per camera.
     ``twin_fleet``        latest redacted Digital Twin entry per camera.
     ``groups``            open sampler event-groups per camera (see tapo_monitor.sampler).
+    ``last_tick_at``      wall time of the most recent tick attempt.
+    ``last_tick_ok``      whether that tick completed without raising.
     """
     last_seen: dict = field(default_factory=dict)
     last_alert: dict = field(default_factory=dict)
@@ -422,6 +425,10 @@ class MonitorState:
     event_ledger: object | None = None
     tick_fail_since: float | None = None
     stall_alerted: bool = False
+    # Read by the status endpoint: "did the last tick complete, and when was it?"
+    # None until the first tick has run.
+    last_tick_at: float | None = None
+    last_tick_ok: bool | None = None
     ledger_handler: object | None = None
     pending_sd: list = field(default_factory=list)
     groups: dict = field(default_factory=dict)
@@ -2130,6 +2137,9 @@ def main(argv=None):  # pragma: no cover - thin entry point
             log.info("event ledger initialized: %s", state.event_ledger.path)
         except Exception as exc:  # noqa: BLE001 - observability must not block startup
             log.warning("event ledger initialization failed: %s", type(exc).__name__)
+    # Opt-in JSON status endpoint (observability.status_port). start() contains its own
+    # failures and the thread is a daemon, so the monitor loop owes it nothing.
+    statusd.start(app, state, started_at=_time.time())
     secrets = resolve_secrets(app)
     log.info("loaded %d camera(s); poll events every %ds, control every %ds; face_names=%d known",
              len(app.cameras), poll_interval, control_interval, len(secrets.get("face_names") or {}))
@@ -2178,6 +2188,8 @@ def tick(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     except Exception as e:  # noqa: BLE001 - one bad tick must not end the daemon
         tick_ok = False
         log.exception("tick error: %s", e)
+    state.last_tick_ok = tick_ok
+    state.last_tick_at = now
     stall_watchdog(app, state, secrets, ok=tick_ok, now=now)
     return last_control
 

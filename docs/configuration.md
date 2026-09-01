@@ -545,6 +545,8 @@ observability:
   ledger: false
   ledger_retention_days: 30
   shadow_match_window: 20
+  status_port: 0
+  status_bind: 127.0.0.1
 ```
 
 - All observability features are opt-in.
@@ -553,6 +555,10 @@ observability:
 - `ledger` stores normalized metadata and decisions, never media.
 - `shadow_match_window` is the intended correlation window for integrations; the current
   CLI report accepts an explicit `--window` and defaults to the same 20 seconds.
+- `status_port` (1–65535) serves `GET /status` — a JSON summary of daemon and fleet
+  state — when non-zero; 0 or absent keeps it off. The server binds `status_bind`,
+  which defaults to `127.0.0.1`: the endpoint is unauthenticated, so exposing it
+  beyond the host is the operator's explicit choice, never a default.
 
 State path overrides:
 

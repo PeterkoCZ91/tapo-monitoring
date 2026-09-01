@@ -53,6 +53,9 @@ observability:
   ledger: false            # local SQLite event/decision ledger (TAPO_LEDGER_FILE overrides)
   ledger_retention_days: 30
   shadow_match_window: 20  # seconds for camera ↔ independent shadow observation matching
+  # status_port: 8730      # serve GET /status (JSON daemon+fleet summary); 0/absent = off
+  # status_bind: 127.0.0.1 # localhost by default on purpose (no auth) — widening it is
+  #                        # an explicit operator choice, e.g. a VPN interface address
 
 reliability:
   enabled: false       # enable layered health, recorder continuity and latency metrics

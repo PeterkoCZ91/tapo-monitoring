@@ -152,6 +152,54 @@ miss. Clock alignment, worker coverage and detector calibration must be checked 
 The independent always-watching worker is the next major phase; the foundation delivered
 here is its privacy-safe ingestion, storage and reporting contract.
 
+## JSON status endpoint
+
+The daemon can serve the state it already holds as one machine-readable page, so a
+dashboard, a health check or a colleague's script can ask "how is this host doing"
+without parsing logs or reading state files. It is off by default; a non-zero
+`observability.status_port` starts a small HTTP server on a daemon thread at startup:
+
+```yaml
+observability:
+  status_port: 8730
+  # status_bind: 127.0.0.1   # the default; widen deliberately, e.g. to a VPN address
+```
+
+`GET /status` answers with a single JSON object: the running package version and
+fingerprint, the process start time, the current time, the last tick's outcome, and a
+per-camera summary reduced from the redacted Digital Twin state — layered health, the
+open drift count and the latest reachability observation:
+
+```json
+{
+  "package": {"version": "0.4.0", "fingerprint": "1a2b3c4d5e6f"},
+  "started_at": 1710000000.0,
+  "now": 1710003600.0,
+  "tick": {"ok": true, "at": 1710003598.0},
+  "cameras": {
+    "front": {
+      "reachable": true,
+      "health": {"status": "ok", "layers": {"network": "ok", "api": "ok",
+                 "events": "ok", "rtsp": "ok", "storage": "ok"}},
+      "drift_count": 0,
+      "probed_at": 1710003300.0
+    }
+  }
+}
+```
+
+A camera the twin has not probed yet reports `null` for the twin-derived fields. Every
+other path is 404 and only GET is answered. The payload is assembled from state the
+daemon already maintains: a request triggers no camera probe, and no secret, token,
+URL or camera address is ever included.
+
+The server binds `127.0.0.1` unless `status_bind` says otherwise, and that default is
+deliberate — the endpoint has no authentication, so making it reachable beyond the
+host must be the operator's explicit decision (a VPN interface address, say), not
+something the package does on its own. The endpoint also cannot cost the monitor loop
+anything: a port that will not bind is a startup warning, and a request that fails is
+a logged 500, never a dead server or a crashed daemon.
+
 ## Development hand-off
 
 The architecture is split deliberately so later work does not require camera hardware:
@@ -161,6 +209,7 @@ The architecture is split deliberately so later work does not require camera har
 - `twin.py`: desired-state mapping and atomic latest-state persistence;
 - `ledger.py`: SQLite observations, decisions, retention and correlation;
 - `daemon.py`: opt-in scheduling using already-connected clients;
+- `statusd.py`: the opt-in JSON status endpoint over already-held state;
 - `cli.py`: offline/operator and external-worker interfaces.
 
 The implementation sequence, remaining gaps and longer research tracks are maintained in

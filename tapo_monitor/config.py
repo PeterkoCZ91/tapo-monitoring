@@ -246,6 +246,11 @@ class ObservabilityConfig:
     ledger: bool = False
     ledger_retention_days: int = 30
     shadow_match_window: int = 20
+    # JSON status endpoint (GET /status). 0 = off, the default. It binds to
+    # ``status_bind``, localhost on purpose: the endpoint is unauthenticated, so
+    # exposing it beyond the host must be the operator's explicit choice.
+    status_port: int = 0
+    status_bind: str = "127.0.0.1"
 
 
 @dataclass
@@ -724,6 +729,15 @@ def load_config_from_dict(data) -> AppConfig:
         raise ConfigError("observability.ledger_retention_days must be >= 1")
     if match_window < 1:
         raise ConfigError("observability.shadow_match_window must be >= 1")
+    try:
+        status_port = int(obs_raw.get("status_port", 0))
+    except (TypeError, ValueError):
+        raise ConfigError("observability.status_port must be an integer") from None
+    if not 0 <= status_port <= 65535:
+        raise ConfigError("observability.status_port must be between 0 and 65535")
+    status_bind = obs_raw.get("status_bind", "127.0.0.1")
+    if not isinstance(status_bind, str) or not status_bind.strip():
+        raise ConfigError("observability.status_bind must be a non-empty string")
     observability = ObservabilityConfig(
         digital_twin=bool(obs_raw.get("digital_twin", False)),
         probe_interval=probe_interval,
@@ -731,6 +745,8 @@ def load_config_from_dict(data) -> AppConfig:
         ledger=bool(obs_raw.get("ledger", False)),
         ledger_retention_days=retention_days,
         shadow_match_window=match_window,
+        status_port=status_port,
+        status_bind=status_bind,
     )
 
     reliability_config = _reliability(data.get("reliability"), "config")
