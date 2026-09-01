@@ -104,9 +104,10 @@ TAPO_SCORER_METRICS_FILE=/opt/tapo-monitor/data/scorer.jsonl
 TAPO_SCORER_METRICS_PERSIST_SECONDS=60
 TAPO_SCORER_METRICS_RETENTION_DAYS=7
 TAPO_SCORER_METRICS_RETENTION_FILES=8
+TAPO_SCORER_METRICS_MAX_JOURNAL_BYTES=33554432
 ```
 
-The four `TAPO_SCORER_METRICS_*` values are read from this file by the process itself and
+The `TAPO_SCORER_METRICS_*` values are read from this file by the process itself and
 never appear in `ExecStart`: an undefined `${VAR}` there expands to nothing, and the
 service would exit before the model loads — under `Restart=always` that is an invisible
 crash loop caused by an observability setting. Unset, blank and unparseable values all
@@ -131,10 +132,14 @@ tools/check_scorer_rollout.sh http://127.0.0.1:8766
 When `TAPO_SCORER_METRICS_FILE` is set, the scorer also writes one aggregate JSON line
 after the configured persistence interval. The small `.state` sidecar restores cumulative
 counters after a restart. The current JSONL file rotates once its **oldest record** is
-older than the retention window and keeps eight rotated files; it contains timestamps,
-counters, latency totals and sanitised failure reasons only — never JPEGs, URLs, camera
-names or client addresses. The age deliberately comes from the first record rather than
-the file mtime, which an every-minute append keeps permanently fresh.
+older than the retention window — or, whichever comes first, once the file itself
+outgrows `TAPO_SCORER_METRICS_MAX_JOURNAL_BYTES` (32 MiB by default), so a burst of fat
+records cannot outgrow a small disk between two age checks — and keeps eight rotated
+files; it contains timestamps, counters, latency totals and sanitised failure reasons
+only — never JPEGs, URLs, camera names or client addresses. The age deliberately comes
+from the first record rather than the file mtime, which an every-minute append keeps
+permanently fresh. Rotation of either kind never touches the `.state` sidecar, so the
+cumulative counters survive it.
 
 Point each camera's `scorer.url` at the service:
 

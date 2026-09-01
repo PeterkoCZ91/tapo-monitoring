@@ -32,6 +32,11 @@ JOURNAL_STAMP = "%Y-%m-%dT%H:%M:%SZ"
 METRICS_PERSIST_SECONDS = 60.0
 METRICS_RETENTION_DAYS = 7.0
 METRICS_RETENTION_FILES = 8
+# Size backstop for the journal, on top of the age rotation. Nominal growth is ~2 MB a
+# day, so seven retention days fit in ~14 MB and this cap never fires in normal
+# operation — it exists so a burst of fat records cannot outgrow a small disk between
+# two age checks.
+METRICS_MAX_JOURNAL_BYTES = 32 * 1024 * 1024
 
 
 def _parse_stamp(value):
@@ -100,13 +105,14 @@ class ScorerMetrics:
     )
 
     def __init__(self, metrics_file=None, persist_seconds=60, retention_days=7,
-                 retention_files=8):
+                 retention_files=8, max_journal_bytes=METRICS_MAX_JOURNAL_BYTES):
         self._lock = threading.Lock()
         self._metrics_file = os.fspath(metrics_file) if metrics_file else None
         self._state_file = f"{self._metrics_file}.state" if self._metrics_file else None
         self._persist_seconds = max(0.0, float(persist_seconds))
         self._retention_seconds = max(1.0, float(retention_days) * 24 * 60 * 60)
         self._retention_files = max(1, int(retention_files))
+        self._max_journal_bytes = max(1, int(max_journal_bytes))
         self._last_persist = None
         self._journal_started = None
         self._request_samples = deque(maxlen=LATENCY_SAMPLE_LIMIT)
@@ -255,9 +261,21 @@ class ScorerMetrics:
         self._journal_started = started
         return started
 
+    def _journal_oversized(self):
+        """True when the journal has outgrown the size cap.
+
+        The size is read fresh from the filesystem, so growth this process did not
+        write (a crashed twin, a copy truncated and re-fed by an operator) counts too.
+        """
+        try:
+            return os.path.getsize(self._metrics_file) >= self._max_journal_bytes
+        except OSError:
+            return False
+
     def _rotate_if_needed(self, now):
         started = self._journal_started_at()
-        if started is None or now - started < self._retention_seconds:
+        aged_out = started is not None and now - started >= self._retention_seconds
+        if not aged_out and not self._journal_oversized():
             return
         stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime(now))
         rotated = f"{self._metrics_file}.{stamp}"
@@ -587,7 +605,8 @@ def build_score_fn(model_path, input_size=416):
 
 
 def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=60,
-                metrics_retention_days=7, metrics_retention_files=8):
+                metrics_retention_days=7, metrics_retention_files=8,
+                metrics_max_journal_bytes=METRICS_MAX_JOURNAL_BYTES):
     """HTTP server: POST /score (JPEG body) -> JSON scores; GET /health -> ok.
 
     Threaded so /health, /metrics and slow clients never queue behind a long
@@ -600,6 +619,7 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
         persist_seconds=metrics_persist_seconds,
         retention_days=metrics_retention_days,
         retention_files=metrics_retention_files,
+        max_journal_bytes=metrics_max_journal_bytes,
     )
     inference_lock = threading.Lock()
 
@@ -697,6 +717,9 @@ def metrics_settings(env=None):
             env, "TAPO_SCORER_METRICS_RETENTION_DAYS", float, METRICS_RETENTION_DAYS),
         "metrics_retention_files": _env_setting(
             env, "TAPO_SCORER_METRICS_RETENTION_FILES", int, METRICS_RETENTION_FILES),
+        "metrics_max_journal_bytes": _env_setting(
+            env, "TAPO_SCORER_METRICS_MAX_JOURNAL_BYTES", int,
+            METRICS_MAX_JOURNAL_BYTES),
     }
 
 
@@ -734,6 +757,7 @@ def build_parser(env=None):
         ("--metrics-persist-seconds", "metrics_persist_seconds", float),
         ("--metrics-retention-days", "metrics_retention_days", float),
         ("--metrics-retention-files", "metrics_retention_files", int),
+        ("--metrics-max-journal-bytes", "metrics_max_journal_bytes", int),
     ):
         parser.add_argument(flag, nargs="?", const=settings[key],
                             type=_blank_tolerant(cast, settings[key]),
@@ -753,6 +777,7 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
         metrics_persist_seconds=args.metrics_persist_seconds,
         metrics_retention_days=args.metrics_retention_days,
         metrics_retention_files=args.metrics_retention_files,
+        metrics_max_journal_bytes=args.metrics_max_journal_bytes,
     )
     log.info("scorer listening on :%d (model=%s, input=%d)",
              args.port, args.model, args.input_size)

@@ -532,15 +532,77 @@ def test_metrics_journal_keeps_a_young_journal_with_an_old_mtime(tmp_path):
                 if path.name[len("scorer-metrics.jsonl."):][:8].isdigit()]
 
 
+def test_metrics_journal_rotates_on_size_before_age(tmp_path):
+    # Age rotation alone lets a burst outgrow the disk between two age checks: the
+    # journal is appended every persist interval, so seven quiet days cost ~14 MB but
+    # seven noisy ones cost whatever the burst wrote. A journal past the size cap must
+    # rotate even though its oldest record is still young.
+    metrics_file = tmp_path / "scorer-metrics.jsonl"
+    fresh_stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    metrics_file.write_text(
+        json.dumps({"recorded_at": fresh_stamp, "pad": "x" * 512}) + "\n",
+        encoding="utf-8")
+    metrics = scorer_service.ScorerMetrics(metrics_file=str(metrics_file),
+                                          persist_seconds=0, retention_days=7,
+                                          max_journal_bytes=256)
+
+    metrics.flush()
+
+    rotated = [path for path in tmp_path.glob("scorer-metrics.jsonl.*")
+               if path.name[len("scorer-metrics.jsonl."):][:8].isdigit()]
+    assert len(rotated) == 1
+    assert fresh_stamp in rotated[0].read_text(encoding="utf-8")
+    assert "pad" not in metrics_file.read_text(encoding="utf-8")
+
+
+def test_metrics_journal_keeps_a_young_small_journal_under_the_default_cap(tmp_path):
+    metrics_file = tmp_path / "scorer-metrics.jsonl"
+    fresh_stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    metrics_file.write_text(json.dumps({"recorded_at": fresh_stamp}) + "\n",
+                            encoding="utf-8")
+    metrics = scorer_service.ScorerMetrics(metrics_file=str(metrics_file),
+                                          persist_seconds=0, retention_days=7)
+
+    metrics.flush()
+
+    assert not [path for path in tmp_path.glob("scorer-metrics.jsonl.*")
+                if path.name[len("scorer-metrics.jsonl."):][:8].isdigit()]
+
+
+def test_metrics_size_rotation_never_loses_counters_across_restart(tmp_path):
+    # Rotation renames the journal, never the state file, so a size-triggered rotation
+    # must leave the counters a restarted service loads exactly where they were.
+    metrics_file = tmp_path / "scorer-metrics.jsonl"
+    metrics = scorer_service.ScorerMetrics(metrics_file=str(metrics_file),
+                                          persist_seconds=0, retention_days=7,
+                                          max_journal_bytes=64)
+    metrics.begin(1)
+    metrics.finish(0.1, 0.1, True, result={"person": 0.9, "animal": 0.0})
+    metrics.flush()
+    metrics.flush()          # second persist finds the journal over the cap and rotates
+
+    assert [path for path in tmp_path.glob("scorer-metrics.jsonl.*")
+            if path.name[len("scorer-metrics.jsonl."):][:8].isdigit()]
+    reborn = scorer_service.ScorerMetrics(metrics_file=str(metrics_file),
+                                          persist_seconds=0, retention_days=7,
+                                          max_journal_bytes=64)
+    assert reborn.requests == 1
+    assert reborn.completed == 1
+    assert reborn.person_candidates == 1
+    assert reborn.restart_count == metrics.restart_count + 1
+
+
 def test_metrics_settings_ignore_unset_blank_and_invalid_environment():
     defaults = scorer_service.metrics_settings(env={})
     assert defaults == {"metrics_file": None, "metrics_persist_seconds": 60.0,
-                        "metrics_retention_days": 7.0, "metrics_retention_files": 8}
+                        "metrics_retention_days": 7.0, "metrics_retention_files": 8,
+                        "metrics_max_journal_bytes": 32 * 1024 * 1024}
     blank = scorer_service.metrics_settings(env={
         "TAPO_SCORER_METRICS_FILE": "  ",
         "TAPO_SCORER_METRICS_PERSIST_SECONDS": "",
         "TAPO_SCORER_METRICS_RETENTION_DAYS": "",
         "TAPO_SCORER_METRICS_RETENTION_FILES": "",
+        "TAPO_SCORER_METRICS_MAX_JOURNAL_BYTES": "",
     })
     assert blank == defaults
     mixed = scorer_service.metrics_settings(env={
@@ -557,11 +619,13 @@ def test_metrics_settings_read_the_environment():
         "TAPO_SCORER_METRICS_PERSIST_SECONDS": "30",
         "TAPO_SCORER_METRICS_RETENTION_DAYS": "2",
         "TAPO_SCORER_METRICS_RETENTION_FILES": "3",
+        "TAPO_SCORER_METRICS_MAX_JOURNAL_BYTES": "1048576",
     })
     assert settings == {"metrics_file": "/var/lib/tapo/scorer.jsonl",
                         "metrics_persist_seconds": 30.0,
                         "metrics_retention_days": 2.0,
-                        "metrics_retention_files": 3}
+                        "metrics_retention_files": 3,
+                        "metrics_max_journal_bytes": 1048576}
 
 
 def test_cli_survives_a_unit_file_whose_metrics_variables_are_unset():
@@ -571,12 +635,13 @@ def test_cli_survives_a_unit_file_whose_metrics_variables_are_unset():
     args = parser.parse_args([
         "--model", "/models/yolox_m.onnx", "--port", "8766", "--input-size", "640",
         "--metrics-file", "--metrics-persist-seconds", "--metrics-retention-days",
-        "--metrics-retention-files",
+        "--metrics-retention-files", "--metrics-max-journal-bytes",
     ])
     assert args.metrics_file is None
     assert args.metrics_persist_seconds == 60.0
     assert args.metrics_retention_days == 7.0
     assert args.metrics_retention_files == 8
+    assert args.metrics_max_journal_bytes == 32 * 1024 * 1024
 
 
 def test_cli_survives_quoted_empty_metrics_variables():
