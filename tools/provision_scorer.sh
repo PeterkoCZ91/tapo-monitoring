@@ -47,7 +47,10 @@ while (($#)); do
         --unit)         unit="${2:?--unit needs a value}"; shift 2 ;;
         --bootstrap)    bootstrap=1; shift ;;
         --dry-run)      dry_run=1; shift ;;
-        -h|--help)      sed -n '2,29p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        # The header block, however long it grows: print from line 2 until the first line
+        # that is not a comment. A fixed range printed `set -euo pipefail` as help text
+        # and would have kept sliding every time a line was added above it.
+        -h|--help)      sed -n '2,${/^#/!q;p;}' "${BASH_SOURCE[0]}"; exit 0 ;;
         *)              die "unknown argument $1" ;;
     esac
 done

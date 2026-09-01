@@ -39,7 +39,7 @@ die() { echo "deploy_release: $*" >&2; exit 1; }
 
 # shellcheck disable=SC2088  # the tilde is deliberately literal here: the remote side
 # expands it against the host's $HOME, not the workstation's.
-host="" ref="HEAD" unit="tapo-monitor.service" python_bin="~/tapo-env/bin/python"
+host="" ref="" unit="tapo-monitor.service" python_bin="~/tapo-env/bin/python"
 restart_cmd="" env_file=""
 while (($#)); do
     case "$1" in
@@ -48,12 +48,17 @@ while (($#)); do
         --restart-cmd) restart_cmd="${2:?--restart-cmd needs a value}"; shift 2 ;;
         --env-file)    env_file="${2:?--env-file needs a value}"; shift 2 ;;
         -*)            die "unknown option $1" ;;
+        # "$ref is still empty" is the test for "no ref given yet": using the default
+        # value as the sentinel meant an explicit HEAD reopened the slot, so a third
+        # argument became the ref and the deploy shipped something the command line
+        # never named.
         *)             if [[ -z "$host" ]]; then host="$1"
-                       elif [[ "$ref" == "HEAD" ]]; then ref="$1"
+                       elif [[ -z "$ref" ]]; then ref="$1"
                        else die "unexpected argument $1"; fi; shift ;;
     esac
 done
 [[ -n "$host" ]] || die "usage: deploy_release.sh <ssh-host> [git-ref] [options]"
+ref="${ref:-HEAD}"
 restart_cmd="${restart_cmd:-sudo systemctl restart $unit}"
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

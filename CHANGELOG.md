@@ -44,6 +44,13 @@ All notable changes to this project are documented here.
   parent. The walk-up therefore located the file and handed the selfcheck a path with none,
   so every post-deploy check on a release-layout host reported a config failure the host
   did not have — the one check meant to catch a bad deploy, failing on good ones.
+- `deploy_release.sh` no longer reopens the ref slot for an explicit `HEAD`. It used the
+  default value as its "was a ref given" sentinel, so `deploy_release.sh <host> HEAD <ref>`
+  quietly shipped `<ref>` — a deploy of something the command line does not name, which is
+  the kind of mistake that is only noticed by the fingerprint on the far side.
+- `provision_scorer.sh --help` prints the header block and stops there. The fixed line
+  range it ended on had already slipped past the last comment line and printed
+  `set -euo pipefail` as if it were help text.
 
 ### Removed
 - `systemd/tapo-scorer@.service`. The instance form promised a unit that could be enabled
