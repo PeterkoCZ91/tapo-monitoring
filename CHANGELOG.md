@@ -105,6 +105,12 @@ All notable changes to this project are documented here.
   now explicit, and test doubles accept the keywords the production caller actually sends.
 
 ### Fixed
+- Every delivered Telegram text notification leaves a journal line — drift alerts and
+  recoveries, camera outage 🔴/🟢, the daemon's own stall watchdog and the event-API
+  notices. Only failed deliveries were logged, so from the host a delivered drift alert
+  and one that never went out looked identical (the 2026-09-01 fleet review could not
+  verify drift-alert delivery at all). Same repair the review digest already got: the
+  line says kind, camera and count, never the message body.
 - A refused preset recall is logged once and then counted, not repeated every control
   pass. A camera that refuses every recall wrote 1104 identical warnings in ten hours,
   which buries the log it is supposed to be improving. Dropping the warning would be the

@@ -1230,6 +1230,23 @@ def test_stall_watchdog_retries_undelivered_alert(monkeypatch):
     assert len(attempts) == 2
 
 
+def test_stall_watchdog_says_when_notifications_went_out(monkeypatch, caplog):
+    # Same gap the review digest had: only failed deliveries logged, so from the journal
+    # a delivered 🔴/🟢 and a swallowed one looked identical.
+    app = _app_with_stall_threshold(900)
+    state = daemon.MonitorState()
+    monkeypatch.setattr(daemon.notify, "send_text", lambda tok, chat, text: True)
+    secrets = {"telegram_token": "t", "telegram_chat": "c"}
+
+    with caplog.at_level("INFO", logger="tapo_monitor.daemon"):
+        daemon.stall_watchdog(app, state, secrets, ok=False, now=1000)
+        daemon.stall_watchdog(app, state, secrets, ok=False, now=1900)
+        daemon.stall_watchdog(app, state, secrets, ok=True, now=2000)
+
+    assert "stall alert sent" in caplog.messages
+    assert "stall recovery sent" in caplog.messages
+
+
 def test_stall_watchdog_never_raises_into_the_loop(monkeypatch):
     # It runs in the one place that survives a broken tick; it must not become the
     # reason that loop dies.
@@ -1244,7 +1261,7 @@ def test_stall_watchdog_never_raises_into_the_loop(monkeypatch):
                           ok=False, now=1900)   # would raise if unguarded
 
 
-def test_watchdog_event_api_alert_restart_and_recovery(monkeypatch):
+def test_watchdog_event_api_alert_restart_and_recovery(monkeypatch, caplog):
     app = cfg.load_config_from_dict({
         "alerts": {"event_failure_threshold": 10, "event_restart_threshold": 20},
         "cameras": [{"name": "a", "host": "203.0.113.10"}],
@@ -1260,13 +1277,19 @@ def test_watchdog_event_api_alert_restart_and_recovery(monkeypatch):
     rebooted = []
     monkeypatch.setattr(camera, "reboot", lambda client: rebooted.append(client) or True)
     secrets = {"telegram_token": "t", "telegram_chat": "c"}
-    daemon._watchdog_pass(app, {"a": object()}, state, now=10, secrets=secrets)
-    assert sent and "event API unavailable" in sent[0]
-    daemon._watchdog_pass(app, {"a": object()}, state, now=20, secrets=secrets)
-    assert rebooted and state.event_restart_attempted["a"] is True
-    state.events_reachable["a"] = True
-    daemon._watchdog_pass(app, {"a": object()}, state, now=30, secrets=secrets)
+    with caplog.at_level("INFO", logger="tapo_monitor.daemon"):
+        daemon._watchdog_pass(app, {"a": object()}, state, now=10, secrets=secrets)
+        assert sent and "event API unavailable" in sent[0]
+        daemon._watchdog_pass(app, {"a": object()}, state, now=20, secrets=secrets)
+        assert rebooted and state.event_restart_attempted["a"] is True
+        state.events_reachable["a"] = True
+        daemon._watchdog_pass(app, {"a": object()}, state, now=30, secrets=secrets)
     assert any("event API restored" in msg for msg in sent)
+    # Each delivered message also leaves a journal line (the message itself is the only
+    # other trace, and it cannot be checked from the host).
+    assert "event failure alert sent for a" in caplog.messages
+    assert "event restart notice sent for a" in caplog.messages
+    assert "event recovery notice sent for a" in caplog.messages
 
 # ── update_outage (pure transitions) ─────────────────────────────────────────
 
@@ -3587,6 +3610,25 @@ def test_watchdog_messages_include_uptime_and_outage_duration(monkeypatch):
     ]
 
 
+def test_watchdog_says_when_outage_notifications_went_out(monkeypatch, caplog):
+    # Only failed deliveries logged, so a delivered 🔴/🟢 left no trace in the journal —
+    # same gap the review digest had.
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    monkeypatch.setattr(daemon.notify, "send_text", lambda tok, chat, msg: True)
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "t", "telegram_chat": "c"}
+
+    with caplog.at_level("INFO", logger="tapo_monitor.daemon"):
+        daemon._watchdog_pass(app, {"a": object()}, state, now=0, secrets=secrets)
+        daemon._watchdog_pass(app, {}, state, now=3600, secrets=secrets)
+        daemon._watchdog_pass(app, {}, state, now=4500, secrets=secrets)
+        daemon._watchdog_pass(app, {"a": object()}, state, now=5400, secrets=secrets)
+
+    assert "outage alert sent for a" in caplog.messages
+    assert "recovery notice sent for a" in caplog.messages
+
+
 def test_watchdog_uses_ping_health_independently_from_api_client(monkeypatch):
     app = cfg.load_config_from_dict(
         {"cameras": [{"name": "a", "host": "203.0.113.10"}]})
@@ -3782,6 +3824,45 @@ def test_digital_twin_deduplicates_drift_and_reports_recovery(monkeypatch):
     assert "configuration drift" in messages[0]
     assert "recovered" in messages[1]
     assert state.twin_alerted["a"] == set()
+
+
+def test_digital_twin_says_when_drift_alerts_went_out(monkeypatch, caplog):
+    # The 2026-09-01 fleet review could not tell from the journal whether drift alerts
+    # were ever delivered: only the Telegram message existed, and only failures logged.
+    # Mirror the review digest — say the delivery out loud, kind and camera, no body.
+    app = _twin_app(drift_alerts=True)
+    state = _twin_state()
+    monkeypatch.setattr(daemon.notify, "send_text", lambda token, chat, message: True)
+    snapshots = iter((_twin_snapshot(vehicle=True), _twin_snapshot(vehicle=False)))
+    secrets = {"telegram_token": "t", "telegram_chat": "c"}
+
+    with caplog.at_level("INFO", logger="tapo_monitor.daemon"):
+        for now in (100, 160):
+            daemon.process_digital_twin(
+                app, {"a": object()}, state, now=now, secrets=secrets,
+                probe=lambda client: next(snapshots),
+            )
+
+    assert any(message.startswith("drift alert sent for a: ")
+               for message in caplog.messages)
+    assert "drift recovery sent for a" in caplog.messages
+
+
+def test_digital_twin_stays_quiet_about_undelivered_drift_alerts(monkeypatch, caplog):
+    # The journal line means "delivered", not "attempted" — a swallowed send must not
+    # leave a trace that reads as a delivery.
+    app = _twin_app(drift_alerts=True)
+    state = _twin_state()
+    monkeypatch.setattr(daemon.notify, "send_text", lambda token, chat, message: False)
+    secrets = {"telegram_token": "t", "telegram_chat": "c"}
+
+    with caplog.at_level("INFO", logger="tapo_monitor.daemon"):
+        daemon.process_digital_twin(
+            app, {"a": object()}, state, now=100, secrets=secrets,
+            probe=lambda client: _twin_snapshot(vehicle=True),
+        )
+
+    assert not any("sent" in message for message in caplog.messages)
 
 
 def test_digital_twin_probe_failure_isolated_and_throttled():

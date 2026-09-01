@@ -477,15 +477,18 @@ def stall_watchdog(app: AppConfig, state: "MonitorState", secrets, *, ok, now):
         event, _ = update_stall(state, ok, now, app.alerts.stall_threshold)
         if event == "alert":
             down = notify.format_duration(max(0, now - (state.tick_fail_since or now)))
-            if not notify.send_text(secrets["telegram_token"], secrets["telegram_chat"],
-                                    f"🔴 monitor stalled: no successful tick for {down}"):
+            if notify.send_text(secrets["telegram_token"], secrets["telegram_chat"],
+                                f"🔴 monitor stalled: no successful tick for {down}"):
+                log.info("stall alert sent")
+            else:
                 # Delivery is part of the transition; an outage whose symptom is silence
                 # must not be muted by a swallowed message.
                 state.stall_alerted = False
                 log.warning("stall notification delivery failed")
         elif event == "recovered":
-            notify.send_text(secrets["telegram_token"], secrets["telegram_chat"],
-                             "🟢 monitor recovered: ticks completing again")
+            if notify.send_text(secrets["telegram_token"], secrets["telegram_chat"],
+                                "🟢 monitor recovered: ticks completing again"):
+                log.info("stall recovery sent")
     except Exception:  # noqa: BLE001 - the watchdog may never kill the loop it guards
         log.debug("stall watchdog failed", exc_info=True)
 
@@ -1744,12 +1747,17 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
                     f"⚠️ camera '{cfg.name}' configuration drift: {details}",
                 ):
                     alerted.update(item["key"] for item in new_results)
+                    # Like the review digest: say the delivery out loud, or a drift alert
+                    # that reached Telegram leaves no trace in the journal at all.
+                    log.info("drift alert sent for %s: %d drift(s)",
+                             cfg.name, len(new_results))
             recovered = alerted - current_keys
             if recovered and notify.send_text(
                 secrets["telegram_token"], secrets["telegram_chat"],
                 f"✅ camera '{cfg.name}' configuration drift recovered",
             ):
                 alerted.difference_update(recovered)
+                log.info("drift recovery sent for %s", cfg.name)
         state.twin_alerted[cfg.name] = alerted
 
         entry = twin.fleet_entry(
@@ -2082,7 +2090,9 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
                       if uptime is not None else "")
             delivered = notify.send_text(
                 token, chat, f"🔴 camera '{cfg.name}' unreachable{detail}")
-            if not delivered:
+            if delivered:
+                log.info("outage alert sent for %s", cfg.name)
+            else:
                 # Delivery is part of the transition: retry while the outage remains due.
                 state.outage_alerted.pop(cfg.name, None)
                 log.warning("outage notification delivery failed for %s", cfg.name)
@@ -2094,6 +2104,7 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
                 token, chat, f"🟢 camera '{cfg.name}' back online{detail}")
             if delivered:
                 state.recovery_pending.pop(cfg.name, None)
+                log.info("recovery notice sent for %s", cfg.name)
             else:
                 log.warning("recovery notification delivery failed for %s", cfg.name)
     for cfg in app.cameras:
@@ -2116,6 +2127,7 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
                 )
                 if delivered:
                     state.event_alerted[name] = True
+                    log.info("event failure alert sent for %s", name)
             if (app.alerts.event_restart_enabled
                     and age >= app.alerts.event_restart_threshold
                     and not state.event_restart_attempted.get(name)):
@@ -2124,9 +2136,10 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
                     state.event_restart_attempted[name] = True
                     if camera_api.reboot(client):
                         log.warning("event API restart requested for %s", name)
-                        notify.send_text(
+                        if notify.send_text(
                             token, chat, f"event API restart requested for camera {name}"
-                        )
+                        ):
+                            log.info("event restart notice sent for %s", name)
                     else:
                         log.warning("event API restart failed for %s", name)
         elif event_ok is True:
@@ -2139,6 +2152,7 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
                 )
                 if delivered:
                     state.event_alerted.pop(name, None)
+                    log.info("event recovery notice sent for %s", name)
             state.event_fail_since.pop(name, None)
             state.event_restart_attempted.pop(name, None)
             state.event_error.pop(name, None)
