@@ -295,6 +295,83 @@ silently forever. `pi_notify.sh` must be at `/usr/local/bin/pi_notify.sh`; it re
 Telegram secrets from `/etc/tapo-monitor/secrets.env`, and a host that keeps them
 elsewhere sets `TAPO_ENV_FILE` in `/etc/tapo-monitor/notify.env`.
 
+## The whole fleet in one table
+
+Every check above reports on one host at a time. The daily pass over all of them was a
+few dozen ad-hoc ssh one-liners, phrased a little differently each morning, so the answer
+could never be laid beside yesterday's. `tools/fleet_status.sh` asks every host the same
+questions in the same order, in parallel, and prints one row each:
+
+```bash
+export TAPO_FLEET_HOSTS="alpha beta gamma"   # ssh targets, or label=ssh-target
+tools/fleet_status.sh
+```
+
+```
+tapo fleet status — 2026-09-02 07:12:03 CEST, night window 18:00-08:00
+
+HOST   UNIT           RST  UPTIME  FINGERPRINT  EXPECT DIGEST  HOSTWATCH  DISK  LOAD   TEMP  PANLIM  SENT
+alpha  running          0   7h20m  3f9c2d81a0b4 ok     today   ok 1m       34%  0.83  42.0C      11    25
+beta   running          8   7h20m  3f9c2d81a0b4 ok     today   none        26%  0.35  49.1C       2    14
+gamma  AUTO-RESTART    14      12s  8b1e04c7d5aa DRIFT  LATE    ok 1m       13%  0.18  47.2C       0     0
+scorer ok, up 9h51m, requests 54983 (+318 in 61m), failed 6, p95 0.92s
+
+details
+  alpha: release 20260901T215256Z-3f9c2d81a0b4
+         digest due 20:45, last sent 2026-09-01 20:45; frames 09-01 18:00 -> 09-02 07:12; 149G free
+  ...
+
+findings
+  gamma: tapo-monitor.service is crash-looping (activating/auto-restart) — is-active alone would call this healthy
+  gamma: fingerprint drift: running 8b1e04c7d5aa, env file expects 3f9c2d81a0b4
+  gamma: digest was due at 20:45 and has not gone out; last was 2026-08-31
+```
+
+Which machines make up the fleet is configuration, not code — the same rule as
+`WATCH_TARGETS`. This repository is public, so `TAPO_FLEET_HOSTS` is required and the
+script prints usage when it is unset; nothing about a particular installation is baked
+into it. Column by column:
+
+- **UNIT** — `AUTO-RESTART` is the crash loop `systemctl is-active` answers `activating`
+  to, which is why the row shows the substate rather than the verdict.
+- **RST** — `NRestarts`. Not a finding on its own; a deploy restart counts too. A number
+  that has climbed between two mornings is the signal.
+- **FINGERPRINT / EXPECT** — what the running package hashes to, against
+  `TAPO_EXPECTED_FINGERPRINT` in that unit's own env file. `DRIFT` means the host is
+  running something other than what the last deploy intended, `unset` that this host was
+  never enrolled in the check. When the package cannot report its fingerprint at all the
+  release directory's name is used instead, and the details block says so — that name
+  cannot notice a file edited in place afterwards.
+- **DIGEST** — `today` sent, `pending` (yesterday's went out, today's hour has not come
+  yet), `LATE` (the hour passed and nothing went out), `MISSING`, `off` (no
+  `TAPO_REVIEW_DIGEST_TIME`). Since the digest is also the fleet heartbeat, `LATE` on an
+  otherwise healthy row usually means Telegram, not the daemon.
+- **HOSTWATCH** — the peer watch timer and how long ago it last ran. `none` means this
+  host watches nobody, which is correct for the host at the end of the chain and worth
+  noticing when it is not.
+- **PANLIM / SENT** — frames the pan guard archived and photos delivered to Telegram
+  during the window named in the header: `--night HH:MM-HH:MM`, default `18:00-08:00`,
+  evaluated in each host's own clock. A window that closes, rather than the last 24
+  hours, so this morning's traffic cannot leak into a number about the dark.
+
+The scorer gets its own line because it shares none of those columns. Its counters are
+cumulative, so a single reading says nothing; the run remembers the previous one under
+`${XDG_STATE_HOME:-~/.local/state}/tapo-fleet-status` and reports the movement since the
+last check instead. A restart between two runs is called out, because the counters reset
+with it.
+
+One check has no column: if `current` was switched *after* the unit last started, the
+daemon is still executing the previous release while every file on disk agrees with the
+new one. That lands in `findings`.
+
+It reads and nothing else — no restart, no deploy, no sudo, nothing written on any host,
+and only three variables are ever read out of an env file that also holds credentials. A
+host that does not answer within `TAPO_FLEET_TIMEOUT` (60 s) gets an `UNREACHABLE` row
+and a finding rather than aborting the table. The exit status is 0 when the findings
+block is empty and 1 when it is not. The rest of the knobs (`TAPO_FLEET_UNIT`,
+`TAPO_FLEET_ROOT`, `TAPO_FLEET_PYTHON`, `TAPO_FLEET_SCORER_URL`, …) are documented in the
+script's own header.
+
 ## Snapshot sources
 
 The monitor chooses frames in this order:

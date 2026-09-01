@@ -14,6 +14,18 @@ All notable changes to this project are documented here.
   blocks that normally run over ssh are covered too — the stub executes them here, against
   a directory playing the host, which is the only way to test the config snapshot, the
   atomic switch and the pruning at all. CI runs them beside shellcheck.
+- `tools/fleet_status.sh` reads the whole fleet into one comparable table. The daily pass
+  was a few dozen ad-hoc ssh one-liners, phrased differently every morning, so its result
+  could never be laid beside yesterday's — and half the questions worth asking were the
+  ones nobody typed twice. One row per host now carries the unit (including the
+  `auto-restart` crash loop `is-active` reports as healthy), the running fingerprint
+  against the `TAPO_EXPECTED_FINGERPRINT` its env file names, whether the digest went out,
+  the host-watch timer, disk/load/temperature and last night's pan-guard and sent-log
+  counts, with the scorer's `/health` and the movement in its counters since the previous
+  run. It only reads: no restart, no deploy, no sudo, nothing written on any host. Hosts
+  come from `TAPO_FLEET_HOSTS` the way `WATCH_TARGETS` feeds `host_watch.sh`, are probed
+  in parallel so one sleeping Pi cannot hold up the table, and an unreachable one is a row
+  and a finding rather than the end of the run.
 - `tools/provision_scorer.sh` builds the shared scorer host from the checkout. That host
   serves every camera's frames and was the last one whose unit existed nowhere but on its
   own disk, so losing it meant reconstructing the command line from memory. The script
