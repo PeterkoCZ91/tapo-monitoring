@@ -89,18 +89,47 @@ ledger for comparing firmware events with independent local observations. Config
 state paths, CLI commands, privacy boundaries and rollout guidance are in
 [`observability.md`](observability.md).
 
-## Deploy the scorer
+## Provision the scorer
 
-1. Install the package with scorer dependencies (`pip install -e ".[scorer]"` from the
-   checkout) in the scorer venv and put the ONNX model on local disk.
-2. Adjust `WorkingDirectory`/`ExecStart` in `systemd/tapo-scorer@.service` to that
-   checkout and venv, then create `/etc/tapo-monitor/scorer.env`:
+Every camera's alerts depend on this one host, and it is the only one that runs no
+daemon — so it has no digest, no fingerprint check and, until it is given one, no way to
+speak. `tools/provision_scorer.sh` builds it from this checkout. Run it on the scorer
+host; it is idempotent and safe to re-run on the live service:
+
+```bash
+sudo tools/provision_scorer.sh --user tapo --dry-run   # diffs only, touches nothing
+sudo tools/provision_scorer.sh --user tapo
+curl -s http://127.0.0.1:8766/health   # -> {"ok": true}
+curl -s http://127.0.0.1:8766/metrics  # current aggregate counters; no image data
+```
+
+It renders `systemd/tapo-scorer.service.in` into `/etc/systemd/system/tapo-scorer.service`
+with the host's own user, working directory and interpreter, writes
+`/etc/tapo-monitor/scorer.env` on first run, installs `pi_notify.sh` together with the
+`pi-failure-notify@` handler the unit's `OnFailure=` names, restarts only when a file
+that affects the service actually changed, and ends by running
+`tools/check_scorer_rollout.sh` against the port it just configured.
+
+The unit is rendered rather than copied because systemd expands `${VAR}` in an `ExecStart`
+*argument* but never in the executable itself: the interpreter and working directory can
+only be literal text, so a copied unit needs the same hand-edit on every host — which is
+how the running unit drifted away from the repository's copy in the first place.
+
+Defaults, all overridable: `--home ~USER/tapo-scorer`, `--python <home>/env/bin/python`,
+`--model <home>/yolox_m.onnx`, `--port 8766`, `--input-size 640`,
+`--metrics-file <home>/metrics/scorer.jsonl`, `--unit tapo-scorer.service`. On a fresh
+host, `--bootstrap` creates the venv and installs `".[scorer]"` from the checkout; the
+ONNX weights are the one thing the script will not fetch, so put them at `--model` first.
+
+`scorer.env` is created once and never overwritten — it holds the host's own paths, and
+re-provisioning must not silently undo a local retention change. Edit it by hand and
+re-run the script, which restarts the service because the env file changed.
 
 ```env
-TAPO_SCORER_MODEL=/opt/tapo-monitor/models/yolox_m.onnx
+TAPO_SCORER_MODEL=/srv/tapo-scorer/yolox_m.onnx
 TAPO_SCORER_PORT=8766
 TAPO_SCORER_INPUT_SIZE=640
-TAPO_SCORER_METRICS_FILE=/opt/tapo-monitor/data/scorer.jsonl
+TAPO_SCORER_METRICS_FILE=/srv/tapo-scorer/metrics/scorer.jsonl
 TAPO_SCORER_METRICS_PERSIST_SECONDS=60
 TAPO_SCORER_METRICS_RETENTION_DAYS=7
 TAPO_SCORER_METRICS_RETENTION_FILES=8
@@ -113,21 +142,34 @@ service would exit before the model loads — under `Restart=always` that is an 
 crash loop caused by an observability setting. Unset, blank and unparseable values all
 fall back to the built-in defaults.
 
-3. Install and start the unit. **On an existing host, write `scorer.env` before copying
-   the unit**, and note that `install` overwrites it — copy the example only when
-   provisioning, and hand-edit an env file that already carries local paths:
+### When the scorer itself fails
+
+The unit gives up after five starts in five minutes instead of crash-looping in silence,
+and `OnFailure=pi-failure-notify@%n.service` reports why. That needs credentials on a host
+that has none of its own: create `/etc/tapo-monitor/notify.env`, mode 600, with
+`TELEGRAM_TOKEN=` and `TELEGRAM_CHAT_ID=` (or `TAPO_ENV_FILE=` pointing at a file that
+carries them, which is what the camera hosts do). The script never accepts a token as an
+argument — argv is world-readable in `/proc` — and warns instead when the file is absent.
+
+Test the chain without disturbing the scorer: install a throwaway unit whose `ExecStart`
+is `/bin/false` and that carries the same `OnFailure=` line, start it, and read the
+journal.
 
 ```bash
-sudo install -d -o tapo -g tapo /opt/tapo-monitor/data
-sudo install -m 0640 systemd/tapo-scorer.env.example /etc/tapo-monitor/scorer.env
-# Edit scorer.env if the service user, model path or retention differs.
-sudo cp systemd/tapo-scorer@.service /etc/systemd/system/tapo-scorer@.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now tapo-scorer@tapo
-curl -s http://127.0.0.1:8766/health   # -> {"ok": true}
-curl -s http://127.0.0.1:8766/metrics  # current aggregate counters; no image data
-tools/check_scorer_rollout.sh http://127.0.0.1:8766
+journalctl -u 'pi-failure-notify@*' -n 20 --no-pager
+# "Triggering OnFailure= dependencies" then "Finished pi-failure-notify@<unit>.service.service"
+# -> the handler ran and exited 0, which pi_notify.sh does only after Telegram answers "ok":true
 ```
+
+Read the handler's name from the journal rather than constructing it: `%n` is the *full*
+unit name, so the instance is `<unit>.service` and systemd appends its own `.service` on
+top. Asking `systemctl show` about the single-suffix spelling is not a check — it reports
+defaults for a unit that does not exist, and `Result=success` for something that never
+ran looks exactly like success.
+
+This covers the scorer dying loudly. A host that dies quietly — power, kernel, network —
+is caught from outside by the mutual host watch, which polls this service's `/health` from
+another machine; see "Watching the hosts themselves" below.
 
 When `TAPO_SCORER_METRICS_FILE` is set, the scorer also writes one aggregate JSON line
 after the configured persistence interval. The small `.state` sidecar restores cumulative

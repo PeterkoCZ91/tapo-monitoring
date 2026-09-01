@@ -1,0 +1,31 @@
+[Unit]
+Description=tapo-monitor shared YOLO scoring service
+After=network-online.target
+Wants=network-online.target
+# Restart=always alone retries a crash loop forever in silence, and this is the host every
+# camera depends on: a scorer that never comes back degrades the whole fleet to raw
+# passthrough without anyone being told. Give up after 5 starts in 5 minutes and report.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+OnFailure=pi-failure-notify@%n.service
+
+[Service]
+Type=simple
+User=@SCORER_USER@
+EnvironmentFile=/etc/tapo-monitor/scorer.env
+# With `-m`, Python imports the package from the working directory, so a host that keeps
+# the package as a copy here and one that pip-installed it into the venv both work.
+WorkingDirectory=@SCORER_HOME@
+# systemd expands ${VAR} in arguments but never in the executable itself — that is why
+# this file is rendered by tools/provision_scorer.sh instead of being copied and edited.
+#
+# The durable-metrics settings (TAPO_SCORER_METRICS_*) stay in the env file and are read
+# from there by the process: an undefined ${VAR} outside quotes drops the word entirely,
+# and argparse would exit before the model loads — an invisible crash loop caused by an
+# observability setting.
+ExecStart=@SCORER_PYTHON@ -m tapo_monitor.scorer_service --model ${TAPO_SCORER_MODEL} --port ${TAPO_SCORER_PORT} --input-size ${TAPO_SCORER_INPUT_SIZE}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

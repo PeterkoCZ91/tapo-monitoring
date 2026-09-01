@@ -203,7 +203,7 @@ production pilot uses two cameras with overlapping views.
 
 ## Phase 6 — Deployment and fleet integrity
 
-Status: **shipped; the unknown-key hard fail and two scorer-side items remain**
+Status: **shipped; the unknown-key hard fail remains**
 
 Deployed hosts were rsync copies of the package, not git checkouts, and a partial copy
 twice produced a daemon that ran for hours while alerting on nothing. The work here made
@@ -246,15 +246,21 @@ so the canonical unit edit becomes cosmetic rather than blocking.
   package fingerprint, and when `TAPO_EXPECTED_FINGERPRINT` names the intended release a
   mismatch is a failed check that removes the OK headline. Manual inventory found exactly
   this drift twice after a change had already shipped.
-- [ ] Make the repository's unit templates match a real host, or ship a provisioning
-  script. The monitor template now describes the release layout the fleet actually runs;
-  what remains is the shared scorer, which still runs a hand-written unit with hardcoded
-  paths, so a replacement scorer host cannot be built from the repository alone.
-- [ ] Failure notification on the scorer host. It is the single point of failure for every
-  camera's alerts and the only host with no Telegram credentials, so its crash loop is the
-  one that cannot report itself. Softened by the mutual host watch, which polls the
-  scorer's `/health` from another machine — a dead scorer is now noticed externally, but
-  its own units still cannot say why they crashed.
+- [x] The repository's unit templates match a real host. The monitor template describes
+  the release layout the fleet runs; the shared scorer — the last host that existed only
+  on its own disk — is now built by `tools/provision_scorer.sh`, which renders
+  `systemd/tapo-scorer.service.in` with that host's user, working directory and
+  interpreter. Rendering rather than copying is forced by systemd: `${VAR}` expands in an
+  `ExecStart` argument but never in the executable, so a copied unit needs a hand-edit on
+  every host, and a hand-edit is how the running unit drifted from the repository's copy.
+  The script is idempotent and installs only what differs, so it is safe to re-run against
+  the live service; `--bootstrap` builds the venv on a fresh host.
+- [x] Failure notification on the scorer host. It is the single point of failure for every
+  camera's alerts and was the only host with no Telegram credentials, so its crash loop was
+  the one that could not report itself. The unit now stops after five starts in five
+  minutes rather than looping in silence, and `OnFailure=` sends the reason through the
+  fleet's own notifier. Together with the mutual host watch polling `/health` from another
+  machine, a dead scorer is now noticed both from outside and from within.
 
 ## Research tracks
 

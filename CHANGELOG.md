@@ -4,7 +4,34 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+- `tools/provision_scorer.sh` builds the shared scorer host from the checkout. That host
+  serves every camera's frames and was the last one whose unit existed nowhere but on its
+  own disk, so losing it meant reconstructing the command line from memory. The script
+  renders `systemd/tapo-scorer.service.in` with the host's user, working directory and
+  interpreter — rendering rather than copying because systemd expands `${VAR}` in an
+  `ExecStart` argument but never in the executable itself — writes `scorer.env` once,
+  wires the failure notifier, and verifies the result through `/health` and
+  `check_scorer_rollout.sh`. It installs only what differs and restarts only when
+  something that affects the service changed, so re-running it against the live scorer is
+  safe; `--bootstrap` creates the venv on a fresh host and `--dry-run` shows the diffs.
+- The scorer reports its own failures. It had no Telegram credentials, which made its
+  crash loop the one nobody would hear about, and `Restart=always` alone would retry it
+  forever in silence. The unit now gives up after five starts in five minutes and
+  `OnFailure=` hands the reason to the fleet's notifier. Credentials live in
+  `/etc/tapo-monitor/notify.env`; the script never takes a token as an argument, because
+  argv is world-readable in `/proc`.
+
 ### Changed
+- The scorer's metrics settings moved out of `ExecStart` into `scorer.env`, where the
+  process reads them itself. The replaced hand-written unit passed them as command-line
+  flags, which is the arrangement that turns an undefined `${VAR}` into an argparse exit
+  before the model loads.
+
+### Removed
+- `systemd/tapo-scorer@.service`. The instance form promised a unit that could be enabled
+  per service user, but its paths still had to be hand-edited, and no host ran it —
+  `tools/provision_scorer.sh` renders the real unit instead.
 - `deploy_release.sh` and `rollback_release.sh` keep `TAPO_EXPECTED_FINGERPRINT` current
   when the host has opted in: the release they just switched to is by definition the
   intended one, and a manual update step that must follow every deploy is a step that
