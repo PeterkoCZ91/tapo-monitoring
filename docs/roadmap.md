@@ -121,7 +121,8 @@ the uniform mid-segment frame and competes with the live pipeline.
 
 ## Phase 4 — Closed-loop reliability
 
-Status: **core v1 shipped; optional exporters remain planned**
+Status: **complete** (the Prometheus/MQTT half of the exporter item was resolved by
+decision, not code — see the item)
 
 - [x] Add allow-listed self-healing for configuration drift already asserted safely by the
   daemon (person detection, vehicle detection and SmartTrack categories).
@@ -142,10 +143,15 @@ Status: **core v1 shipped; optional exporters remain planned**
   and any refused repair. It claims OK only for what it checked, and any failed check
   removes the headline: a heartbeat that says OK while a camera is down converts a silence
   you might question into a confirmation you will trust.
-- [ ] Add a standalone JSON status endpoint and optional Prometheus/MQTT export.
-- [ ] Close the one gap a self-reported heartbeat cannot: a host cannot report that it is
-  dead, and nobody notices an absent message. This needs an external dead-man's switch
-  where the alarm is raised by something other than the host being watched.
+- [x] Add a standalone JSON status endpoint. Opt-in (`observability.status_port`), bound
+  to localhost by default on purpose. Prometheus/MQTT export was decided against: the CLI,
+  twin state and the scorer's endpoints already provide machine-readable status, and a new
+  wide network listener does not earn its place.
+- [x] Close the one gap a self-reported heartbeat cannot: a host cannot report that it is
+  dead, and nobody notices an absent message. `host_watch` lets the hosts watch each other
+  over the private network with the Telegram credentials they already have — consecutive
+  misses to alert, one alert per cooldown, a recovery message — and can poll a peer's HTTP
+  health endpoint, so the shared scorer's death is noticed from another machine.
 - [x] Make the repair policy consistent: `auto_fix` and `allowed_repairs` took effect even
   when `reliability.enabled` was false, so trimming the allow-list silently disabled
   repairs that guard known regressions (person detection off, auto-track without the
@@ -157,9 +163,9 @@ Status: **core v1 shipped; optional exporters remain planned**
 - [x] Sanitise addresses in the ledger at the sanitiser, not only at each caller: the
   sensitive-value pattern now covers IPv4 and session-token shapes as defence in depth.
 
-The remaining exporter item is operationally optional: the CLI, twin state and scorer
-`/health`/`/metrics` endpoints already provide machine-readable status without opening a
-new network listener in the camera daemon.
+The exporter question is settled: the JSON status endpoint stays localhost-first and
+opt-in, and no Prometheus/MQTT listener ships while the CLI, twin state and scorer
+endpoints already answer the same questions.
 
 ## Phase 5 — Multi-camera scene intelligence
 
@@ -219,12 +225,13 @@ about making a deploy verifiable rather than hopeful.
   `pytest.importorskip` disappears silently when its dependency is absent, so the scorer
   service's tests had never run in CI while the build reported success; a step now asserts
   that module is collected rather than skipped.
-- [ ] One deploy path: full-package transfer into a timestamped release directory, a
+- [x] One deploy path: full-package transfer into a timestamped release directory, a
   `selfcheck` inside it, then an atomic symlink switch and a per-host restart. Rollback
-  becomes re-pointing the symlink instead of finding the right tarball. Requires the unit
-  to start from an absolute interpreter and a `__main__` entry point.
-- [ ] Snapshot each host's config and env file into the release directory it belongs to,
-  so a rollback restores the configuration that matched that code.
+  becomes re-pointing the symlink instead of finding the right tarball. The unit starts
+  from an absolute interpreter through the new `__main__` entry point; hosts migrate per
+  the runbook in docs/operations.md.
+- [x] Snapshot each host's config and env file into the release directory it belongs to,
+  so a rollback can restore the configuration that matched that code.
 - [x] Reject unknown configuration keys (warn first, then fail). A mistyped key silently
   took its default, and a dropped `rotate` costs roughly a third of the person score — a
   silent alert killer. The warn phase is shipped: full key path plus the closest real key,
@@ -239,7 +246,9 @@ about making a deploy verifiable rather than hopeful.
   replacement cannot be built from the repository alone.
 - [ ] Failure notification on the scorer host. It is the single point of failure for every
   camera's alerts and the only host with no Telegram credentials, so its crash loop is the
-  one that cannot report itself.
+  one that cannot report itself. Softened by the mutual host watch, which polls the
+  scorer's `/health` from another machine — a dead scorer is now noticed externally, but
+  its own units still cannot say why they crashed.
 
 ## Research tracks
 

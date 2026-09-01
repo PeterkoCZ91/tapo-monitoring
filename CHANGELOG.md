@@ -5,6 +5,21 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Deploys land in timestamped release directories and a symlink switch makes them live:
+  `tools/deploy_release.sh` stages from `git archive` (never the working copy), snapshots
+  the host's config and env file into the release, runs `selfcheck` inside it, flips
+  `~/tapo-monitor/current` atomically and verifies the fingerprint through the symlink;
+  `tools/rollback_release.sh` re-points it. Rollback stops being "find the right tarball".
+  The package gained a `__main__` entry point so the unit can start from an absolute
+  interpreter regardless of cwd.
+- The hosts can watch each other. The digest heartbeat cannot report that its own host is
+  dead, so `tools/host_watch.sh` plus a two-minute timer lets one host ping its peers (and
+  optionally poll an HTTP health endpoint) and alert through the Telegram credentials it
+  already has — three consecutive misses to alert, one alert per cooldown, a recovery
+  message when the peer returns. The topology lives in each host's env file, not here.
+- An opt-in JSON status endpoint (`observability.status_port`): the daemon serves package
+  version and fingerprint, last tick and the per-camera twin summary on localhost by
+  default — binding wider is the operator's explicit choice, not a shipped default.
 - Unknown configuration keys are warned about, with the full key path and the closest
   real key. A mistyped key silently took its default — a dropped `rotate` costs about a
   third of the person score, which is a silent alert killer. The known keys are derived
