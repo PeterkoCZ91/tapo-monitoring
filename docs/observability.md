@@ -119,7 +119,9 @@ When `ledger: true`, the daemon mirrors its existing structured audit records in
 camera detections plus send, defer, cooldown, scorer and Telegram decisions. The database
 stores timestamps, local camera labels, event types, sources, confidence and a small
 metadata allow-list. It stores no frames, video, stream URLs, credentials, device IDs,
-MAC addresses or face IDs.
+MAC addresses or face IDs. The metadata sanitiser also drops any value that looks like
+an IPv4 address or a session token (a long hex or base64 run), so an error text that
+slips one in never reaches the database, whichever caller handed it over.
 
 The path is `$XDG_STATE_HOME/tapo-monitor/events.sqlite3` by default and can be overridden
 with `TAPO_LEDGER_FILE`. The file and containing state directory are private. Startup

@@ -49,8 +49,18 @@ _SAFE_METADATA_KEYS = frozenset({
     "track_id",
     "zone",
 })
+# Keyword tells plus value shapes. The shapes are defence in depth: callers already
+# keep addresses and session material out of the ledger, but a pytapo failure text can
+# carry the camera's address and its stok, so the sanitiser itself must catch them.
+# IPv4 needs all four octets (floats and three-part versions never match); token shapes
+# are what this stack actually produces — a 32+ char hex run (the stok, the MD5/SHA256
+# hashed credential) or a base64 run (padded, or long with +/ in it).
 _SENSITIVE_VALUE = re.compile(
-    r"(?i)(authorization|bearer|token|secret|passw(?:or)?d|api[_-]?key|://|-----begin)"
+    r"(?i)(authorization|bearer|token|secret|passw(?:or)?d|api[_-]?key|://|-----begin"
+    r"|(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])"
+    r"|\b[0-9a-f]{32,}\b"
+    r"|[A-Za-z0-9+/]{16,}={1,2}"
+    r"|(?=[A-Za-z0-9+/]{0,23}[+/])[A-Za-z0-9+/]{24,})"
 )
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.: -]{0,127}$")
 

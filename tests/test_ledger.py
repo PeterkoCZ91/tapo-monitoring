@@ -145,6 +145,42 @@ def test_metadata_is_allowlisted_and_never_keeps_media_or_credentials(tmp_path):
     assert len(fingerprint) == 64
 
 
+def test_sanitiser_scrubs_ipv4_addresses_itself():
+    # Defence in depth: callers already keep addresses out of the ledger, but a pytapo
+    # failure text reaching metadata must still come out address-free at the sanitiser.
+    # All four octets are required, so scores ("0.83") and versions ("3.4.18") never match.
+    assert ledger.sanitize_metadata({"reason": "connect refused by 192.0.2.44"}) == {}
+    assert ledger.sanitize_metadata({"reason": "rtsp read from 203.0.113.7 timed out"}) == {}
+    assert ledger.sanitize_metadata({"label": "192.0.2.10"}) == {}
+
+
+def test_sanitiser_scrubs_session_token_shapes():
+    # pytapo session material is a long hex run (the stok, the MD5/SHA256-hashed
+    # credential) or a base64 blob; either shape must be dropped whatever key and
+    # surrounding text it arrives under.
+    fake_stok = "deadbeef" * 4                            # 32 hex chars, obviously fake
+    assert ledger.sanitize_metadata({"reason": f"invalid stok {fake_stok}"}) == {}
+    assert ledger.sanitize_metadata({"reason": "deadbeef" * 8}) == {}   # sha256-sized
+    assert ledger.sanitize_metadata({"reason": "FAKEFAKEFAKEFAKEFAKE=="}) == {}
+    assert ledger.sanitize_metadata(
+        {"reason": "seq FAKE+FAKE/FAKEFAKEFAKEFAKEFAKE rejected"}) == {}
+
+
+def test_sanitiser_keeps_legitimate_short_values():
+    # The new patterns must not mangle what the ledger exists to hold: names, event
+    # types, versions and prose about floats.
+    metadata = {
+        "label": "person",
+        "zone": "gate",
+        "model": "yolox_m",
+        "model_version": "3.4.18",
+        "reason": "score 0.83 below threshold 0.9",
+        "track_id": "a1b2c3",
+        "decision": "hold_for_review",
+    }
+    assert ledger.sanitize_metadata(metadata) == metadata
+
+
 def test_matching_is_deterministic_max_cardinality_and_never_reuses_events():
     # Nearest-first would pair camera 4 -> shadow 5 and lose camera 6.  Ordered
     # matching consumes 4 -> 0, leaving 6 -> 5, so both observations are audited.
