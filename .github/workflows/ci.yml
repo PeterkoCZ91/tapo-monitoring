@@ -51,7 +51,18 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
-          shellcheck tools/*.sh pi_notify.sh
+          shellcheck tools/*.sh pi_notify.sh tests/tools/helper.bash
+
+      # The shell layer deploys the fleet, and shellcheck only says the syntax is sound.
+      # These tests run the deploy, rollback and check scripts for real against stubbed
+      # ssh/systemd/curl, so a wrong path or a swallowed argument fails here instead of
+      # on a host. Version-independent like the linters, so once is enough.
+      - name: Test (bats)
+        if: matrix.python-version == '3.12'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bats
+          bats tests/tools
 
       - name: Test (pytest)
         run: pytest -q

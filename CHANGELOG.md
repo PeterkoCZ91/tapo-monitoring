@@ -5,6 +5,15 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- The shell layer has tests. Nearly a thousand lines of bash deploy, roll back, provision
+  and verify the fleet, and the only thing standing behind them was shellcheck, which
+  reads syntax and not intent — the config-path bug below shipped past it and was found by
+  an operator instead. `tests/tools/*.bats` runs those scripts for real against stubbed
+  ssh, systemd, curl and ping, in a throwaway `$HOME`, so a wrong path or a swallowed
+  argument fails on a workstation rather than on a host that is now half-deployed. The
+  blocks that normally run over ssh are covered too — the stub executes them here, against
+  a directory playing the host, which is the only way to test the config snapshot, the
+  atomic switch and the pruning at all. CI runs them beside shellcheck.
 - `tools/provision_scorer.sh` builds the shared scorer host from the checkout. That host
   serves every camera's frames and was the last one whose unit existed nowhere but on its
   own disk, so losing it meant reconstructing the command line from memory. The script

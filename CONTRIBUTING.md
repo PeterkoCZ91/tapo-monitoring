@@ -32,12 +32,21 @@ export TELEGRAM_TOKEN=... TELEGRAM_CHAT_ID=... GROQ_API_KEY=...
 ```bash
 tapo-monitor check cameras.yaml   # validate config + print a summary
 pytest -q                          # run the test suite
+bats tests/tools                   # the deploy/rollback/check scripts (apt install bats)
 ruff check .                       # lint
+shellcheck tools/*.sh pi_notify.sh tests/tools/helper.bash
 ```
 
 The pure logic (config parsing, scheduling, weather, tracking decisions, detection
 classification, notification gating) is unit-tested without hardware. I/O collaborators
 (camera, snapshot, Groq, Telegram) are injected so the pipeline is testable offline.
+
+The shell tools are tested the same way: `tests/tools/*.bats` runs them against stubbed
+ssh, systemd, curl and ping in a throwaway `$HOME`, so nothing there needs — or is allowed
+to reach — a real host. Anything a test forgets to stub hits a guard stub that fails
+loudly with exit 99. The `*_remote.bats` files go one step further: their ssh stub drops
+the host argument and runs the remote block here, so the config snapshot, the atomic
+symlink switch and the pruning are exercised against a directory that plays the host.
 
 ## Branch naming
 
