@@ -5086,3 +5086,99 @@ def test_inert_preset_warning_is_none_when_no_static_camera_sets_a_night_preset(
         {"name": "front", "host": "203.0.113.11", "tracking": {"night_preset": "2"}}]})
 
     assert daemon.inert_preset_warning(app) is None
+
+
+# ── pan-limit window: frames the camera recorded while its aim was off ────────
+def _pending_scored(frames):
+    """app+state+fetch for an SD follow-up whose frames go through the scorer."""
+    app = cfg.load_config_from_dict({
+        "groq": {},
+        "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
+                     "scorer": {"url": "http://127.0.0.1:1/score", "threshold": 0.5}}],
+    })
+    state = daemon.MonitorState()
+
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
+        return list(frames)
+
+    state.pending_sd.append({"camera": "a", "etype": "person", "event": {"start_time": 1000},
+                             "span": 30, "full_span": 30, "due_at": 0, "live_sent": True})
+    return app, state, fetch_frames
+
+
+def _score_recorder(monkeypatch, scored, person=0.9):
+    monkeypatch.setattr(
+        daemon.scorer, "score_image",
+        lambda url, path, **k: scored.append(path) or {"person": person, "animal": 0.0})
+
+
+def test_pending_sd_skips_a_frame_recorded_while_the_lens_was_out_of_bounds(monkeypatch, caplog):
+    # 2026-09-02 04:36:59: the guard pulled a camera off the scaffolding it had drifted
+    # onto, and two minutes later the SD follow-up scored a frame recorded *during* that
+    # swing at 0.63 and delivered the IR-lit netting as a person. Correcting the aim
+    # cannot unrecord what the card already holds, so such frames must not be scored.
+    sent, scored = [], []
+    inside, after = "/tmp/sdf_1000_1_00_at1000.jpg", "/tmp/sdf_1000_1_18_at1018.jpg"
+    app, state, fetch_frames = _pending_scored([inside, after])
+    daemon._record_out_of_bounds(state, "a", 1002.0, 6)
+    _score_recorder(monkeypatch, scored)
+
+    with caplog.at_level("INFO", logger="tapo_monitor.monitor"):
+        _run_pending(app, state, {"a": object()}, 1300, fetch_frames,
+                     lambda cfg_: (lambda cam, ev: None), sent, monkeypatch)
+
+    assert scored == [after], "the out-of-bounds frame must never reach the scorer"
+    assert [img for img, _ in sent] == [after]
+    assert any("reason=panlimit_window" in r.getMessage() for r in caplog.records)
+
+
+def test_pending_sd_scores_a_frame_whose_name_carries_no_capture_time(monkeypatch):
+    # An unparseable name means "unknown", and unknown must be scored: a naming change or
+    # an older queued entry must never cost a real detection.
+    sent, scored = [], []
+    app, state, fetch_frames = _pending_scored(["/tmp/sdf_1000_1_00.jpg"])
+    daemon._record_out_of_bounds(state, "a", 1002.0, 6)
+    _score_recorder(monkeypatch, scored)
+
+    _run_pending(app, state, {"a": object()}, 1300, fetch_frames,
+                 lambda cfg_: (lambda cam, ev: None), sent, monkeypatch)
+
+    assert scored == ["/tmp/sdf_1000_1_00.jpg"]
+    assert len(sent) == 1
+
+
+def test_pending_sd_is_unaffected_when_the_guard_never_fired(monkeypatch):
+    sent, scored = [], []
+    app, state, fetch_frames = _pending_scored(["/tmp/sdf_1000_1_00_at1000.jpg"])
+    _score_recorder(monkeypatch, scored)
+
+    _run_pending(app, state, {"a": object()}, 1300, fetch_frames,
+                 lambda cfg_: (lambda cam, ev: None), sent, monkeypatch)
+
+    assert scored == ["/tmp/sdf_1000_1_00_at1000.jpg"]
+    assert len(sent) == 1
+
+
+def test_out_of_bounds_window_opens_a_whole_poll_interval_before_the_recall():
+    # The poll is the only evidence of when the lens left: it was inside at the previous
+    # one, so everything since then is suspect, not just the instant of the recall.
+    state = daemon.MonitorState()
+    daemon._record_out_of_bounds(state, "a", 1000.0, 6)
+
+    assert daemon._in_panlimit_window(state, "a", 993.9) is False  # before the last good poll
+    assert daemon._in_panlimit_window(state, "a", 994.0) is True   # that poll itself
+    assert daemon._in_panlimit_window(state, "a", 996.0) is True
+    assert daemon._in_panlimit_window(state, "a", 1000.0) is True
+    assert daemon._in_panlimit_window(state, "a", 1005.0) is True   # lens still travelling
+    assert daemon._in_panlimit_window(state, "a", 1005.5) is False
+    assert daemon._in_panlimit_window(state, "b", 1000.0) is False
+
+
+def test_out_of_bounds_windows_are_bounded():
+    # A guard firing seventeen times a night must not grow the state without limit.
+    state = daemon.MonitorState()
+    for tick in range(50):
+        daemon._record_out_of_bounds(state, "a", 1000.0 + tick, 6)
+
+    assert len(state.pan_limit_out_of_bounds["a"]) == daemon.PANLIMIT_WINDOW_KEEP
+    assert daemon._in_panlimit_window(state, "a", 1049.0) is True   # newest kept

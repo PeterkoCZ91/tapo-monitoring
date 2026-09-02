@@ -21,6 +21,7 @@ of tests; the orchestrators take injectable collaborators so their logic is unit
 import asyncio
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -197,13 +198,38 @@ def _download_segment(client, start, end, time_correction, out_dir):  # pragma: 
     return out_path if exists else None
 
 
-def _extract_frames(mp4_path, out_dir, base, span, every, rotate=0):  # pragma: no cover - subprocess I/O
-    """Extract one JPEG every ``every`` seconds across ``span``. Returns paths (in order)."""
+# Capture epoch carried in a frame's own name, e.g. sdf_1788316600_..._12_at1788316593.jpg.
+# Any run of digits: a shorter number simply cannot fall inside a window built from real
+# clock readings, so a misparse costs a frame nothing.
+_CAPTURE_STAMP = re.compile(r"_at(\d+)\.jpg$")
+
+
+def frame_capture_time(path):
+    """Epoch this frame was recorded, or None when its name does not carry one.
+
+    The offset in the name counts from the *segment* the camera had on its card, which
+    can begin minutes before the event, and the process that reads these paths never
+    sees that number — the frames cross a subprocess boundary as filenames and nothing
+    else. So the absolute stamp travels in the name too. Callers must treat None as
+    "unknown", never as "fine": a name we cannot parse must not cost a real detection.
+    """
+    match = _CAPTURE_STAMP.search(os.path.basename(str(path)))
+    return float(match.group(1)) if match else None
+
+
+def _extract_frames(mp4_path, out_dir, base, span, every, rotate=0,
+                    clip_start=None):  # pragma: no cover - subprocess I/O
+    """Extract one JPEG every ``every`` seconds across ``span``. Returns paths (in order).
+
+    With ``clip_start`` the name also carries each frame's capture epoch, which is what
+    lets a consumer ask *when* a frame was taken — see :func:`frame_capture_time`.
+    """
     out_dir = out_dir.rstrip("/")
     vf = snapshot.scaled_vf(rotate)
     paths = []
     for offset in range(0, max(span, 1), every):
-        out_path = os.path.join(out_dir, f"{base}_{offset:02d}.jpg")
+        stamp = "" if clip_start is None else f"_at{int(clip_start) + offset}"
+        out_path = os.path.join(out_dir, f"{base}_{offset:02d}{stamp}.jpg")
         try:
             subprocess.run(
                 ["ffmpeg", "-y", "-ss", str(offset), "-i", mp4_path, "-frames:v", "1",
@@ -281,7 +307,8 @@ def fetch_sd_frames(client, start_time, out_dir="/tmp", span=SD_SPAN, every=SD_F
         return []
     try:
         base = f"sdf_{int(start_time)}_{int(_time.time() * 1000)}"
-        frames = extract_frames(mp4, out_dir, base, dl_span, every, rotate=rotate)
+        frames = extract_frames(mp4, out_dir, base, dl_span, every, rotate=rotate,
+                                clip_start=dl_start)
         if not frames:
             print(f"SD fetch: extracted 0 frames from {mp4}", file=sys.stderr)
         return frames

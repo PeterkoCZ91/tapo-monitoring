@@ -438,6 +438,11 @@ class MonitorState:
     # directly comparable to the sampler's): lets an expiring hold tell "no second frame
     # ever came" from "the guard yanked the subject out of view mid-corroboration".
     pan_limit_recall_at: dict = field(default_factory=dict)
+    # Per camera, the recent intervals in which the lens is known to have been off its
+    # allowed span. The SD follow-up arrives ~2 minutes after the event and re-scores what
+    # the camera *recorded*, so the guard having fixed the aim by then does not help: the
+    # out-of-bounds view is already on the card. These windows let those frames be skipped.
+    pan_limit_out_of_bounds: dict = field(default_factory=dict)
     # ── hubpoll (battery cameras indexed on a hub) ───────────────────────────
     # Sessions are keyed by hub host, not camera: two cameras on one hub share the single
     # session that hub tolerates. Kept here rather than in ``cam_clients`` because that
@@ -1487,6 +1492,18 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
             # SD path: first above-threshold frame wins. Skipped (empty) when the recording
             # path already made the pick above.
             for frame in (() if recording_pick else frames):
+                taken = sdclip.frame_capture_time(frame)
+                if taken is not None and _in_panlimit_window(state, cfg.name, taken):
+                    # The guard had pulled the lens off its allowed span at this moment,
+                    # so the frame shows wherever it was pointed — a wall, scaffolding
+                    # netting lit by the camera's own IR — and not the scene. Fixing the
+                    # aim does not unrecord it: on 2026-09-02 04:36:59 such a frame scored
+                    # 0.63 and was delivered as a person, eleven seconds after the recall
+                    # had already corrected the camera. An unparseable name means unknown,
+                    # and unknown is scored: this must never eat a real detection.
+                    monitor.audit_event(cfg, event, etype, "sd", "drop",
+                                        reason="panlimit_window")
+                    continue
                 if score is not None:
                     # Local scorer is the arbiter (Groq captions later, at send time).
                     s = score(frame)
@@ -1871,6 +1888,33 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
     return state.twin_fleet
 
 
+# How long after a recall the lens may still be travelling back to the preset. Frames
+# recorded inside it show the swing, not the scene.
+PANLIMIT_SETTLE_SECONDS = 5
+# Windows kept per camera. The SD follow-up reaches back a couple of minutes at most, so
+# a handful covers every frame that can still be scored; older ones only waste memory.
+PANLIMIT_WINDOW_KEEP = 8
+
+
+def _record_out_of_bounds(state, name, now, poll_interval):
+    """Note the interval in which this camera is known to have been off its span.
+
+    The poll is the only evidence of *when* it left: it was inside at the previous one,
+    so everything since then is suspect. Hence the window opens a full poll interval
+    before the recall and closes once the lens has had time to travel back.
+    """
+    windows = state.pan_limit_out_of_bounds.setdefault(name, [])
+    windows.append((now - max(float(poll_interval or 0), 0.0),
+                    now + PANLIMIT_SETTLE_SECONDS))
+    del windows[:-PANLIMIT_WINDOW_KEEP]
+
+
+def _in_panlimit_window(state, name, when):
+    """True when a frame recorded at ``when`` was taken while the aim was out of bounds."""
+    return any(start <= when <= end
+               for start, end in state.pan_limit_out_of_bounds.get(name, ()))
+
+
 def _archive_panlimit_frame(cfg, axis, value, *, now):
     """Best-effort frame of the out-of-bounds view, grabbed before the recall erases it.
 
@@ -1939,6 +1983,7 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
                 _archive_panlimit_frame(cfg, axis, value, now=now)
                 panlimit.goto_preset(g["ptz"], g["token"], target)
                 state.pan_limit_recall_at[cfg.name] = now
+                _record_out_of_bounds(state, cfg.name, now, pl.poll_interval)
                 log.info("pan_limit %s: %s=%.4f out of bounds -> recall preset %s",
                          cfg.name, axis, value, target)
         except Exception as e:  # noqa: BLE001 - an ONVIF hiccup must not kill the loop

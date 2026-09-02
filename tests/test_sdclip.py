@@ -105,7 +105,7 @@ def test_fetch_subprocess_passes_camera_rotation():
 def test_fetch_sd_frames_threads_rotate_to_extractor():
     seen = {}
 
-    def extract_frames(mp4, out_dir, base, span, every, rotate=0):
+    def extract_frames(mp4, out_dir, base, span, every, rotate=0, clip_start=None):
         seen["rotate"] = rotate
         return ["/tmp/x_00.jpg"]
 
@@ -186,7 +186,7 @@ def test_fetch_frames_returns_candidates_on_success():
         calls["window"] = (start, end)
         calls["tc"] = tc
         return "/tmp/clip.mp4"
-    def extract_frames(mp4, out_dir, base, span, every, rotate=0):
+    def extract_frames(mp4, out_dir, base, span, every, rotate=0, clip_start=None):
         calls["mp4"] = mp4
         calls["span"] = span
         calls["every"] = every
@@ -203,7 +203,7 @@ def test_fetch_frames_returns_candidates_on_success():
 def test_fetch_frames_returns_empty_when_download_fails():
     def download(client, start, end, tc, out_dir):
         return None
-    def extract_frames(mp4, out_dir, base, span, every, rotate=0):
+    def extract_frames(mp4, out_dir, base, span, every, rotate=0, clip_start=None):
         raise AssertionError("extract must not run when download failed")
     assert sdclip.fetch_sd_frames(_Cam(), 1000, download=download,
                                   extract_frames=extract_frames) == []
@@ -216,7 +216,7 @@ def test_fetch_frames_removes_downloaded_mp4(tmp_path):
         mp4.write_bytes(b"mp4")
         return str(mp4)
 
-    def extract_frames(mp4_path, out_dir, base, span, every, rotate=0):
+    def extract_frames(mp4_path, out_dir, base, span, every, rotate=0, clip_start=None):
         assert mp4_path == str(mp4)
         return [str(tmp_path / "frame.jpg")]
 
@@ -229,7 +229,7 @@ def test_fetch_frames_removes_downloaded_mp4(tmp_path):
 def test_fetch_frames_empty_when_no_frames_extracted():
     def download(client, start, end, tc, out_dir):
         return "/tmp/clip.mp4"
-    def extract_frames(mp4, out_dir, base, span, every, rotate=0):
+    def extract_frames(mp4, out_dir, base, span, every, rotate=0, clip_start=None):
         return []
     assert sdclip.fetch_sd_frames(_Cam(), 1000, download=download,
                                   extract_frames=extract_frames) == []
@@ -243,7 +243,7 @@ def test_fetch_frames_tolerates_time_correction_error():
     def download(client, start, end, tc, out_dir):
         seen["tc"] = tc
         return "/tmp/clip.mp4"
-    def extract_frames(mp4, out_dir, base, span, every, rotate=0):
+    def extract_frames(mp4, out_dir, base, span, every, rotate=0, clip_start=None):
         return ["/tmp/x_00.jpg"]
     assert sdclip.fetch_sd_frames(BadCam(), 1000, download=download,
                                   extract_frames=extract_frames) == ["/tmp/x_00.jpg"]
@@ -257,7 +257,7 @@ def test_fetch_frames_uses_real_segment_bounds():
     def download(client, start, end, tc, out_dir):
         calls["window"] = (start, end)
         return "/tmp/clip.mp4"
-    def extract_frames(mp4, out_dir, base, span, every, rotate=0):
+    def extract_frames(mp4, out_dir, base, span, every, rotate=0, clip_start=None):
         calls["span"] = span
         return ["/tmp/a_00.jpg"]
     out = sdclip.fetch_sd_frames(
@@ -356,3 +356,34 @@ def test_fetch_subprocess_derives_every_from_span():
 
     sdclip.fetch_sd_frames_subprocess(_cfg(), 1000, span=120, run=run, python="PY")
     assert captured["argv"][-3:] == ["120", "15", "0"]   # span, every (derived), rotate
+
+
+def test_frame_capture_time_reads_the_stamp_the_extractor_wrote():
+    assert sdclip.frame_capture_time("/tmp/sdf_1788316600_9_12_at1788316593.jpg") == 1788316593.0
+    assert sdclip.frame_capture_time("sdf_1_2_00_at1000.jpg") == 1000.0
+
+
+def test_frame_capture_time_is_none_when_the_name_carries_nothing():
+    # Unknown, not "fine": the caller must score such a frame rather than skip it.
+    assert sdclip.frame_capture_time("/tmp/sdf_1788316600_9_12.jpg") is None
+    assert sdclip.frame_capture_time("/tmp/whatever.jpg") is None
+
+
+def test_extractor_is_told_the_segment_start_not_the_event_start():
+    # The offsets count from the segment the camera had on its card, which can begin
+    # minutes before the event. Stamping frames with the event start would put every one
+    # of them in the wrong place on the clock — and the pan-limit window compares clocks.
+    seen = {}
+
+    def segment_bounds(client, start, **k):
+        return (940, 1200)                      # segment opened 60 s before the event
+
+    def extract_frames(mp4, out_dir, base, span, every, rotate=0, clip_start=None):
+        seen["clip_start"] = clip_start
+        return ["/tmp/a_00_at940.jpg"]
+
+    sdclip.fetch_sd_frames(_Cam(), 1000, span=30, every=6,
+                           download=lambda *a, **k: "/tmp/seg.mp4",
+                           extract_frames=extract_frames, segment_bounds=segment_bounds)
+
+    assert seen["clip_start"] == 940

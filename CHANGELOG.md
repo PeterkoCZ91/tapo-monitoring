@@ -59,6 +59,16 @@ All notable changes to this project are documented here.
   before the model loads.
 
 ### Fixed
+- The SD follow-up no longer scores frames the camera recorded while the pan-limit guard
+  had its aim off the allowed span. The guard fixes where the lens points; it cannot
+  unrecord what is already on the card, and the follow-up re-scores that recording about
+  two minutes later. On 2026-09-02 at 04:36:59 a frame of IR-lit scaffolding netting
+  scored 0.63 and was delivered as a person — eleven seconds after the recall had already
+  corrected the camera, and while the live path's corroboration gate was correctly holding
+  the same view at 0.56. Such frames are now skipped before they reach the scorer, audited
+  as `panlimit_window`. Frames carry their capture epoch in their own name because that is
+  the only channel that survives the download subprocess, and a name without one is scored
+  as before: unknown must never cost a real detection.
 - `check_monitor_rollout.sh` finds the config under the release layout. It tested for
   `cameras.yaml` through one path and then recorded another: the kernel resolves `..`
   against the directory `current` points at, bash's logical `cd` against the symlink's own

@@ -509,6 +509,18 @@ to corroborate (`motion_send_threshold`), a hold broken by a recall is sent when
 expires instead of being dropped — audited as `hold_rescue_recall`; it needs the review
 log configured, which is where the held frame lives.
 
+Correcting the aim does not unrecord what the camera already put on its SD card. The
+follow-up arrives about two minutes later and re-scores the *recording* of the event, so
+frames taken while the lens was off its span still show whatever it was pointed at — a
+wall, netting lit by the camera's own IR — and they score like a subject: on 2026-09-02 at
+04:36:59 such a frame reached a phone at p0.63, eleven seconds after the recall had
+already fixed the camera. Frames whose capture time falls inside a recall's window are
+therefore skipped before the scorer sees them, audited as `panlimit_window`. The window
+opens a full `poll_interval` before the recall — the previous poll is the last moment the
+aim is known to have been good — and closes five seconds after it, while the lens travels
+back. A frame whose name carries no capture time is scored as usual: unknown must never
+cost a real detection.
+
 Enable it per camera, not by default. The firmware already returns a camera to where its
 track started, after `back_time` seconds (30 on the C560WS), which covers the ordinary
 case on its own — and faster than a 60 s control pass. What it does not do is return the
