@@ -8,6 +8,7 @@ run it against ``journalctl`` output on the target host.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import shlex
 import sys
@@ -65,6 +66,15 @@ class CameraSummary:
     detections: int = 0
     telegram_ok: int = 0
     telegram_failed: int = 0
+    telegram_unknown: int = 0
+    detected_events: set = field(default_factory=set)
+    delivered_events: set = field(default_factory=set)
+    deferred_events: set = field(default_factory=set)
+    sd_events: set = field(default_factory=set)
+    other_delivery_events: set = field(default_factory=set)
+    panlimit_frames: int = 0
+    panlimit_events: set = field(default_factory=set)
+    paths: dict = field(default_factory=dict)
     deferred: int = 0
     cooldown: int = 0
     dropped_below_threshold: int = 0
@@ -76,13 +86,41 @@ class CameraSummary:
 
     def observe(self, rec: dict) -> None:
         action = rec.get("action")
+        start = rec.get("start")
+        event = None
+        if (isinstance(start, (int, float)) and not isinstance(start, bool)
+                and math.isfinite(start) and start >= 0):
+            event = (rec.get("etype", "unknown"), start)
+        if action == "detect" and event is not None:
+            self.detected_events.add(event)
+        if action == "defer" and event is not None:
+            self.deferred_events.add(event)
+        if action == "drop" and rec.get("reason") == "panlimit_window":
+            self.panlimit_frames += 1
+            if event is not None:
+                self.panlimit_events.add(event)
         if action == "detect":
             self.detections += 1
         elif action == "send":
+            path = str(rec.get("path") or "unknown")
+            bucket = self.paths.setdefault(path, {"delivered": 0, "failed": 0, "unknown": 0,
+                                                 "latencies": []})
             if rec.get("telegram") is False:
                 self.telegram_failed += 1
-            else:
+                bucket["failed"] += 1
+            elif rec.get("telegram") is True:
                 self.telegram_ok += 1
+                bucket["delivered"] += 1
+                if event is not None:
+                    self.delivered_events.add(event)
+                    (self.sd_events if path == "sd" else self.other_delivery_events).add(event)
+                age = rec.get("event_age_s")
+                if (isinstance(age, (int, float)) and not isinstance(age, bool)
+                        and math.isfinite(age) and age >= 0):
+                    bucket["latencies"].append(float(age))
+            else:
+                self.telegram_unknown += 1
+                bucket["unknown"] += 1
             if isinstance(rec.get("score"), (int, float)):
                 self.sent_scores.append(float(rec["score"]))
         elif action == "defer":
@@ -114,6 +152,35 @@ def summarize(lines) -> dict[str, CameraSummary]:
     return summaries
 
 
+def summary_data(summaries: dict[str, CameraSummary]) -> dict:
+    """Stable JSON metrics; event counts deduplicate by camera, type and start time.
+
+    Only explicit telegram=true is confirmed. Rescue means a deferred event delivered
+    by SD with no other delivery in this input window, not an estimate of recall.
+    """
+    result = {}
+    for camera, summary in sorted(summaries.items()):
+        result[camera] = {
+            "detections": summary.detections,
+            "detected_events": len(summary.detected_events),
+            "delivered_events": len(summary.delivered_events),
+            "sd_rescued_events": len((summary.sd_events & summary.deferred_events)
+                                     - summary.other_delivery_events),
+            "telegram_ok": summary.telegram_ok,
+            "telegram_failed": summary.telegram_failed,
+            "telegram_unknown": summary.telegram_unknown,
+            "panlimit_frames": summary.panlimit_frames,
+            "panlimit_events": len(summary.panlimit_events),
+            "paths": {
+                path: {**{key: value for key, value in bucket.items() if key != "latencies"},
+                       "latency_p50_s": _pct(bucket["latencies"], 0.5),
+                       "latency_p95_s": _pct(bucket["latencies"], 0.95)}
+                for path, bucket in sorted(summary.paths.items())
+            },
+        }
+    return result
+
+
 def _fmt_num(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.2f}"
 
@@ -127,14 +194,16 @@ def format_summary(summaries: dict[str, CameraSummary]) -> str:
     if not summaries:
         return "No audit lines found."
     lines = []
+    metrics = summary_data(summaries)
     for camera in sorted(summaries):
         s = summaries[camera]
-        considered = s.telegram_ok + s.telegram_failed + s.deferred + s.dropped_below_threshold
+        considered = s.telegram_ok + s.telegram_failed + s.telegram_unknown + s.deferred + s.dropped_below_threshold
         send_rate = (s.telegram_ok / s.detections * 100.0) if s.detections else 0.0
         lines.append(f"{camera}:")
         lines.append(
             f"  detections={s.detections} considered={considered} "
             f"telegram_ok={s.telegram_ok} telegram_failed={s.telegram_failed} "
+            f"telegram_unknown={s.telegram_unknown} "
             f"send_rate={send_rate:.1f}%"
         )
         lines.append(
@@ -150,6 +219,18 @@ def format_summary(summaries: dict[str, CameraSummary]) -> str:
             f"dropped max={_fmt_num(_pct(s.dropped_scores, 1.0))}; "
             f"threshold~{_fmt_num(_threshold(s))}"
         )
+        data = metrics[camera]
+        lines.append(
+            f"  unique events: detected={data['detected_events']} delivered={data['delivered_events']} "
+            f"sd_rescued={data['sd_rescued_events']}; "
+            f"panlimit frames/events={data['panlimit_frames']}/{data['panlimit_events']}"
+        )
+        for path, bucket in data["paths"].items():
+            lines.append(
+                f"  {path}: delivered={bucket['delivered']} failed={bucket['failed']} "
+                f"unknown={bucket['unknown']} latency p50/p95="
+                f"{_fmt_num(bucket['latency_p50_s'])}/{_fmt_num(bucket['latency_p95_s'])}s"
+            )
         if s.detections and s.telegram_ok == 0 and s.dropped_below_threshold:
             lines.append("  hint: threshold may be too high, or camera events are mostly false positives.")
         elif s.telegram_ok and s.dropped_below_threshold:
@@ -164,12 +245,14 @@ def format_summary(summaries: dict[str, CameraSummary]) -> str:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Summarize tapo-monitor audit log lines")
     parser.add_argument("path", nargs="?", help="log file path; stdin when omitted or '-'")
+    parser.add_argument("--json", action="store_true", help="machine-readable delivery and latency metrics")
     args = parser.parse_args(argv)
+    render = (lambda summaries: json.dumps(summary_data(summaries), sort_keys=True)) if args.json else format_summary
     if not args.path or args.path == "-":
-        print(format_summary(summarize(sys.stdin)))
+        print(render(summarize(sys.stdin)))
         return 0
     with open(args.path, encoding="utf-8", errors="replace") as fh:
-        print(format_summary(summarize(fh)))
+        print(render(summarize(fh)))
     return 0
 
 

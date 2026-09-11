@@ -576,3 +576,24 @@ def test_run_if_due_delivers_digest_despite_malformed_scan_summary(tmp_path):
         send_photo=lambda p, c: True) is True
     assert len(texts) == 1
     assert "1 suppressed frame(s)" in texts[0]
+
+
+def test_scan_context_names_camera_without_data(tmp_path):
+    summary = {"generated_at": 1000, "date": "2026-08-12", "aborted": False,
+               "cameras": {"front": {"segments": 0, "frames_scored": 0},
+                           "back": {"segments": 96, "frames_scored": 400}}}
+    (tmp_path / ".shadow-scan.json").write_text(json.dumps(summary))
+    line = reviewdigest.scan_context_line(str(tmp_path), 1000)
+    assert "missing data: front" in line
+
+
+def test_scan_context_reports_degraded_extraction(tmp_path):
+    summary = {"generated_at": 1000, "date": "2026-08-12", "aborted": True,
+               "cameras": {"front": {"segments": 96, "frames_scored": 400,
+                                     "coverage": "degraded", "segments_degraded": 7,
+                                     "extraction_timeouts": 7}}}
+    (tmp_path / ".shadow-scan.json").write_text(json.dumps(summary))
+    line = reviewdigest.scan_context_line(str(tmp_path), 1000)
+    assert "incomplete coverage: front" in line
+    assert "7 degraded segment(s), 7 extraction timeout(s)" in line
+    assert "aborted" in line

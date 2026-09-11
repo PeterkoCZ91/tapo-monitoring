@@ -300,13 +300,22 @@ def scan_context_line(review_dir, now):
     if not isinstance(cameras, dict):
         return None
     segments = frames = matched = candidates = skipped = 0
-    for stats in cameras.values():
+    missing, incomplete = [], []
+    degraded = timeouts = 0
+    for camera, stats in cameras.items():
         try:
             segments += int(stats.get("segments", 0) or 0)
             frames += int(stats.get("frames_scored", 0) or 0)
             matched += int(stats.get("matched", 0) or 0)
             candidates += int(stats.get("shadow_only", 0) or 0)
             skipped += int(stats.get("segments_skipped", 0) or 0)
+            degraded += int(stats.get("segments_degraded", 0) or 0)
+            timeouts += int(stats.get("extraction_timeouts", 0) or 0)
+            if (stats.get("coverage") == "missing"
+                    or not stats.get("segments") or not stats.get("frames_scored")):
+                missing.append(str(camera))
+            elif stats.get("coverage") in ("partial", "degraded"):
+                incomplete.append(str(camera))
         except (AttributeError, TypeError, ValueError):
             return None
     # Covered, not merely present: a run that spent its decode budget reports the same
@@ -316,6 +325,16 @@ def scan_context_line(review_dir, now):
             f"segments, {frames} frames, {matched} matched, {candidates} candidate(s)")
     if skipped:
         line += f" — {skipped} skipped (decode budget spent)"
+    if missing:
+        line += " — missing data: " + ", ".join(missing)
+    if incomplete:
+        line += " — incomplete coverage: " + ", ".join(incomplete)
+    if degraded:
+        line += f" — {degraded} degraded segment(s), {timeouts} extraction timeout(s)"
+    if summary.get("aborted"):
+        line += " — aborted"
+    if summary.get("trimmed"):
+        line += " — scoring budget spent"
     return line
 
 

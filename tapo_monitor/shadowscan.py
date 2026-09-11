@@ -91,12 +91,20 @@ def _run_ffmpeg(args, *, timeout=None):  # pragma: no cover - subprocess I/O
 
 def extract_candidates(mkv, seg_start, out_dir, base, *, runner=None,
                        scene=DEFAULT_SCENE, cap=DEFAULT_SEGMENT_CAP, clock=None,
-                       scene_pass=True):
+                       scene_pass=True, diagnostics=None):
     """Scene-change candidate JPEGs (+1 uniform mid-segment frame) with epoch stamps.
 
     The uniform frame exists so a slow or static subject cannot slip through a
     scene-change-only filter. Any ffmpeg failure degrades to fewer frames, never raises.
     """
+    diagnostics = {} if diagnostics is None else diagnostics
+    diagnostics.update(extraction_errors=0, extraction_timeouts=0)
+
+    def failed(exc):
+        diagnostics["extraction_errors"] += 1
+        if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)):
+            diagnostics["extraction_timeouts"] += 1
+
     if runner is None:
         clock = clock or time.monotonic
         deadline = clock() + SEGMENT_EXTRACTION_TIMEOUT
@@ -129,7 +137,8 @@ def extract_candidates(mkv, seg_start, out_dir, base, *, runner=None,
                 path = pattern % k
                 if os.path.exists(path) and os.path.getsize(path) > 0:
                     out.append((path, seg_start + offset))
-        except Exception:  # noqa: BLE001 - a bad segment must not end the batch
+        except Exception as exc:  # noqa: BLE001 - a bad segment must not end the batch
+            failed(exc)
             log.warning("shadow scan: scene extraction failed for %s", mkv, exc_info=True)
             scene_failed = True
     if scene_failed:
@@ -143,7 +152,8 @@ def extract_candidates(mkv, seg_start, out_dir, base, *, runner=None,
                         "-update", "1", path])
                 if os.path.exists(path) and os.path.getsize(path) > 0:
                     out.append((path, seg_start + float(offset)))
-            except Exception:  # noqa: BLE001 - one fallback frame must not end the batch
+            except Exception as exc:  # noqa: BLE001 - one fallback frame must not end the batch
+                failed(exc)
                 log.warning("shadow scan: seek fallback failed for %s at %ss", mkv, offset)
     mid = os.path.join(out_dir, f"{base}_mid.jpg")
     mid_offset = recclip.SEGMENT_SECONDS // 2
@@ -153,7 +163,8 @@ def extract_candidates(mkv, seg_start, out_dir, base, *, runner=None,
                 "-update", "1", mid])
         if os.path.exists(mid) and os.path.getsize(mid) > 0:
             out.append((mid, seg_start + float(mid_offset)))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        failed(exc)
         log.warning("shadow scan: mid-frame extraction failed for %s", mkv, exc_info=True)
     return out
 
@@ -250,7 +261,7 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
     review_dir = (env.get(sentlog.ENV_REVIEW_DIR) or "").strip() or None
     summary = {"date": date_str, "generated_at": now, "duration_s": 0.0,
                "aborted": False, "trimmed": False, "extract_exhausted": False,
-               "cameras": {}}
+               "coverage_incomplete": False, "cameras": {}}
     try:
         os.makedirs(out_dir, exist_ok=True)
     except OSError:
@@ -268,8 +279,7 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
     extract_left = float(extract_budget)
     archive_counter = 0
     scannable = [cfg for cfg in app.cameras
-                 if cfg.scorer.url and root
-                 and os.path.isdir(os.path.join(root, cfg.host))]
+                 if cfg.scorer.url]
     for position, cfg in enumerate(scannable):
         # Both budgets are shares, not a first-come counter: whoever is last in
         # cameras.yaml must not inherit whatever the earlier cameras left over.
@@ -278,10 +288,12 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
         camera_started = clock()
         extract_deadline = camera_started + extract_left / cameras_left
         camera_frames = budget_left // cameras_left
-        segments = segments_for_date(root, cfg.host, date_str)
+        segments = segments_for_date(root, cfg.host, date_str) if root else []
         candidates, per_cam = [], {"segments": len(segments), "frames_scored": 0,
                                    "observations": 0, "matched": 0, "shadow_only": 0,
-                                   "segments_skipped": 0}
+                                   "segments_skipped": 0, "segments_degraded": 0,
+                                   "segments_without_frames": 0, "extraction_errors": 0,
+                                   "extraction_timeouts": 0, "coverage": "missing"}
         try:
             for index, (mkv, seg_start) in enumerate(segments):
                 if clock() >= extract_deadline:
@@ -291,9 +303,17 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
                                 "%d segment(s) for %s", per_cam["segments_skipped"],
                                 len(segments), cfg.name)
                     break
-                extract_kwargs = {"runner": runner}
-                candidates.extend(extract_candidates(
-                    mkv, seg_start, out_dir, f"{cfg.name}_{index:03d}", **extract_kwargs))
+                diagnostics = {}
+                extracted = extract_candidates(
+                    mkv, seg_start, out_dir, f"{cfg.name}_{index:03d}", runner=runner,
+                    diagnostics=diagnostics)
+                candidates.extend(extracted)
+                if not extracted:
+                    per_cam["segments_without_frames"] += 1
+                if diagnostics.get("extraction_errors"):
+                    per_cam["segments_degraded"] += 1
+                for key in ("extraction_errors", "extraction_timeouts"):
+                    per_cam[key] += diagnostics.get(key, 0)
             scored = score_candidates(
                 candidates, cfg.scorer.url, cfg.scorer.threshold,
                 rate=rate, budget=camera_frames, score=score,
@@ -303,6 +323,15 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
             budget_left -= scored["scored"]
             summary["aborted"] = summary["aborted"] or scored["aborted"]
             summary["trimmed"] = summary["trimmed"] or scored["trimmed"]
+            if per_cam["frames_scored"]:
+                if (per_cam["segments_skipped"] or per_cam["segments_without_frames"]
+                        or scored["trimmed"] or scored["aborted"]
+                        or scored["scored"] < len(candidates)):
+                    per_cam["coverage"] = "partial"
+                elif per_cam["segments_degraded"]:
+                    per_cam["coverage"] = "degraded"
+                else:
+                    per_cam["coverage"] = "complete"
             for obs in cluster_hits(scored["hits"]):
                 per_cam["observations"] += 1
                 events.record_shadow_event(camera=cfg.name, event_type="person",
@@ -327,6 +356,7 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
                     archive_counter += 1
         except Exception:  # noqa: BLE001 - one camera must not end the batch
             log.warning("shadow scan: %s failed", cfg.name, exc_info=True)
+            per_cam["coverage"] = "partial" if per_cam["frames_scored"] else "missing"
         finally:
             for path, _ts in candidates:
                 try:
@@ -335,7 +365,14 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
                     pass
         extract_left = max(0.0, extract_left - (clock() - camera_started))
         summary["cameras"][cfg.name] = per_cam
+        summary["coverage_incomplete"] |= per_cam["coverage"] != "complete"
         if summary["aborted"]:
+            # Keep every expected camera visible when scoring stops the run early.
+            for pending in scannable[position + 1:]:
+                summary["cameras"][pending.name] = {
+                    "segments": len(segments_for_date(root, pending.host, date_str)) if root else 0,
+                    "frames_scored": 0, "coverage": "missing", "reason": "scan_aborted"}
+            summary["coverage_incomplete"] = True
             break
     summary["duration_s"] = round(time.monotonic() - started, 1)
     write_summary(review_dir, summary)

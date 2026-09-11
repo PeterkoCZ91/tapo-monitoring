@@ -145,3 +145,21 @@ def test_fetch_recording_frames_uses_segment(tmp_path):
         base_dir="/r", segment_for=lambda *a, **k: seg, extract=fake_extract)
     assert got == ["/tmp/rec_0.jpg"]
     assert captured["mkv"] == seg[0] and captured["seg_start"] == 1000.0
+
+
+def test_recording_capture_times_follow_seek_offsets_even_after_failed_frame(tmp_path):
+    from tapo_monitor.sdclip import frame_capture_time
+
+    def runner(args):
+        offset = int(args[args.index("-ss") + 1])
+        if offset == 34:
+            raise RuntimeError("frame unavailable")
+        with open(args[-1], "w") as image:
+            image.write("frame")
+
+    frames = recclip.extract_frames(
+        "/segment.mkv", seg_start=1000, event_start=1030.9, span=12,
+        every=4, out_dir=str(tmp_path), base="rec_event", runner=runner,
+    )
+
+    assert [frame_capture_time(frame) for frame in frames] == [1030, 1038]

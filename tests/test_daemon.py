@@ -5112,7 +5112,8 @@ def _score_recorder(monkeypatch, scored, person=0.9):
         lambda url, path, **k: scored.append(path) or {"person": person, "animal": 0.0})
 
 
-def test_pending_sd_skips_a_frame_recorded_while_the_lens_was_out_of_bounds(monkeypatch, caplog):
+@pytest.mark.parametrize("source", ["sd", "recording"])
+def test_pending_sd_skips_a_frame_recorded_while_the_lens_was_out_of_bounds(source, monkeypatch, caplog):
     # 2026-09-02 04:36:59: the guard pulled a camera off the scaffolding it had drifted
     # onto, and two minutes later the SD follow-up scored a frame recorded *during* that
     # swing at 0.63 and delivered the IR-lit netting as a person. Correcting the aim
@@ -5120,6 +5121,7 @@ def test_pending_sd_skips_a_frame_recorded_while_the_lens_was_out_of_bounds(monk
     sent, scored = [], []
     inside, after = "/tmp/sdf_1000_1_00_at1000.jpg", "/tmp/sdf_1000_1_18_at1018.jpg"
     app, state, fetch_frames = _pending_scored([inside, after])
+    app.cameras[0].snapshot_source = source
     daemon._record_out_of_bounds(state, "a", 1002.0, 6)
     _score_recorder(monkeypatch, scored)
 
@@ -5132,11 +5134,13 @@ def test_pending_sd_skips_a_frame_recorded_while_the_lens_was_out_of_bounds(monk
     assert any("reason=panlimit_window" in r.getMessage() for r in caplog.records)
 
 
-def test_pending_sd_scores_a_frame_whose_name_carries_no_capture_time(monkeypatch):
+@pytest.mark.parametrize("source", ["sd", "recording"])
+def test_pending_sd_scores_a_frame_whose_name_carries_no_capture_time(source, monkeypatch):
     # An unparseable name means "unknown", and unknown must be scored: a naming change or
     # an older queued entry must never cost a real detection.
     sent, scored = [], []
     app, state, fetch_frames = _pending_scored(["/tmp/sdf_1000_1_00.jpg"])
+    app.cameras[0].snapshot_source = source
     daemon._record_out_of_bounds(state, "a", 1002.0, 6)
     _score_recorder(monkeypatch, scored)
 
@@ -5147,9 +5151,11 @@ def test_pending_sd_scores_a_frame_whose_name_carries_no_capture_time(monkeypatc
     assert len(sent) == 1
 
 
-def test_pending_sd_is_unaffected_when_the_guard_never_fired(monkeypatch):
+@pytest.mark.parametrize("source", ["sd", "recording"])
+def test_pending_sd_is_unaffected_when_the_guard_never_fired(source, monkeypatch):
     sent, scored = [], []
     app, state, fetch_frames = _pending_scored(["/tmp/sdf_1000_1_00_at1000.jpg"])
+    app.cameras[0].snapshot_source = source
     _score_recorder(monkeypatch, scored)
 
     _run_pending(app, state, {"a": object()}, 1300, fetch_frames,
@@ -5182,3 +5188,52 @@ def test_out_of_bounds_windows_are_bounded():
 
     assert len(state.pan_limit_out_of_bounds["a"]) == daemon.PANLIMIT_WINDOW_KEEP
     assert daemon._in_panlimit_window(state, "a", 1049.0) is True   # newest kept
+
+
+def test_expired_hold_rescued_when_recall_follows_in_same_loop_step(monkeypatch, tmp_path, caplog):
+    # loop_step runs monitor -> sample -> guard with one shared now value. A live
+    # hold followed seconds later by a physical recall therefore has equal stamps.
+    sent = []
+    app = _sampler_app(threshold=0.3, motion_send=0.6)
+    state = daemon.MonitorState()
+    group, frame = _rescue_group(tmp_path, held_at=1100)
+    order = []
+
+    def hold(*args, now, **kwargs):
+        order.append("hold")
+        group["last_hold_at"] = now
+        state.groups["a"] = group
+
+    def recall(*args, now, **kwargs):
+        order.append("recall")
+        state.pan_limit_recall_at["a"] = now
+
+    def noop(*args, **kwargs):
+        pass
+
+    daemon.loop_step(
+        app, {}, state, now=1100, secrets={}, last_control=1100,
+        control_interval=60, monitor=hold, sample=noop, drain=noop,
+        hubpoll=noop, guard=recall, digest=noop, is_night=lambda: True)
+    assert order == ["hold", "recall"]
+    assert group["last_hold_at"] == state.pan_limit_recall_at["a"]
+    with caplog.at_level("INFO", logger="tapo_monitor.monitor"):
+        _run_sampler(app, state, 1271, sent, monkeypatch)
+    assert [image for image, _caption in sent] == [frame]
+    assert "reason=hold_rescue_recall" in caplog.text
+    assert "hold_expired" not in caplog.text
+
+
+@pytest.mark.parametrize("source", ["sd", "recording"])
+def test_panlimit_filtered_batch_never_uses_blind_live_fallback(source, monkeypatch):
+    sent, scored, grabbed = [], [], []
+    app, state, fetch = _pending_scored(["/tmp/frame_at1000.jpg"])
+    app.cameras[0].snapshot_source = source
+    state.pending_sd[0]["live_sent"] = False
+    daemon._record_out_of_bounds(state, "a", 1002, 6)
+    _score_recorder(monkeypatch, scored)
+
+    _run_pending(app, state, {"a": object()}, 1300, fetch,
+                 lambda cfg_: (lambda cam, ev: grabbed.append(True)), sent, monkeypatch)
+
+    assert not scored and not sent and not grabbed

@@ -26,6 +26,7 @@
 #                         absolute                 (default tapo-monitor)
 #   TAPO_FLEET_PYTHON     venv interpreter on the host, same rule
 #                         (default tapo-env/bin/python, falls back to python3)
+#   TAPO_FLEET_CONFIG     camera config on each host (default <root>/cameras.yaml)
 #   TAPO_FLEET_TIMEOUT    seconds per host before it counts as unreachable  (default 60)
 #   TAPO_FLEET_STATE_DIR  where the scorer counters are remembered
 #
@@ -76,6 +77,7 @@ unit="${TAPO_FLEET_UNIT:-tapo-monitor.service}"
 watch_unit="${TAPO_FLEET_WATCH_UNIT:-host-watch.timer}"
 root="${TAPO_FLEET_ROOT:-tapo-monitor}"
 python_bin="${TAPO_FLEET_PYTHON:-tapo-env/bin/python}"
+config="${TAPO_FLEET_CONFIG:-}"
 host_timeout="${TAPO_FLEET_TIMEOUT:-60}"
 connect_timeout=$(( host_timeout / 4 ))
 ((connect_timeout > 3)) || connect_timeout=3
@@ -100,18 +102,20 @@ trap 'rm -rf "$tmpdir"' EXIT
 probe_host() {
     local remote_args
     remote_args="$(printf ' %q' "$root" "$unit" "$python_bin" "$watch_unit" \
-        "$night_start" "$night_end")"
+        "$night_start" "$night_end" "$config")"
     # shellcheck disable=SC2029  # client-side expansion is the point: the arguments are
     # %q-quoted here and executed on the host.
     timeout "$host_timeout" ssh -o BatchMode=yes -o ConnectTimeout="$connect_timeout" \
         "$1" "bash -s --$remote_args" <<'REMOTE'
 set -u
 export LC_ALL=C
-root="$1"; unit="$2"; python_bin="$3"; watch_unit="$4"; night_start="$5"; night_end="$6"
+root="$1"; unit="$2"; python_bin="$3"; watch_unit="$4"; night_start="$5"; night_end="$6"; config="$7"
 
 case "$root" in /*) ;; *) root="$HOME/$root" ;; esac
 case "$python_bin" in /*) ;; *) python_bin="$HOME/$python_bin" ;; esac
 [ -x "$python_bin" ] || python_bin="python3"
+[ -n "$config" ] || config="$root/cameras.yaml"
+case "$config" in /*) ;; *) config="$HOME/$config" ;; esac
 
 emit() { printf '%s=%s\n' "$1" "$2"; }
 notes=""
@@ -181,6 +185,85 @@ fi
 emit fp_running "$fp"
 emit fp_source "$fp_source"
 emit fp_expected "$(envget TAPO_EXPECTED_FINGERPRINT)"
+
+# Probe configured cameras, never the historical union in health.json: removing a
+# retired camera stops expecting it while its evidence stays on disk. Only non-secret
+# environment values cross into Python; do not source the service env file.
+camera_probe=$(cd "$pkg_dir" && \
+    TAPO_HEALTH_STATE_FILE="$(envget TAPO_HEALTH_STATE_FILE)" \
+    XDG_STATE_HOME="$(envget XDG_STATE_HOME)" \
+    RECORDING_ROOT="$(envget RECORDING_ROOT)" \
+    "$python_bin" - "$config" "$now" <<'CAMERA_PY'
+import os
+import sys
+import types
+
+from tapo_monitor import health, reliability
+from tapo_monitor.config import load_config
+
+
+def clean(value):
+    return str(value).replace("\n", " ").replace("\r", " ")
+
+
+try:
+    app = load_config(sys.argv[1])
+    now = float(sys.argv[2])
+    state = types.SimpleNamespace(**{key: {} for key in health.PERSISTED_FIELDS})
+    loaded = health.load_state(health.default_state_path(), state)
+    issues = []
+    details = []
+    wired = [cfg for cfg in app.cameras if "hubpoll" not in cfg.detection.sources]
+    if wired and not loaded:
+        issues.append("health state unavailable")
+    for cfg in app.cameras:
+        name = clean(cfg.name)
+        if "hubpoll" in cfg.detection.sources:
+            online = "battery/hub (may sleep)"
+        elif cfg.name in state.fail_since:
+            age = max(0, int(now - state.fail_since[cfg.name]))
+            issues.append(f"{name}: offline ({age}s)")
+            online = "offline"
+        elif cfg.name in state.online_since:
+            online = "online (last observed)"
+        else:
+            online = "unknown"
+            if loaded:
+                issues.append(f"{name}: availability unknown")
+        if cfg.name in state.event_fail_since:
+            issues.append(f"{name}: event API unavailable")
+        recording = "not configured"
+        recording_root = os.environ.get("RECORDING_ROOT")
+        # Battery cameras sleep and have no continuous stream to expect. For wired
+        # cameras the recorder serves both SD and recording snapshot sources.
+        if recording_root and "hubpoll" not in cfg.detection.sources:
+            result = reliability.recorder_health(
+                recording_root, cfg.host, now=now,
+                max_age=app.reliability.recorder_max_age,
+            )
+            reason = result.get("reason", "unknown")
+            age = result.get("latest_age_s")
+            recording = reason + (f" ({int(age)}s old)" if age is not None else "")
+            if result.get("status") != "ok":
+                issues.append(f"{name}: recording {recording}")
+        elif cfg.snapshot_source == "recording":
+            issues.append(f"{name}: recording root unavailable")
+        details.append(f"{name}: {online}, recording {recording}")
+    print("camera_summary=" + ("CHECK" if issues else "ok") + f" ({len(app.cameras)})")
+    print("camera_details=" + " | ".join(details))
+    print("camera_findings=" + " | ".join(issues))
+except Exception as exc:
+    # Config exceptions can include values from config; emit the type only.
+    print("camera_summary=UNKNOWN")
+    print("camera_findings=camera probe failed (" + type(exc).__name__ + ")")
+CAMERA_PY
+)
+if [ "$?" -eq 0 ] && [ -n "$camera_probe" ]; then
+    printf '%s\n' "$camera_probe"
+else
+    emit camera_summary UNKNOWN
+    emit camera_findings "camera probe unavailable"
+fi
 
 # A deploy switches `current` and then restarts. The reverse order means the daemon is
 # still executing the release before this one, and every other check here would agree
@@ -480,6 +563,14 @@ for idx in "${!targets[@]}"; do
     detail="release $(f "$idx" release)"
     [[ "$(f "$idx" fp_source)" == "cli" ]] || detail="$detail, fingerprint read from the release name (the package could not report it)"
     printf '  %s: %s\n' "$label" "$detail"
+    printf '  %s  cameras %s: %s\n' "${label//?/ }" \
+        "$(f "$idx" camera_summary)" "$(f "$idx" camera_details)"
+    camera_findings="$(f "$idx" camera_findings)"
+    if [[ "$(f "$idx" camera_summary)" == "-" ]]; then
+        finding "$label" "camera probe unavailable"
+    elif [[ "$camera_findings" != "-" ]]; then
+        finding "$label" "$camera_findings"
+    fi
     printf '  %s  digest due %s, last sent %s %s; frames %s; %s free\n' \
         "${label//?/ }" "$(f "$idx" digest_time)" "$(f "$idx" digest_last)" \
         "$(f "$idx" digest_at)" "$(f "$idx" night_label)" "$(f "$idx" disk_avail)"

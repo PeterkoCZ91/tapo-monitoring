@@ -425,7 +425,8 @@ def test_run_scan_missing_root_is_calm(tmp_path, monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
         summary = shadowscan.run_scan(app, "2026-08-12", out_dir=str(tmp_path / "w"),
                                       ledger_factory=lambda: _FakeLedger())
-    assert summary["cameras"] == {}
+    assert summary["cameras"]["front"]["coverage"] == "missing"
+    assert summary["coverage_incomplete"] is True
     assert (tmp_path / "review" / shadowscan.SUMMARY_NAME).exists()
     assert any("RECORDING_ROOT" in r.message for r in caplog.records)
 
@@ -674,3 +675,74 @@ def test_default_extract_budget_covers_a_full_day_on_both_cameras(tmp_path, monk
 
     assert summary["extract_exhausted"] is False
     assert [cam["segments_skipped"] for cam in summary["cameras"].values()] == [0, 0]
+
+
+def test_run_scan_reports_camera_without_recordings(tmp_path, monkeypatch):
+    app, _ = _app_with_recorder(tmp_path, monkeypatch)
+    summary = shadowscan.run_scan(
+        app, "2026-08-13", out_dir=str(tmp_path / "work"),
+        ledger_factory=_FakeLedger)
+    assert summary["cameras"]["front"]["coverage"] == "missing"
+    assert summary["coverage_incomplete"] is True
+    assert summary["aborted"] is False
+
+
+def test_run_scan_reports_missing_camera_directory(tmp_path, monkeypatch):
+    app, root = _app_with_recorder(tmp_path, monkeypatch)
+    monkeypatch.setenv("RECORDING_ROOT", str(root / "missing"))
+    summary = shadowscan.run_scan(
+        app, "2026-08-12", out_dir=str(tmp_path / "work"),
+        ledger_factory=_FakeLedger)
+    assert summary["cameras"]["front"]["coverage"] == "missing"
+
+
+def test_run_scan_exposes_scene_timeout_even_when_fallback_scores(tmp_path, monkeypatch):
+    app, _ = _app_with_recorder(tmp_path, monkeypatch)
+
+    def runner(args):
+        if "-ss" not in args:
+            raise shadowscan.subprocess.TimeoutExpired(args, 90)
+        with open(args[-1], "wb") as output:
+            output.write(b"jpeg")
+        return ""
+
+    summary = shadowscan.run_scan(
+        app, "2026-08-12", out_dir=str(tmp_path / "work"), rate=0,
+        ledger_factory=_FakeLedger, runner=runner,
+        score=lambda *a, **k: {"person": 0.1})
+    camera = summary["cameras"]["front"]
+    assert camera["coverage"] == "degraded"
+    assert camera["segments_degraded"] == 1
+    assert camera["extraction_timeouts"] == 1
+    assert camera["frames_scored"] == 3
+    assert summary["coverage_incomplete"] is True
+
+
+def test_run_scan_reports_unreadable_segment_as_missing(tmp_path, monkeypatch):
+    app, _ = _app_with_recorder(tmp_path, monkeypatch)
+
+    def runner(args):
+        raise RuntimeError("unreadable segment")
+
+    summary = shadowscan.run_scan(
+        app, "2026-08-12", out_dir=str(tmp_path / "work"),
+        ledger_factory=_FakeLedger, runner=runner)
+    camera = summary["cameras"]["front"]
+    assert camera["segments"] == 1
+    assert camera["coverage"] == "missing"
+    assert camera["segments_without_frames"] == 1
+    assert camera["extraction_errors"] == 4
+    assert camera["extraction_timeouts"] == 0
+
+
+def test_run_scan_keeps_unscanned_camera_visible_after_scorer_abort(tmp_path, monkeypatch):
+    app = _app_with_two_recorders(tmp_path, monkeypatch, count=1)
+    monkeypatch.setattr(shadowscan, "extract_candidates",
+                        lambda *a, **k: [("missing.jpg", 1)] * 3)
+    summary = shadowscan.run_scan(
+        app, "2026-08-12", out_dir=str(tmp_path / "work"), rate=0,
+        ledger_factory=_FakeLedger, score=lambda *a, **k: None)
+    assert summary["aborted"] is True
+    assert summary["coverage_incomplete"] is True
+    assert summary["cameras"]["second"]["coverage"] == "missing"
+    assert summary["cameras"]["second"]["reason"] == "scan_aborted"

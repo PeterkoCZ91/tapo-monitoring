@@ -131,7 +131,8 @@ def _run_ffmpeg(args):  # pragma: no cover - subprocess I/O
 def extract_frames(mkv, seg_start, event_start, span, every, out_dir, base, runner=None,
                    rotate=0):
     """One JPEG every ``every`` sec across ``span``, seeking from the event's offset in
-    the segment. Returns paths (oldest first); clips the window to the segment end."""
+    the segment. Returns paths (oldest first); clips the window to the segment end.
+    Names carry the segment epoch plus actual seek offset for pan-window filtering."""
     runner = runner or _run_ffmpeg
     out_dir = out_dir.rstrip("/")
     vf = snapshot.scaled_vf(rotate)
@@ -139,7 +140,7 @@ def extract_frames(mkv, seg_start, event_start, span, every, out_dir, base, runn
     limit = min(base_offset + max(int(span), 1), SEGMENT_SECONDS)
     paths = []
     for k, offset in enumerate(range(base_offset, limit, max(int(every), 1))):
-        out_path = os.path.join(out_dir, f"{base}_{k:02d}.jpg")
+        out_path = os.path.join(out_dir, f"{base}_{k:02d}_at{int(seg_start + offset)}.jpg")
         try:
             runner(["ffmpeg", "-y", "-ss", str(offset), "-i", mkv, "-frames:v", "1",
                     "-vf", vf, "-q:v", "2", "-update", "1", out_path])

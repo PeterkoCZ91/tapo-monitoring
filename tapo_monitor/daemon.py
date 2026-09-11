@@ -36,6 +36,7 @@ from . import (
     enrich,
     health,
     hubclient,
+    incident_archive,
     ledger,
     monitor,
     notify,
@@ -395,6 +396,7 @@ class MonitorState:
     last_event_start: dict = field(default_factory=dict)
     fail_since: dict = field(default_factory=dict)
     outage_alerted: dict = field(default_factory=dict)
+    outage_preserver: object = field(default_factory=incident_archive.OutagePreserver)
     online_since: dict = field(default_factory=dict)
     last_success: dict = field(default_factory=dict)
     last_outage_duration: dict = field(default_factory=dict)
@@ -1486,24 +1488,23 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
         selected_score = None
         score = score_for(cfg)
         try:
-            recording_pick = cfg.snapshot_source == "recording" and score is not None
-            if recording_pick:
-                image, selected_score = _select_recording_frame(cfg, event, etype, frames, score)
-            # SD path: first above-threshold frame wins. Skipped (empty) when the recording
-            # path already made the pick above.
-            for frame in (() if recording_pick else frames):
+            # Both sources carry capture epochs. Filter before either scorer selection;
+            # retain the original frames so an all-filtered batch cannot trigger a blind
+            # live fallback. Unknown timestamps stay eligible, as with older SD names.
+            eligible_frames = []
+            for frame in frames:
                 taken = sdclip.frame_capture_time(frame)
                 if taken is not None and _in_panlimit_window(state, cfg.name, taken):
-                    # The guard had pulled the lens off its allowed span at this moment,
-                    # so the frame shows wherever it was pointed — a wall, scaffolding
-                    # netting lit by the camera's own IR — and not the scene. Fixing the
-                    # aim does not unrecord it: on 2026-09-02 04:36:59 such a frame scored
-                    # 0.63 and was delivered as a person, eleven seconds after the recall
-                    # had already corrected the camera. An unparseable name means unknown,
-                    # and unknown is scored: this must never eat a real detection.
                     monitor.audit_event(cfg, event, etype, "sd", "drop",
                                         reason="panlimit_window")
-                    continue
+                else:
+                    eligible_frames.append(frame)
+            recording_pick = cfg.snapshot_source == "recording" and score is not None
+            if recording_pick:
+                image, selected_score = _select_recording_frame(
+                    cfg, event, etype, eligible_frames, score)
+            # SD/raw path: first accepted frame wins; recording scores all eligible frames.
+            for frame in (() if recording_pick else eligible_frames):
                 if score is not None:
                     # Local scorer is the arbiter (Groq captions later, at send time).
                     s = score(frame)
@@ -1641,7 +1642,9 @@ def _rescue_expired_hold(app, cfg, state, group, *, now, secrets, time_str):
     recalled_at = state.pan_limit_recall_at.get(cfg.name)
     if not path or held_at is None or recalled_at is None:
         return False
-    if not (held_at < recalled_at <= now):
+    # loop_step shares one timestamp across monitor -> sampler -> pan guard.
+    # Equality means the guard recalled after this hold in the same iteration.
+    if not (held_at <= recalled_at <= now):
         return False
     if not os.path.exists(path):
         return False                      # review-log retention got there first
@@ -2264,6 +2267,11 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
         # client-based behaviour only for injected/test connectors that do not.
         ok = state.network_reachable.get(cfg.name, cam_clients.get(cfg.name) is not None)
         event, _ = update_outage(state, cfg.name, ok, now, app.alerts.outage_threshold)
+        if not ok and now - state.fail_since[cfg.name] >= app.alerts.outage_threshold:
+            state.outage_preserver.submit(
+                os.getenv("RECORDING_ROOT"), cfg.host,
+                outage_at=state.fail_since[cfg.name], observed_at=now,
+            )
         if event == "alert":
             uptime = state.last_observed_uptime.get(cfg.name)
             detail = (f" after {notify.format_duration(uptime)} observed uptime"
