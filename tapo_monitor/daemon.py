@@ -396,7 +396,7 @@ class MonitorState:
     last_event_start: dict = field(default_factory=dict)
     fail_since: dict = field(default_factory=dict)
     outage_alerted: dict = field(default_factory=dict)
-    outage_preserver: object = field(default_factory=incident_archive.OutagePreserver)
+    outage_preserver: incident_archive.OutagePreserver = field(default_factory=incident_archive.OutagePreserver)
     online_since: dict = field(default_factory=dict)
     last_success: dict = field(default_factory=dict)
     last_outage_duration: dict = field(default_factory=dict)
