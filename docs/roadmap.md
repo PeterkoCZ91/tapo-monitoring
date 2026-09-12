@@ -194,7 +194,7 @@ Status: **pilot v1 deployed (2026-08-25)**
   camera class nothing else ever moves, so the recall is its only automatic way back from a
   nudge — and it costs nothing while the camera already holds the preset. `night_preset` is
   unused for a static camera and now draws the startup warning instead.
-- Give PTZ handoffs a bounded lease and always restore the previous control policy.
+- [x] Model PTZ handoffs as a bounded lease with deterministic expiry and previous-policy restoration; live camera movement remains gated until a measured overlapping pair is available.
 
 The first slice is deliberately limited to configured camera groups. It leaves camera
 motion untouched, does not use `handoff_preset`, shares one gate across live/sampler/SD
