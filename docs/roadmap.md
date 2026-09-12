@@ -175,9 +175,9 @@ Status: **pilot v1 deployed (2026-08-25)**
 - [x] Suppress duplicate live, sampler and SD notifications after a successful delivery.
 - [x] Persist the per-camera event watermark after each detection pass to prevent replay
   after a daemon restart.
-- [ ] Correlate adjacent-camera observations into a durable scene event.
-- [ ] Preserve lead/follow camera pairs with event-time delta and derive a probable
-  transition direction only after camera-clock alignment; never infer biometric identity.
+- [x] Correlate adjacent-camera observations into a durable scene event (offline-capable ledger path; live pair still required for production validation).
+- [x] Preserve lead/follow camera pairs with event-time delta and an explicit measured camera order;
+  direction remains unknown until that order is supplied. Clock-offset calibration remains open; never infer biometric identity.
 - [ ] Select the best frame across cameras.
 - [ ] Measure and report each camera's clock offset. The duplicate gate compares event
   times across cameras, so a skew larger than the window makes it silently inert — and any

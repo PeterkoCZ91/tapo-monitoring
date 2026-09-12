@@ -1029,6 +1029,19 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                     _cfg.coordinator.group, _name, etype, event, now,
                     window=_cfg.coordinator.scene_window,
                 )
+                scene_event = state.scene_coordinator.scene_event(
+                    _cfg.coordinator.group, event.get("start_time"),
+                    window=_cfg.coordinator.scene_window,
+                    camera_order=_cfg.coordinator.camera_order,
+                )
+                if scene_event is not None and state.event_ledger is not None:
+                    state.event_ledger.record_scene_event(
+                        group=scene_event.group, event_at=scene_event.event_at,
+                        lead_camera=scene_event.lead_camera,
+                        follow_camera=scene_event.follow_camera,
+                        delta_seconds=scene_event.delta_seconds,
+                        direction=scene_event.direction,
+                    )
             if _cfg.sampler.enabled:
                 sampler.observe_event(state.groups, _name, event, etype, sent, now,
                                       _cfg.sampler, delivered=delivered)

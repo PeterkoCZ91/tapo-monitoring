@@ -93,3 +93,11 @@ def test_scene_event_does_not_guess_direction_without_measured_order():
     coordinator.record_delivery("g", "camera-b", "person", {"start_time": 101}, 101)
 
     assert coordinator.scene_event("g", 100, window=2).direction is None
+
+
+def test_scene_event_reverse_direction_is_explicit():
+    coordinator = SceneCoordinator()
+    coordinator.record_delivery("g", "destination", "person", {"start_time": 100}, 100)
+    coordinator.record_delivery("g", "source", "person", {"start_time": 103}, 103)
+    event = coordinator.scene_event("g", 101, window=5, camera_order=("source", "destination"))
+    assert event.direction == "reverse"

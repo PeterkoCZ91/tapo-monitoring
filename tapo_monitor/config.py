@@ -119,6 +119,8 @@ class CoordinatorConfig:
     group: str | None = None
     handoff_preset: str | None = None
     scene_window: int = 15
+    # Explicit operator-measured sequence used only for scene direction; empty means unknown.
+    camera_order: tuple[str, ...] = ()
 
 
 @dataclass
@@ -549,6 +551,16 @@ def _camera(data, index):
         raise ConfigError(f"{where}: 'coordinator.scene_window' must be an integer") from None
     if scene_window < 1:
         raise ConfigError(f"{where}: 'coordinator.scene_window' must be >= 1")
+    raw_camera_order = coord.get("camera_order", ())
+    if raw_camera_order is None:
+        raw_camera_order = ()
+    if not isinstance(raw_camera_order, (list, tuple)):
+        raise ConfigError(f"{where}: 'coordinator.camera_order' must be a list")
+    if any(not isinstance(item, str) or not item.strip() for item in raw_camera_order):
+        raise ConfigError(f"{where}: 'coordinator.camera_order' entries must be non-empty strings")
+    camera_order = tuple(item.strip() for item in raw_camera_order)
+    if len(set(camera_order)) != len(camera_order):
+        raise ConfigError(f"{where}: 'coordinator.camera_order' must not contain duplicates")
     try:
         rtsp_port = int(data.get("rtsp_port", 554))
     except (TypeError, ValueError):
@@ -661,6 +673,7 @@ def _camera(data, index):
             group=coord.get("group"),
             handoff_preset=coord.get("handoff_preset"),
             scene_window=scene_window,
+            camera_order=camera_order,
         ),
     )
 

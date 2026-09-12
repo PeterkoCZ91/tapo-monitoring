@@ -297,3 +297,20 @@ def test_camera_events_between_filters_by_camera_and_window(tmp_path):
     assert events.camera_events_between("front", 50.0, 200.0) == [100.0]
     assert events.camera_events_between("front", 0.0, 1000.0) == [100.0, 500.0]
     assert events.camera_events_between("front", 600.0, 700.0) == []
+
+
+def test_scene_event_is_durable_and_idempotent(tmp_path):
+    events = ledger.EventLedger(tmp_path / "events.sqlite3")
+    first = events.record_scene_event(
+        group="overlap", event_at=100, lead_camera="source", follow_camera="destination",
+        delta_seconds=4, direction="forward",
+    )
+    duplicate = events.record_scene_event(
+        group="overlap", event_at=100, lead_camera="source", follow_camera="destination",
+        delta_seconds=4, direction="forward",
+    )
+    assert duplicate == first
+    assert events.scene_events(start=0, end=200) == [{
+        "group_name": "overlap", "event_at": 100.0, "lead_camera": "source",
+        "follow_camera": "destination", "delta_seconds": 4.0, "direction": "forward",
+    }]

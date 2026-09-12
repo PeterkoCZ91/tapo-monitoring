@@ -107,6 +107,18 @@ CREATE TABLE IF NOT EXISTS decisions (
 );
 CREATE INDEX IF NOT EXISTS decisions_camera_time
     ON decisions(camera, event_at, id);
+CREATE TABLE IF NOT EXISTS scene_events (
+    id INTEGER PRIMARY KEY,
+    group_name TEXT NOT NULL,
+    event_at REAL NOT NULL,
+    lead_camera TEXT NOT NULL,
+    follow_camera TEXT NOT NULL,
+    delta_seconds REAL NOT NULL,
+    direction TEXT,
+    fingerprint TEXT NOT NULL UNIQUE
+);
+CREATE INDEX IF NOT EXISTS scene_events_time
+    ON scene_events(group_name, event_at, id);
 """
 
 
@@ -365,6 +377,52 @@ class EventLedger:
                 "SELECT id FROM decisions WHERE fingerprint = ?", (fingerprint,)
             ).fetchone()
         return int(row["id"])
+
+    def record_scene_event(self, *, group: str, event_at: float, lead_camera: str,
+                           follow_camera: str, delta_seconds: float,
+                           direction: str | None = None) -> int:
+        """Persist one media-free multi-camera scene summary idempotently."""
+        group = _safe_identifier(group, "group")
+        lead_camera = _safe_identifier(lead_camera, "lead_camera")
+        follow_camera = _safe_identifier(follow_camera, "follow_camera")
+        event_at = _finite_timestamp(event_at, "event_at")
+        delta_seconds = _finite_timestamp(delta_seconds, "delta_seconds")
+        if direction not in (None, "forward", "reverse"):
+            raise ValueError("direction must be forward, reverse or None")
+        identity = [group, event_at, lead_camera, follow_camera, delta_seconds, direction]
+        fingerprint = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO scene_events(
+                    group_name, event_at, lead_camera, follow_camera, delta_seconds,
+                    direction, fingerprint
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(fingerprint) DO NOTHING""",
+                (group, event_at, lead_camera, follow_camera, delta_seconds, direction, fingerprint),
+            )
+            row = connection.execute(
+                "SELECT id FROM scene_events WHERE fingerprint = ?", (fingerprint,)
+            ).fetchone()
+        return int(row["id"])
+
+    def scene_events(self, *, start: float, end: float, group: str | None = None) -> list[dict]:
+        """Return durable scene summaries in event-time order."""
+        start = _finite_timestamp(start, "start")
+        end = _finite_timestamp(end, "end")
+        if end < start:
+            raise ValueError("end must not precede start")
+        clauses = ["event_at >= ?", "event_at <= ?"]
+        params: list = [start, end]
+        if group is not None:
+            clauses.append("group_name = ?")
+            params.append(_safe_identifier(group, "group"))
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT group_name, event_at, lead_camera, follow_camera, delta_seconds, direction "
+                "FROM scene_events WHERE " + " AND ".join(clauses) + " ORDER BY event_at, id",
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def record_audit(self, record: Mapping, *, observed_at: float | None = None):
         """Fold one parsed structured audit record into observations/decisions."""
