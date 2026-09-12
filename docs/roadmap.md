@@ -207,7 +207,7 @@ production pilot uses two cameras with overlapping views.
 
 ## Phase 6 — Deployment and fleet integrity
 
-Status: **shipped; the unknown-key hard fail remains**
+Status: **shipped**
 
 Deployed hosts were rsync copies of the package, not git checkouts, and a partial copy
 twice produced a daemon that ran for hours while alerting on nothing. The work here made
