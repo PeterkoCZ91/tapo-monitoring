@@ -548,7 +548,10 @@ class EventLedger:
             decisions = connection.execute(
                 "DELETE FROM decisions WHERE event_at < ?", (cutoff,)
             )
-        return observations.rowcount + decisions.rowcount
+            scene_events = connection.execute(
+                "DELETE FROM scene_events WHERE event_at < ?", (cutoff,)
+            )
+        return observations.rowcount + decisions.rowcount + scene_events.rowcount
 
     def cleanup(self, retention_seconds: float, *, now: float | None = None) -> int:
         """Apply an age-based retention policy and return the number removed."""

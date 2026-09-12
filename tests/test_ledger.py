@@ -314,3 +314,17 @@ def test_scene_event_is_durable_and_idempotent(tmp_path):
         "group_name": "overlap", "event_at": 100.0, "lead_camera": "source",
         "follow_camera": "destination", "delta_seconds": 4.0, "direction": "forward",
     }]
+
+def test_retention_cleanup_deletes_expired_scene_events(tmp_path):
+    events = ledger.EventLedger(tmp_path / "events.sqlite3")
+    events.record_scene_event(
+        group="yard", event_at=10, lead_camera="source", follow_camera="destination",
+        delta_seconds=2, direction="forward"
+    )
+    events.record_scene_event(
+        group="yard", event_at=30, lead_camera="source", follow_camera="destination",
+        delta_seconds=2, direction="forward"
+    )
+
+    assert events.cleanup(5, now=30) == 1
+    assert [event["event_at"] for event in events.scene_events(start=0, end=100)] == [30.0]

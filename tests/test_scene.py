@@ -116,3 +116,36 @@ def test_estimate_clock_offset_uses_median_and_rejects_empty():
     from tapo_monitor.scene import estimate_clock_offset
     assert estimate_clock_offset([(100, 102), (200, 203), (300, 302)]) == 2
     assert estimate_clock_offset([("bad", 1), (float("nan"), 2)]) is None
+
+def test_offline_scene_pipeline_round_trip(tmp_path):
+    from tapo_monitor.ledger import EventLedger
+    from tapo_monitor.scene import choose_best_frame, estimate_clock_offset
+
+    offset = estimate_clock_offset([(1000.0, 1003.0), (1010.0, 1013.0)])
+    coordinator = SceneCoordinator()
+    coordinator.record_delivery("yard", "source", "person", {"start_time": 1000}, 1000)
+    coordinator.record_delivery(
+        "yard", "destination", "person", {"start_time": 1006 - offset}, 1006
+    )
+    event = coordinator.scene_event(
+        "yard", 1003, window=10, camera_order=("source", "destination")
+    )
+    assert event is not None
+    best = choose_best_frame([
+        {"camera": "source", "frame": "a", "score": 0.6, "captured_at": 1000},
+        {"camera": "destination", "frame": "b", "score": 0.9, "captured_at": 1006},
+    ])
+    assert best["frame"] == "b"
+
+    ledger = EventLedger(tmp_path / "events.sqlite3")
+    assert ledger.record_scene_event(
+        group=event.group, event_at=event.event_at, lead_camera=event.lead_camera,
+        follow_camera=event.follow_camera, delta_seconds=event.delta_seconds,
+        direction=event.direction,
+    ) == 1
+    assert ledger.record_scene_event(
+        group=event.group, event_at=event.event_at, lead_camera=event.lead_camera,
+        follow_camera=event.follow_camera, delta_seconds=event.delta_seconds,
+        direction=event.direction,
+    ) == 1
+    assert len(ledger.scene_events(start=0, end=2000, group="yard")) == 1
