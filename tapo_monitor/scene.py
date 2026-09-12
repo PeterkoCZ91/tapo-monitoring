@@ -1,5 +1,7 @@
 """Small, in-memory correlation gate for overlapping camera views."""
 
+import math
+import statistics
 from dataclasses import dataclass
 
 
@@ -29,6 +31,50 @@ def _event_time(event):
         return float(event.get("start_time"))
     except (AttributeError, TypeError, ValueError):
         return None
+
+
+def choose_best_frame(candidates):
+    """Choose the highest-scoring frame with deterministic tie breaking.
+
+    Candidates are mappings with ``score`` and optional ``captured_at``, ``camera`` and
+    ``frame`` fields. Invalid scores are ignored; ties prefer the earliest capture and
+    then stable camera/frame names. The original mapping is returned unchanged.
+    """
+    valid = []
+    for candidate in candidates or ():
+        try:
+            score = float(candidate.get("score"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if not math.isfinite(score):
+            continue
+        captured = candidate.get("captured_at", float("inf"))
+        try:
+            captured = float(captured)
+        except (TypeError, ValueError):
+            captured = float("inf")
+        valid.append((score, captured, str(candidate.get("camera", "")),
+                      str(candidate.get("frame", "")), candidate))
+    if not valid:
+        return None
+    return min(valid, key=lambda item: (-item[0], item[1], item[2], item[3]))[-1]
+
+
+def estimate_clock_offset(pairs):
+    """Return the median ``other - reference`` offset from timestamp pairs.
+
+    Invalid or non-finite pairs are ignored. ``None`` means there is no usable evidence;
+    the estimator never invents zero as a measurement.
+    """
+    offsets = []
+    for reference, other in pairs or ():
+        try:
+            reference, other = float(reference), float(other)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(reference) and math.isfinite(other):
+            offsets.append(other - reference)
+    return statistics.median(offsets) if offsets else None
 
 
 class SceneCoordinator:

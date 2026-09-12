@@ -101,3 +101,18 @@ def test_scene_event_reverse_direction_is_explicit():
     coordinator.record_delivery("g", "source", "person", {"start_time": 103}, 103)
     event = coordinator.scene_event("g", 101, window=5, camera_order=("source", "destination"))
     assert event.direction == "reverse"
+
+
+
+def test_choose_best_frame_uses_score_then_capture_time():
+    early = {"camera": "source", "frame": "a", "score": 0.8, "captured_at": 100}
+    late = {"camera": "destination", "frame": "b", "score": 0.8, "captured_at": 101}
+    assert __import__("tapo_monitor.scene", fromlist=["choose_best_frame"]).choose_best_frame(
+        [late, early, {"score": "nan"}]
+    ) is early
+
+
+def test_estimate_clock_offset_uses_median_and_rejects_empty():
+    from tapo_monitor.scene import estimate_clock_offset
+    assert estimate_clock_offset([(100, 102), (200, 203), (300, 302)]) == 2
+    assert estimate_clock_offset([("bad", 1), (float("nan"), 2)]) is None
