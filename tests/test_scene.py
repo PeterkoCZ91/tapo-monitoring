@@ -68,3 +68,28 @@ def test_missing_event_time_is_passthrough():
     )
 
     assert coordinator.allows("overlap-group", "camera-b", "person", {}, 108, window=15)
+
+
+
+def test_scene_event_reports_measured_direction_and_delta():
+    coordinator = SceneCoordinator()
+    coordinator.record_delivery("overlap-group", "source", "person", {"start_time": 100}, 101)
+    coordinator.record_delivery("overlap-group", "destination", "person", {"start_time": 106}, 107)
+
+    event = coordinator.scene_event(
+        "overlap-group", 104, window=10, camera_order=("source", "destination")
+    )
+
+    assert event.lead_camera == "source"
+    assert event.follow_camera == "destination"
+    assert event.delta_seconds == 6
+    assert event.direction == "forward"
+    assert event.cameras == ("source", "destination")
+
+
+def test_scene_event_does_not_guess_direction_without_measured_order():
+    coordinator = SceneCoordinator()
+    coordinator.record_delivery("g", "camera-a", "person", {"start_time": 100}, 100)
+    coordinator.record_delivery("g", "camera-b", "person", {"start_time": 101}, 101)
+
+    assert coordinator.scene_event("g", 100, window=2).direction is None
