@@ -349,7 +349,7 @@ def _field_names(cls):
 
 
 def _warn_unknown_keys(mapping, known, where):
-    """Log one warning per key in ``mapping`` that no parser reads. Warn only, never fail.
+    """Reject keys in ``mapping`` that no parser reads.
 
     A mistyped key silently takes its default — a dropped ``rotate`` costs about a third
     of the person score — so every parse site names the stray key with its full path
@@ -364,13 +364,18 @@ def _warn_unknown_keys(mapping, known, where):
     """
     if not isinstance(mapping, dict):
         return
+    unknown = []
     for key in mapping:
         if key in known:
             continue
         path = f"{where}.{key}" if where else str(key)
         matches = difflib.get_close_matches(str(key), sorted(known), n=1)
         hint = f" (did you mean {matches[0]!r}?)" if matches else ""
-        log.warning("%s: unknown key%s", path, hint)
+        message = f"{path}: unknown key{hint}"
+        log.warning("%s", message)
+        unknown.append(message)
+    if unknown:
+        raise ConfigError("; ".join(unknown))
 
 
 def _weather(data, where):

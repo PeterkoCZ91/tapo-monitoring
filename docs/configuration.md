@@ -563,9 +563,9 @@ the group only after its Telegram delivery succeeds; failed or deferred deliveri
 block another camera. The live, sampler and SD paths share the same gate. Cameras without
 a group keep the existing per-camera behavior.
 
-`handoff_preset` remains reserved. This first slice never moves a camera and does not
-select a better frame, so it is safe for a camera whose physical angle is currently
-wrong. Track progress in the [roadmap](roadmap.md).
+`handoff_preset` remains reserved for the bounded lease state machine. The current
+runtime still does not move a camera or select a better frame; live activation waits for
+a measured overlapping-camera pair. Track progress in the [roadmap](roadmap.md).
 
 ## Observability
 

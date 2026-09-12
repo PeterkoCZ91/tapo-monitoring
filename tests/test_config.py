@@ -787,9 +787,7 @@ def test_hubpoll_rejects_crop_from_native_it_cannot_honour():
                                                  crop_from_native=True))
 
 
-# ── unknown keys: warn (never fail), full path + did-you-mean ─────────────────
-# A mistyped key silently takes its default — a dropped 'rotate' costs about a
-# third of the person score — so every parse site names the key nothing reads.
+# ── unknown keys: fail early, full path + did-you-mean ────────────────────────
 
 def _unknown_key_warnings(caplog):
     return [r.getMessage() for r in caplog.records
@@ -798,21 +796,18 @@ def _unknown_key_warnings(caplog):
 
 def _load_capturing(caplog, data):
     with caplog.at_level("WARNING", logger="tapo_monitor.config"):
-        return cfg.load_config_from_dict(data)
+        try:
+            return cfg.load_config_from_dict(data)
+        except cfg.ConfigError as exc:
+            return str(exc)
 
 
 def test_unknown_top_level_key_warns_with_did_you_mean(caplog):
     data = _minimal()
     data["observabilty"] = {"digital_twin": True}
 
-    app = _load_capturing(caplog, data)
-
-    # Loading still succeeds and the typo key silently took the default — the warning
-    # is the only trace of it.
-    assert app.observability.digital_twin is False
-    assert _unknown_key_warnings(caplog) == [
-        "observabilty: unknown key (did you mean 'observability'?)"
-    ]
+    _load_capturing(caplog, data)
+    assert _load_capturing(caplog, data) == "observabilty: unknown key (did you mean 'observability'?)"
 
 
 def test_unknown_camera_key_warns_with_the_indexed_path(caplog):
@@ -821,24 +816,16 @@ def test_unknown_camera_key_warns_with_the_indexed_path(caplog):
         {"name": "yard", "host": "192.0.2.51", "rotat": 90},
     ]}
 
-    app = _load_capturing(caplog, data)
-
-    assert app.cameras[1].rotate == 0
-    assert _unknown_key_warnings(caplog) == [
-        "cameras[1].rotat: unknown key (did you mean 'rotate'?)"
-    ]
+    _load_capturing(caplog, data)
+    assert _load_capturing(caplog, data) == "cameras[1].rotat: unknown key (did you mean 'rotate'?)"
 
 
 def test_unknown_scorer_key_warns_with_the_full_nested_path(caplog):
     data = {"cameras": [{"name": "front", "host": "192.0.2.50",
                          "scorer": {"url": "http://scorer/score", "tresh": 0.7}}]}
 
-    app = _load_capturing(caplog, data)
-
-    assert app.cameras[0].scorer.threshold == 0.4
-    assert _unknown_key_warnings(caplog) == [
-        "cameras[0].scorer.tresh: unknown key (did you mean 'threshold'?)"
-    ]
+    _load_capturing(caplog, data)
+    assert _load_capturing(caplog, data) == "cameras[0].scorer.tresh: unknown key (did you mean 'threshold'?)"
 
 
 @pytest.mark.parametrize("section, typo, real", [
@@ -856,9 +843,7 @@ def test_every_nested_camera_section_reports_its_unknown_keys(caplog, section, t
 
     _load_capturing(caplog, data)
 
-    assert _unknown_key_warnings(caplog) == [
-        f"cameras[0].{section}.{typo}: unknown key (did you mean '{real}'?)"
-    ]
+    assert _load_capturing(caplog, data) == f"cameras[0].{section}.{typo}: unknown key (did you mean '{real}'?)"
 
 
 @pytest.mark.parametrize("section, typo, real", [
@@ -874,17 +859,14 @@ def test_every_top_level_section_reports_its_unknown_keys(caplog, section, typo,
 
     _load_capturing(caplog, data)
 
-    assert _unknown_key_warnings(caplog) == [
-        f"{section}.{typo}: unknown key (did you mean '{real}'?)"
-    ]
+    assert _load_capturing(caplog, data) == f"{section}.{typo}: unknown key (did you mean '{real}'?)"
 
 
 def test_unknown_key_with_no_close_match_warns_without_a_suggestion(caplog):
     data = _minimal()
     data["cameras"][0]["frobnicator"] = True
 
-    _load_capturing(caplog, data)
-
+    assert _load_capturing(caplog, data) == "cameras[0].frobnicator: unknown key"
     assert _unknown_key_warnings(caplog) == ["cameras[0].frobnicator: unknown key"]
 
 
@@ -933,10 +915,7 @@ def test_each_unknown_key_warns_exactly_once_and_loading_succeeds(caplog):
     data["cameras"][0]["rotat"] = 90
     data["cameras"][0]["scorer"] = {"tresh": 0.7}
 
-    app = _load_capturing(caplog, data)
-
-    assert app.cameras[0].name == "front"
-    assert sorted(_unknown_key_warnings(caplog)) == [
-        "cameras[0].rotat: unknown key (did you mean 'rotate'?)",
-        "cameras[0].scorer.tresh: unknown key (did you mean 'threshold'?)",
-    ]
+    error = _load_capturing(caplog, data)
+    assert "cameras[0].rotat: unknown key (did you mean 'rotate'?)" in error
+    assert "cameras[0].scorer.tresh" not in error
+    assert len(_unknown_key_warnings(caplog)) == 1

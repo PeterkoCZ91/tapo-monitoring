@@ -236,12 +236,8 @@ so the canonical unit edit becomes cosmetic rather than blocking.
   fleet has been migrated per the runbook in docs/operations.md and runs this layout.
 - [x] Snapshot each host's config and env file into the release directory it belongs to,
   so a rollback can restore the configuration that matched that code.
-- [x] Warn on unknown configuration keys. A mistyped key silently took its default, and a
-  dropped `rotate` costs roughly a third of the person score — a silent alert killer. The
-  warning carries the full key path plus the closest real key, derived from the dataclasses
-  so the check cannot rot.
-- [ ] Promote the unknown-key warning to a hard fail. Deliberately waiting until the
-  warnings have soaked in production.
+- [x] Reject unknown configuration keys before startup. A mistyped key now fails with the
+  full path and closest real key, derived from dataclasses so the check cannot rot.
 - [x] Nightly fleet-drift report: the daily digest's fleet block carries the running
   package fingerprint, and when `TAPO_EXPECTED_FINGERPRINT` names the intended release a
   mismatch is a failed check that removes the OK headline. Manual inventory found exactly
