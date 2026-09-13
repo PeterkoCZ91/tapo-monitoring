@@ -1,8 +1,10 @@
 # Battery cameras that record to a hub
 
-Notes from adding two battery Tapo cameras (C410 / C460 class) paired to an H200-class hub
-on firmware 1.6.x. They behave nothing like the mains PTZ cameras the rest of this project
-was built for, and the parts that surprised us are written down here because the upstream
+Notes from adding two battery Tapo cameras (C410 / C460 class) paired to an H200-class hub,
+observed across firmware 1.6.x through 1.7.5 (the hub auto-upgrades overnight, so treat any
+single version mentioned below as a snapshot, not a floor). They behave nothing like the
+mains PTZ cameras the rest of this project was built for, and the parts that surprised us
+are written down here because the upstream
 libraries do not cover them yet: `python-kasa` issue #1723 describes the same symptom (a
 hub that counts its cameras but lists none) and is still open and uncommented, and the
 addressing below was pieced together with `pytapo` issue #194 as the starting point.
