@@ -139,6 +139,43 @@ there. It cost this project two days at one site — 13 real detections, every o
 `no_frame`, while the clips themselves downloaded perfectly. The daemon now says so once at
 startup instead of leaving it to be inferred per event.
 
+## A protocol-accurate test double
+
+The hub's local API turns out to be impersonable, which is worth knowing before reaching
+for real hardware to test against.
+
+**The handshake is a mutual challenge over the account password, not a certificate.** The
+client proves it knows the password (`SHA256(cnonce + pwd_hash + snonce)`), and the "hub"
+proves the same thing back — so anything that knows the account password can play the hub's
+side of the handshake and land on the *same* derived AES session key the real client
+derives, no certificate involved. The TLS layer underneath is not checked at all
+(`verify_mode = CERT_NONE` on the client): a self-signed certificate is accepted without
+complaint. This is a different code path from the camera's outbound cloud-iot connection,
+which *does* pin a private CA baked into the firmware and cannot be intercepted this way —
+the distinction is local-device API vs. outbound cloud API, not a general weakness of the
+protocol family.
+
+**Consequence: a standalone mock hub is straightforward to build.** A small server that
+speaks the real handshake, decrypts each `securePassthrough` request, and answers from a
+table of previously-captured real responses (falling back to `UNSUPPORTED_METHOD` for
+anything not yet recorded) is enough to develop and exercise the hub client against without
+any hardware present, and without the H200's own quirks (the reused-connection disconnect,
+the multi-minute session-eviction lockout) getting in the way of an unrelated test run. Seed
+the response table by pointing a real client at a handshake-compatible proxy sitting between
+it and the real hub once; every response it returns is genuine hub output, not a guess at
+the schema.
+
+**What this technique does *not* reach: live view.** The hub advertises a `preWakeUp` app
+component, which reads like exactly the mechanism you'd want for shortening the wake-to-frame
+latency described above. It was never observed as an invoked method in real traffic, despite
+capturing a full session including a live-view attempt — the phone app's video path connects
+directly to the camera rather than through the hub, and most likely negotiates over
+WebRTC/SRTP (the hub separately advertises an `srtpWebrtc` component) once past the initial
+handshake. That traffic never takes the shape of an HTTP request, so nothing at the HTTP
+layer — including this technique — sees it. Whatever actually wakes the camera for a live
+look, if it is a discrete signal at all rather than the camera simply polling its radio, lives
+outside JSON API reach.
+
 ## Consequences for the daemon
 
 See `docs/configuration.md` for the `hubpoll` detection source these notes produced. The
