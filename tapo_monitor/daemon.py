@@ -1236,6 +1236,10 @@ def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
     when a clip yields no alert — a clip we could not turn into a frame must not be retried
     forever — and it starts at ``now`` on the first pass, so a hub full of stored clips does
     not arrive as an alert storm at startup.
+
+    A camera the hub reports as recording 24/7 is resolved but never polled for clips:
+    every clip on such a camera would look identical to a triggered one, and hubpoll has no
+    confirmed way to tell them apart yet (see ``docs/battery-cameras-on-a-hub.md``).
     """
     hub_for = hub_for or _default_hub_client
     frame_for = frame_for or _default_hub_frame
@@ -1267,7 +1271,20 @@ def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             state.hub_devices[cfg.name] = device
             log.info("hubpoll %s: resolved to hub camera %r (%s)",
                      cfg.name, device["alias"], device["model"])
+            if device["record_24h"]:
+                # hubpoll's whole model is "a new clip is a triggered event" — true for the
+                # event-only cameras this path was built and measured against, false for a
+                # camera the hub has switched to continuous recording, where every indexed
+                # segment would otherwise be scored and alerted on as motion. Refuse rather
+                # than guess from video_type, whose values are not confirmed for this fleet.
+                log.warning(
+                    "hubpoll %s: hub reports 24/7 recording (plan_24h_record) for this "
+                    "camera; hubpoll cannot yet tell a continuous segment from a triggered "
+                    "clip, so alerts stay disabled for it — see "
+                    "docs/battery-cameras-on-a-hub.md", cfg.name)
         state.hub_last_poll[cfg.name] = now
+        if device["record_24h"]:
+            continue
         cursor = state.hub_cursor.get(cfg.name)
         if cursor is None:
             state.hub_cursor[cfg.name] = now

@@ -179,10 +179,9 @@ Status: **pilot v1 deployed (2026-08-25)**
 - [x] Preserve lead/follow camera pairs with event-time delta and an explicit measured camera order;
   direction remains unknown until that order is supplied. Clock-offset calibration remains open; never infer biometric identity.
 - [ ] Select the best frame across cameras.
-- [ ] Acquire a hub-backed test pair (compatible hub plus battery camera) for validation.
-  The setup must provide hub storage and indexed clips so we can test camera-loss evidence,
-  clock-offset measurement, cross-camera frame selection and the `hubpoll` path end to end.
-  Confirm model and firmware compatibility before purchase; support varies by hub and camera.
+- [x] Acquire a hub-backed test pair (compatible hub plus battery camera) for validation.
+  Hub storage and indexed clips let the `hubpoll` path and the 24/7-recording guard be
+  tested end to end against real hardware.
 - [ ] Measure and report each camera's clock offset. The duplicate gate compares event
   times across cameras, so a skew larger than the window makes it silently inert — and any
   later lead/follow inference would be worse than inert. First production evidence: on the

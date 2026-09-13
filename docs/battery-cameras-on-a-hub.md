@@ -1,8 +1,10 @@
 # Battery cameras that record to a hub
 
-Notes from adding two battery Tapo cameras (C410 / C460 class) paired to an H200-class hub
-on firmware 1.6.x. They behave nothing like the mains PTZ cameras the rest of this project
-was built for, and the parts that surprised us are written down here because the upstream
+Notes from adding two battery Tapo cameras (C410 / C460 class) paired to an H200-class hub,
+observed across firmware 1.6.x through 1.7.5 (the hub auto-upgrades overnight, so treat any
+single version mentioned below as a snapshot, not a floor). They behave nothing like the
+mains PTZ cameras the rest of this project was built for, and the parts that surprised us
+are written down here because the upstream
 libraries do not cover them yet: `python-kasa` issue #1723 describes the same symptom (a
 hub that counts its cameras but lists none) and is still open and uncommented, and the
 addressing below was pieced together with `pytapo` issue #194 as the starting point.
@@ -72,6 +74,12 @@ a sanity signal that a camera really is recording where you think it is.
 
 ## Operational rules the hub enforces on you
 
+On H200 firmware 1.7.5, reusing an HTTP connection repeatedly disconnected the second
+login request. Keeping the authenticated SslAes session while opening a fresh TCP
+connection for each HTTP request made sequential queries work. The hub adapter therefore
+owns an HTTP client with connection reuse disabled and closes that client, its worker
+thread and event loop on shutdown, including when discovery fails.
+
 - **The handshake is the expensive part, not the queries.** A fresh session is accepted only
   sporadically; several queries inside an established one are reliable (six sequential
   queries at ~1.5 s spacing, no trouble). Open one session and hold it.
@@ -133,6 +141,43 @@ there. It cost this project two days at one site — 13 real detections, every o
 `no_frame`, while the clips themselves downloaded perfectly. The daemon now says so once at
 startup instead of leaving it to be inferred per event.
 
+## A protocol-accurate test double
+
+The hub's local API turns out to be impersonable, which is worth knowing before reaching
+for real hardware to test against.
+
+**The handshake is a mutual challenge over the account password, not a certificate.** The
+client proves it knows the password (`SHA256(cnonce + pwd_hash + snonce)`), and the "hub"
+proves the same thing back — so anything that knows the account password can play the hub's
+side of the handshake and land on the *same* derived AES session key the real client
+derives, no certificate involved. The TLS layer underneath is not checked at all
+(`verify_mode = CERT_NONE` on the client): a self-signed certificate is accepted without
+complaint. This is a different code path from the camera's outbound cloud-iot connection,
+which *does* pin a private CA baked into the firmware and cannot be intercepted this way —
+the distinction is local-device API vs. outbound cloud API, not a general weakness of the
+protocol family.
+
+**Consequence: a standalone mock hub is straightforward to build.** A small server that
+speaks the real handshake, decrypts each `securePassthrough` request, and answers from a
+table of previously-captured real responses (falling back to `UNSUPPORTED_METHOD` for
+anything not yet recorded) is enough to develop and exercise the hub client against without
+any hardware present, and without the H200's own quirks (the reused-connection disconnect,
+the multi-minute session-eviction lockout) getting in the way of an unrelated test run. Seed
+the response table by pointing a real client at a handshake-compatible proxy sitting between
+it and the real hub once; every response it returns is genuine hub output, not a guess at
+the schema.
+
+**What this technique does *not* reach: live view.** The hub advertises a `preWakeUp` app
+component, which reads like exactly the mechanism you'd want for shortening the wake-to-frame
+latency described above. It was never observed as an invoked method in real traffic, despite
+capturing a full session including a live-view attempt — the phone app's video path connects
+directly to the camera rather than through the hub, and most likely negotiates over
+WebRTC/SRTP (the hub separately advertises an `srtpWebrtc` component) once past the initial
+handshake. That traffic never takes the shape of an HTTP request, so nothing at the HTTP
+layer — including this technique — sees it. Whatever actually wakes the camera for a live
+look, if it is a discrete signal at all rather than the camera simply polling its radio, lives
+outside JSON API reach.
+
 ## Consequences for the daemon
 
 See `docs/configuration.md` for the `hubpoll` detection source these notes produced. The
@@ -148,3 +193,11 @@ parts worth repeating:
 - Expect **20–40 s** from motion to alert: ~13 s of recording before the clip is indexed,
   up to one poll interval, then a few seconds to download, score and send. On a mains camera
   the same path takes seconds; this is the price of a camera that sleeps.
+- A camera the paired-device list reports as `plan_24h_record: true` is **not polled for
+  clips**. Everything above assumes an event-only camera, where an indexed clip and a
+  triggered recording are the same thing; on a camera recording continuously (H200 firmware
+  1.6.5 added 24/7 Capture for compatible models, e.g. C460 — this C410 does not support it)
+  that assumption breaks, and treating every segment as motion would alert on plain footage.
+  `video_type` might eventually distinguish the two, but its values (`2`, `6` observed so
+  far) are not confirmed against any visual ground truth yet, so the daemon refuses rather
+  than guesses: it logs once and leaves the camera resolved but idle.
