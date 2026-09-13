@@ -10,6 +10,8 @@ tapo-camera.env
 
 # Real deployment config (coordinates, hosts, camera layout) — never published.
 cameras.yaml
+# go2rtc.yaml embeds the camera's cloud password in its tapo:// source URL
+go2rtc.yaml
 cameras.*.yaml
 # Same hole, same reason: `cameras.yaml.bak-cropnative-20260807` is the live convention.
 cameras.yaml.*
