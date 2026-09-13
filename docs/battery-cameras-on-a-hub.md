@@ -154,3 +154,11 @@ parts worth repeating:
 - Expect **20–40 s** from motion to alert: ~13 s of recording before the clip is indexed,
   up to one poll interval, then a few seconds to download, score and send. On a mains camera
   the same path takes seconds; this is the price of a camera that sleeps.
+- A camera the paired-device list reports as `plan_24h_record: true` is **not polled for
+  clips**. Everything above assumes an event-only camera, where an indexed clip and a
+  triggered recording are the same thing; on a camera recording continuously (H200 firmware
+  1.6.5 added 24/7 Capture for compatible models, e.g. C460 — this C410 does not support it)
+  that assumption breaks, and treating every segment as motion would alert on plain footage.
+  `video_type` might eventually distinguish the two, but its values (`2`, `6` observed so
+  far) are not confirmed against any visual ground truth yet, so the daemon refuses rather
+  than guesses: it logs once and leaves the camera resolved but idle.

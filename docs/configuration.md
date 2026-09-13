@@ -243,6 +243,11 @@ Notes and constraints:
   behind it, so a rotation here is rejected rather than silently ignored.
 - On the first pass the cursor starts at *now*: a hub full of stored clips is not replayed
   as an alert storm. Clips are scored and gated exactly like bare motion elsewhere.
+- **24/7-capture cameras are not supported yet.** `hubpoll` assumes every indexed clip is a
+  triggered recording. If the hub reports a camera as recording continuously (e.g. a C460
+  with 24/7 Capture enabled, unlike the event-only C410 this path was built against), the
+  daemon logs a warning once and never polls that camera for clips, rather than alerting on
+  every recorded segment.
 
 ### Tracking and detection policy
 

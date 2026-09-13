@@ -4747,6 +4747,30 @@ def test_hubpoll_resolves_the_camera_addressing_once(monkeypatch, tmp_path):
     assert state.hub_devices["gate"]["device_id"] == "DEV1"
 
 
+def test_hubpoll_disables_a_camera_the_hub_records_24_7(monkeypatch, tmp_path, caplog):
+    """A continuously-recording camera (e.g. C460) must not alert on every segment."""
+    counter = _CountingNotify()
+    monkeypatch.setattr(daemon.notify, "send_photo", counter.send_photo)
+    app = _hub_app()
+    always_on = [{**HUB_CAMS[0], "model": "C460", "record_24h": True}]
+    hub = _FakeHub(cameras=always_on, clips=[[_clip(1100)], [_clip(1200)]])
+    state = daemon.MonitorState()
+    state.hub_cursor["gate"] = 1000
+
+    with caplog.at_level("WARNING"):
+        daemon.run_hubpoll_pass(app, {}, state, now=1100, secrets=_hub_secrets(),
+                                hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                                clip_frame_for=_clip_frames(tmp_path))
+        daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(),
+                                hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                                clip_frame_for=_clip_frames(tmp_path))
+
+    assert counter.photos == 0
+    assert hub.searches == []                  # never even asked for clips
+    assert state.hub_cursor["gate"] == 1000     # cursor untouched, nothing was consumed
+    assert sum("24/7" in r.message for r in caplog.records) == 1   # warned once, not per tick
+
+
 def test_hubpoll_is_quiet_when_the_hub_cannot_be_reached(monkeypatch, tmp_path):
     counter = _CountingNotify()
     monkeypatch.setattr(daemon.notify, "send_photo", counter.send_photo)
