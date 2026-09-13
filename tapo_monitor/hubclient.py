@@ -544,7 +544,7 @@ def kasa_session(host, email, password, timeout=SESSION_QUERY_TIMEOUT):  # pragm
 
     The kasa transport is async while the daemon is not, so the session owns a private
     event loop on its own thread: coroutines are submitted to it and waited on. That keeps
-    one long-lived connection alive across daemon ticks without ever nesting event loops —
+    one authenticated session alive across daemon ticks without ever nesting event loops —
     the trap that makes the camera-side media APIs unusable from here.
     """
     import asyncio
@@ -552,32 +552,77 @@ def kasa_session(host, email, password, timeout=SESSION_QUERY_TIMEOUT):  # pragm
 
     class _Session:
         def __init__(self):
+            self._device = None
+            self._http = None
+            self._closed = False
             self._loop = asyncio.new_event_loop()
-            self._thread = threading.Thread(target=self._loop.run_forever,
+            self._thread = threading.Thread(target=self._run,
                                             name="hub-session", daemon=True)
             self._thread.start()
-            self._device = self._await(self._open())
+            try:
+                self._device = self._await(self._open())
+            except BaseException:
+                self.close()
+                raise
+
+        def _run(self):
+            try:
+                self._loop.run_forever()
+            finally:
+                try:
+                    self._loop.run_until_complete(self._shutdown())
+                finally:
+                    self._loop.close()
+
+        async def _shutdown(self):
+            pending = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            try:
+                if self._device is not None:
+                    await asyncio.wait_for(self._device.protocol.close(), timeout=timeout)
+            except Exception:  # noqa: BLE001 - HTTP resources still need closing
+                log.debug("hub protocol close failed", exc_info=True)
+            finally:
+                if self._http is not None:
+                    await self._http.close()
 
         def _await(self, coro):
-            return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=timeout)
+            future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+            try:
+                return future.result(timeout=timeout)
+            except TimeoutError:
+                future.cancel()
+                raise
 
         async def _open(self):
+            import aiohttp
             from kasa import Discover
             from kasa.credentials import Credentials
-            return await Discover.discover_single(host, credentials=Credentials(email, password))
+            self._http = aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True))
+            self._device = await Discover.discover_single(
+                host, credentials=Credentials(email, password))
+            # H200 firmware can disconnect the second request on a reused socket,
+            # including the second step of login. Keep auth, but use fresh sockets.
+            self._device.config.http_client = self._http
+            return self._device
 
         async def _send(self, method, params):
             transport = self._device.protocol._transport
             return await transport.send(json.dumps(wrap(method, params)))
 
         def send(self, method, params):
+            if self._closed:
+                raise RuntimeError("hub session is closed")
             return self._await(self._send(method, params))
 
         def close(self):
-            try:
-                self._await(self._device.protocol.close())
-            except Exception:  # noqa: BLE001 - best effort; the loop still has to stop
-                log.debug("hub protocol close failed", exc_info=True)
-            self._loop.call_soon_threadsafe(self._loop.stop)
+            if not self._closed:
+                self._closed = True
+                self._loop.call_soon_threadsafe(self._loop.stop)
+            self._thread.join(timeout=timeout + 1)
+            if self._thread.is_alive():
+                log.warning("hub session thread did not stop within the shutdown timeout")
 
     return _Session()

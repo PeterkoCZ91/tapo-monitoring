@@ -72,6 +72,12 @@ a sanity signal that a camera really is recording where you think it is.
 
 ## Operational rules the hub enforces on you
 
+On H200 firmware 1.7.5, reusing an HTTP connection repeatedly disconnected the second
+login request. Keeping the authenticated SslAes session while opening a fresh TCP
+connection for each HTTP request made sequential queries work. The hub adapter therefore
+owns an HTTP client with connection reuse disabled and closes that client, its worker
+thread and event loop on shutdown, including when discovery fails.
+
 - **The handshake is the expensive part, not the queries.** A fresh session is accepted only
   sporadically; several queries inside an established one are reliable (six sequential
   queries at ~1.5 s spacing, no trouble). Open one session and hold it.
