@@ -5,6 +5,12 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `hubpoll` refuses to poll clips from a camera the hub reports as recording 24/7
+  (`plan_24h_record: true`, e.g. a C460 with 24/7 Capture enabled). The whole detection
+  model assumes an indexed clip is a triggered recording; on a continuously-recording
+  camera every stored segment would otherwise be scored and alerted on as plain footage.
+  The daemon logs a warning once and leaves the camera resolved but idle rather than
+  guess from `video_type`, whose values are not yet confirmed against ground truth.
 - Type checking and coverage, both wired into CI. `mypy` runs at the rung an unannotated
   package can hold — assignments a name cannot keep, calls that cannot match a signature —
   which is the fault class that has reached production here (a package copied without one
@@ -59,6 +65,12 @@ All notable changes to this project are documented here.
   before the model loads.
 
 ### Fixed
+- The hub session no longer breaks against H200 firmware (observed on 1.7.5) that
+  disconnects a reused HTTP connection on the second request of an otherwise-valid
+  session. The authenticated session now opens a fresh TCP connection per HTTP request
+  while keeping the same encryption key, and shutdown cancels pending work and closes
+  the HTTP client even when the protocol's own close call fails, instead of leaving a
+  socket the next handshake has to wait out.
 - The SD follow-up no longer scores frames the camera recorded while the pan-limit guard
   had its aim off the allowed span. The guard fixes where the lens points; it cannot
   unrecord what is already on the card, and the follow-up re-scores that recording about

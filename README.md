@@ -10,9 +10,10 @@ optional local scoring, Telegram delivery and layered health monitoring in one t
 Python daemon.
 
 > **Project status:** the core daemon and alert pipeline are operational and validated on
-> the C560WS. The Camera Digital Twin (layered health, drift and allow-listed self-healing)
-> and the Shadow Detection Auditor run in production behind opt-in flags; a nightly
-> recorder scan measures camera miss candidates. Camera models and firmware differ;
+> the C560WS, and the `hubpoll` battery-camera path is validated end to end against real
+> hub-backed hardware. The Camera Digital Twin (layered health, drift and allow-listed
+> self-healing) and the Shadow Detection Auditor run in production behind opt-in flags; a
+> nightly recorder scan measures camera miss candidates. Camera models and firmware differ;
 > unsupported capabilities degrade to `unknown` instead of being guessed.
 
 ## Why this project exists
