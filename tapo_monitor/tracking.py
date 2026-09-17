@@ -12,7 +12,10 @@ auto-track master switch. Therefore SmartTrack/preset/sensitivity are applied fi
 encapsulates this so callers can't get the order wrong.
 """
 
+import logging
 import time as _time
+
+log = logging.getLogger(__name__)
 
 SMARTTRACK_KEYS = {
     "people": "people_enabled",
@@ -60,8 +63,26 @@ def apply_smarttrack(cam, kinds):
     cam.executeFunction("setSmartTrackConfig", smarttrack_payload(kinds))
 
 
-def set_autotrack(cam, enabled):
-    """Set the auto-track master switch, trying known method shapes. Returns bool."""
+def set_autotrack(cam, enabled, back_time=None):
+    """Set the auto-track master switch, trying known method shapes. Returns bool.
+
+    ``back_time`` is the firmware's own return timer: how many seconds the camera keeps
+    looking where auto-track took it before swinging back to where the track started
+    (30 s out of the box on the C560WS). It rides along in the SAME setTargetTrackConfig
+    request as the master switch, and deliberately so — see the module docstring: nothing
+    may run between ``apply_smarttrack`` and the auto-track assert, and a second call to
+    write the dwell would sit in exactly that gap. A camera that refuses the combined
+    payload still gets tracking asserted by the ordinary path below.
+    """
+    if back_time is not None:
+        try:
+            cam.executeFunction("setTargetTrackConfig", {"target_track": {
+                "target_track_info": {"enabled": "on" if enabled else "off",
+                                      "back_time": str(int(back_time))}}})
+            return True
+        except Exception:
+            log.warning("camera refused the combined auto-track/back_time call; "
+                        "falling back to the plain switch")
     if hasattr(cam, "setAutoTrackTarget"):
         try:
             cam.setAutoTrackTarget(enabled)
@@ -76,28 +97,40 @@ def set_autotrack(cam, enabled):
         return False
 
 
-def verify_autotrack(cam, expected):
-    """Read the auto-track state back and compare to expected."""
+def verify_autotrack(cam, expected, back_time=None):
+    """Read the auto-track state back and compare to expected.
+
+    A ``back_time`` that did not land is reported but does not fail the check: tracking
+    being on is what the night depends on, a longer dwell is a comfort on top of it, and
+    conflating the two would turn a refused comfort into "auto-track not confirmed". It
+    must still be said out loud — a camera quietly keeping its 30 s looks exactly like one
+    that took 180, and in that state the whole dwell is worth nothing.
+    """
     try:
-        actual = cam.getAutoTrackTarget().get("enabled", "").lower() == "on"
+        info = cam.getAutoTrackTarget()
+        actual = info.get("enabled", "").lower() == "on"
+        if back_time is not None and str(info.get("back_time")) != str(int(back_time)):
+            log.warning("camera did not take back_time=%s (reads %s): auto-track will "
+                        "still pull the lens home early", back_time, info.get("back_time"))
         return actual == expected
     except Exception:
         return False
 
 
-def ensure_autotrack(cam, enabled, sleep=None):
+def ensure_autotrack(cam, enabled, sleep=None, back_time=None):
     """Assert auto-track LAST and verify; one retry. Returns True on success.
 
     ``sleep`` is injectable so tests run without real delays (resolved at call time).
+    ``back_time`` travels with the assert; see :func:`set_autotrack`.
     """
     if sleep is None:
         sleep = _time.sleep
-    if not set_autotrack(cam, enabled):
+    if not set_autotrack(cam, enabled, back_time=back_time):
         return False
     sleep(1)
-    if verify_autotrack(cam, enabled):
+    if verify_autotrack(cam, enabled, back_time=back_time):
         return True
     sleep(3)
-    set_autotrack(cam, enabled)
+    set_autotrack(cam, enabled, back_time=back_time)
     sleep(2)
-    return verify_autotrack(cam, enabled)
+    return verify_autotrack(cam, enabled, back_time=back_time)

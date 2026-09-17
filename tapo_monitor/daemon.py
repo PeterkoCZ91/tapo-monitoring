@@ -86,6 +86,9 @@ class CameraPlan:
     smarttrack: tuple
     preset: str | None
     person_sensitivity: int | None = None
+    # Firmware return timer for a track, in seconds, or None to leave the camera's own
+    # value alone. Set only where tracking actually runs — see plan_camera.
+    back_time: int | None = None
     # Day/night mode to assert this tick ("on" = IR/B&W, "off" = day/colour, "auto"), or
     # None to leave the camera's day/night mode untouched.
     night_vision: str | None = None
@@ -105,8 +108,14 @@ def plan_camera(cfg: CameraConfig, night: bool, rain_active: bool) -> CameraPlan
         # a nudge. One sat aimed at asphalt for two days (2026-08-18..20) with nothing in
         # the system able to correct it.
         preset = cfg.tracking.day_preset
+        back_time = None                          # nothing is tracking: no dwell to configure
     else:
         preset = cfg.tracking.night_preset        # tracking at night -> optional night preset
+        # The dwell belongs to the same branch as night_preset, and for the same reason:
+        # a tracking camera tracks only at night, so by day (or parked in a storm) there
+        # is no track to come back from. Writing it then would configure a timer for
+        # something that cannot happen.
+        back_time = cfg.tracking.back_time
     night_vision = None
     if cfg.night_vision == "ir":
         night_vision = "on" if night else "off"   # IR/B&W at night, day/colour by day
@@ -120,6 +129,7 @@ def plan_camera(cfg: CameraConfig, night: bool, rain_active: bool) -> CameraPlan
         preset=preset,
         person_sensitivity=cfg.person_sensitivity,
         night_vision=night_vision,
+        back_time=back_time,
     )
 
 
@@ -229,12 +239,17 @@ def _recall_preset(cam, preset, camera=None) -> bool:
 
 
 def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
-               repair_failures=None, camera=None, privacy_on=False):
+               repair_failures=None, camera=None, privacy_on=False, hold=False):
     """Apply a CameraPlan to a connected camera in firmware-safe order.
 
     SmartTrack / motion sensitivity / preset first; auto-track asserted LAST and verified.
     Returns True if auto-track ended in the intended state. Refused repairs are counted
     into ``repair_failures`` when given, so a camera quietly rejecting them is visible.
+
+    ``hold`` asks for the preset recall to be skipped this pass because auto-track has the
+    lens on a subject. It is honoured ONLY while the plan actually tracks: with tracking
+    off the recall is the single thing that repairs a drifted or nudged aim, so a hold
+    leaking into the day would rebuild the two-day asphalt incident silently.
     """
     try:
         cam.setMotionDetection(sensitivity=int(plan.motion_sensitivity))
@@ -279,8 +294,13 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
     # an unknown one still recalls, and the aim is restored on the first pass after the
     # switch goes off. The camera is not silently un-repaired either: privacy.enabled is
     # a critical drift key, so the twin reports the parked lens itself.
-    if plan.preset and not privacy_on:
+    if plan.preset and not privacy_on and not (hold and plan.autotrack_on):
         _recall_preset(cam, plan.preset, camera)
+    elif hold and plan.autotrack_on and plan.preset:
+        # Said out loud: a lens that stays off its preset looks identical to a refused
+        # recall, and that failure mode has cost this fleet two days of blind asphalt.
+        log.info("preset %s recall held for %s: auto-track is on a subject",
+                 plan.preset, camera)
     # apply_smarttrack MUST be the LAST configuration call before ensure_autotrack.
     # Live evidence (2026-06-23) showed one of the calls above resets smart_track_info
     # to ALL-OFF; running SmartTrack first let those calls wipe the night people-only
@@ -290,17 +310,19 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
     if plan.autotrack_on and _repair_allowed(reliability_config, "smarttrack"):
         _repair("smarttrack", lambda: tracking.apply_smarttrack(cam, plan.smarttrack),
                 repair_failures)
-    return tracking.ensure_autotrack(cam, plan.autotrack_on)
+    return tracking.ensure_autotrack(cam, plan.autotrack_on, back_time=plan.back_time)
 
 
 def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=None,
-             repair_failures=None, privacy=None):
+             repair_failures=None, privacy=None, hold=None):
     """One pass over all cameras. Dependencies injectable for testing.
 
     Returns a dict {camera_name: CameraPlan} of what was planned. ``repair_failures`` is
     the sink for refused self-heals, so a day of them can be reported rather than only
     logged one line at a time. ``privacy`` names the cameras whose lens the twin last saw
-    parked; they get every configuration call but no motor call.
+    parked; they get every configuration call but no motor call. ``hold`` names the
+    cameras whose auto-track is currently on a subject; they keep every configuration call
+    too, but their preset recall waits (see :func:`cameras_holding_recall`).
     """
     now = now if now is not None else _time.time()
     is_night = is_night or scheduling.is_night
@@ -337,7 +359,8 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
                 # depends on never takes — with not a single log line to show for it.
                 if not apply_plan(cam, plan, app.reliability,
                                   repair_failures=repair_failures, camera=cfg.name,
-                                  privacy_on=cfg.name in (privacy or ())):
+                                  privacy_on=cfg.name in (privacy or ()),
+                                  hold=cfg.name in (hold or ())):
                     log.warning("auto-track %s not confirmed for %s: the camera took the "
                                 "call but read back the other state",
                                 "on" if plan.autotrack_on else "off", cfg.name)
@@ -440,6 +463,10 @@ class MonitorState:
     # directly comparable to the sampler's): lets an expiring hold tell "no second frame
     # ever came" from "the guard yanked the subject out of view mid-corroboration".
     pan_limit_recall_at: dict = field(default_factory=dict)
+    # Per camera, when the current uninterrupted preset-recall hold started (see
+    # cameras_holding_recall). Cleared the moment the recall is let through again, so the
+    # cap always measures one stretch rather than the whole night.
+    recall_hold_since: dict = field(default_factory=dict)
     # Per camera, the recent intervals in which the lens is known to have been off its
     # allowed span. The SD follow-up arrives ~2 minutes after the event and re-scores what
     # the camera *recorded*, so the guard having fixed the aim by then does not help: the
@@ -1817,6 +1844,65 @@ def control_due(last_control, now, interval):
     return last_control is None or (now - last_control) >= interval
 
 
+def hold_due(last_event_at, now, hold_seconds, held_since):
+    """True while the lens should be left where auto-track put it. Pure.
+
+    The camera turns after somebody and the control pass pulls it straight back, so the
+    clip on the SD card — which is what actually gets watched afterwards — shows the empty
+    home view rather than whatever the person was doing. Holding the recall is what buys
+    that footage; ``back_time`` alone cannot, because whichever timer is shorter wins.
+
+    ``last_event_at`` is the camera's newest event time, so every fresh event re-arms the
+    hold and a passage keeps the lens on its subject. ``held_since`` caps one unbroken
+    stretch at ``hold_seconds``: a through-location fires events all evening and would
+    otherwise never see its preset recalled again — and on this fleet that recall is the
+    only thing that corrects tilt (``pan_limit.tilt`` is deliberately off everywhere).
+    """
+    if not hold_seconds or last_event_at is None:
+        return False
+    if now - last_event_at >= hold_seconds:
+        return False                               # nobody there any more: go home
+    if held_since is not None and now - held_since >= hold_seconds:
+        return False                               # one stretch is up: let the recall through
+    return True
+
+
+def cameras_holding_recall(app: AppConfig, state: "MonitorState", now):
+    """Names whose preset recall waits this control pass. Mutates the hold bookkeeping.
+
+    Call it on the control pass only: the state it keeps is "how long has this hold been
+    running", and a hold that started on a fast poll would measure a stretch in which no
+    recall could have happened anyway.
+    """
+    names = set()
+    for cfg in app.cameras:
+        hold_seconds = cfg.tracking.track_hold
+        if hold_due(state.last_seen.get(cfg.name), now, hold_seconds,
+                    state.recall_hold_since.get(cfg.name)):
+            state.recall_hold_since.setdefault(cfg.name, now)
+            names.add(cfg.name)
+        else:
+            state.recall_hold_since.pop(cfg.name, None)
+    return names
+
+
+def inert_dwell_warning(app: AppConfig):
+    """The warning for a ``track_hold`` that no ``back_time`` backs up, or None. Pure.
+
+    The two halves are one dwell and the shorter one decides. Holding our own recall for
+    three minutes while the camera's firmware still swings home after its own back_time
+    reads like a configured dwell and delivers nothing — the one failure here that leaves
+    no trace in the log at all.
+    """
+    names = [cfg.name for cfg in app.cameras
+             if cfg.tracking.track_hold and cfg.tracking.back_time is None]
+    if not names:
+        return None
+    return (f"track_hold set without back_time for camera(s) {', '.join(names)}: the "
+            "firmware returns the lens on its own timer (30 s out of the box), so the "
+            "hold buys no extra footage")
+
+
 def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
     """Refresh the opt-in Camera Digital Twin using already-connected clients only."""
     if not app.observability.digital_twin and not app.reliability.enabled:
@@ -2162,7 +2248,8 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
         cam_clients.clear()
         plans = run_control(app, now=now, connect=connect_factory(cam_clients, state, now),
                             repair_failures=state.repair_failures,
-                            privacy=twin.cameras_in_privacy(state.twin_fleet))
+                            privacy=twin.cameras_in_privacy(state.twin_fleet),
+                            hold=cameras_holding_recall(app, state, now))
         if isinstance(plans, Mapping):
             state.desired_plans.update(plans)
         watchdog(app, cam_clients, state, now=now, secrets=secrets, night=night)
@@ -2230,6 +2317,9 @@ def main(argv=None):  # pragma: no cover - thin entry point
     preset_warning = inert_preset_warning(app)
     if preset_warning:
         log.warning("%s", preset_warning)
+    dwell_warning = inert_dwell_warning(app)
+    if dwell_warning:
+        log.warning("%s", dwell_warning)
     cam_clients = {}
     last_control = None
 

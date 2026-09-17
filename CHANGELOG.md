@@ -5,6 +5,20 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- A night dwell for tracking cameras: `tracking.back_time` (the camera's own return timer,
+  written with the auto-track assert) and `tracking.track_hold` (seconds the control pass
+  leaves the preset recall alone while events keep arriving). Auto-track turns the lens
+  onto whoever walks past, and until now two timers pulled it straight back — the firmware
+  after 30 s and our recall on the next control pass — so the SD clip, which is what
+  actually gets reviewed afterwards, spent the passage showing an empty preset instead of
+  the subject. Both halves are needed: the shorter timer decides, so raising either alone
+  changes nothing, and `track_hold` without `back_time` is warned about at startup.
+  The hold is honoured only while the plan actually tracks. With tracking off the recall
+  is the only thing that repairs a drifted aim — one camera sat pointed at asphalt for two
+  days because nothing could bring it back — so a hold can never reach the day, a
+  storm-parked camera or a static one. One unbroken hold is capped at `track_hold`, which
+  keeps the preset (the only tilt correction) coming round on a busy night, and `pan_limit`
+  is untouched: a dwell never licenses the lens to sit outside its preset span.
 - `hubpoll` refuses to poll clips from a camera the hub reports as recording 24/7
   (`plan_24h_record: true`, e.g. a C460 with 24/7 Capture enabled). The whole detection
   model assumes an indexed clip is a triggered recording; on a continuously-recording

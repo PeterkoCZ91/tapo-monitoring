@@ -686,7 +686,7 @@ def test_run_once_passes_the_repair_sink_through_to_apply_plan(monkeypatch):
     seen = {}
 
     def fake_apply_plan(cam, plan, reliability_config=None, *, repair_failures=None,
-                        camera=None, privacy_on=False):
+                        camera=None, privacy_on=False, hold=False):
         seen["got"] = repair_failures
         if repair_failures is not None:
             repair_failures["smarttrack"] = repair_failures.get("smarttrack", 0) + 1
@@ -739,7 +739,7 @@ def test_loop_step_gives_the_control_pass_the_state_repair_counter(monkeypatch):
     state = daemon.MonitorState()
     seen = {}
 
-    def fake_run_control(app_, *, now, connect, repair_failures=None, privacy=None):
+    def fake_run_control(app_, *, now, connect, repair_failures=None, privacy=None, hold=None):
         seen["got"] = repair_failures
         return {}
 
@@ -760,7 +760,7 @@ def test_loop_step_tells_the_control_pass_which_cameras_are_parked():
     state.twin_fleet = {"a": {"actual": {"privacy.enabled": True}}}
     seen = {}
 
-    def fake_run_control(app_, *, now, connect, repair_failures=None, privacy=None):
+    def fake_run_control(app_, *, now, connect, repair_failures=None, privacy=None, hold=None):
         seen["privacy"] = privacy
         return {}
 
@@ -1185,7 +1185,7 @@ def test_loop_step_decouples_control_from_event_poll():
     secrets = {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
     calls = {"control": 0, "watchdog": 0, "monitor": 0, "drain": 0}
 
-    def fake_control(app, now, connect, repair_failures=None, privacy=None):
+    def fake_control(app, now, connect, repair_failures=None, privacy=None, hold=None):
         calls["control"] += 1
         connect(app.cameras[0])  # populate cam_clients like the real connect does
 
@@ -5261,3 +5261,206 @@ def test_panlimit_filtered_batch_never_uses_blind_live_fallback(source, monkeypa
                  lambda cfg_: (lambda cam, ev: grabbed.append(True)), sent, monkeypatch)
 
     assert not scored and not sent and not grabbed
+
+
+# ── night dwell: back_time + the preset-recall hold ──────────────────────────
+
+def test_plan_carries_the_dwell_only_where_tracking_runs():
+    # back_time is the firmware's return timer for a track. A tracking camera tracks only
+    # at night, so the dwell belongs to the same branch as night_preset: by day there is
+    # no track to come back from and nothing to configure.
+    cam = _cam(tracking={"night_preset": "2", "back_time": 180})
+
+    assert daemon.plan_camera(cam, night=True, rain_active=False).back_time == 180
+    assert daemon.plan_camera(cam, night=False, rain_active=False).back_time is None
+
+
+def test_plan_drops_the_dwell_when_rain_parks_the_camera():
+    # storm_park turns tracking off for the night. A parked camera is in the day shape:
+    # it holds a preset and does not track, so the dwell must not travel with the plan.
+    cam = _cam(tracking={"night_preset": "2", "back_time": 180},
+               weather={"storm_park": True, "strategy": "lower_sensitivity"})
+
+    assert daemon.plan_camera(cam, night=True, rain_active=True).back_time is None
+
+
+def test_hold_due_keeps_the_lens_on_a_fresh_subject():
+    assert daemon.hold_due(last_event_at=100, now=140, hold_seconds=180, held_since=None) is True
+
+
+def test_hold_due_releases_once_the_events_stop():
+    # The subject is gone: nothing is being watched, so the camera goes home.
+    assert daemon.hold_due(last_event_at=100, now=300, hold_seconds=180, held_since=None) is False
+
+
+def test_hold_due_is_off_when_the_camera_has_no_dwell_configured():
+    assert daemon.hold_due(last_event_at=100, now=110, hold_seconds=0, held_since=None) is False
+
+
+def test_hold_due_has_never_seen_an_event():
+    assert daemon.hold_due(last_event_at=None, now=110, hold_seconds=180, held_since=None) is False
+
+
+def test_hold_due_caps_one_uninterrupted_stretch():
+    # A through-location produces events all evening, and each one re-arms the hold. Without
+    # a cap the preset would never be recalled again — and on this fleet that recall is the
+    # only thing that corrects tilt (pan_limit.tilt is deliberately off). So a single
+    # unbroken hold ends after hold_seconds even while events keep arriving.
+    assert daemon.hold_due(last_event_at=295, now=300, hold_seconds=180, held_since=100) is False
+    assert daemon.hold_due(last_event_at=295, now=270, hold_seconds=180, held_since=100) is True
+
+
+def test_apply_plan_holds_the_recall_while_tracking_at_night(monkeypatch):
+    # The point of the whole change: auto-track has swung the lens onto somebody and the
+    # control pass must not yank it back mid-passage, or the SD clip the user actually
+    # watches shows the empty home view instead of the subject.
+    FakeCam, tracking = _nightvision_fakecam()
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+    recalled = []
+
+    class CountingCam(FakeCam):
+        def setPreset(self, preset):
+            recalled.append(preset)
+
+    plan = daemon.plan_camera(_cam(tracking={"night_preset": "2"}),
+                              night=True, rain_active=False)
+    assert plan.autotrack_on is True
+
+    daemon.apply_plan(CountingCam(), plan, hold=True)
+
+    assert recalled == []
+
+
+def test_apply_plan_never_holds_the_recall_by_day(monkeypatch):
+    # THE regression this test exists for. By day auto-track is off and the 60 s recall is
+    # the ONLY thing that repairs the aim: one camera sat pointed at asphalt for two days
+    # (2026-08-18..20) because nothing could bring it back. A hold that leaked into the day
+    # would rebuild exactly that failure, silently.
+    FakeCam, tracking = _nightvision_fakecam()
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+    recalled = []
+
+    class CountingCam(FakeCam):
+        def setPreset(self, preset):
+            recalled.append(preset)
+
+    plan = daemon.plan_camera(_cam(tracking={"day_preset": "4", "night_preset": "2"}),
+                              night=False, rain_active=False)
+    assert plan.autotrack_on is False
+
+    daemon.apply_plan(CountingCam(), plan, hold=True)
+
+    assert recalled == ["4"]
+
+
+def test_apply_plan_never_holds_the_recall_for_a_rain_parked_camera(monkeypatch):
+    # A storm-parked camera is in the day shape at night: tracking off, holding a preset.
+    # Nothing is being followed, so there is nothing to keep the lens on.
+    FakeCam, tracking = _nightvision_fakecam()
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+    recalled = []
+
+    class CountingCam(FakeCam):
+        def setPreset(self, preset):
+            recalled.append(preset)
+
+    plan = daemon.plan_camera(
+        _cam(tracking={"day_preset": "4", "night_preset": "2"},
+             weather={"storm_park": True, "strategy": "lower_sensitivity"}),
+        night=True, rain_active=True)
+    assert plan.autotrack_on is False
+
+    daemon.apply_plan(CountingCam(), plan, hold=True)
+
+    assert recalled == ["4"]
+
+
+def test_cameras_holding_recall_tracks_the_stretch(monkeypatch):
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "yard", "host": "203.0.113.10",
+         "tracking": {"night_preset": "2", "track_hold": 180}},
+    ]})
+    state = daemon.MonitorState()
+    state.last_seen["yard"] = 1000
+
+    assert daemon.cameras_holding_recall(app, state, now=1010) == {"yard"}
+    assert state.recall_hold_since["yard"] == 1010
+
+    # The stretch is measured from where it started, not from the newest event, so a
+    # passage that keeps firing events still lets the recall through once the cap passes.
+    state.last_seen["yard"] = 1185
+    assert daemon.cameras_holding_recall(app, state, now=1190) == set()
+    assert "yard" not in state.recall_hold_since
+
+
+def test_cameras_holding_recall_ignores_a_camera_without_the_setting():
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "yard", "host": "203.0.113.10", "tracking": {"night_preset": "2"}},
+    ]})
+    state = daemon.MonitorState()
+    state.last_seen["yard"] = 1000
+
+    assert daemon.cameras_holding_recall(app, state, now=1010) == set()
+
+
+def test_run_once_holds_the_recall_for_a_camera_that_is_still_tracking(monkeypatch):
+    # Wiring test on purpose, same reason as the privacy one above: apply_plan can hold
+    # perfectly and change nothing in production if the control pass never says which
+    # cameras are on a subject. This project has shipped that dead shape twice.
+    from tapo_monitor import tracking
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "yard", "host": "203.0.113.10",
+         "tracking": {"night_preset": "2", "track_hold": 180}},
+    ]})
+    recalled = []
+
+    class FakeCam:
+        def executeFunction(self, *a, **k):
+            pass
+        def setMotionDetection(self, sensitivity=False):
+            pass
+        def setPersonDetection(self, enabled, sensitivity=False):
+            pass
+        def setVehicleDetection(self, enabled, sensitivity=False):
+            pass
+        def setPreset(self, preset):
+            recalled.append(preset)
+        def setAutoTrackTarget(self, enabled):
+            pass
+        def getAutoTrackTarget(self):
+            return {"enabled": "on", "back_time": "30"}
+
+    cam = FakeCam()
+    daemon.run_once(app, now=1, connect=lambda c: (cam, None),
+                    is_night=lambda: True, is_raining=lambda *a, **k: False,
+                    hold={"yard"})
+    assert recalled == []
+
+    daemon.run_once(app, now=1, connect=lambda c: (cam, None),
+                    is_night=lambda: True, is_raining=lambda *a, **k: False,
+                    hold=set())
+    assert recalled == ["2"]
+
+
+def test_inert_dwell_warning_names_a_hold_no_back_time_backs_up():
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "yard", "host": "203.0.113.10", "tracking": {"track_hold": 180}},
+    ]})
+    warning = daemon.inert_dwell_warning(app)
+    assert warning is not None and "yard" in warning
+
+
+def test_inert_dwell_warning_quiet_when_both_halves_are_set():
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "yard", "host": "203.0.113.10",
+         "tracking": {"track_hold": 180, "back_time": 180}},
+    ]})
+    assert daemon.inert_dwell_warning(app) is None
+
+
+def test_inert_dwell_warning_quiet_for_a_camera_with_no_dwell():
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "yard", "host": "203.0.113.10"},
+    ]})
+    assert daemon.inert_dwell_warning(app) is None

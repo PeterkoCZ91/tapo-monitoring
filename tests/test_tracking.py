@@ -95,3 +95,95 @@ def test_ensure_autotrack_succeeds_after_retry():
 def test_ensure_autotrack_fails_when_camera_never_accepts():
     cam = _FakeCam(accept=False)
     assert tracking.ensure_autotrack(cam, True, sleep=_no_sleep) is False
+
+
+# ── back_time (firmware dwell after a track) ─────────────────────────────────
+
+class _TrackCfgCam:
+    """Camera that records executeFunction payloads and serves a target_track readback."""
+
+    def __init__(self, accept=True, back_time="30"):
+        self.state = False
+        self.back_time = back_time
+        self.accept = accept
+        self.calls = []
+
+    def setAutoTrackTarget(self, enabled):
+        self.calls.append(("setAutoTrackTarget", {"enabled": enabled}))
+        self.state = enabled
+
+    def executeFunction(self, method, params):
+        self.calls.append((method, params))
+        if not self.accept:
+            raise RuntimeError("refused")
+        info = params["target_track"]["target_track_info"]
+        if "enabled" in info:
+            self.state = info["enabled"] == "on"
+        if "back_time" in info:
+            self.back_time = info["back_time"]
+
+    def getAutoTrackTarget(self):
+        return {"enabled": "on" if self.state else "off", "back_time": self.back_time}
+
+
+def test_back_time_rides_along_in_the_autotrack_call():
+    # The dwell must be written by the SAME request that asserts the master switch.
+    # setSmartTrackConfig silently clears auto-track, so apply_smarttrack -> assert is a
+    # gap nothing may enter; a separate setTargetTrackConfig for back_time would sit
+    # exactly there and re-open the ordering bug this module exists to prevent.
+    cam = _TrackCfgCam()
+
+    assert tracking.set_autotrack(cam, True, back_time=180) is True
+
+    assert len(cam.calls) == 1
+    method, params = cam.calls[0]
+    assert method == "setTargetTrackConfig"
+    assert params["target_track"]["target_track_info"] == {"enabled": "on", "back_time": "180"}
+
+
+def test_back_time_absent_leaves_the_call_shape_untouched():
+    # Cameras without a configured dwell keep the exact path they have always taken.
+    cam = _TrackCfgCam()
+
+    assert tracking.set_autotrack(cam, True) is True
+
+    assert cam.calls == [("setAutoTrackTarget", {"enabled": True})]
+
+
+def test_a_refused_back_time_still_turns_tracking_on():
+    # The dwell is a comfort; tracking is not. A firmware that rejects the combined
+    # payload must still end the pass with auto-track asserted.
+    cam = _TrackCfgCam(accept=False)
+
+    assert tracking.set_autotrack(cam, True, back_time=180) is True
+
+    assert cam.calls[0][0] == "setTargetTrackConfig"
+    assert cam.calls[-1] == ("setAutoTrackTarget", {"enabled": True})
+    assert cam.state is True
+
+
+def test_verify_autotrack_reports_a_back_time_the_camera_did_not_take(caplog):
+    # A camera that quietly keeps back_time=30 looks identical to one that took 180 —
+    # and the whole change is worthless in that state. Say so rather than assume.
+    cam = _TrackCfgCam(back_time="30")
+    cam.state = True
+
+    with caplog.at_level("WARNING"):
+        assert tracking.verify_autotrack(cam, True, back_time=180) is True
+
+    assert "back_time" in caplog.text
+
+
+def test_verify_autotrack_is_quiet_when_the_dwell_landed():
+    cam = _TrackCfgCam(back_time="180")
+    cam.state = True
+
+    assert tracking.verify_autotrack(cam, True, back_time=180) is True
+
+
+def test_ensure_autotrack_passes_the_dwell_through():
+    cam = _TrackCfgCam()
+
+    assert tracking.ensure_autotrack(cam, True, sleep=_no_sleep, back_time=180) is True
+
+    assert cam.back_time == "180"

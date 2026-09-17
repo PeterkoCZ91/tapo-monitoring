@@ -141,6 +141,19 @@ cameras:
       smarttrack: [people]   # subset of: people, vehicle, pet, baby
       day_preset: "2"        # PTZ preset to park at during the day (static)
       night_preset:          # optional preset for night
+      # How long the camera keeps looking where auto-track took it (night only — a
+      # tracking camera tracks only at night). Two halves of one dwell and the SHORTER
+      # one decides, so setting either alone changes nothing:
+      #   back_time  — the camera's own return timer, in seconds (30 out of the box on
+      #                the C560WS). Written with the auto-track assert; unset = untouched.
+      #   track_hold — seconds our control pass leaves the preset recall alone while
+      #                events keep arriving. Re-armed by every fresh event, but one
+      #                unbroken stretch never exceeds this, so the preset (the only thing
+      #                that corrects tilt) still comes round. 0 = off.
+      # Worth it where the SD recording is what gets reviewed: pulling the lens home
+      # mid-passage leaves the clip showing an empty preset instead of the subject.
+      # back_time: 180
+      # track_hold: 180
 
     # Soft pan-limit (optional). The C560WS auto-track physically follows a target
     # anywhere — the local Tapo API exposes no angular limit and no motor position — so it

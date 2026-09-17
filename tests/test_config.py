@@ -919,3 +919,18 @@ def test_each_unknown_key_warns_exactly_once_and_loading_succeeds(caplog):
     assert "cameras[0].rotat: unknown key (did you mean 'rotate'?)" in error
     assert "cameras[0].scorer.tresh" not in error
     assert len(_unknown_key_warnings(caplog)) == 1
+
+
+def test_tracking_dwell_defaults_to_off():
+    app = cfg.load_config_from_dict({"cameras": [{"name": "c", "host": "203.0.113.10"}]})
+    assert app.cameras[0].tracking.back_time is None
+    assert app.cameras[0].tracking.track_hold == 0
+
+
+def test_tracking_dwell_parsed():
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "c", "host": "203.0.113.10",
+         "tracking": {"back_time": 180, "track_hold": 180}},
+    ]})
+    assert app.cameras[0].tracking.back_time == 180
+    assert app.cameras[0].tracking.track_hold == 180

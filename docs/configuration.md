@@ -258,12 +258,53 @@ tracking:
   smarttrack: [people]
   day_preset: "2"
   night_preset: "1"
+  back_time: 180
+  track_hold: 180
 ```
 
 `smarttrack` accepts `people`, `vehicle`, `pet` and `baby` where firmware supports them.
 The current control policy re-asserts person detection, disables vehicle detection and
 applies auto-track last. `person_sensitivity` is an optional integer from 0 to 100; unset
 leaves the existing person sensitivity unchanged.
+
+#### Night dwell: how long the camera keeps watching
+
+Auto-track swings the lens onto whoever walks past and then two separate timers pull it
+back: the camera's own `back_time` (30 s out of the box on the C560WS) and our preset
+recall on the next control pass (≤ 60 s). Whichever is shorter wins, which is why raising
+one alone does nothing at all.
+
+That matters wherever the SD recording is what actually gets reviewed. The Telegram frame
+says *someone was here at 02:14*; the clip is where you find out what they were doing —
+and a lens pulled home after 30 s spends the rest of that clip showing an empty preset.
+
+`back_time` is written in the same `setTargetTrackConfig` request that asserts the
+auto-track switch, deliberately: `setSmartTrackConfig` silently clears that switch, so
+nothing may run between `apply_smarttrack` and the assert, and a separate call for the
+dwell would sit in exactly that gap. A camera that refuses the combined payload still gets
+tracking asserted the ordinary way, and a `back_time` that reads back unchanged is logged
+rather than assumed — a camera quietly keeping its 30 s is indistinguishable from one that
+took 180, and in that state the dwell is worth nothing.
+
+`track_hold` holds our own recall for the same stretch. Every fresh event re-arms it, so a
+passage keeps the lens on its subject, but one unbroken hold never runs longer than
+`track_hold`: a through-location fires events all evening and would otherwise never see
+its preset recalled again — and that recall is the only thing that corrects tilt, since
+`pan_limit.tilt` is off by default. Held recalls are logged per pass.
+
+**Night only, and that is the whole safety story.** The hold is honoured only while the
+plan actually tracks, which on a `role: tracking` camera means night, not parked in a
+storm. With tracking off, the preset recall is the *single* mechanism that repairs a
+drifted or nudged aim: one camera here sat pointed at asphalt for two days (2026-08-18..20)
+because nothing in the system could bring it back. A hold that leaked into the day would
+rebuild that failure silently, so it is gated on the plan, not on a clock.
+
+`pan_limit` keeps working throughout. A dwell does not license the camera to sit staring
+into a wall or a neighbour's window: if auto-track drags it outside its preset span, the
+guard recalls it within a `poll_interval` regardless of any hold.
+
+Setting `track_hold` without `back_time` is warned about at startup — the firmware would
+still swing the lens home on its own timer, so the hold buys no footage.
 
 ### Weather policy
 

@@ -61,6 +61,13 @@ class TrackingConfig:
     smarttrack: list[str] = field(default_factory=lambda: ["people"])
     day_preset: str | None = "2"
     night_preset: str | None = None
+    # How long the camera keeps looking where auto-track took it, in seconds. Two halves
+    # of one dwell, both needed: back_time is the firmware's own return timer (30 s on the
+    # C560WS) and track_hold suppresses our preset recall for the same stretch. Raising
+    # either alone changes nothing — whichever is shorter still pulls the lens home.
+    # None/0 keep today's behaviour. Night only: see plan_camera.
+    back_time: int | None = None
+    track_hold: int = 0
 
 
 @dataclass
@@ -407,10 +414,22 @@ def _tracking(data, where):
     d = data or {}
     smarttrack = d.get("smarttrack", ["people"])
     _check_subset(smarttrack, SMARTTRACK_KINDS, "tracking.smarttrack", where)
+    try:
+        back_time = d.get("back_time")
+        back_time = None if back_time is None else int(back_time)
+        track_hold = int(d.get("track_hold") or 0)
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}: tracking back_time/track_hold must be whole seconds") from None
+    if back_time is not None and back_time < 0:
+        raise ConfigError(f"{where}: tracking.back_time must not be negative")
+    if track_hold < 0:
+        raise ConfigError(f"{where}: tracking.track_hold must not be negative")
     return TrackingConfig(
         smarttrack=list(smarttrack),
         day_preset=d.get("day_preset", "2"),
         night_preset=d.get("night_preset"),
+        back_time=back_time,
+        track_hold=track_hold,
     )
 
 
