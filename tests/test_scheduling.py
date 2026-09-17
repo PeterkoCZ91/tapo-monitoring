@@ -2,6 +2,8 @@ import os
 import sys
 from datetime import datetime
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tapo_monitor import scheduling
@@ -52,6 +54,35 @@ def test_is_night_falls_back_to_hhmm_without_coords(monkeypatch):
     monkeypatch.setenv("NIGHT_END", "6")
     # no coords -> astral raises -> HH:MM fallback; 15:00 is day
     assert scheduling.is_night(datetime(2026, 1, 1, 15, 0)) is False
+
+
+def test_parse_clock_window_hhmm():
+    assert scheduling.parse_clock_window("00:30-04:30") == (30, 270)
+
+
+def test_parse_clock_window_rejects_bad_spec():
+    with pytest.raises(ValueError):
+        scheduling.parse_clock_window("not a window")
+
+
+def test_in_clock_window_inside_and_outside():
+    window = scheduling.parse_clock_window("00:30-04:30")
+    assert scheduling.in_clock_window(window, datetime(2026, 1, 1, 2, 0)) is True
+    assert scheduling.in_clock_window(window, datetime(2026, 1, 1, 0, 0)) is False
+    assert scheduling.in_clock_window(window, datetime(2026, 1, 1, 12, 0)) is False
+
+
+def test_in_clock_window_boundaries_start_inclusive_end_exclusive():
+    window = scheduling.parse_clock_window("00:30-04:30")
+    assert scheduling.in_clock_window(window, datetime(2026, 1, 1, 0, 30)) is True
+    assert scheduling.in_clock_window(window, datetime(2026, 1, 1, 4, 30)) is False
+
+
+def test_in_clock_window_wraps_past_midnight():
+    window = scheduling.parse_clock_window("22:00-05:00")
+    assert scheduling.in_clock_window(window, datetime(2026, 1, 1, 23, 0)) is True
+    assert scheduling.in_clock_window(window, datetime(2026, 1, 1, 2, 0)) is True
+    assert scheduling.in_clock_window(window, datetime(2026, 1, 1, 12, 0)) is False
 
 
 def test_is_night_uses_config_location_before_environment(monkeypatch):

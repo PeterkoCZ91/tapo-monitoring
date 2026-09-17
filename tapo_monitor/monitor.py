@@ -170,8 +170,8 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
     """Poll one camera once and alert on new detections. Returns the new watermark.
 
     ``mute`` polls and advances the watermark but skips all grabbing/scoring/alerting.
-    A night_only camera runs muted during the day so the daytime backlog is drained
-    silently and does not replay when night begins.
+    A night_only or quiet_hours camera runs muted outside its window so the backlog is
+    drained silently and does not replay once the window opens.
 
     Side-effecting collaborators are injected:
       snapshot(cam, event) -> image path or None
@@ -222,7 +222,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
 
     alertable, watermark = collect_detections(events, last_seen, cfg.detection.strict_people)
     if mute:
-        return watermark          # night_only by day: drain silently, no grab/score/alert
+        return watermark          # outside window: drain silently, no grab/score/alert
     for event, etype in alertable:
         audit_event(cfg, event, etype, "getevents", "detect")
         event_flags = detection.decode_events_1(event.get("events_1"))

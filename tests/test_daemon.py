@@ -3930,6 +3930,65 @@ def test_watchdog_alerts_night_only_camera_at_night(monkeypatch):
     assert len(sent) == 1 and "unreachable" in sent[0]
 
 
+# ── quiet_hours gating ────────────────────────────────────────────────────────
+
+def _epoch(y, mo, d, h, mi):
+    from datetime import datetime
+    return datetime(y, mo, d, h, mi).timestamp()
+
+
+def test_run_monitor_pass_mutes_quiet_hours_camera_outside_window(monkeypatch):
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10", "quiet_hours": "00:30-04:30"}]})
+    captured = _capture_mute(monkeypatch)
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
+    daemon.run_monitor_pass(app, {"a": object()}, state, now=_epoch(2026, 1, 1, 12, 0),
+                            secrets=secrets, snapshot_for=_no_snapshot, time_str=lambda e: "t",
+                            night=True)
+    assert captured["mute"] is True
+
+
+def test_run_monitor_pass_active_quiet_hours_camera_inside_window(monkeypatch):
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10", "quiet_hours": "00:30-04:30"}]})
+    captured = _capture_mute(monkeypatch)
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
+    daemon.run_monitor_pass(app, {"a": object()}, state, now=_epoch(2026, 1, 1, 2, 0),
+                            secrets=secrets, snapshot_for=_no_snapshot, time_str=lambda e: "t",
+                            night=False)
+    assert captured["mute"] is False
+
+
+def test_watchdog_skips_quiet_hours_camera_outside_window(monkeypatch):
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10", "quiet_hours": "00:30-04:30"}]})
+    sent = []
+    monkeypatch.setattr(
+        daemon.notify, "send_text", lambda tok, chat, msg: sent.append(msg) or True)
+    state = daemon.MonitorState()
+    state.fail_since["a"] = 0
+    secrets = {"telegram_token": "t", "telegram_chat": "c"}
+    daemon._watchdog_pass(app, {}, state, now=_epoch(2026, 1, 1, 12, 0), secrets=secrets,
+                          night=True)
+    assert sent == []                                # no 🔴 outside quiet_hours
+
+
+def test_watchdog_alerts_quiet_hours_camera_inside_window(monkeypatch):
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10", "quiet_hours": "00:30-04:30"}]})
+    sent = []
+    monkeypatch.setattr(
+        daemon.notify, "send_text", lambda tok, chat, msg: sent.append(msg) or True)
+    state = daemon.MonitorState()
+    state.fail_since["a"] = 0
+    secrets = {"telegram_token": "t", "telegram_chat": "c"}
+    daemon._watchdog_pass(app, {}, state, now=_epoch(2026, 1, 1, 2, 0), secrets=secrets,
+                          night=False)
+    assert len(sent) == 1 and "unreachable" in sent[0]
+
+
 def test_watchdog_messages_include_uptime_and_outage_duration(monkeypatch):
     app = cfg.load_config_from_dict(
         {"cameras": [{"name": "a", "host": "203.0.113.10"}]})

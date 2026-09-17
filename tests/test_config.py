@@ -644,6 +644,32 @@ def test_night_only_parsed():
     assert app.cameras[0].night_only is True
 
 
+def test_quiet_hours_defaults_none():
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    assert app.cameras[0].quiet_hours is None
+
+
+def test_quiet_hours_parses_to_minute_pair():
+    app = cfg.load_config_from_dict({"cameras": [{
+        "name": "a", "host": "203.0.113.10", "quiet_hours": "00:30-04:30",
+    }]})
+    assert app.cameras[0].quiet_hours == (30, 270)
+
+
+def test_quiet_hours_rejects_bad_format():
+    data = {"cameras": [{"name": "a", "host": "203.0.113.10", "quiet_hours": "not a window"}]}
+    with pytest.raises(cfg.ConfigError, match="quiet_hours"):
+        cfg.load_config_from_dict(data)
+
+
+def test_quiet_hours_and_night_only_are_mutually_exclusive():
+    data = {"cameras": [{
+        "name": "a", "host": "203.0.113.10", "night_only": True, "quiet_hours": "00:30-04:30",
+    }]}
+    with pytest.raises(cfg.ConfigError, match="mutually exclusive"):
+        cfg.load_config_from_dict(data)
+
+
 def test_scorer_motion_send_threshold_defaults_none():
     app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
     assert app.cameras[0].scorer.motion_send_threshold is None

@@ -91,6 +91,38 @@ def is_night(now=None, location=None):
         return _is_night_hhmm(now)
 
 
+def parse_clock_window(spec):
+    """Parse a "HH:MM-HH:MM" spec into a (start_minute, end_minute) pair.
+
+    Raises ValueError on anything else. The pair may wrap past midnight
+    (``end < start``, e.g. "22:00-05:00") — :func:`in_clock_window` handles that.
+    """
+    try:
+        start_s, end_s = str(spec).split("-", 1)
+        start = _parse_hhmm(start_s, 0)
+        end = _parse_hhmm(end_s, 0)
+    except (ValueError, IndexError):
+        raise ValueError(f"invalid clock window {spec!r}, expected 'HH:MM-HH:MM'") from None
+    return start, end
+
+
+def in_clock_window(window, now=None):
+    """Whether ``now`` (a datetime, default real local time) falls in ``window``.
+
+    ``window`` is a ``(start_minute, end_minute)`` pair from :func:`parse_clock_window`.
+    A window that wraps past midnight (end <= start) is treated as spanning the gap,
+    matching NIGHT_START/NIGHT_END's own wraparound in :func:`_is_night_hhmm`.
+    """
+    start, end = window
+    now = now or datetime.now()
+    cur = now.hour * 60 + now.minute
+    if start == end:
+        return True
+    if start < end:
+        return start <= cur < end
+    return cur >= start or cur < end
+
+
 def describe_window(now=None):
     """Return (mode, info_string) for logging."""
     try:

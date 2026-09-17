@@ -16,7 +16,7 @@ import logging
 import os
 from dataclasses import dataclass, field, fields, is_dataclass
 
-from . import reliability
+from . import reliability, scheduling
 
 log = logging.getLogger(__name__)
 
@@ -175,6 +175,12 @@ class CameraConfig:
     # backlog doesn't replay at nightfall) and all Telegram — including camera-down
     # notices — is suppressed. For sites that only care about after-hours intruders.
     night_only: bool = False
+    # Detect/alert only during this fixed local clock window (e.g. "00:30-04:30"),
+    # instead of the full astral night that night_only mutes around. Mutually exclusive
+    # with night_only: both mute the same set of Telegram traffic (detections plus
+    # operational camera-down/back-up notices), so setting both would just be two
+    # conflicting definitions of the same gate. None leaves the camera unmuted.
+    quiet_hours: tuple[int, int] | None = None
     # Force IR night vision on the astral night schedule. "ir" makes the daemon set the
     # camera to inf_night_vision (B&W, faster shutter -> less motion blur) at night and
     # back to day/colour mode by day; "auto" re-asserts the camera's own auto switch each
@@ -604,6 +610,16 @@ def _camera(data, index):
     night_vision = data.get("night_vision")
     if night_vision is not None and night_vision not in ("ir", "auto"):
         raise ConfigError(f"{where}: 'night_vision' must be 'ir' or 'auto'")
+    quiet_hours_raw = data.get("quiet_hours")
+    quiet_hours = None
+    if quiet_hours_raw is not None:
+        try:
+            quiet_hours = scheduling.parse_clock_window(quiet_hours_raw)
+        except ValueError as exc:
+            raise ConfigError(f"{where}: 'quiet_hours' {exc}") from None
+        if bool(data.get("night_only", False)):
+            raise ConfigError(f"{where}: 'quiet_hours' and 'night_only' are mutually "
+                              f"exclusive (both mute the same Telegram traffic)")
     try:
         rotate = int(data.get("rotate", 0))
     except (TypeError, ValueError):
@@ -674,6 +690,7 @@ def _camera(data, index):
         sd_jobs_per_tick=sd_jobs_per_tick,
         person_sensitivity=int(data["person_sensitivity"]) if data.get("person_sensitivity") is not None else None,
         night_only=bool(data.get("night_only", False)),
+        quiet_hours=quiet_hours,
         night_vision=night_vision,
         snapshot_source=snapshot_source,
         crop_to_subject=bool(data.get("crop_to_subject", False)),

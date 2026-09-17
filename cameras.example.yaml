@@ -132,6 +132,11 @@ cameras:
     #                          # backlog doesn't replay at nightfall) and ALL Telegram —
     #                          # including camera-down notices — is suppressed. For sites
     #                          # that only care about after-hours intruders.
+    # quiet_hours: "00:30-04:30"  # optional; same mute as night_only, but for a fixed
+    #                          # local clock window instead of the astral night — for a
+    #                          # narrower "dead of night" watch. "HH:MM-HH:MM", wraps past
+    #                          # midnight if end <= start. Mutually exclusive with
+    #                          # night_only (both define the same mute gate).
 
     detection:
       sources: [getevents]   # subset of: getevents, hubpoll, onvif, motion

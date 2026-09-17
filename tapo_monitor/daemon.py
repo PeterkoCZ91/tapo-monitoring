@@ -27,6 +27,7 @@ import tempfile
 import time as _time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from . import (
     capabilities,
@@ -140,6 +141,20 @@ def effective_night(cfg: CameraConfig, astronomical_night: bool) -> bool:
     if cfg.schedule == "always_night":
         return True
     return astronomical_night
+
+
+def camera_muted(cfg: CameraConfig, night: bool, now) -> bool:
+    """Whether this camera's Telegram traffic (detections + outage notices) is muted now.
+
+    Two mutually exclusive schedule gates (enforced at config load): ``night_only`` mutes
+    outside the shared astral night, ``quiet_hours`` mutes outside a fixed local clock
+    window. Neither set leaves the camera unmuted around the clock.
+    """
+    if cfg.night_only and not night:
+        return True
+    if cfg.quiet_hours is not None:
+        return not scheduling.in_clock_window(cfg.quiet_hours, datetime.fromtimestamp(now))
+    return False
 
 
 def _repair_allowed(policy, name):
@@ -1149,7 +1164,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             media_observe=media_observe,
             scene_alert=scene_alert,
             hold_archive=hold_archive,
-            mute=cfg.night_only and not night,
+            mute=camera_muted(cfg, night, now),
         )
         state.last_seen[cfg.name] = watermark
     return state.last_seen
@@ -1325,9 +1340,10 @@ def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
         clip_fetch = clip_frame_for(cfg, device)
         score = score_for(cfg)
         can_alert, on_alert = alert_gate(state, cfg.name, cooldown, now)
-        # night_only camera during the day: drain the cursor silently, exactly as the
-        # getEvents path drains its watermark, so dusk does not replay the whole day.
-        muted = cfg.night_only and not night
+        # night_only/quiet_hours camera outside its window: drain the cursor silently,
+        # exactly as the getEvents path drains its watermark, so the window edge does
+        # not replay the whole gap.
+        muted = camera_muted(cfg, night, now)
         for clip in clips:
             if clip["start_time"] <= cursor:
                 # The hub's window is inclusive and it re-lists a clip that is still the
@@ -1465,8 +1481,8 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
         if cfg is None:
             log.warning("drop %s: SD follow-up for unknown camera %r", etype, entry["camera"])
             continue
-        if cfg.night_only and not night:
-            continue                          # night_only by day: drop, won't replay at night
+        if camera_muted(cfg, night, now):
+            continue                          # outside window: drop, won't replay later
         if now - start_time > PENDING_MAX_AGE:
             # Past the getEvents poll window: usually a stale event re-queued after a
             # daemon restart (its segment is long gone). Log it so the queue isn't a
@@ -1749,8 +1765,8 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
         if not cfg.sampler.enabled:
             del state.groups[cfg.name]
             continue
-        if cfg.night_only and not night:
-            continue                          # night_only by day: leave the group alone
+        if camera_muted(cfg, night, now):
+            continue                          # outside window: leave the group alone
         scfg = cfg.sampler
         if sampler.expired(group, now, scfg):
             if group.get("motion_candidates") and not group["sent"]:
@@ -2367,15 +2383,16 @@ def tick(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
 def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets, night=True):
     """Advance per-camera outage state and send 🔴/🟢 alerts once per transition.
 
-    A night_only camera is silent during the day (no 🔴/🟢), matching the rule that all
-    of that camera's Telegram traffic — detection and operational alike — is night-only.
+    A night_only/quiet_hours camera is silent outside its window (no 🔴/🟢), matching the
+    rule that all of that camera's Telegram traffic — detection and operational alike —
+    stays inside the window.
     """
     token = secrets["telegram_token"]
     chat = secrets["telegram_chat"]
     from . import camera as camera_api
     previous = health.snapshot(state)
     for cfg in app.cameras:
-        if cfg.night_only and not night:
+        if camera_muted(cfg, night, now):
             continue
         if "hubpoll" in cfg.detection.sources:
             # A battery camera sleeps through nearly every ping (measured ~6 % answered in
@@ -2416,7 +2433,7 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
             else:
                 log.warning("recovery notification delivery failed for %s", cfg.name)
     for cfg in app.cameras:
-        if cfg.night_only and not night:
+        if camera_muted(cfg, night, now):
             continue
         if "getevents" not in cfg.detection.sources:
             continue
