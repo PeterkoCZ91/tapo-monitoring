@@ -32,6 +32,7 @@ def test_minimal_config_loads_with_defaults():
     assert cam.weather.motion_rain == 20
     assert cam.detection.strict_people is True
     assert cam.enrich.snapshot == "rtsp"
+    assert cam.enrich.light_status is False
 
 
 def test_coordinator_group_and_scene_window_parse():
@@ -951,6 +952,13 @@ def test_tracking_dwell_defaults_to_off():
     app = cfg.load_config_from_dict({"cameras": [{"name": "c", "host": "203.0.113.10"}]})
     assert app.cameras[0].tracking.back_time is None
     assert app.cameras[0].tracking.track_hold == 0
+
+
+def test_enrich_light_status_parsed():
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "c", "host": "203.0.113.10", "enrich": {"light_status": True}},
+    ]})
+    assert app.cameras[0].enrich.light_status is True
 
 
 def test_tracking_dwell_parsed():

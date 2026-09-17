@@ -523,6 +523,12 @@ enrich:
 `enrich.snapshot` is retained for configuration compatibility; the active follow-up source
 is selected by `sd_snapshot` and `snapshot_source`. Keep it at `rtsp` in new configs.
 
+`enrich.light_status` (default `false`) queries the camera's white lamp (the full-color
+night-vision light some models can switch on for a confirmed person) at alert time and
+notes it — a 🔦 — in the Telegram caption. It costs one extra API call per alert and only
+means anything on hardware that has the feature; a camera without it, or a query that
+fails, leaves the caption unchanged (the state is "unknown", not "off").
+
 ### Soft pan limit
 
 ```yaml

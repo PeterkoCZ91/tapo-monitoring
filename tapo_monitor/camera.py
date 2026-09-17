@@ -83,6 +83,22 @@ def reboot(client):
         return False
 
 
+def whitelamp_on(client):
+    """Whether the camera's white lamp (full-color night-vision light) is on now.
+
+    Returns None when the call fails — no whitelamp hardware, older firmware, or a
+    transient error — so a caller treats "unknown" as "say nothing" rather than
+    guessing. Never raises: a caption enrichment must not cost an alert.
+    """
+    try:
+        status = client.getWhitelampStatus()
+    except Exception:  # noqa: BLE001 - best-effort caption enrichment only
+        return None
+    if not isinstance(status, dict):
+        return None
+    return status.get("status") in (1, "1", True)
+
+
 def new_events(events, last_seen):
     """Events whose start_time is strictly newer than the watermark, oldest first."""
     fresh = [e for e in (events or []) if e.get("start_time", 0) > last_seen]

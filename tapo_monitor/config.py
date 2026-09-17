@@ -74,6 +74,10 @@ class TrackingConfig:
 class EnrichConfig:
     snapshot: str = "rtsp"
     groq: bool = True
+    # Query the camera's white lamp (full-color night-vision light) status at alert
+    # time and note it in the Telegram caption. Off by default: it costs one extra API
+    # call per alert and only means anything on a camera with that hardware/feature.
+    light_status: bool = False
 
 
 @dataclass
@@ -442,7 +446,8 @@ def _tracking(data, where):
 def _enrich(data, where):
     d = data or {}
     snapshot = _check_enum(d.get("snapshot", "rtsp"), SNAPSHOT_SOURCES, "enrich.snapshot", where)
-    return EnrichConfig(snapshot=snapshot, groq=bool(d.get("groq", True)))
+    return EnrichConfig(snapshot=snapshot, groq=bool(d.get("groq", True)),
+                        light_status=bool(d.get("light_status", False)))
 
 
 def _sampler(data, where):

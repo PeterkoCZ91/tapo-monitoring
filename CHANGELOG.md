@@ -5,6 +5,10 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `enrich.light_status`: query the camera's white lamp (full-color night-vision light) at
+  alert time and note it (🔦) in the Telegram caption. Off by default — one extra API call
+  per alert, meaningful only on cameras with that hardware/feature; a failed or unsupported
+  query just leaves the caption as it was.
 - Per-camera `quiet_hours` (`"HH:MM-HH:MM"`): the same all-Telegram mute as `night_only`,
   but for a fixed local clock window instead of the full astral night — for a site that
   only cares about a narrower dead-of-night watch. Mutually exclusive with `night_only`

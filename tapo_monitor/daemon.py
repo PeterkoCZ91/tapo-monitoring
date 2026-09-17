@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from . import (
+    camera,
     capabilities,
     cli,
     dnsfix,
@@ -1636,10 +1637,11 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
                           if image in frames else image)
                 description = _caption_describe(cfg, secrets["groq_key"], images)
             label = enrich.face_label(monitor.face_ids(event), secrets.get("face_names"))
+            light = camera.whitelamp_on(cam) if cfg.enrich.light_status else None
             caption = notify.build_caption(
                 monitor.TYPE_EMOJI.get(etype, "👤"), time_str(event),
                 description=description or None, detail=label or None,
-                score=selected_score,
+                score=selected_score, light=light,
             )
             ok = send_alert_photo(cfg, secrets, image, caption, score=selected_score)
             # SD follow-up is a real user-visible alert. Record it in the same gate as
@@ -1828,9 +1830,11 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                 continue
             description = _caption_describe(cfg, secrets["groq_key"], image)
             label = enrich.face_label(monitor.face_ids(group["event"]), secrets.get("face_names"))
+            light = camera.whitelamp_on(cam) if cfg.enrich.light_status else None
             caption = notify.build_caption(
                 monitor.TYPE_EMOJI.get(etype, "👁"), time_str(group["event"]),
                 description=description or None, detail=label or None, score=s,
+                light=light,
             )
             ok = send_alert_photo(cfg, secrets, image, caption, score=s)
             monitor.audit_event(cfg, group["event"], etype, "sampler", "send", score=s,

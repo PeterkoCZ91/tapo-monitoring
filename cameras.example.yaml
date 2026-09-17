@@ -193,6 +193,12 @@ cameras:
     enrich:
       snapshot: rtsp         # rtsp (live frame) | sd (recorded clip frame)
       groq: true             # send the frame to Groq for a short description
+      # light_status: false  # optional; query the camera's white lamp (full-color
+                             # night-vision light) at alert time and note it (🔦) in
+                             # the Telegram caption. Off by default: one extra API call
+                             # per alert, and only meaningful on a camera with that
+                             # hardware/feature (e.g. the "full-color when person is
+                             # detected" toggle in the Tapo app).
 
     sampler:
       enabled: false         # follow-up grabs across the whole event window

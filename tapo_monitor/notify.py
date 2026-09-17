@@ -42,7 +42,7 @@ def is_empty_scene(description, marker=EMPTY_MARKER):
 
 
 def build_caption(emoji, time_str, description=None, detail=None, count=None,
-                  minutes_since_last=None, score=None):
+                  minutes_since_last=None, score=None, light=None):
     """Assemble an alert caption. Pure — no I/O.
 
     ``score`` may carry the scorer's animal confidence alongside the person one; when the
@@ -51,12 +51,18 @@ def build_caption(emoji, time_str, description=None, detail=None, count=None,
     would not separate them, because a dog walker scores high on *both* (measured 0.91
     person / 0.80 animal). So the animal score is read on its own.
 
+    ``light`` is the camera's white-lamp state at alert time (True/False), or None when
+    unknown/not checked (``enrich.light_status`` off, or the query failed) — a caption
+    never claims a light state it did not actually observe.
+
     This never changes *whether* an alert goes out — the threshold gates on person
     confidence alone.
     """
     animal = getattr(score, "animal", None)
     if animal is not None and animal >= ANIMAL_CAPTION_MIN:
         emoji = f"{emoji}🐾"
+    if light is True:
+        emoji = f"{emoji}🔦"
     headline = f"{emoji} {detail} {time_str}".strip() if detail else f"{emoji} {time_str}"
     lines = [headline]
     if description:

@@ -98,6 +98,33 @@ def test_reboot_calls_api_and_swallows_failure():
     assert ok.calls == 1
     assert camera.reboot(Client(fail=True)) is False
 
+
+# ── whitelamp_on ──────────────────────────────────────────────────────────────
+
+def test_whitelamp_on_true_when_status_is_1():
+    class Client:
+        def getWhitelampStatus(self):
+            return {"status": 1, "rest_time": 240}
+    assert camera.whitelamp_on(Client()) is True
+
+def test_whitelamp_on_false_when_status_is_0():
+    class Client:
+        def getWhitelampStatus(self):
+            return {"status": 0, "rest_time": 0}
+    assert camera.whitelamp_on(Client()) is False
+
+def test_whitelamp_on_none_when_unsupported():
+    class Client:
+        def getWhitelampStatus(self):
+            raise Exception("UNSUPPORTED_METHOD")
+    assert camera.whitelamp_on(Client()) is None
+
+def test_whitelamp_on_none_on_malformed_response():
+    class Client:
+        def getWhitelampStatus(self):
+            return "not a dict"
+    assert camera.whitelamp_on(Client()) is None
+
 # ── new_events / newest_start ────────────────────────────────────────────────
 
 def test_new_events_filters_and_sorts():

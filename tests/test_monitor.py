@@ -345,6 +345,51 @@ def test_run_monitor_continues_after_cooldown_event():
     assert watermark == 1300
 
 
+def test_run_monitor_notes_the_light_in_the_caption_when_enabled():
+    sent = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+        def getWhitelampStatus(self):
+            return {"status": 1, "rest_time": 240}
+
+    cfg = config.load_config_from_dict({
+        "cameras": [{"name": "a", "host": "203.0.113.10",
+                     "enrich": {"groq": False, "light_status": True}}]
+    }).cameras[0]
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=100, groq_key="", telegram_token="", telegram_chat="",
+        snapshot=lambda cam, event: "/tmp/x.jpg", time_str=lambda event: "T",
+        send_alert=lambda image, caption, score: sent.append(caption) or True,
+    )
+    assert len(sent) == 1
+    assert "🔦" in sent[0]
+
+
+def test_run_monitor_skips_the_light_check_when_disabled():
+    calls = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+        def getWhitelampStatus(self):
+            calls.append(1)
+            return {"status": 1}
+
+    cfg = config.load_config_from_dict({
+        "cameras": [{"name": "a", "host": "203.0.113.10", "enrich": {"groq": False}}]
+    }).cameras[0]
+    sent = []
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=100, groq_key="", telegram_token="", telegram_chat="",
+        snapshot=lambda cam, event: "/tmp/x.jpg", time_str=lambda event: "T",
+        send_alert=lambda image, caption, score: sent.append(caption) or True,
+    )
+    assert calls == []                   # light_status off: never even asked
+    assert "🔦" not in sent[0]
+
+
 def test_cooldown_overridden_by_recognized_face(monkeypatch):
     # 2026-07-06 18:37:22 live: the camera recognized 3 known faces 40 s after a person
     # alert, and the per-type cooldown silently ate the richest event of the day. A face

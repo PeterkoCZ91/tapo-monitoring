@@ -41,6 +41,18 @@ def test_caption_with_detail():
     cap = notify.build_caption("👤", "23:14", detail="Jana")
     assert cap.startswith("👤 Jana 23:14")
 
+def test_caption_notes_the_light_when_on():
+    cap = notify.build_caption("👤", "23:14", light=True)
+    assert cap.startswith("👤🔦 23:14")
+
+def test_caption_says_nothing_when_light_is_off():
+    cap = notify.build_caption("👤", "23:14", light=False)
+    assert "🔦" not in cap
+
+def test_caption_says_nothing_when_light_is_unknown():
+    cap = notify.build_caption("👤", "23:14", light=None)
+    assert "🔦" not in cap
+
 
 # ── outage_alert_due ─────────────────────────────────────────────────────────
 

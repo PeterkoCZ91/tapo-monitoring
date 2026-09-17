@@ -2747,6 +2747,32 @@ def test_pending_failed_delivery_is_requeued_without_cooldown(monkeypatch):
     assert ("a", "person") not in state.last_alert
 
 
+def test_pending_sd_notes_the_light_when_enabled(monkeypatch):
+    sent = []
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap, **k: sent.append(cap) or True)
+    monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "Person at door")
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
+                                    "enrich": {"light_status": True}}]})
+    state = daemon.MonitorState()
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": True}]
+
+    class Cam:
+        def getWhitelampStatus(self):
+            return {"status": 1}
+
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
+        return ["/tmp/sd.jpg"]
+    secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
+    daemon.process_pending_sd(app, {"a": Cam()}, state, now=1080, secrets=secrets,
+                              snapshot_for=lambda c: (lambda cam, ev: None),
+                              time_str=lambda ev: "T", fetch_frames=fetch_frames)
+    assert len(sent) == 1
+    assert "🔦" in sent[0]
+
+
 def test_pending_falls_back_to_rtsp_when_sd_fails(monkeypatch):
     # live never went out (live_sent=False): SD fails -> live-RTSP fallback rescues.
     sent = []
@@ -3246,6 +3272,36 @@ def _run_sampler(app, state, now, sent, monkeypatch, *, score=0.9, snap="/tmp/f.
     daemon.process_sampler(app, {"a": object()}, state, now=now, secrets=secrets,
                            snapshot_for=lambda c: (lambda cam, ev: snap),
                            time_str=lambda ev: "T")
+
+
+def test_sampler_notes_the_light_when_enabled(monkeypatch):
+    sent = []
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10",
+                                    "sampler": {"enabled": True, "interval": 30,
+                                                "max_frames": 6, "group_gap": 90},
+                                    "scorer": {"url": "http://127.0.0.1:1/score",
+                                              "threshold": 0.4},
+                                    "enrich": {"light_status": True}}]})
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap, **k: sent.append(cap) or True)
+    monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "Person")
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, img, timeout=10, tiles=1, **kw: {"person": 0.9, "animal": 0.0})
+    monkeypatch.setattr(daemon, "_safe_unlink", lambda p: None)
+
+    class Cam:
+        def getWhitelampStatus(self):
+            return {"status": 1}
+
+    secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
+    daemon.process_sampler(app, {"a": Cam()}, state, now=1035, secrets=secrets,
+                           snapshot_for=lambda c: (lambda cam, ev: "/tmp/f.jpg"),
+                           time_str=lambda ev: "T")
+    assert len(sent) == 1
+    assert "🔦" in sent[0]
 
 
 def test_sampler_due_group_scores_and_sends(monkeypatch):
