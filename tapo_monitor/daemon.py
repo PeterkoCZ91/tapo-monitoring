@@ -1193,27 +1193,22 @@ def _default_hub_client(cfg: CameraConfig, state: MonitorState, now):  # pragma:
 
 
 def _default_clip_frame(cfg: CameraConfig, device):  # pragma: no cover
-    """Build fetch(clip) -> image path|None, pulling the clip off the hub as a last resort.
-
-    The camera is awake only while it records, so by the time a poll notices the clip the
-    live grab may find it asleep. The clip itself still holds the moment of detection, so
-    it is downloaded from the hub and one frame extracted from it.
-    """
+    """Download once and extract candidates spanning the recorded event."""
     _, password = resolve_hub_credentials(cfg)
 
     def fetch(clip):
-        clip_path = os.path.join(tempfile.gettempdir(),
-                                 f"hubclip_{int(clip['start_time'])}.ts")
-        got = hubclient.download_clip(
-            cfg.hub_host, password, device["device_id"], device["mac"],
-            clip["start_time"], clip.get("end_time") or clip["start_time"] + 15,
-            clip_path)
-        if not got:
-            return None
-        try:
-            return snapshot.frame_from_clip(got, rotate=cfg.rotate)
-        finally:
-            _safe_unlink(got)
+        end = clip.get("end_time") or clip["start_time"] + 15
+        with tempfile.TemporaryDirectory(prefix="hubclip_") as job_dir:
+            clip_path = os.path.join(job_dir, "clip.ts")
+            got = hubclient.download_clip(
+                cfg.hub_host, password, device["device_id"], device["mac"],
+                clip["start_time"], end, clip_path)
+            if not got:
+                return []
+            if not cfg.scorer.url:
+                return snapshot.frame_from_clip(got, rotate=cfg.rotate)
+            return snapshot.frames_from_clip(
+                got, duration=end - clip["start_time"], rotate=cfg.rotate)
     return fetch
 
 
@@ -1272,7 +1267,7 @@ def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
 
     A standalone pass on purpose: the sampler only advances groups the getEvents path
     created, and a battery camera creates none. So this triggers (a new clip on the hub),
-    captures (go2rtc), scores, gates and sends on its own, reusing the existing scorer,
+    captures (stored clip, then go2rtc fallback), scores, gates and sends on its own, reusing the existing scorer,
     cooldown gate and sender unchanged.
 
     The per-camera cursor is the newest clip start already consumed. It is advanced even
@@ -1366,7 +1361,7 @@ def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             # the real hub: ~3 MB and 3-5 s per event, which buys a frame that matches the
             # detection instead of one that merely follows it.
             image = clip_fetch(clip)
-            if image is None:
+            if not image:
                 # One retry: the download costs a few seconds, transient refusals were
                 # observed in production that the same call reproduced fine a minute later,
                 # and the clip is the only frame that matches the event. The message says
@@ -1375,20 +1370,21 @@ def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                 log.info("hubpoll %s: no frame from the clip at %s; retrying once",
                          cfg.name, int(clip["start_time"]))
                 image = clip_fetch(clip)
-            if image is None:
+            if not image:
                 log.info("hubpoll %s: clip unavailable for %s; trying a live frame",
                          cfg.name, int(clip["start_time"]))
                 image = grab()
-            if image is None:
+            if not image:
                 log.info("hubpoll %s: no frame for the clip at %s; skipping",
                          cfg.name, int(clip["start_time"]))
                 monitor.audit_event(cfg, event, etype, "hubpoll", "drop", reason="no_frame")
                 continue
+            frames = image if isinstance(image, list) else [image]
             try:
-                s = score(image) if score is not None else None
+                image, s = (frames[0], None) if score is None else _select_recording_frame(
+                    cfg, event, etype, frames, score, path="hubpoll", keep_below=True)
                 if score is not None and s is None:
                     log.warning("scorer unavailable; hubpoll passes %s frame through", cfg.name)
-                    monitor.audit_event(cfg, event, etype, "hubpoll", "scorer_unavailable")
                 elif s is not None and s < cfg.scorer.threshold:
                     log.info("drop hub clip: score %.2f below threshold %.2f",
                              s, cfg.scorer.threshold)
@@ -1416,35 +1412,47 @@ def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                 else:
                     log.warning("hub clip Telegram delivery failed for %s", cfg.name)
             finally:
-                _safe_unlink(image)
+                for frame in frames:
+                    _safe_unlink(frame)
 
 
-def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None):
-    """Score every recorder frame; return the sharpest above-threshold one and its score.
+def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
+                            *, path="sd", keep_below=False):
+    """Pick the sharpest subject from an already-extracted, bounded frame sequence.
 
-    The SD path stops at the first above-threshold frame (each download is expensive). A
-    local recording hands us the whole high-res buffer for free, so we rank every hit by
-    sharpness (ffmpeg blurdetect) and pick the clearest — night motion smears single
-    frames. Returns ``(frame, score)`` or ``(None, None)`` when nothing clears the bar; if
-    the scorer is unavailable it passes the offending frame through (``(frame, None)``).
+    Missing blur measurements fall back to detection score. A scorer failure stops
+    further requests; retain a confirmed candidate if available, otherwise preserve
+    the existing unscored passthrough. Hub callers keep the best rejected candidate
+    so their normal threshold gate can audit the rejected clip once.
     """
     blur_score = blur_score or recclip.blur_score
-    above = []
+    above, below = [], []
     for frame in frames:
         s = score(frame)
         if s is None:
-            return frame, s                       # scorer down -> pass this frame through
+            monitor.audit_event(cfg, event, etype, path, "scorer_unavailable")
+            if above:
+                break
+            return frame, s
         if s >= cfg.scorer.threshold:
             above.append((frame, s))
         else:
-            monitor.audit_event(cfg, event, etype, "sd", "drop", score=s,
-                                threshold=cfg.scorer.threshold, reason="below_threshold")
+            below.append((frame, s))
+            if not keep_below:
+                monitor.audit_event(cfg, event, etype, path, "drop", score=s,
+                                    threshold=cfg.scorer.threshold, reason="below_threshold")
     if not above:
+        if keep_below and below:
+            return max(below, key=lambda fs: fs[1])
         return None, None
-    above.sort(key=lambda fs: fs[1], reverse=True)          # best score first
+    above.sort(key=lambda fs: fs[1], reverse=True)
     ranked = [(f, blur_score(f)) for f, _ in above]
     image = recclip.select_sharpest(ranked)
     selected = next(s for f, s in above if f == image)
+    selected_blur = next(b for f, b in ranked if f == image)
+    log.info("frame selection %s [%s]: picked %d/%d, subjects=%d score=%.3f blur=%s",
+             cfg.name, path, frames.index(image) + 1, len(frames), len(above),
+             selected, selected_blur)
     return image, selected
 
 
@@ -1573,26 +1581,12 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
                                         reason="panlimit_window")
                 else:
                     eligible_frames.append(frame)
-            recording_pick = cfg.snapshot_source == "recording" and score is not None
-            if recording_pick:
+            scored_pick = score is not None
+            if scored_pick:
                 image, selected_score = _select_recording_frame(
                     cfg, event, etype, eligible_frames, score)
-            # SD/raw path: first accepted frame wins; recording scores all eligible frames.
-            for frame in (() if recording_pick else eligible_frames):
-                if score is not None:
-                    # Local scorer is the arbiter (Groq captions later, at send time).
-                    s = score(frame)
-                    selected_score = s
-                    if s is None:
-                        monitor.audit_event(cfg, event, etype, "sd", "scorer_unavailable")
-                        image = frame
-                        break
-                    if s >= cfg.scorer.threshold:
-                        image = frame
-                        break
-                    monitor.audit_event(cfg, event, etype, "sd", "drop", score=s,
-                                        threshold=cfg.scorer.threshold, reason="below_threshold")
-                    continue
+            # Without a local scorer, retain the caption-based/raw selection.
+            for frame in (() if scored_pick else eligible_frames):
                 desc = enrich.groq_describe(secrets["groq_key"], frame) if cfg.enrich.groq else ""
                 # Raw mode (groq off): no subject arbiter -> first frame wins as-is.
                 if not cfg.enrich.groq or not notify.is_empty_scene(desc):

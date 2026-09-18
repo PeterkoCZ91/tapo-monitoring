@@ -2596,14 +2596,15 @@ def test_send_alert_photo_archives_sent_frame_without_crop(monkeypatch, tmp_path
 
 # ── process_pending_sd ────────────────────────────────────────────────────────
 
-def test_pending_recording_source_sends_sharpest(monkeypatch):
+@pytest.mark.parametrize("source", ["recording", "sd"])
+def test_pending_recording_source_sends_sharpest(monkeypatch, source):
     # A recording-source camera: process_pending_sd must route through
     # _select_recording_frame (score all, pick sharpest above threshold) and send it,
-    # not stop at the first above-threshold frame like the SD path.
+    # including the camera-SD path, which previously stopped at the first hit.
     sent = []
     app = cfg.load_config_from_dict({"groq": {}, "cameras": [
         {"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
-         "snapshot_source": "recording",
+         "snapshot_source": source,
          "scorer": {"url": "http://x/score", "threshold": 0.4}}]})
     state = daemon.MonitorState()
     state.pending_sd = [{"camera": "a", "etype": "person",

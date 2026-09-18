@@ -46,7 +46,8 @@ recorder and scorer can complement the daemon, but neither is required for the b
   follow-up when the first frame misses the subject; the subject zoom can be cropped from
   a native-resolution grab so a distant figure stays legible.
 - **Battery cameras on a hub** — `hubpoll` reads a sleeping camera's detections off the
-  hub it records to; the alert frame comes from a go2rtc sidecar.
+  hub it records to; with a scorer, the sharpest accepted frame is selected from the
+  stored clip. A go2rtc sidecar supplies a live fallback when the clip cannot be decoded.
 - **Optional local scorer** — a small HTTP YOLO service can gate frames and return subject
   boxes; Groq remains optional caption enrichment.
 - **Confirmed Telegram semantics** — failed sends do not arm cooldowns; recovery, SD and

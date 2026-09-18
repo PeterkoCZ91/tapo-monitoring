@@ -105,8 +105,10 @@ model, `-60305` unsupported, `-71114` storage does not exist.
 ## Getting a frame
 
 There is no JSON method for a clip. A download-type media session against the hub's media
-port, naming the camera's MAC and device id, returns MPEG-TS; one frame is extracted a
-second past the clip start, because the first frames of a recording are the most smeared. A
+port, naming the camera's MAC and device id, returns MPEG-TS. Up to six frames are extracted
+across the clip within a shared 30-second decoding budget. With a configured scorer, the
+sharpest above-threshold candidate wins; without blur measurements, detection score wins.
+Without a scorer the first extracted frame is retained. All candidates share one download. A
 missing key-exchange nonce on the first attempt is answered by opening a throwaway playback
 session once and retrying.
 

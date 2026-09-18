@@ -6,9 +6,11 @@ subprocess in :func:`capture_rtsp` is a thin I/O wrapper kept deliberately untes
 """
 
 import logging
+import math
 import os
 import shutil
 import subprocess
+import tempfile
 import time as _time
 import urllib.parse
 
@@ -262,8 +264,10 @@ def frame_from_clip(clip_path, out_dir="/tmp", timeout=30, rotate=0, skip=1.0,
     """
     if not clip_path or not os.path.exists(clip_path):
         return None
-    out_path = os.path.join(out_dir, f"snapclip_{int(_time.time() * 1000)}.jpg")
+    out_path = None
     try:
+        fd, out_path = tempfile.mkstemp(prefix="snapclip_", suffix=".jpg", dir=out_dir)
+        os.close(fd)
         _run(
             ts_frame_args(clip_path, out_path, rotate=rotate, skip=skip),
             stdout=subprocess.DEVNULL,
@@ -281,6 +285,41 @@ def frame_from_clip(clip_path, out_dir="/tmp", timeout=30, rotate=0, skip=1.0,
         return out_path
     _safe_unlink(out_path)
     return None
+
+
+def frames_from_clip(clip_path, duration, out_dir="/tmp", timeout=30, rotate=0):
+    """Extract up to six event-spanning frames within one decoding time budget.
+
+    The caller owns returned images. Each has a unique filename even when several
+    decodes finish in the same millisecond. Short or partially decoded clips can
+    return fewer candidates; individual failures do not discard successful frames.
+    """
+    try:
+        duration = float(duration)
+    except (ValueError, TypeError):
+        duration = 15.0
+    if not math.isfinite(duration) or duration <= 0:
+        duration = 15.0
+    duration = min(duration, 120.0)
+    first = min(1.0, duration / 6)
+    last = max(first, duration - 0.5)
+    offsets = sorted({first + (last - first) * i / 5 for i in range(6)})
+    deadline = _time.monotonic() + timeout
+    frames = []
+    try:
+        for offset in offsets:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                break
+            frame = frame_from_clip(clip_path, out_dir=out_dir, timeout=remaining,
+                                    rotate=rotate, skip=offset)
+            if frame:
+                frames.append(frame)
+        return frames
+    except BaseException:
+        for frame in frames:
+            safe_unlink(frame)
+        raise
 
 
 def _env_float(name, default):

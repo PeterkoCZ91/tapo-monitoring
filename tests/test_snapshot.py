@@ -339,3 +339,51 @@ def test_frame_from_clip_says_why_the_extraction_failed(tmp_path, caplog):
         assert snapshot.frame_from_clip(str(clip), out_dir=str(tmp_path),
                                         _run=fake_run) is None
     assert any("ffmpeg" in record.getMessage() for record in caplog.records)
+
+
+def test_clip_candidates_span_event_and_share_timeout(monkeypatch):
+    elapsed = [0.0]
+    calls = []
+    monkeypatch.setattr(snapshot._time, "monotonic", lambda: elapsed[0])
+
+    def extract(clip, **kwargs):
+        calls.append(kwargs)
+        elapsed[0] += 12
+        return "frame" + str(len(calls))
+
+    monkeypatch.setattr(snapshot, "frame_from_clip", extract)
+    assert snapshot.frames_from_clip("clip.ts", 20, timeout=30) == ["frame1", "frame2", "frame3"]
+    assert [c["timeout"] for c in calls] == [30, 18, 6]
+    assert calls[0]["skip"] == 1
+    assert calls[-1]["skip"] > calls[0]["skip"]
+
+
+def test_clip_candidates_reach_late_subject_despite_one_bad_frame(monkeypatch):
+    offsets = []
+
+    def extract(clip, **kwargs):
+        offset = kwargs["skip"]
+        offsets.append(offset)
+        return None if len(offsets) == 2 else str(offset)
+
+    monkeypatch.setattr(snapshot, "frame_from_clip", extract)
+    frames = snapshot.frames_from_clip("clip.ts", 20)
+    assert len(offsets) == 6
+    assert len(frames) == 5
+    assert offsets[0] == 1
+    assert 19 <= offsets[-1] < 20
+
+
+def test_clip_frames_do_not_overwrite_each_other_at_same_clock_time(monkeypatch, tmp_path):
+    clip = tmp_path / "clip.ts"
+    clip.write_bytes(b"clip")
+    monkeypatch.setattr(snapshot._time, "time", lambda: 1000)
+
+    def extract(argv, **kwargs):
+        with open(argv[-1], "wb") as output:
+            output.write(b"jpeg")
+
+    first = snapshot.frame_from_clip(str(clip), out_dir=str(tmp_path), _run=extract)
+    second = snapshot.frame_from_clip(str(clip), out_dir=str(tmp_path), _run=extract)
+    assert first != second
+    assert os.path.exists(first) and os.path.exists(second)

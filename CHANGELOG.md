@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- SD follow-ups now select the sharpest above-threshold subject frame, as recorder
+  follow-ups already do, instead of stopping at the first accepted frame. Hub clips
+  supply up to six candidates from one download with a shared decoding time budget.
+  Missing sharpness measurements fall back to detection score; scorer failure retains
+  a confirmed candidate when available. Selection logs identify the chosen candidate.
+  Live and sampler snapshots are unchanged; full-frame sharpness is not a guarantee
+  that a moving subject is sharp.
 - `enrich.light_status`: query the camera's white lamp (full-color night-vision light) at
   alert time and note it (🔦) in the Telegram caption. Off by default — one extra API call
   per alert, meaningful only on cameras with that hardware/feature; a failed or unsupported

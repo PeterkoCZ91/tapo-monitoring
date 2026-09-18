@@ -380,8 +380,12 @@ The monitor chooses frames in this order:
 2. Event-time follow-up when `sd_snapshot` / `sd_motion` is enabled and the event deserves
    a second chance. By default this downloads the segment from the camera **SD card**; with
    `snapshot_source: recording` it instead reads the local recorder tree (`RECORDING_ROOT`)
-   for the event window — full stream1 resolution even when detection runs on stream2, and
-   it picks the *sharpest* above-threshold frame (ffmpeg `blurdetect`) rather than the first.
+   for the event window — full stream1 resolution even when detection runs on stream2.
+   With a local scorer, both SD and recorder follow-ups compare all extracted candidates
+   and pick the *sharpest* above-threshold frame (ffmpeg `blurdetect`). This costs extra
+   scorer requests but no additional download. Missing blur measurements fall back to
+   detection score; a scorer outage retains a previously confirmed candidate when possible.
+   Sharpness measures the whole frame, so it cannot guarantee an unblurred moving subject.
    `recording` reuses the SD follow-up queue, so it requires `sd_snapshot: true`, and it
    falls back to the SD/live path when no matching segment exists or `RECORDING_ROOT` is unset.
 3. Optional local-recorder fallback, only in the late fallback path after SD produced no
