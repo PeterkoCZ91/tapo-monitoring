@@ -208,6 +208,23 @@ journalctl -u tapo-monitor --since "24 hours ago" --no-pager \
 Tune using real accepted and rejected examples. A low send rate alone does not prove the
 threshold is wrong; the camera may be generating false events.
 
+## The white lamp does not switch on (`light_trigger`)
+
+`light_trigger` turns the camera's white lamp on when a person or motion event arrives inside
+its window. Checks, cheapest first:
+
+- The window is evaluated in the **host's** local time zone (`timedatectl`), at poll time, not
+  at the event's own time. An event just before the window closes but polled after it does
+  not fire the lamp.
+- Only the `getevents` detection source triggers it; sampler, SD and hub follow-ups do not.
+- On the C560WS (firmware 1.1.10) `getWhitelampStatus` and `reverseWhitelampStatus` work and
+  the lamp switches itself off after about 300 s. `setForceWhitelampState` is not supported
+  there. `reverseWhitelampStatus` is a toggle, so the daemon only fires it after a status
+  read that says the lamp is off, and never when the state is unreadable.
+- A transient `-40214` right after a switch is normal; the daemon retries the status read once.
+- The log line is `light_trigger: turned on white lamp ...`; it is also written when the lamp
+  was already on.
+
 ## Telegram delivery failures
 
 The daemon records the delivery result. A failed live send does not activate cooldown and

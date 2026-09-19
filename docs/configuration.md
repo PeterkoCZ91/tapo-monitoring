@@ -164,7 +164,7 @@ authentication pressure without improving event latency.
 | `role` | `tracking`, `static` | Tracking cameras follow policy; static cameras stay parked at `day_preset`, re-asserted every control tick. |
 | `schedule` | `astral`, `always_night`, `always_day` | Controls day/night plan selection. |
 | `night_only` | boolean | Drains events but suppresses all Telegram traffic during daytime. |
-| `quiet_hours` | `"HH:MM-HH:MM"`, unset | Mutes INSIDE a fixed local clock window (the camera alerts outside it): detections are drained silently and all Telegram, including camera-down notices, is suppressed. The inverse gate of `night_only`, which reports only during the astral night. Wraps past midnight if end ≤ start. Mutually exclusive with `night_only`. |
+| `quiet_hours` | `"HH:MM-HH:MM"`, unset | Mutes INSIDE a fixed local clock window (the camera alerts outside it): detections are drained silently and all Telegram, including camera-down notices, is suppressed. The inverse gate of `night_only`, which reports only during the astral night. Wraps past midnight if end ≤ start. Mutually exclusive with `night_only`. To keep reporting all day and only switch the white lamp on in a night window, use `light_trigger` instead. |
 | `night_vision` | `ir`, `auto`, unset | Force IR by schedule, re-assert camera auto mode, or leave untouched. |
 
 ### Credentials and streams

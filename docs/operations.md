@@ -257,6 +257,29 @@ ssh-reachable account whose `~/tapo-monitor` is expendable, seed a `cameras.yaml
 env file carrying the credential vars it names, and pass `--restart-cmd true
 --env-file <that file>` — everything short of the systemd restart runs for real.
 
+### Hosts with a user unit or a different venv
+
+`deploy_release.sh` assumes a system unit and `~/tapo-env`. For a host that runs a systemd
+*user* unit from another venv, pass both explicitly:
+
+```bash
+tools/deploy_release.sh <ssh-host> --python ~/other-venv/bin/python \
+  --restart-cmd 'systemctl --user restart tapo-monitor.service'
+```
+
+Things that differ there:
+
+- The script looks up the unit's `EnvironmentFile` at system level, so it does **not** update
+  `TAPO_EXPECTED_FINGERPRINT` in a user unit's env file. Set it by hand after a deploy, or
+  `fleet_status.sh` reports fingerprint drift.
+- `check_monitor_rollout.sh` queries the system manager, so it reports a false
+  `unit: FAILED` for a user unit. Confirm with `systemctl --user is-active` and the user
+  journal (`journalctl --user -u tapo-monitor`).
+- `selfcheck` runs over a non-interactive ssh whose `PATH` may not contain `ffmpeg`; the
+  check fails and `current` is not switched. Install ffmpeg system-wide (a binary under
+  `~/.local/bin` is not visible to that shell) or make the env file the script sources set
+  a `PATH` that has it. Without ffmpeg a hub camera would drop every clip as `no_frame`.
+
 ### Rollback
 
 ```bash

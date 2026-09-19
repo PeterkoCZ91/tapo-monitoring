@@ -5,6 +5,16 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Hub clip delivery is retried: a failed Telegram send goes to a bounded queue (4 attempts,
+  600 s TTL) instead of being lost after the cursor moved on, and the hub cursor is kept in
+  `hub_cursor.json` so a restart no longer skips clips from the downtime (capped at 4 h).
+- Every hub clip decision (send or drop, with its reason) is audited with the clip's
+  `video_type` and length; cooldown drops now carry the score too. Below-threshold hub clips
+  go to the review log when one is configured.
+- `inactivity_alert_days` (1-90, off by default) for hub cameras: one text notice when the hub
+  has indexed no clip for that long. Checked at most once a day; state survives restarts.
+- `events_1` bit 8 is decoded as `linecrossing`, so it no longer shows up as an unknown bit.
+  It does not change the alert type.
 - `light_trigger`: per-camera option to trigger the camera's white lamp / LED floodlight
   on person or motion detection within an optional clock window (`"HH:MM-HH:MM"`).
 - SD follow-ups now select the sharpest above-threshold subject frame, as recorder
@@ -90,6 +100,14 @@ All notable changes to this project are documented here.
   argv is world-readable in `/proc`.
 
 ### Changed
+- Frame sharpness is judged on the scorer's subject box when every candidate frame has one
+  (Laplacian variance of the crop); without boxes it falls back to full-frame blur as before.
+  Below-threshold frames of one sequence share a single audit line.
+- `trigger_whitelamp` retries a transient status read once, never fires the toggle when the
+  state is unreadable, and re-reads the state after a failed toggle.
+- Auto-track setup reads `back_time` first and skips the write when it already matches; a
+  refused combined call warns once per camera and tries the `auto_track_target` namespace.
+- A muted camera drops its open sampler group instead of resurrecting it after the window.
 - The scorer's metrics settings moved out of `ExecStart` into `scorer.env`, where the
   process reads them itself. The replaced hand-written unit passed them as command-line
   flags, which is the arrangement that turns an undefined `${VAR}` into an argparse exit
