@@ -132,11 +132,14 @@ cameras:
     #                          # backlog doesn't replay at nightfall) and ALL Telegram —
     #                          # including camera-down notices — is suppressed. For sites
     #                          # that only care about after-hours intruders.
-    # quiet_hours: "00:30-04:30"  # optional; same mute as night_only, but for a fixed
-    #                          # local clock window instead of the astral night — for a
-    #                          # narrower "dead of night" watch. "HH:MM-HH:MM", wraps past
-    #                          # midnight if end <= start. Mutually exclusive with
-    #                          # night_only (both define the same mute gate).
+    # quiet_hours: "00:30-04:30"  # optional; mute detection alerts and outage notices
+    #                          # during a fixed local clock window ("HH:MM-HH:MM", wraps past
+    #                          # midnight if end <= start). Mutually exclusive with night_only.
+    # light_trigger: "00:30-04:30" # optional; turn on camera white lamp / LED floodlight on
+    #                          # detection within a clock window. Can be a window string or:
+    # light_trigger:
+    #   window: "00:30-04:30"  # optional clock window (unset = all hours)
+    #   types: [person, motion] # detection types to trigger on (default: person, motion)
 
     detection:
       sources: [getevents]   # subset of: getevents, hubpoll, onvif, motion

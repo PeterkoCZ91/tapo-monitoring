@@ -14,8 +14,11 @@ The pytapo import is lazy (inside ``tapo_factory``) so the rest of the package â
 tests â€” import without the dependency present.
 """
 
+import logging
 import subprocess
 import time as _time
+
+log = logging.getLogger(__name__)
 
 PING_ECHOES = 2
 PING_INTERVAL = "0.3"
@@ -97,6 +100,24 @@ def whitelamp_on(client):
     if not isinstance(status, dict):
         return None
     return status.get("status") in (1, "1", True)
+
+
+def trigger_whitelamp(client):
+    """Turn on the camera's white lamp if supported and not already on. Never raises."""
+    try:
+        status = client.getWhitelampStatus()
+        if isinstance(status, dict) and status.get("status") in (1, "1", True):
+            return True  # already on
+        if hasattr(client, "reverseWhitelampStatus"):
+            client.reverseWhitelampStatus()
+            return True
+        if hasattr(client, "setForceWhitelampState"):
+            client.setForceWhitelampState(True)
+            return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("failed to trigger whitelamp: %s", exc)
+        return False
+    return False
 
 
 def new_events(events, last_seen):

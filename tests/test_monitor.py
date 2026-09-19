@@ -1133,3 +1133,92 @@ def test_get_events_failure_logs_the_detail_in_the_journal(monkeypatch, caplog):
     assert watermark == 5
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert warnings == ["getEvents failed: Exception: Invalid stok value from 203.0.113.10"]
+
+
+def test_run_monitor_triggers_whitelamp_in_window():
+    from datetime import datetime
+    triggered = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    cfg = config.load_config_from_dict({"cameras": [{
+        "name": "a", "host": "203.0.113.10",
+        "light_trigger": "00:30-04:30",
+    }]}).cameras[0]
+
+    now_in = datetime(2026, 1, 1, 2, 0).timestamp()
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=now_in, groq_key="", telegram_token="", telegram_chat="",
+        snapshot=lambda *a: None, time_str=lambda e: "t",
+        trigger_whitelamp=lambda cam: triggered.append(cam) or True,
+    )
+    assert len(triggered) == 1
+
+
+def test_run_monitor_does_not_trigger_whitelamp_outside_window():
+    from datetime import datetime
+    triggered = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    cfg = config.load_config_from_dict({"cameras": [{
+        "name": "a", "host": "203.0.113.10",
+        "light_trigger": "00:30-04:30",
+    }]}).cameras[0]
+
+    now_out = datetime(2026, 1, 1, 12, 0).timestamp()
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=now_out, groq_key="", telegram_token="", telegram_chat="",
+        snapshot=lambda *a: None, time_str=lambda e: "t",
+        trigger_whitelamp=lambda cam: triggered.append(cam) or True,
+    )
+    assert len(triggered) == 0
+
+
+def test_run_monitor_does_not_trigger_whitelamp_when_disabled():
+    from datetime import datetime
+    triggered = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    cfg = config.load_config_from_dict({"cameras": [{
+        "name": "a", "host": "203.0.113.10",
+        "light_trigger": {"enabled": False, "window": "00:30-04:30"},
+    }]}).cameras[0]
+
+    now_in = datetime(2026, 1, 1, 2, 0).timestamp()
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=now_in, groq_key="", telegram_token="", telegram_chat="",
+        snapshot=lambda *a: None, time_str=lambda e: "t",
+        trigger_whitelamp=lambda cam: triggered.append(cam) or True,
+    )
+    assert len(triggered) == 0
+
+
+def test_run_monitor_does_not_trigger_whitelamp_when_etype_mismatches():
+    from datetime import datetime
+    triggered = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    cfg = config.load_config_from_dict({"cameras": [{
+        "name": "a", "host": "203.0.113.10",
+        "light_trigger": {"enabled": True, "window": "00:30-04:30", "types": ["motion"]},
+    }]}).cameras[0]
+
+    now_in = datetime(2026, 1, 1, 2, 0).timestamp()
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=now_in, groq_key="", telegram_token="", telegram_chat="",
+        snapshot=lambda *a: None, time_str=lambda e: "t",
+        trigger_whitelamp=lambda cam: triggered.append(cam) or True,
+    )
+    assert len(triggered) == 0
+

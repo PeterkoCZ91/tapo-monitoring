@@ -80,9 +80,9 @@ def set_autotrack(cam, enabled, back_time=None):
                 "target_track_info": {"enabled": "on" if enabled else "off",
                                       "back_time": str(int(back_time))}}})
             return True
-        except Exception:
-            log.warning("camera refused the combined auto-track/back_time call; "
-                        "falling back to the plain switch")
+        except Exception as exc:
+            log.warning("camera refused the combined auto-track/back_time call (%s); "
+                        "falling back to the plain switch", exc)
     if hasattr(cam, "setAutoTrackTarget"):
         try:
             cam.setAutoTrackTarget(enabled)

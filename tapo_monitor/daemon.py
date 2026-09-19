@@ -148,13 +148,13 @@ def camera_muted(cfg: CameraConfig, night: bool, now) -> bool:
     """Whether this camera's Telegram traffic (detections + outage notices) is muted now.
 
     Two mutually exclusive schedule gates (enforced at config load): ``night_only`` mutes
-    outside the shared astral night, ``quiet_hours`` mutes outside a fixed local clock
+    outside the shared astral night, ``quiet_hours`` mutes inside a fixed local clock
     window. Neither set leaves the camera unmuted around the clock.
     """
     if cfg.night_only and not night:
         return True
     if cfg.quiet_hours is not None:
-        return not scheduling.in_clock_window(cfg.quiet_hours, datetime.fromtimestamp(now))
+        return scheduling.in_clock_window(cfg.quiet_hours, datetime.fromtimestamp(now))
     return False
 
 
@@ -1166,6 +1166,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             scene_alert=scene_alert,
             hold_archive=hold_archive,
             mute=camera_muted(cfg, night, now),
+            trigger_whitelamp=camera.trigger_whitelamp,
         )
         state.last_seen[cfg.name] = watermark
     return state.last_seen

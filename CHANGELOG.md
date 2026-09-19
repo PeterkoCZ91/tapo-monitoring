@@ -5,6 +5,8 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `light_trigger`: per-camera option to trigger the camera's white lamp / LED floodlight
+  on person or motion detection within an optional clock window (`"HH:MM-HH:MM"`).
 - SD follow-ups now select the sharpest above-threshold subject frame, as recorder
   follow-ups already do, instead of stopping at the first accepted frame. Hub clips
   supply up to six candidates from one download with a shared decoding time budget.
@@ -94,6 +96,11 @@ All notable changes to this project are documented here.
   before the model loads.
 
 ### Fixed
+- Hub clip downloads now enforce stream completion integrity (`download_clip`). If a
+  download stream terminates early, stalls, or receives an error, the incomplete video
+  file is unlinked and rejected rather than treated as a valid clip.
+- Corrected `quiet_hours` semantics so detection alerts and outage notices are muted
+  during the configured clock window rather than outside of it.
 - The hub session no longer breaks against H200 firmware (observed on 1.7.5) that
   disconnects a reused HTTP connection on the second request of an otherwise-valid
   session. The authenticated session now opens a fresh TCP connection per HTTP request

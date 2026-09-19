@@ -26,6 +26,7 @@ WEATHER_STRATEGIES = {"none", "disable_tracking", "lower_sensitivity"}
 DETECTION_SOURCES = {"onvif", "getevents", "motion", "hubpoll"}
 SMARTTRACK_KINDS = {"people", "vehicle", "pet", "baby"}
 SNAPSHOT_SOURCES = {"rtsp", "sd"}
+LIGHT_TRIGGER_TYPES = {"person", "motion", "pet", "tamper", "vehicle"}
 
 
 class ConfigError(ValueError):
@@ -123,6 +124,13 @@ class PanLimitConfig:
     tilt: bool = False
     tilt_min: float | None = None           # ignore presets outside this tilt window
     tilt_max: float | None = None
+
+
+@dataclass
+class LightTriggerConfig:
+    enabled: bool = False
+    window: tuple[int, int] | None = None  # (start_minute, end_minute)
+    types: tuple[str, ...] = ("person", "motion")
 
 
 @dataclass
@@ -233,6 +241,7 @@ class CameraConfig:
     scorer: ScorerConfig = field(default_factory=ScorerConfig)
     coordinator: CoordinatorConfig = field(default_factory=CoordinatorConfig)
     pan_limit: PanLimitConfig = field(default_factory=PanLimitConfig)
+    light_trigger: LightTriggerConfig = field(default_factory=LightTriggerConfig)
 
 
 @dataclass
@@ -538,6 +547,37 @@ def _pan_limit(data, where):
     )
 
 
+def _light_trigger(data, where):
+    if data is None:
+        return LightTriggerConfig()
+    if isinstance(data, LightTriggerConfig):
+        return data
+    if isinstance(data, str):
+        try:
+            window = scheduling.parse_clock_window(data)
+        except ValueError as exc:
+            raise ConfigError(f"{where}: 'light_trigger' {exc}") from None
+        return LightTriggerConfig(enabled=True, window=window, types=("person", "motion"))
+    if isinstance(data, dict):
+        raw_window = data.get("window")
+        window = None
+        if raw_window is not None:
+            try:
+                window = scheduling.parse_clock_window(raw_window)
+            except ValueError as exc:
+                raise ConfigError(f"{where}: 'light_trigger.window' {exc}") from None
+        enabled = bool(data["enabled"]) if "enabled" in data else (window is not None)
+        raw_types = data.get("types", ("person", "motion"))
+        if not isinstance(raw_types, (list, tuple)):
+            raise ConfigError(f"{where}: 'light_trigger.types' must be a list")
+        for t in raw_types:
+            if not isinstance(t, str) or t not in LIGHT_TRIGGER_TYPES:
+                opts = ", ".join(sorted(LIGHT_TRIGGER_TYPES))
+                raise ConfigError(f"{where}: 'light_trigger.types' has invalid {t!r}; allowed: [{opts}]")
+        return LightTriggerConfig(enabled=enabled, window=window, types=tuple(raw_types))
+    raise ConfigError(f"{where}: 'light_trigger' must be a string or mapping")
+
+
 def _reliability(data, where):
     d = data or {}
     try:
@@ -715,6 +755,7 @@ def _camera(data, index):
         sampler=_sampler(data.get("sampler"), where),
         scorer=_scorer(data.get("scorer"), where),
         pan_limit=_pan_limit(data.get("pan_limit"), where),
+        light_trigger=_light_trigger(data.get("light_trigger"), where),
         coordinator=CoordinatorConfig(
             group=coord.get("group"),
             handoff_preset=coord.get("handoff_preset"),
@@ -722,6 +763,11 @@ def _camera(data, index):
             camera_order=camera_order,
         ),
     )
+
+
+def load_camera_config(data, index=0) -> CameraConfig:
+    """Parse a single camera configuration dictionary into CameraConfig."""
+    return _camera(data, index)
 
 
 def load_config_from_dict(data) -> AppConfig:

@@ -671,6 +671,88 @@ def test_quiet_hours_and_night_only_are_mutually_exclusive():
         cfg.load_config_from_dict(data)
 
 
+def test_quiet_hours_mutes_inside_window():
+    from datetime import datetime
+
+    from tapo_monitor import daemon
+    app = cfg.load_config_from_dict({"cameras": [{
+        "name": "a", "host": "203.0.113.10", "quiet_hours": "00:30-04:30",
+    }]})
+    cam_cfg = app.cameras[0]
+    inside = datetime(2026, 1, 1, 2, 0).timestamp()
+    outside = datetime(2026, 1, 1, 12, 0).timestamp()
+    assert daemon.camera_muted(cam_cfg, night=False, now=inside) is True
+    assert daemon.camera_muted(cam_cfg, night=False, now=outside) is False
+
+
+def test_light_trigger_defaults():
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    lt = app.cameras[0].light_trigger
+    assert lt.enabled is False
+    assert lt.window is None
+    assert lt.types == ("person", "motion")
+
+
+def test_light_trigger_parses_string():
+    app = cfg.load_config_from_dict({"cameras": [{
+        "name": "a", "host": "203.0.113.10", "light_trigger": "00:30-04:30",
+    }]})
+    lt = app.cameras[0].light_trigger
+    assert lt.enabled is True
+    assert lt.window == (30, 270)
+    assert lt.types == ("person", "motion")
+
+
+def test_light_trigger_parses_dict():
+    app = cfg.load_config_from_dict({"cameras": [{
+        "name": "a", "host": "203.0.113.10",
+        "light_trigger": {"enabled": True, "window": "00:30-04:30", "types": ["person"]},
+    }]})
+    lt = app.cameras[0].light_trigger
+    assert lt.enabled is True
+    assert lt.window == (30, 270)
+    assert lt.types == ("person",)
+
+
+def test_light_trigger_dict_window_defaults_enabled_true():
+    app = cfg.load_config_from_dict({"cameras": [{
+        "name": "a", "host": "203.0.113.10",
+        "light_trigger": {"window": "00:30-04:30"},
+    }]})
+    lt = app.cameras[0].light_trigger
+    assert lt.enabled is True
+    assert lt.window == (30, 270)
+    assert lt.types == ("person", "motion")
+
+
+def test_light_trigger_rejects_bad_string_window():
+    data = {"cameras": [{"name": "a", "host": "203.0.113.10", "light_trigger": "invalid"}]}
+    with pytest.raises(cfg.ConfigError, match="light_trigger"):
+        cfg.load_config_from_dict(data)
+
+
+def test_light_trigger_rejects_bad_dict_window():
+    data = {"cameras": [{"name": "a", "host": "203.0.113.10",
+                         "light_trigger": {"window": "invalid"}}]}
+    with pytest.raises(cfg.ConfigError, match="light_trigger.window"):
+        cfg.load_config_from_dict(data)
+
+
+def test_light_trigger_rejects_unknown_types():
+    data = {"cameras": [{"name": "a", "host": "203.0.113.10",
+                         "light_trigger": {"types": ["unknown_type"]}}]}
+    with pytest.raises(cfg.ConfigError, match="light_trigger.types"):
+        cfg.load_config_from_dict(data)
+
+
+def test_load_camera_config():
+    cam = cfg.load_camera_config({"name": "a", "host": "203.0.113.10", "light_trigger": "00:30-04:30"})
+    assert cam.name == "a"
+    assert cam.light_trigger.enabled is True
+    assert cam.light_trigger.window == (30, 270)
+
+
+
 def test_scorer_motion_send_threshold_defaults_none():
     app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
     assert app.cameras[0].scorer.motion_send_threshold is None

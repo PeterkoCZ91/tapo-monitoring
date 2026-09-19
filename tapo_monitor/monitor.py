@@ -9,8 +9,9 @@ with their side-effecting pieces injected so the orchestration stays testable.
 import logging
 import shlex
 import time as _time
+from datetime import datetime
 
-from . import camera, detection, enrich, notify, sentlog, snapshot
+from . import camera, detection, enrich, notify, scheduling, sentlog, snapshot
 
 log = logging.getLogger(__name__)
 
@@ -166,7 +167,8 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 defer=None, score=None, observe=None, poll_observe=None,
                 media_observe=None, latency_observe=None, mute=False, corroborate=None,
                 burst_sent=None,
-                send_alert=None, scene_alert=None, hold_archive=None):
+                send_alert=None, scene_alert=None, hold_archive=None,
+                trigger_whitelamp=camera.trigger_whitelamp):
     """Poll one camera once and alert on new detections. Returns the new watermark.
 
     ``mute`` polls and advances the watermark but skips all grabbing/scoring/alerting.
@@ -225,6 +227,13 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         return watermark          # outside window: drain silently, no grab/score/alert
     for event, etype in alertable:
         audit_event(cfg, event, etype, "getevents", "detect")
+        lt = getattr(cfg, "light_trigger", None)
+        if lt is not None and lt.enabled and etype in lt.types:
+            if lt.window is None or scheduling.in_clock_window(
+                lt.window, datetime.fromtimestamp(now)
+            ):
+                if trigger_whitelamp is not None and trigger_whitelamp(cam):
+                    log.info("light_trigger: turned on white lamp for %s (%s)", cfg.name, etype)
         event_flags = detection.decode_events_1(event.get("events_1"))
         defer_motion = (
             etype == "motion"

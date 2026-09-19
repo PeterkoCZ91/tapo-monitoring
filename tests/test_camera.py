@@ -125,6 +125,55 @@ def test_whitelamp_on_none_on_malformed_response():
             return "not a dict"
     assert camera.whitelamp_on(Client()) is None
 
+
+# ── trigger_whitelamp ─────────────────────────────────────────────────────────
+
+def test_trigger_whitelamp_status_0_calls_reverse():
+    class Client:
+        def __init__(self):
+            self.reversed = False
+        def getWhitelampStatus(self):
+            return {"status": 0}
+        def reverseWhitelampStatus(self):
+            self.reversed = True
+    client = Client()
+    assert camera.trigger_whitelamp(client) is True
+    assert client.reversed is True
+
+
+def test_trigger_whitelamp_status_0_calls_set_force_state():
+    class Client:
+        def __init__(self):
+            self.forced = None
+        def getWhitelampStatus(self):
+            return {"status": 0}
+        def setForceWhitelampState(self, state):
+            self.forced = state
+    client = Client()
+    assert camera.trigger_whitelamp(client) is True
+    assert client.forced is True
+
+
+def test_trigger_whitelamp_status_already_1_does_nothing():
+    class Client:
+        def __init__(self):
+            self.reversed = False
+        def getWhitelampStatus(self):
+            return {"status": 1}
+        def reverseWhitelampStatus(self):
+            self.reversed = True
+    client = Client()
+    assert camera.trigger_whitelamp(client) is True
+    assert client.reversed is False
+
+
+def test_trigger_whitelamp_on_exception_returns_false_never_raises():
+    class Client:
+        def getWhitelampStatus(self):
+            raise RuntimeError("API failure")
+    assert camera.trigger_whitelamp(Client()) is False
+
+
 # ── new_events / newest_start ────────────────────────────────────────────────
 
 def test_new_events_filters_and_sorts():
