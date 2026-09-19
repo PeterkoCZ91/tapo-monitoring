@@ -163,3 +163,52 @@ def test_recording_capture_times_follow_seek_offsets_even_after_failed_frame(tmp
     )
 
     assert [frame_capture_time(frame) for frame in frames] == [1030, 1038]
+
+
+# ── subject-crop blur ────────────────────────────────────────────────────────
+
+def test_crop_bounds_pads_and_clamps():
+    assert recclip._crop_bounds([100, 100, 200, 300], 1280, 720) == (90, 80, 210, 320)
+    assert recclip._crop_bounds([-50, -5, 1300, 900], 1280, 720) == (0, 0, 1280, 720)
+
+
+@pytest.mark.parametrize("box", [[10, 10, 12, 12], [1, 2, 3], ["a", 1, 2, 3], [0, 0, float("nan"), 5]])
+def test_crop_bounds_rejects_bad_box(box):
+    assert recclip._crop_bounds(box, 1280, 720) is None
+
+
+def test_blur_score_uses_subject_crop_when_box_given():
+    called = []
+    v = recclip.blur_score("/x.jpg", runner=lambda p: called.append(p) or "blur mean: 9",
+                           box=[1, 2, 3, 4], variance=lambda p, b: 99.0)
+    assert v == pytest.approx(1.0) and not called       # 100/(1+99), ffmpeg not touched
+
+
+def test_blur_score_sharper_crop_scores_lower():
+    lo = recclip.blur_score("/a", box=[0, 0, 9, 9], variance=lambda p, b: 400.0)
+    hi = recclip.blur_score("/b", box=[0, 0, 9, 9], variance=lambda p, b: 5.0)
+    assert lo < hi
+
+
+def test_blur_score_falls_back_to_whole_frame_without_box_or_crop():
+    out = "blur mean: 4.5\n"
+    assert recclip.blur_score("/x", runner=lambda p: out) == 4.5
+    assert recclip.blur_score("/x", runner=lambda p: out, box=[0, 0, 9, 9],
+                              variance=lambda p, b: None) == 4.5
+
+    def boom(p, b):
+        raise ImportError("no PIL")
+    assert recclip.blur_score("/x", runner=lambda p: out, box=[0, 0, 9, 9], variance=boom) == 4.5
+
+
+def test_laplacian_variance_real_image(tmp_path):
+    pil = pytest.importorskip("PIL.Image")
+    np = pytest.importorskip("numpy")
+    rng = np.random.default_rng(0)
+    img = np.full((720, 1280), 128, dtype=np.uint8)
+    img[:, :640] = rng.integers(0, 255, (720, 640))       # sharp static background left
+    path = str(tmp_path / "a.png")
+    pil.fromarray(img).save(path)
+    sharp = recclip.blur_score(path, box=[100, 300, 200, 500])
+    flat = recclip.blur_score(path, box=[800, 300, 900, 500])
+    assert flat > sharp

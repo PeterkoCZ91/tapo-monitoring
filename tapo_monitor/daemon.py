@@ -17,6 +17,7 @@ per-camera watermark held in :class:`MonitorState` and fires the enrich/notify s
 :func:`resolve_secrets`.
 """
 
+import json
 import logging
 import math
 import os
@@ -71,6 +72,15 @@ log = logging.getLogger(__name__)
 # Drop a queued SD fetch once its event ages past the getEvents poll window; bounds the
 # queue if a camera stays offline so it can never grow without limit.
 PENDING_MAX_AGE = 600
+# hubpoll delivery retry: a failed Telegram send of a hub alert is retried this many
+# times in total (first attempt included), one HUB_RETRY_DELAY apart, and dropped once
+# the entry is older than HUB_PENDING_TTL. Bounded like pending_sd: never a black hole.
+HUB_RETRY_MAX_ATTEMPTS = 4
+HUB_RETRY_DELAY = 60
+HUB_PENDING_TTL = PENDING_MAX_AGE
+# A persisted hub cursor older than this is clamped forward on restore, so a long outage
+# costs at most this much replayed history rather than a flood of stale alerts.
+HUB_CURSOR_MAX_AGE = 4 * 3600
 
 # A single transient scorer timeout would otherwise flip the whole frame to passthrough
 # (unfiltered spam). Retry once after this delay before degrading.
@@ -496,6 +506,10 @@ class MonitorState:
     hub_devices: dict = field(default_factory=dict)   # camera -> hub-side {device_id, mac}
     hub_cursor: dict = field(default_factory=dict)    # camera -> newest clip start consumed
     hub_last_poll: dict = field(default_factory=dict)
+    # Hub alerts whose Telegram delivery failed, waiting for a bounded retry (the hub
+    # cursor has already moved past their clip, so this queue is the only copy).
+    pending_hub: list = field(default_factory=list)
+    hub_cursor_path: str | None = None
 
 
 def backoff_seconds(fails, base=60, cap=1800):
@@ -741,8 +755,11 @@ def score_for(cfg: CameraConfig):
             log.info("scorer retry for %s after %.2fs failure", cfg.name, elapsed)
             _time.sleep(SCORER_RETRY_DELAY)
             result = score_remote(image_path)
+        if result is not None:
+            score.boxes[image_path] = scorer.subject_box(result)
         return None if result is None else scorer.subject_score(result)
 
+    score.boxes = {}   # frame path -> subject box; lets sharpness be judged on the subject
     return score
 
 
@@ -1261,6 +1278,105 @@ def hubpoll_decoder_warning(app: AppConfig, available):
             f"so every event will be dropped as no_frame")
 
 
+def hub_cursor_default_path(env=None, home=None):
+    """Sibling of the health state file (same XDG rules, TAPO_HUB_CURSOR_FILE override)."""
+    env = os.environ if env is None else env
+    override = env.get("TAPO_HUB_CURSOR_FILE")
+    if override:
+        return os.path.expanduser(override)
+    return os.path.join(os.path.dirname(health.default_state_path(env, home)),
+                        "hub_cursor.json")
+
+
+def save_hub_cursor(path, cursor, logger=None):
+    """Atomically persist the per-camera hub cursor (mode 0600). Returns success."""
+    temp = None
+    try:
+        directory = os.path.dirname(os.path.abspath(path))
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        fd, temp = tempfile.mkstemp(prefix=".hubcursor-", dir=directory, text=True)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"version": 1, "cursor": cursor}, fh, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temp, path)
+        temp = None
+        return True
+    except (OSError, TypeError, ValueError) as exc:
+        if logger is not None:
+            logger.warning("hub cursor save failed: %s", exc)
+        return False
+    finally:
+        if temp is not None:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
+
+
+def load_hub_cursor(path, now, logger=None, max_age=HUB_CURSOR_MAX_AGE):
+    """Load the persisted cursor, clamped to ``now - max_age``; {} when absent/invalid."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+        raw = payload["cursor"]
+        if payload.get("version") != 1 or not isinstance(raw, dict):
+            raise ValueError("unsupported hub cursor file")
+        out = {}
+        for name, value in raw.items():
+            if (not isinstance(name, str) or isinstance(value, bool)
+                    or not isinstance(value, (int, float)) or not math.isfinite(value)):
+                raise ValueError("bad hub cursor entry")
+            out[name] = min(max(float(value), now - max_age), now)
+        return out
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        if logger is not None:
+            logger.warning("hub cursor load failed: %s", exc)
+        return {}
+
+
+def process_pending_hub(app, state, *, now, secrets):
+    """Retry hub alerts whose Telegram delivery failed; bounded by attempts and TTL."""
+    cfg_by_name = {c.name: c for c in app.cameras}
+    remaining = []
+    for entry in state.pending_hub:
+        cfg = cfg_by_name.get(entry["camera"])
+        event = {"start_time": entry["start_time"]}
+        if cfg is None or now - entry["queued_at"] > HUB_PENDING_TTL:
+            log.info("drop hub alert for %s: too old or camera gone (age=%ds)",
+                     entry["camera"], int(now - entry["queued_at"]))
+            _safe_unlink(entry["image"])
+            continue
+        if now < entry["due_at"]:
+            remaining.append(entry)
+            continue
+        if not os.path.exists(entry["image"]):
+            log.warning("drop hub alert for %s: retry frame is gone", cfg.name)
+            continue
+        entry["attempts"] += 1
+        ok = send_alert_photo(cfg, secrets, entry["image"], entry["caption"],
+                              score=entry["score"])
+        monitor.audit_event(cfg, event, "motion", "hubpoll", "send", score=entry["score"],
+                            telegram=ok)
+        if ok:
+            log.info("alert hub clip sent for %s on retry %d [hubpoll]",
+                     cfg.name, entry["attempts"])
+            _, on_alert = alert_gate(state, cfg.name, app.alerts.cooldown, now)
+            on_alert("motion", event)
+            _safe_unlink(entry["image"])
+        elif entry["attempts"] >= HUB_RETRY_MAX_ATTEMPTS:
+            log.warning("drop hub alert for %s: delivery failed %d times",
+                        cfg.name, entry["attempts"])
+            _safe_unlink(entry["image"])
+        else:
+            entry["due_at"] = now + HUB_RETRY_DELAY
+            remaining.append(entry)
+    state.pending_hub = remaining
+
+
 def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
                      night=True, hub_for=None, frame_for=None, time_str=None,
                      score_for=None, clip_frame_for=None):
@@ -1286,6 +1402,21 @@ def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
     time_str = time_str or _default_time_str
     score_for = score_for or _default_score_for
     cooldown = app.alerts.cooldown
+    cursor_before = dict(state.hub_cursor)
+    try:
+        _run_hubpoll_cameras(app, cam_clients, state, now=now, secrets=secrets,
+                             night=night, hub_for=hub_for, frame_for=frame_for,
+                             time_str=time_str, score_for=score_for,
+                             clip_frame_for=clip_frame_for, cooldown=cooldown)
+    finally:
+        if state.pending_hub:
+            process_pending_hub(app, state, now=now, secrets=secrets)
+        if state.hub_cursor_path and state.hub_cursor != cursor_before:
+            save_hub_cursor(state.hub_cursor_path, state.hub_cursor, logger=log)
+
+
+def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_for,
+                         frame_for, time_str, score_for, clip_frame_for, cooldown):
     for cfg in app.cameras:
         if "hubpoll" not in cfg.detection.sources:
             continue
@@ -1381,6 +1512,7 @@ def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                 monitor.audit_event(cfg, event, etype, "hubpoll", "drop", reason="no_frame")
                 continue
             frames = image if isinstance(image, list) else [image]
+            queued_image = None
             try:
                 image, s = (frames[0], None) if score is None else _select_recording_frame(
                     cfg, event, etype, frames, score, path="hubpoll", keep_below=True)
@@ -1411,10 +1543,20 @@ def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                              cfg.name, f"{s:.2f}" if s is not None else "n/a")
                     on_alert(etype, event)
                 else:
-                    log.warning("hub clip Telegram delivery failed for %s", cfg.name)
+                    log.warning("hub clip Telegram delivery failed for %s; retry queued",
+                                cfg.name)
+                    # The cursor is already past this clip, so this queue is the only
+                    # remaining copy: keep the chosen frame for a bounded retry.
+                    state.pending_hub.append({
+                        "camera": cfg.name, "start_time": clip["start_time"],
+                        "image": image, "caption": caption, "score": s,
+                        "attempts": 1, "queued_at": now, "due_at": now + HUB_RETRY_DELAY,
+                    })
+                    queued_image = image
             finally:
                 for frame in frames:
-                    _safe_unlink(frame)
+                    if frame != queued_image:
+                        _safe_unlink(frame)
 
 
 def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
@@ -1439,15 +1581,22 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
             above.append((frame, s))
         else:
             below.append((frame, s))
-            if not keep_below:
-                monitor.audit_event(cfg, event, etype, path, "drop", score=s,
-                                    threshold=cfg.scorer.threshold, reason="below_threshold")
+    if below and not keep_below:
+        # One line per sequence: nine frames under the threshold are one decision.
+        log.info("frame selection %s [%s]: %d frame(s) below threshold %.2f",
+                 cfg.name, path, len(below), cfg.scorer.threshold)
+        monitor.audit_event(cfg, event, etype, path, "drop", score=max(s for _, s in below),
+                            threshold=cfg.scorer.threshold, reason="below_threshold")
     if not above:
         if keep_below and below:
             return max(below, key=lambda fs: fs[1])
         return None, None
     above.sort(key=lambda fs: fs[1], reverse=True)
-    ranked = [(f, blur_score(f)) for f, _ in above]
+    boxes = getattr(score, "boxes", None) or {}
+    # Mixing crop and whole-frame measurements is not comparable: use boxes all-or-none.
+    use_boxes = all(boxes.get(f) for f, _ in above)
+    ranked = [(f, blur_score(f, box=boxes[f]) if use_boxes else blur_score(f))
+              for f, _ in above]
     image = recclip.select_sharpest(ranked)
     selected = next(s for f, s in above if f == image)
     selected_blur = next(b for f, b in ranked if f == image)
@@ -1763,7 +1912,8 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
             del state.groups[cfg.name]
             continue
         if camera_muted(cfg, night, now):
-            continue                          # outside window: leave the group alone
+            del state.groups[cfg.name]        # muted: drop it, don't resurrect it after the window
+            continue
         scfg = cfg.sampler
         if sampler.expired(group, now, scfg):
             if group.get("motion_candidates") and not group["sent"]:
@@ -2299,6 +2449,8 @@ def main(argv=None):  # pragma: no cover - thin entry point
     poll_interval = app.loop.event_interval
     control_interval = app.loop.control_interval
     state = MonitorState()
+    state.hub_cursor_path = hub_cursor_default_path()
+    state.hub_cursor = load_hub_cursor(state.hub_cursor_path, _time.time(), logger=log)
     state.health_path = health.default_state_path()
     restored = health.load_state(state.health_path, state, logger=log)
     state.twin_path = twin.default_state_path()

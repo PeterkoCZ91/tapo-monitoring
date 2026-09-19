@@ -3936,7 +3936,7 @@ def test_sampler_skips_night_only_camera_by_day(monkeypatch):
                            snapshot_for=lambda c: (lambda cam, ev: "/tmp/f.jpg"),
                            time_str=lambda ev: "T", night=False)
     assert sent == []
-    assert state.groups["a"]["frames"] == 0          # untouched by day
+    assert "a" not in state.groups                  # muted: group dropped, not resurrected later
 
 
 def test_pending_skips_night_only_camera_by_day(monkeypatch):
@@ -5581,3 +5581,99 @@ def test_inert_dwell_warning_quiet_for_a_camera_with_no_dwell():
         {"name": "yard", "host": "203.0.113.10"},
     ]})
     assert daemon.inert_dwell_warning(app) is None
+
+
+# ── hubpoll: delivery retry queue and cursor persistence ─────────────────────
+
+def _flaky_send(monkeypatch, outcomes):
+    calls = []
+    queue = list(outcomes)
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda *a, **k: calls.append(1) or (queue.pop(0) if queue else True))
+    return calls
+
+
+def _hub_fail_once(tmp_path, monkeypatch, outcomes):
+    calls = _flaky_send(monkeypatch, outcomes)
+    app = _hub_app()
+    hub = _FakeHub(clips=[[_clip(1100)]])
+    state = daemon.MonitorState()
+    state.hub_cursor["gate"] = 1000
+    daemon.run_hubpoll_pass(app, {}, state, now=1300, secrets=_hub_secrets(),
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
+    return app, state, calls
+
+
+def test_hubpoll_failed_delivery_is_queued_and_retried(monkeypatch, tmp_path):
+    app, state, calls = _hub_fail_once(tmp_path, monkeypatch, [False])
+    assert state.hub_cursor["gate"] == 1100
+    assert len(state.pending_hub) == 1 and len(calls) == 1
+    entry = state.pending_hub[0]
+    assert os.path.exists(entry["image"])
+    daemon.process_pending_hub(app, state, now=1310, secrets=_hub_secrets())
+    assert len(calls) == 1                       # not yet due
+    daemon.process_pending_hub(app, state, now=1361, secrets=_hub_secrets())
+    assert len(calls) == 2 and state.pending_hub == []
+    assert not os.path.exists(entry["image"])
+
+
+def test_hubpoll_retry_gives_up_after_max_attempts(monkeypatch, tmp_path):
+    app, state, calls = _hub_fail_once(tmp_path, monkeypatch, [False] * 10)
+    image = state.pending_hub[0]["image"]
+    now = 1300
+    for _ in range(10):
+        now += daemon.HUB_RETRY_DELAY
+        daemon.process_pending_hub(app, state, now=now, secrets=_hub_secrets())
+    assert len(calls) == daemon.HUB_RETRY_MAX_ATTEMPTS
+    assert state.pending_hub == [] and not os.path.exists(image)
+
+
+def test_hubpoll_retry_drops_after_ttl(monkeypatch, tmp_path):
+    app, state, calls = _hub_fail_once(tmp_path, monkeypatch, [False])
+    image = state.pending_hub[0]["image"]
+    daemon.process_pending_hub(app, state, now=1300 + daemon.HUB_PENDING_TTL + 1,
+                               secrets=_hub_secrets())
+    assert len(calls) == 1 and state.pending_hub == [] and not os.path.exists(image)
+
+
+def test_hubpoll_pass_drains_pending_queue(monkeypatch, tmp_path):
+    app, state, calls = _hub_fail_once(tmp_path, monkeypatch, [False])
+    daemon.run_hubpoll_pass(app, {}, state, now=1400, secrets=_hub_secrets(),
+                            hub_for=_hub_for(_FakeHub()), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
+    assert len(calls) == 2 and state.pending_hub == []
+
+
+def test_hub_cursor_persists_and_clamps_age(tmp_path):
+    path = str(tmp_path / "sub" / "hub_cursor.json")
+    assert daemon.save_hub_cursor(path, {"gate": 90000.0, "old": 1.0})
+    assert oct(os.stat(path).st_mode & 0o777) == "0o600"
+    got = daemon.load_hub_cursor(path, now=100000.0)
+    assert got["gate"] == 90000.0
+    assert got["old"] == 100000.0 - daemon.HUB_CURSOR_MAX_AGE
+    assert daemon.load_hub_cursor(str(tmp_path / "missing.json"), 5) == {}
+    (tmp_path / "bad.json").write_text("{nope")
+    assert daemon.load_hub_cursor(str(tmp_path / "bad.json"), 5) == {}
+
+
+def test_hubpoll_pass_saves_cursor_and_restored_cursor_replays_gap(monkeypatch, tmp_path):
+    counter = _CountingNotify()
+    monkeypatch.setattr(daemon.notify, "send_photo", counter.send_photo)
+    app = _hub_app()
+    path = str(tmp_path / "hub_cursor.json")
+    state = daemon.MonitorState()
+    state.hub_cursor_path = path
+    hub = _FakeHub()
+    daemon.run_hubpoll_pass(app, {}, state, now=1000, secrets=_hub_secrets(),
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
+    assert json.load(open(path))["cursor"] == {"gate": 1000}
+    # "restart": new state restores the cursor; a clip from the downtime is alerted
+    state2 = daemon.MonitorState()
+    state2.hub_cursor = daemon.load_hub_cursor(path, now=1050)
+    hub2 = _FakeHub(clips=[[_clip(1020)]])
+    daemon.run_hubpoll_pass(app, {}, state2, now=1100, secrets=_hub_secrets(),
+                            hub_for=_hub_for(hub2), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
+    assert counter.photos == 1

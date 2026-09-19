@@ -16,6 +16,7 @@ Why a local recording beats the live grab / camera SD:
 """
 
 import glob
+import math
 import os
 import re
 import subprocess
@@ -91,8 +92,68 @@ def _run_blurdetect(path):  # pragma: no cover - subprocess I/O
     return p.stderr.decode("utf-8", "replace")
 
 
-def blur_score(path, runner=None):
-    """ffmpeg ``blurdetect`` 'blur mean' (lower = sharper), or None if unavailable."""
+MIN_CROP_PX = 16          # a subject box smaller than this in either side is noise
+BOX_PAD = 0.10            # margin around the person box, fraction of its size
+
+
+def _crop_bounds(box, width, height):
+    """Padded, clamped integer (l, t, r, b) of ``box`` inside a width x height image, or None."""
+    try:
+        x1, y1, x2, y2 = (float(v) for v in box)
+    except (TypeError, ValueError):
+        return None
+    if not all(map(math.isfinite, (x1, y1, x2, y2))):
+        return None
+    x1, x2 = sorted((x1, x2))
+    y1, y2 = sorted((y1, y2))
+    px, py = (x2 - x1) * BOX_PAD, (y2 - y1) * BOX_PAD
+    left, top = max(int(x1 - px), 0), max(int(y1 - py), 0)
+    right, bottom = min(int(math.ceil(x2 + px)), width), min(int(math.ceil(y2 + py)), height)
+    if right - left < MIN_CROP_PX or bottom - top < MIN_CROP_PX:
+        return None
+    return left, top, right, bottom
+
+
+def _laplacian_variance(path, box):  # pragma: no cover - needs optional Pillow/numpy
+    import numpy as np
+    from PIL import Image
+    with Image.open(path) as im:
+        bounds = _crop_bounds(box, *im.size)
+        if bounds is None:
+            return None
+        g = np.asarray(im.convert("L").crop(bounds), dtype=np.float64)
+    lap = (-4 * g[1:-1, 1:-1] + g[:-2, 1:-1] + g[2:, 1:-1] + g[1:-1, :-2] + g[1:-1, 2:])
+    return float(lap.var())
+
+
+def subject_blur(path, box, variance=None):
+    """Blur of the subject crop (lower = sharper), or None if it can't be measured.
+
+    Laplacian variance of the padded ``box`` region, mapped to ``100 / (1 + var)`` so it
+    orders like ffmpeg's blurdetect (lower = sharper). Whole-frame blur barely moves when
+    90 % of a night image is sharp static background; the crop isolates the walker.
+    """
+    variance = variance or _laplacian_variance
+    try:
+        var = variance(path, box)
+    except Exception:  # noqa: BLE001 - Pillow/numpy missing or unreadable image
+        return None
+    if var is None or not math.isfinite(var) or var < 0:
+        return None
+    return 100.0 / (1.0 + var)
+
+
+def blur_score(path, runner=None, box=None, variance=None):
+    """Blur (lower = sharper), or None if unavailable.
+
+    With a scorer ``box`` [x1,y1,x2,y2] the subject crop is measured (Laplacian variance);
+    without one, or if that can't be measured, ffmpeg ``blurdetect`` 'blur mean' of the whole
+    frame. Compare only scores taken the same way within one candidate set.
+    """
+    if box is not None:
+        b = subject_blur(path, box, variance)
+        if b is not None:
+            return b
     runner = runner or _run_blurdetect
     try:
         m = _BLUR_RE.search(runner(path) or "")
