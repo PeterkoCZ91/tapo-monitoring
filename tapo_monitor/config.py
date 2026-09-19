@@ -187,11 +187,11 @@ class CameraConfig:
     # backlog doesn't replay at nightfall) and all Telegram — including camera-down
     # notices — is suppressed. For sites that only care about after-hours intruders.
     night_only: bool = False
-    # Detect/alert only during this fixed local clock window (e.g. "00:30-04:30"),
-    # instead of the full astral night that night_only mutes around. Mutually exclusive
-    # with night_only: both mute the same set of Telegram traffic (detections plus
-    # operational camera-down/back-up notices), so setting both would just be two
-    # conflicting definitions of the same gate. None leaves the camera unmuted.
+    # Mute INSIDE this fixed local clock window (e.g. "00:30-04:30"); the camera reports
+    # outside it (inverse of night_only, which mutes outside the astral night). Muted =
+    # events drained silently, no detections and no camera-down/back-up notices.
+    # Mutually exclusive with night_only: two conflicting definitions of the same gate.
+    # None leaves the camera unmuted.
     quiet_hours: tuple[int, int] | None = None
     # Force IR night vision on the astral night schedule. "ir" makes the daemon set the
     # camera to inf_night_vision (B&W, faster shutter -> less motion blur) at night and

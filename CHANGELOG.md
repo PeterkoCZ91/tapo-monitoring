@@ -18,9 +18,9 @@ All notable changes to this project are documented here.
   alert time and note it (🔦) in the Telegram caption. Off by default — one extra API call
   per alert, meaningful only on cameras with that hardware/feature; a failed or unsupported
   query just leaves the caption as it was.
-- Per-camera `quiet_hours` (`"HH:MM-HH:MM"`): the same all-Telegram mute as `night_only`,
-  but for a fixed local clock window instead of the full astral night — for a site that
-  only cares about a narrower dead-of-night watch. Mutually exclusive with `night_only`
+- Per-camera `quiet_hours` (`"HH:MM-HH:MM"`): an all-Telegram mute (detections and
+  outage notices) applied INSIDE a fixed local clock window, so the camera reports outside
+  it — the inverse of `night_only`, which reports only during the astral night. Mutually exclusive with `night_only`
   (both define the same mute gate; setting both is a config error).
 - A night dwell for tracking cameras: `tracking.back_time` (the camera's own return timer,
   written with the auto-track assert) and `tracking.track_hold` (seconds the control pass
