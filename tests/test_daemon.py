@@ -5677,3 +5677,171 @@ def test_hubpoll_pass_saves_cursor_and_restored_cursor_replays_gap(monkeypatch, 
                             hub_for=_hub_for(hub2), frame_for=_frames(tmp_path),
                             clip_frame_for=_clip_frames(tmp_path))
     assert counter.photos == 1
+
+
+# ── hubpoll: audit fields, review log, inactivity watchdog ────────────────────
+
+class _LatestHub(_FakeHub):
+    """Adds the inactivity query; ``answers`` is a list of (ok, clip) results."""
+
+    def __init__(self, answers, **kw):
+        super().__init__(**kw)
+        self.answers = list(answers)
+        self.latest_calls = 0
+
+    def latest_clip(self, device_id, mac, since, until, now):
+        self.latest_calls += 1
+        return self.answers.pop(0) if self.answers else (True, None)
+
+
+DAY = 86400
+
+
+def _inactive_state(now):
+    state = daemon.MonitorState()
+    state.hub_cursor["gate"] = now
+    state.hub_devices["gate"] = HUB_CAMS[0]
+    return state
+
+
+def _inactive_pass(app, state, hub, now, tmp_path):
+    daemon.run_hubpoll_pass(app, {}, state, now=now, secrets=_hub_secrets(),
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
+
+
+def _texts(monkeypatch):
+    sent = []
+    monkeypatch.setattr(daemon.notify, "send_text",
+                        lambda token, chat, text: sent.append(text) or True)
+    return sent
+
+
+def test_inactivity_notice_sent_once_not_every_pass(monkeypatch, tmp_path):
+    sent = _texts(monkeypatch)
+    now = 100 * DAY
+    app = _hub_app(inactivity_alert_days=7)
+    state = _inactive_state(now)
+    hub = _LatestHub([(True, _clip(now - 10 * DAY))] * 10)
+    for i in range(4):
+        _inactive_pass(app, state, hub, now + i * (DAY + 1), tmp_path)
+    assert len(sent) == 1 and "gate" in sent[0]
+    assert hub.latest_calls == 4          # at most one query per day
+    # another N days of silence -> a second notice
+    _inactive_pass(app, state, hub, now + 8 * DAY + 100, tmp_path)
+    assert len(sent) == 2
+
+
+def test_inactivity_query_at_most_daily(monkeypatch, tmp_path):
+    _texts(monkeypatch)
+    now = 100 * DAY
+    app = _hub_app(inactivity_alert_days=7)
+    state = _inactive_state(now)
+    hub = _LatestHub([(True, _clip(now - 1 * DAY))] * 5)
+    for i in range(5):
+        _inactive_pass(app, state, hub, now + i * 3600, tmp_path)
+    assert hub.latest_calls == 1
+
+
+def test_inactivity_resets_after_a_new_clip(monkeypatch, tmp_path):
+    sent = _texts(monkeypatch)
+    monkeypatch.setattr(daemon.notify, "send_photo", lambda *a, **k: True)
+    now = 100 * DAY
+    app = _hub_app(inactivity_alert_days=7)
+    state = _inactive_state(now)
+    hub = _LatestHub([(True, _clip(now - 10 * DAY))])
+    _inactive_pass(app, state, hub, now, tmp_path)
+    assert len(sent) == 1
+    # a clip arrives, then silence again for more than N days (alerted_at < new clip)
+    t1 = now + 2 * DAY
+    hub.batches = [[_clip(t1 - 100)]]
+    hub.answers = [(True, _clip(t1 - 100))]
+    _inactive_pass(app, state, hub, t1, tmp_path)
+    assert len(sent) == 1
+    t2 = t1 + 8 * DAY
+    hub.answers = [(True, _clip(t1 - 100))]
+    _inactive_pass(app, state, hub, t2, tmp_path)
+    assert len(sent) == 2
+
+
+def test_inactivity_off_by_default_sends_nothing(monkeypatch, tmp_path):
+    sent = _texts(monkeypatch)
+    now = 100 * DAY
+    app = _hub_app()
+    state = _inactive_state(now)
+    hub = _LatestHub([(True, _clip(now - 50 * DAY))])
+    _inactive_pass(app, state, hub, now, tmp_path)
+    assert sent == [] and hub.latest_calls == 0
+
+
+def test_inactivity_failed_query_sends_nothing_and_retries_later(monkeypatch, tmp_path):
+    sent = _texts(monkeypatch)
+    now = 100 * DAY
+    app = _hub_app(inactivity_alert_days=7)
+    state = _inactive_state(now)
+    hub = _LatestHub([(False, None), (True, _clip(now - 20 * DAY))])
+    _inactive_pass(app, state, hub, now, tmp_path)
+    assert sent == [] and hub.latest_calls == 1
+    _inactive_pass(app, state, hub, now + 60, tmp_path)      # too soon to retry
+    assert hub.latest_calls == 1
+    _inactive_pass(app, state, hub, now + 3700, tmp_path)
+    assert len(sent) == 1
+
+
+def test_inactivity_muted_camera_is_silent(monkeypatch, tmp_path):
+    sent = _texts(monkeypatch)
+    now = 100 * DAY
+    app = _hub_app(inactivity_alert_days=7, night_only=True)
+    state = _inactive_state(now)
+    hub = _LatestHub([(True, _clip(now - 20 * DAY))])
+    daemon.run_hubpoll_pass(app, {}, state, now=now, secrets=_hub_secrets(), night=False,
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
+    assert sent == []
+
+
+def test_inactivity_notice_state_persisted_across_restart(monkeypatch, tmp_path):
+    sent = _texts(monkeypatch)
+    now = 100 * DAY
+    app = _hub_app(inactivity_alert_days=7)
+    state = _inactive_state(now)
+    state.hub_inactive_path = str(tmp_path / "inact.json")
+    hub = _LatestHub([(True, _clip(now - 10 * DAY))] * 3)
+    _inactive_pass(app, state, hub, now, tmp_path)
+    fresh = _inactive_state(now)
+    fresh.hub_inactive_alerted = daemon.load_hub_cursor(
+        state.hub_inactive_path, now, max_age=float("inf"))
+    _inactive_pass(app, fresh, hub, now + DAY + 1, tmp_path)
+    assert len(sent) == 1
+
+
+def test_hub_drop_audit_carries_score_threshold_type_and_length(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(daemon.notify, "send_photo", lambda *a, **k: True)
+    app = _hub_app(scorer={"url": "http://scorer/score", "threshold": 0.5})
+    hub = _FakeHub(clips=[[_clip(1100, 1112)]])
+    state = daemon.MonitorState()
+    state.hub_cursor["gate"] = 1000
+    with caplog.at_level("INFO"):
+        daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(),
+                                hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                                clip_frame_for=_clip_frames(tmp_path), score_for=_scores(0.2))
+    line = next(r.getMessage() for r in caplog.records if "action=drop" in r.getMessage())
+    for part in ("reason=below_threshold", "score=0.2", "threshold=0.5",
+                 "video_type=2", "clip_s=12.0"):
+        assert part in line
+    from tapo_monitor import audit
+    assert audit.parse_audit_line(line)["clip_s"] == 12.0
+
+
+def test_hub_drop_below_threshold_goes_to_review_log(monkeypatch, tmp_path):
+    monkeypatch.setattr(daemon.notify, "send_photo", lambda *a, **k: True)
+    review = tmp_path / "review"
+    monkeypatch.setenv("TAPO_REVIEW_LOG_DIR", str(review))
+    app = _hub_app(scorer={"url": "http://scorer/score", "threshold": 0.5})
+    hub = _FakeHub(clips=[[_clip(1100)]])
+    state = daemon.MonitorState()
+    state.hub_cursor["gate"] = 1000
+    daemon.run_hubpoll_pass(app, {}, state, now=1200, secrets=_hub_secrets(),
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path), score_for=_scores(0.2))
+    assert len(list(review.glob("gate_drop*.jpg"))) == 1

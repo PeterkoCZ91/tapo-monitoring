@@ -283,5 +283,7 @@ cameras:
   #   hub_password_env: HUB_PASSWORD    # Tapo account password
   #   go2rtc_src: gate                  # stream name in go2rtc.yaml
   #   hub_poll_interval: 20
+  #   # inactivity_alert_days: 14       # optional (1-90): one notice when the hub has
+  #                                     # indexed no clip for this many days; off by default
   #   # hub_device_mac:                 # pin only when one hub holds several cameras and
   #   # hub_device_id:                  # neither the alias nor the MAC can be matched

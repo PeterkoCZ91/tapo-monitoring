@@ -1050,3 +1050,22 @@ def test_tracking_dwell_parsed():
     ]})
     assert app.cameras[0].tracking.back_time == 180
     assert app.cameras[0].tracking.track_hold == 180
+
+
+def test_inactivity_alert_days_defaults_off_and_parses():
+    assert cfg.load_config_from_dict(_hubpoll_camera()).cameras[0].inactivity_alert_days is None
+    cam = cfg.load_config_from_dict(_hubpoll_camera(inactivity_alert_days=14)).cameras[0]
+    assert cam.inactivity_alert_days == 14
+
+
+@pytest.mark.parametrize("value", [0, -1, 91, "7", 1.5, True])
+def test_inactivity_alert_days_rejects_bad_values(value):
+    with pytest.raises(cfg.ConfigError, match="inactivity_alert_days"):
+        cfg.load_config_from_dict(_hubpoll_camera(inactivity_alert_days=value))
+
+
+def test_inactivity_alert_days_requires_hubpoll():
+    with pytest.raises(cfg.ConfigError, match="hubpoll"):
+        cfg.load_config_from_dict(
+            {"cameras": [{"name": "front", "host": "192.0.2.50",
+                          "inactivity_alert_days": 7}]})

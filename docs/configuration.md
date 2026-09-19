@@ -218,6 +218,7 @@ go2rtc_src: gate                # go2rtc stream name for this camera
 hub_poll_interval: 20           # seconds between hub polls
 hub_device_mac: null            # optional: pin the hub-side addressing
 hub_device_id: null
+inactivity_alert_days: null     # optional, 1-90: one Telegram notice after this many days without a clip
 ```
 
 A battery camera with no usable SD keeps no event index of its own: its recordings — and
@@ -229,6 +230,12 @@ wanted.
 
 Notes and constraints:
 
+- **Inactivity notice (optional).** `inactivity_alert_days: N` (1-90, default off) sends one
+  Telegram text when the hub has indexed no clip for the camera for more than N days. The
+  newest clip is asked from the hub at most once a day (a failed query sends nothing and is
+  retried after an hour); after a notice the next needs a newer clip or another N days of
+  silence. It honours `night_only`/`quiet_hours`. State: `hub_inactivity.json` beside the
+  hub cursor file.
 - **Addressing is discovered.** The hub's paired-device list hands over each camera's
   device id and MAC at startup; the camera is matched by that MAC, that id, or by an alias
   equal to the camera's `name`, and a hub with exactly one camera needs no hint at all.

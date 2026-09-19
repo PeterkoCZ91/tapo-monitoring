@@ -337,6 +337,22 @@ class HubClient:
             clip_search_params(device_id, mac, since, until, self.player_id), now)
         return [c for c in parse_clips(result) if c["start_time"] > since]
 
+    def latest_clip(self, device_id, mac, since, until, now):
+        """Newest clip in a window as ``(ok, clip_or_None)``.
+
+        Unlike :meth:`search_clips` this tells a failed query from an empty index, which
+        the inactivity watchdog needs: silence from a broken hub must not read as "no
+        clips". ``ok`` is true only for a non-empty answer without an error code; the
+        caller must keep the window at or below ~90 days (longer windows time out).
+        """
+        code, result = self.query(
+            CLIP_SEARCH_METHOD,
+            clip_search_params(device_id, mac, since, until, self.player_id), now)
+        if code not in (0, None) or not result:
+            return False, None
+        clips = parse_clips(result)
+        return True, (clips[-1] if clips else None)
+
 
 def download_query_params(mac, player_id):
     """Query params for the hub's media endpoint in download mode. Pure.

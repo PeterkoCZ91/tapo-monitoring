@@ -68,7 +68,14 @@ def _fmt_audit_value(value):
 
 
 def audit_event(cfg, event, etype, path, action, *, score=None, threshold=None,
-                telegram=None, reason=None):
+                telegram=None, reason=None, extra=None):
+    """Log one structured ``audit`` line.
+
+    ``extra`` is an optional mapping of additional ``key=value`` fields appended after the
+    fixed ones (e.g. hub ``video_type``/``clip_s``). Parsers read audit lines as free-form
+    key/value pairs and ignore keys they do not know, so this never breaks a consumer.
+    ``None`` values and keys that are not plain identifiers are skipped.
+    """
     parts = [
         f"camera={_fmt_audit_value(cfg.name)}",
         f"path={_fmt_audit_value(path)}",
@@ -93,6 +100,9 @@ def audit_event(cfg, event, etype, path, action, *, score=None, threshold=None,
         parts.append(f"telegram={_fmt_audit_value(str(bool(telegram)).lower())}")
     if reason:
         parts.append(f"reason={_fmt_audit_value(reason)}")
+    for key, value in (extra or {}).items():
+        if value is not None and str(key).replace("_", "").isalnum():
+            parts.append(f"{key}={_fmt_audit_value(value)}")
     log.info("audit %s", " ".join(parts))
 
 

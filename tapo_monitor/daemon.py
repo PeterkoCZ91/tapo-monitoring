@@ -81,6 +81,11 @@ HUB_PENDING_TTL = PENDING_MAX_AGE
 # A persisted hub cursor older than this is clamped forward on restore, so a long outage
 # costs at most this much replayed history rather than a flood of stale alerts.
 HUB_CURSOR_MAX_AGE = 4 * 3600
+# Hub inactivity watchdog: the clip index answers windows up to ~90 days and times out
+# beyond that; one query per camera per day, a failed one is retried after an hour.
+HUB_INACTIVITY_WINDOW = 90 * 86400
+HUB_INACTIVITY_CHECK_EVERY = 86400
+HUB_INACTIVITY_RETRY = 3600
 
 # A single transient scorer timeout would otherwise flip the whole frame to passthrough
 # (unfiltered spam). Retry once after this delay before degrading.
@@ -510,6 +515,12 @@ class MonitorState:
     # cursor has already moved past their clip, so this queue is the only copy).
     pending_hub: list = field(default_factory=list)
     hub_cursor_path: str | None = None
+    # Inactivity watchdog: newest clip start seen this process, next allowed hub query and
+    # when the last notice went out (persisted beside the cursor so a restart cannot repeat it).
+    hub_last_clip: dict = field(default_factory=dict)
+    hub_inactive_next_check: dict = field(default_factory=dict)
+    hub_inactive_alerted: dict = field(default_factory=dict)
+    hub_inactive_path: str | None = None
 
 
 def backoff_seconds(fails, base=60, cap=1800):
@@ -1288,6 +1299,12 @@ def hub_cursor_default_path(env=None, home=None):
                         "hub_cursor.json")
 
 
+def hub_inactivity_default_path(env=None, home=None):
+    """``hub_inactivity.json`` next to the hub cursor file."""
+    return os.path.join(os.path.dirname(hub_cursor_default_path(env, home)),
+                        "hub_inactivity.json")
+
+
 def save_hub_cursor(path, cursor, logger=None):
     """Atomically persist the per-camera hub cursor (mode 0600). Returns success."""
     temp = None
@@ -1338,6 +1355,16 @@ def load_hub_cursor(path, now, logger=None, max_age=HUB_CURSOR_MAX_AGE):
         return {}
 
 
+def _hub_clip_audit(clip):
+    """Optional audit fields describing one hub clip: its ``video_type`` and length. Pure."""
+    length = None
+    try:
+        length = round(float(clip["end_time"]) - float(clip["start_time"]), 1)
+    except (KeyError, TypeError, ValueError):
+        pass
+    return {"video_type": clip.get("video_type"), "clip_s": length}
+
+
 def process_pending_hub(app, state, *, now, secrets):
     """Retry hub alerts whose Telegram delivery failed; bounded by attempts and TTL."""
     cfg_by_name = {c.name: c for c in app.cameras}
@@ -1360,7 +1387,8 @@ def process_pending_hub(app, state, *, now, secrets):
         ok = send_alert_photo(cfg, secrets, entry["image"], entry["caption"],
                               score=entry["score"])
         monitor.audit_event(cfg, event, "motion", "hubpoll", "send", score=entry["score"],
-                            telegram=ok)
+                            threshold=cfg.scorer.threshold if entry["score"] is not None else None,
+                            telegram=ok, reason="retry", extra=entry.get("audit_extra"))
         if ok:
             log.info("alert hub clip sent for %s on retry %d [hubpoll]",
                      cfg.name, entry["attempts"])
@@ -1403,16 +1431,76 @@ def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
     score_for = score_for or _default_score_for
     cooldown = app.alerts.cooldown
     cursor_before = dict(state.hub_cursor)
+    alerted_before = dict(state.hub_inactive_alerted)
     try:
         _run_hubpoll_cameras(app, cam_clients, state, now=now, secrets=secrets,
                              night=night, hub_for=hub_for, frame_for=frame_for,
                              time_str=time_str, score_for=score_for,
                              clip_frame_for=clip_frame_for, cooldown=cooldown)
+        check_hub_inactivity(app, state, now=now, secrets=secrets, night=night,
+                             hub_for=hub_for)
     finally:
         if state.pending_hub:
             process_pending_hub(app, state, now=now, secrets=secrets)
         if state.hub_cursor_path and state.hub_cursor != cursor_before:
             save_hub_cursor(state.hub_cursor_path, state.hub_cursor, logger=log)
+        if state.hub_inactive_path and state.hub_inactive_alerted != alerted_before:
+            save_hub_cursor(state.hub_inactive_path, state.hub_inactive_alerted, logger=log)
+
+
+def check_hub_inactivity(app, state, *, now, secrets, night, hub_for):
+    """One Telegram notice when a hubpoll camera's hub has indexed no clip for N days.
+
+    Opt-in per camera (``inactivity_alert_days``). The newest clip comes from the hub
+    itself (one query per camera per day, 90-day window) merged with any clip this process
+    already consumed, so a restart does not depend on in-memory state. A failed query sends
+    nothing. After a notice the next one needs a newer clip or another N days of silence,
+    so a quiet site is told once rather than on every pass. A muted camera stays silent and
+    is told when it is unmuted, if still inactive.
+    """
+    for cfg in app.cameras:
+        days = cfg.inactivity_alert_days
+        if not days or "hubpoll" not in cfg.detection.sources:
+            continue
+        device = state.hub_devices.get(cfg.name)
+        if device is None or device.get("record_24h"):
+            continue
+        if camera_muted(cfg, night, now):
+            continue
+        if now < state.hub_inactive_next_check.get(cfg.name, 0):
+            continue
+        client = hub_for(cfg, state, now)
+        if client is None:
+            continue
+        try:
+            ok, clip = client.latest_clip(device["device_id"], device["mac"],
+                                          now - HUB_INACTIVITY_WINDOW, now, now=now)
+        except Exception as exc:  # noqa: BLE001 - a watchdog must never break the poll
+            log.warning("hub inactivity check for %s failed: %s", cfg.name, type(exc).__name__)
+            ok, clip = False, None
+        if not ok:
+            state.hub_inactive_next_check[cfg.name] = now + HUB_INACTIVITY_RETRY
+            continue
+        state.hub_inactive_next_check[cfg.name] = now + HUB_INACTIVITY_CHECK_EVERY
+        seen = [t for t in (clip["start_time"] if clip else None,
+                            state.hub_last_clip.get(cfg.name)) if t is not None]
+        # No clip in the whole window: idle for at least the window (>= any valid N).
+        last = max(seen) if seen else now - HUB_INACTIVITY_WINDOW
+        limit = days * 86400
+        if now - last <= limit:
+            continue
+        alerted_at = state.hub_inactive_alerted.get(cfg.name)
+        if alerted_at is not None and alerted_at >= last and now - alerted_at < limit:
+            continue
+        idle = notify.format_duration(now - last)
+        text = (f"💤 camera '{cfg.name}': no hub clip for over {days} day(s)"
+                f" (last {idle} ago)" if seen else
+                f"💤 camera '{cfg.name}': no hub clip in the last 90 days")
+        if notify.send_text(secrets["telegram_token"], secrets["telegram_chat"], text):
+            state.hub_inactive_alerted[cfg.name] = now
+            log.info("hub inactivity notice sent for %s", cfg.name)
+        else:
+            log.warning("hub inactivity notice delivery failed for %s", cfg.name)
 
 
 def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_for,
@@ -1479,6 +1567,8 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
                 # re-alert.
                 continue
             state.hub_cursor[cfg.name] = clip["start_time"]
+            state.hub_last_clip[cfg.name] = max(
+                clip["start_time"], state.hub_last_clip.get(cfg.name, 0))
             if muted:
                 continue
             # A hub clip is a triggered recording, not a classified detection: the camera
@@ -1486,6 +1576,7 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
             # decides.
             etype = "motion"
             event = {"start_time": clip["start_time"]}
+            clip_extra = _hub_clip_audit(clip)
             # The clip is fetched first because the clip *is* the event: it carries the
             # moment of detection and arrives in a few seconds. A live grab only happens
             # once the poll has noticed the clip — 20-30 s later, by which time the camera
@@ -1509,13 +1600,15 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
             if not image:
                 log.info("hubpoll %s: no frame for the clip at %s; skipping",
                          cfg.name, int(clip["start_time"]))
-                monitor.audit_event(cfg, event, etype, "hubpoll", "drop", reason="no_frame")
+                monitor.audit_event(cfg, event, etype, "hubpoll", "drop", reason="no_frame",
+                                    extra=clip_extra)
                 continue
             frames = image if isinstance(image, list) else [image]
             queued_image = None
             try:
                 image, s = (frames[0], None) if score is None else _select_recording_frame(
-                    cfg, event, etype, frames, score, path="hubpoll", keep_below=True)
+                    cfg, event, etype, frames, score, path="hubpoll", keep_below=True,
+                    audit_extra=clip_extra)
                 if score is not None and s is None:
                     log.warning("scorer unavailable; hubpoll passes %s frame through", cfg.name)
                 elif s is not None and s < cfg.scorer.threshold:
@@ -1523,11 +1616,17 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
                              s, cfg.scorer.threshold)
                     monitor.audit_event(cfg, event, etype, "hubpoll", "drop", score=s,
                                         threshold=cfg.scorer.threshold,
-                                        reason="below_threshold")
+                                        reason="below_threshold", extra=clip_extra)
+                    # Same review-log the sampler's hold uses (no-op unless TAPO_REVIEW_LOG_DIR).
+                    sentlog.archive_review_if_configured(
+                        image, {**sentlog.review_meta(cfg.name, "drop", etype, s),
+                                **{k: v for k, v in clip_extra.items() if v is not None}})
                     continue
                 if not can_alert(etype, event):
                     log.info("skip hub clip: cooldown active [hubpoll]")
-                    monitor.audit_event(cfg, event, etype, "hubpoll", "cooldown")
+                    monitor.audit_event(cfg, event, etype, "hubpoll", "cooldown", score=s,
+                                        threshold=cfg.scorer.threshold if s is not None else None,
+                                        extra=clip_extra)
                     continue
                 description = _caption_describe(cfg, secrets["groq_key"], image)
                 caption = notify.build_caption(
@@ -1537,7 +1636,7 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
                 ok = send_alert_photo(cfg, secrets, image, caption, score=s)
                 monitor.audit_event(cfg, event, etype, "hubpoll", "send", score=s,
                                     threshold=cfg.scorer.threshold if score is not None else None,
-                                    telegram=ok)
+                                    telegram=ok, extra=clip_extra)
                 if ok:
                     log.info("alert hub clip sent for %s (score=%s) [hubpoll]",
                              cfg.name, f"{s:.2f}" if s is not None else "n/a")
@@ -1551,6 +1650,7 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
                         "camera": cfg.name, "start_time": clip["start_time"],
                         "image": image, "caption": caption, "score": s,
                         "attempts": 1, "queued_at": now, "due_at": now + HUB_RETRY_DELAY,
+                        "audit_extra": clip_extra,
                     })
                     queued_image = image
             finally:
@@ -1560,7 +1660,7 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
 
 
 def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
-                            *, path="sd", keep_below=False):
+                            *, path="sd", keep_below=False, audit_extra=None):
     """Pick the sharpest subject from an already-extracted, bounded frame sequence.
 
     Missing blur measurements fall back to detection score. A scorer failure stops
@@ -1573,7 +1673,8 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
     for frame in frames:
         s = score(frame)
         if s is None:
-            monitor.audit_event(cfg, event, etype, path, "scorer_unavailable")
+            monitor.audit_event(cfg, event, etype, path, "scorer_unavailable",
+                                extra=audit_extra)
             if above:
                 break
             return frame, s
@@ -1586,7 +1687,8 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
         log.info("frame selection %s [%s]: %d frame(s) below threshold %.2f",
                  cfg.name, path, len(below), cfg.scorer.threshold)
         monitor.audit_event(cfg, event, etype, path, "drop", score=max(s for _, s in below),
-                            threshold=cfg.scorer.threshold, reason="below_threshold")
+                            threshold=cfg.scorer.threshold, reason="below_threshold",
+                            extra=audit_extra)
     if not above:
         if keep_below and below:
             return max(below, key=lambda fs: fs[1])
@@ -2451,6 +2553,9 @@ def main(argv=None):  # pragma: no cover - thin entry point
     state = MonitorState()
     state.hub_cursor_path = hub_cursor_default_path()
     state.hub_cursor = load_hub_cursor(state.hub_cursor_path, _time.time(), logger=log)
+    state.hub_inactive_path = hub_inactivity_default_path()
+    state.hub_inactive_alerted = load_hub_cursor(
+        state.hub_inactive_path, _time.time(), logger=log, max_age=math.inf)
     state.health_path = health.default_state_path()
     restored = health.load_state(state.health_path, state, logger=log)
     state.twin_path = twin.default_state_path()
