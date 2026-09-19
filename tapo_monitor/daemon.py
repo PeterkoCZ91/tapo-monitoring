@@ -767,10 +767,11 @@ def score_for(cfg: CameraConfig):
             _time.sleep(SCORER_RETRY_DELAY)
             result = score_remote(image_path)
         if result is not None:
-            score.boxes[image_path] = scorer.subject_box(result)
+            boxes[image_path] = scorer.subject_box(result)
         return None if result is None else scorer.subject_score(result)
 
-    score.boxes = {}   # frame path -> subject box; lets sharpness be judged on the subject
+    boxes: dict = {}   # frame path -> subject box; lets sharpness be judged on the subject
+    score.boxes = boxes  # type: ignore[attr-defined]
     return score
 
 

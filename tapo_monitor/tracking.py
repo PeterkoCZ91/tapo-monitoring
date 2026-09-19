@@ -63,7 +63,7 @@ def apply_smarttrack(cam, kinds):
     cam.executeFunction("setSmartTrackConfig", smarttrack_payload(kinds))
 
 
-_BACK_TIME_WARNED = set()  # cameras already warned about a refused back_time write
+_BACK_TIME_WARNED: set = set()  # cameras already warned about a refused back_time write
 
 
 def _back_time_already_set(cam, back_time):
