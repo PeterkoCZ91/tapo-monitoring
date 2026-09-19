@@ -167,11 +167,56 @@ def test_trigger_whitelamp_status_already_1_does_nothing():
     assert client.reversed is False
 
 
-def test_trigger_whitelamp_on_exception_returns_false_never_raises():
+def test_trigger_whitelamp_on_exception_returns_false_never_raises(monkeypatch):
+    monkeypatch.setattr(camera._time, "sleep", lambda s: None)
+
     class Client:
         def getWhitelampStatus(self):
             raise RuntimeError("API failure")
     assert camera.trigger_whitelamp(Client()) is False
+
+
+def test_trigger_whitelamp_unreadable_status_never_toggles_blind():
+    class Client:
+        reversed = False
+        def getWhitelampStatus(self):
+            return None
+        def reverseWhitelampStatus(self):
+            self.reversed = True
+    client = Client()
+    assert camera.trigger_whitelamp(client) is False
+    assert client.reversed is False
+
+
+def test_trigger_whitelamp_reverse_error_but_lamp_landed_is_success(monkeypatch):
+    monkeypatch.setattr(camera._time, "sleep", lambda s: None)
+
+    class Client:
+        calls = 0
+        def getWhitelampStatus(self):
+            self.calls += 1
+            return {"status": 0 if self.calls == 1 else 1}
+        def reverseWhitelampStatus(self):
+            raise RuntimeError("-40214")
+    assert camera.trigger_whitelamp(Client()) is True
+
+
+def test_trigger_whitelamp_retries_transient_status_read(monkeypatch):
+    monkeypatch.setattr(camera._time, "sleep", lambda s: None)
+
+    class Client:
+        calls = 0
+        reversed = False
+        def getWhitelampStatus(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("-40214")
+            return {"status": 0}
+        def reverseWhitelampStatus(self):
+            self.reversed = True
+    client = Client()
+    assert camera.trigger_whitelamp(client) is True
+    assert client.reversed is True
 
 
 # ── new_events / newest_start ────────────────────────────────────────────────

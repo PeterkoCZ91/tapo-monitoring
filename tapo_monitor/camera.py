@@ -104,12 +104,33 @@ def whitelamp_on(client):
 
 def trigger_whitelamp(client):
     """Turn on the camera's white lamp if supported and not already on. Never raises."""
-    try:
+    def lamp_on():
         status = client.getWhitelampStatus()
-        if isinstance(status, dict) and status.get("status") in (1, "1", True):
+        if not isinstance(status, dict):
+            return None
+        return status.get("status") in (1, "1", True)
+
+    try:
+        try:
+            state = lamp_on()
+        except Exception:  # noqa: BLE001 - transient (-40214 right after a switch); retry once
+            _time.sleep(1)
+            state = lamp_on()
+        if state:
             return True  # already on
+        if state is None:
+            # reverseWhitelampStatus is a toggle: never fire it blind on an unreadable state
+            log.warning("failed to trigger whitelamp: status unreadable")
+            return False
         if hasattr(client, "reverseWhitelampStatus"):
-            client.reverseWhitelampStatus()
+            try:
+                client.reverseWhitelampStatus()
+            except Exception as exc:  # noqa: BLE001 - the toggle may still have landed
+                _time.sleep(1)
+                if lamp_on():
+                    return True
+                log.warning("failed to trigger whitelamp: %s", exc)
+                return False
             return True
         if hasattr(client, "setForceWhitelampState"):
             client.setForceWhitelampState(True)
