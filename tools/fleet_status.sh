@@ -113,7 +113,14 @@ root="$1"; unit="$2"; python_bin="$3"; watch_unit="$4"; night_start="$5"; night_
 
 case "$root" in /*) ;; *) root="$HOME/$root" ;; esac
 case "$python_bin" in /*) ;; *) python_bin="$HOME/$python_bin" ;; esac
-[ -x "$python_bin" ] || python_bin="python3"
+if [ ! -x "$python_bin" ]; then
+    for candidate in "$HOME/tapo-probe-venv/bin/python" "$HOME/tapo-env/bin/python" python3; do
+        if [ -x "$candidate" ] || command -v "$candidate" >/dev/null 2>&1; then
+            python_bin="$candidate"
+            break
+        fi
+    done
+fi
 [ -n "$config" ] || config="$root/cameras.yaml"
 case "$config" in /*) ;; *) config="$HOME/$config" ;; esac
 
@@ -129,6 +136,13 @@ emit now_hm "$(date +%H:%M)"
 
 unit_props=$(systemctl show -p LoadState -p ActiveState -p SubState -p NRestarts \
     -p ActiveEnterTimestampMonotonic -p EnvironmentFiles "$unit" 2>/dev/null)
+if [ "$(prop "$unit_props" LoadState)" = "not-found" ] || [ -z "$unit_props" ]; then
+    user_props=$(systemctl --user show -p LoadState -p ActiveState -p SubState -p NRestarts \
+        -p ActiveEnterTimestampMonotonic -p EnvironmentFiles "$unit" 2>/dev/null || true)
+    if [ -n "$user_props" ] && [ "$(prop "$user_props" LoadState)" != "not-found" ]; then
+        unit_props="$user_props"
+    fi
+fi
 emit unit_load "$(prop "$unit_props" LoadState)"
 emit unit_active "$(prop "$unit_props" ActiveState)"
 emit unit_sub "$(prop "$unit_props" SubState)"
