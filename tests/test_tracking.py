@@ -187,3 +187,40 @@ def test_ensure_autotrack_passes_the_dwell_through():
     assert tracking.ensure_autotrack(cam, True, sleep=_no_sleep, back_time=180) is True
 
     assert cam.back_time == "180"
+
+
+class _NsCam(_TrackCfgCam):
+    """Camera that only knows the auto_track_target namespace (C560WS fw 1.1.10)."""
+
+    def executeFunction(self, method, params):
+        self.calls.append((method, params))
+        if method != "setAutoTrackTarget":
+            raise RuntimeError("refused")
+        info = params["auto_track_target"]
+        self.state = info["enabled"] == "on"
+        if "back_time" in info:
+            self.back_time = info["back_time"]
+
+
+def test_back_time_falls_back_to_auto_track_target_namespace():
+    cam = _NsCam()
+    assert tracking.set_autotrack(cam, True, back_time=180) is True
+    assert cam.calls[-1][0] == "setAutoTrackTarget"
+    assert cam.back_time == "180" and cam.state is True
+
+
+def test_back_time_already_set_skips_the_combined_call(caplog):
+    cam = _TrackCfgCam(accept=False, back_time="180")
+    with caplog.at_level("WARNING"):
+        assert tracking.set_autotrack(cam, True, back_time=180) is True
+    assert cam.calls == [("setAutoTrackTarget", {"enabled": True})]
+    assert "refused" not in caplog.text
+
+
+def test_refused_back_time_warns_only_once_per_camera(caplog):
+    tracking._BACK_TIME_WARNED.clear()
+    cam = _TrackCfgCam(accept=False)
+    with caplog.at_level("WARNING"):
+        tracking.set_autotrack(cam, True, back_time=180)
+        tracking.set_autotrack(cam, True, back_time=180)
+    assert caplog.text.count("refused the combined") == 1

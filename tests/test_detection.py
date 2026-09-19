@@ -49,7 +49,8 @@ def test_decode_unknown_with_person():
 
 def test_decode_garbage_is_all_false():
     f = detection.decode_events_1(None)
-    assert f == {"raw": 0, "motion": False, "pir": False, "person": False, "unknown_bits": []}
+    assert f == {"raw": 0, "motion": False, "pir": False, "person": False,
+                 "linecrossing": False, "unknown_bits": []}
 
 
 # ── classify_onvif ───────────────────────────────────────────────────────────
@@ -124,3 +125,16 @@ def test_getevent_nonperson_motion_bit_is_candidate_when_strict():
 
 def test_getevent_nonperson_motion_bit_kept_when_not_strict():
     assert detection.classify_getevent(None, events_1=2, strict_people=False) == "motion"
+
+
+def test_decode_events_1_bit8_is_linecrossing_not_unknown():
+    f = detection.decode_events_1(256)
+    assert f["linecrossing"] is True
+    assert f["unknown_bits"] == []
+    assert f["person"] is False and f["motion"] is False and f["pir"] is False
+
+
+def test_decode_events_1_bit8_does_not_imply_person():
+    f = detection.decode_events_1(256 | 2)
+    assert f["linecrossing"] and f["motion"] and not f["person"]
+    assert detection.has_person_bit(256) is False

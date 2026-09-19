@@ -63,6 +63,18 @@ def apply_smarttrack(cam, kinds):
     cam.executeFunction("setSmartTrackConfig", smarttrack_payload(kinds))
 
 
+_BACK_TIME_WARNED = set()  # cameras already warned about a refused back_time write
+
+
+def _back_time_already_set(cam, back_time):
+    """True when the camera already reads back the wanted back_time (no write needed)."""
+    try:
+        info = cam.getAutoTrackTarget()
+        return str(info.get("back_time")) == str(int(back_time))
+    except Exception:
+        return False
+
+
 def set_autotrack(cam, enabled, back_time=None):
     """Set the auto-track master switch, trying known method shapes. Returns bool.
 
@@ -74,15 +86,27 @@ def set_autotrack(cam, enabled, back_time=None):
     write the dwell would sit in exactly that gap. A camera that refuses the combined
     payload still gets tracking asserted by the ordinary path below.
     """
-    if back_time is not None:
+    if back_time is not None and not _back_time_already_set(cam, back_time):
+        want = {"enabled": "on" if enabled else "off", "back_time": str(int(back_time))}
         try:
-            cam.executeFunction("setTargetTrackConfig", {"target_track": {
-                "target_track_info": {"enabled": "on" if enabled else "off",
-                                      "back_time": str(int(back_time))}}})
+            cam.executeFunction("setTargetTrackConfig",
+                                {"target_track": {"target_track_info": dict(want)}})
             return True
         except Exception as exc:
+            first_exc = exc
+        # Newer firmware (C560WS 1.1.10) knows only the auto_track_target namespace.
+        try:
+            cam.executeFunction("setAutoTrackTarget", {"auto_track_target": dict(want)})
+            return True
+        except Exception:
+            pass
+        key = getattr(cam, "host", None) or id(cam)
+        if key not in _BACK_TIME_WARNED:
+            _BACK_TIME_WARNED.add(key)
             log.warning("camera refused the combined auto-track/back_time call (%s); "
-                        "falling back to the plain switch", exc)
+                        "falling back to the plain switch", first_exc)
+        else:
+            log.debug("combined auto-track/back_time call refused again (%s)", first_exc)
     if hasattr(cam, "setAutoTrackTarget"):
         try:
             cam.setAutoTrackTarget(enabled)

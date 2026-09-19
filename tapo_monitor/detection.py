@@ -13,12 +13,13 @@ motion — the usual setting for unattended night monitoring.
 PERSON_BIT = 524288
 
 # Named events_1 bits confirmed on C560WS/C260 (docs/tapo-firmware-api-research.md §5).
-# Bits the firmware sets that we have NOT yet ground-truthed (3, 7, 8 — correlated with
-# alarm_type 4/8/9, likely vehicle/pet/line-crossing AI categories) are reported as
+# Bits the firmware sets that we have NOT yet ground-truthed (3, 7 — correlated with
+# alarm_type 4/8/9, likely vehicle/pet AI categories) are reported as
 # ``unknown_bits`` rather than guessed at, so logs can map them empirically.
 EVENTS_1_BITS = {
     1: "motion",   # value 2   — basic motion (often a false positive on its own)
     5: "pir",      # value 32  — hardware PIR sensor confirmed
+    8: "linecrossing",  # value 256 — line-crossing detection (informational; never alerts alone)
     19: "person",  # value 524288 — on-device AI confirmed a person
 }
 
@@ -29,14 +30,15 @@ def decode_events_1(events_1):
     """Decode the getEvents ``events_1`` bitmask into named flags.
 
     Returns a dict ``{"raw": int, "motion": bool, "pir": bool, "person": bool,
-    "unknown_bits": [bit, ...]}``. Bits without a known meaning are listed (not
+    "linecrossing": bool, "unknown_bits": [bit, ...]}``. Bits without a known meaning are listed (not
     discarded) so they can be mapped from logs. Invalid input decodes to all-False.
     """
     try:
         raw = int(events_1)
     except (TypeError, ValueError):
         raw = 0
-    flags = {"raw": raw, "motion": False, "pir": False, "person": False, "unknown_bits": []}
+    flags = {"raw": raw, "motion": False, "pir": False, "person": False,
+             "linecrossing": False, "unknown_bits": []}
     for bit in range(raw.bit_length()):
         if not raw & (1 << bit):
             continue
