@@ -5,10 +5,13 @@ aliases replaced): indexed single-key wrappers (``search_results_1``) rather tha
 lists, which is what the parsers exist to flatten.
 """
 
+import json
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import pytapo.media_stream.session
 
 from tapo_monitor import hubclient
 
@@ -443,3 +446,159 @@ def test_the_probe_runs_once_per_session_not_once_per_query():
     client.search_days(DEV, MAC, "20260801", "20260814", now=1)
 
     assert [m for m, _ in session.calls].count(hubclient.PROBE_METHOD) == 1
+
+
+# ── download_clip transport integrity ─────────────────────────────────────────
+
+class _MockStreamResponse:
+    """Simulate a chunk or JSON message from HttpMediaSession.transceive()."""
+
+    def __init__(self, mimetype, content):
+        self.mimetype = mimetype
+        if isinstance(content, (dict, list)):
+            self.plaintext = json.dumps(content).encode()
+        elif isinstance(content, str):
+            self.plaintext = content.encode()
+        else:
+            self.plaintext = content
+
+
+class _MockAsyncStream:
+    """Async iterator yielding scripted responses or raising errors."""
+
+    def __init__(self, items):
+        self._items = list(items)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._items:
+            raise StopAsyncIteration
+        item = self._items.pop(0)
+        if isinstance(item, type) and issubclass(item, BaseException):
+            raise item()
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
+class _MockMediaSession:
+    """Mock HttpMediaSession recording transceive calls and yielding responses."""
+
+    def __init__(self, stream_items=None, stop_items=None, **kwargs):
+        self.stream_items = list(stream_items or [])
+        self.stop_items = list(stop_items or [])
+        self.kwargs = kwargs
+        self.transceive_calls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+    def transceive(self, payload, session=None):
+        self.transceive_calls.append((payload, session))
+        if session is not None:
+            return _MockAsyncStream(self.stop_items)
+        return _MockAsyncStream(self.stream_items)
+
+
+def test_download_clip_complete(monkeypatch, tmp_path):
+    out_file = str(tmp_path / "clip.mp4")
+    items = [
+        _MockStreamResponse("application/json", {"type": "response", "params": {"session_id": 42}}),
+        _MockStreamResponse("video/mp2t", b"chunk1"),
+        _MockStreamResponse("video/mp2t", b"chunk2"),
+        _MockStreamResponse("application/json", {
+            "type": "notification",
+            "params": {"event_type": "stream_status", "status": "finished"},
+        }),
+    ]
+    created = []
+
+    def factory(**kwargs):
+        s = _MockMediaSession(stream_items=items, **kwargs)
+        created.append(s)
+        return s
+
+    monkeypatch.setattr(pytapo.media_stream.session, "HttpMediaSession", factory)
+    res = hubclient.download_clip("192.0.2.1", "cloudpw", DEV, MAC, 100, 200, out_file)
+    assert res == out_file
+    assert os.path.exists(out_file)
+    with open(out_file, "rb") as f:
+        assert f.read() == b"chunk1chunk2"
+    assert len(created) == 1
+    # Ensure polite stop payload was sent with the active session id
+    assert any(s == 42 for _, s in created[0].transceive_calls)
+
+
+def test_download_clip_truncated_stream_end(monkeypatch, tmp_path):
+    out_file = str(tmp_path / "clip.mp4")
+    items = [
+        _MockStreamResponse("application/json", {"type": "response", "params": {"session_id": 42}}),
+        _MockStreamResponse("video/mp2t", b"chunk1"),
+        # Stream terminates (StopAsyncIteration) before finished notification
+    ]
+    monkeypatch.setattr(pytapo.media_stream.session, "HttpMediaSession",
+                        lambda **kwargs: _MockMediaSession(stream_items=items, **kwargs))
+    res = hubclient.download_clip("192.0.2.1", "cloudpw", DEV, MAC, 100, 200, out_file)
+    assert res is None
+    assert not os.path.exists(out_file)
+
+
+def test_download_clip_truncated_timeout(monkeypatch, tmp_path):
+    out_file = str(tmp_path / "clip.mp4")
+    items = [
+        _MockStreamResponse("application/json", {"type": "response", "params": {"session_id": 42}}),
+        _MockStreamResponse("video/mp2t", b"chunk1"),
+        TimeoutError("stall"),
+    ]
+    monkeypatch.setattr(pytapo.media_stream.session, "HttpMediaSession",
+                        lambda **kwargs: _MockMediaSession(stream_items=items, **kwargs))
+    res = hubclient.download_clip("192.0.2.1", "cloudpw", DEV, MAC, 100, 200, out_file)
+    assert res is None
+    assert not os.path.exists(out_file)
+
+
+def test_download_clip_zero_chunks(monkeypatch, tmp_path):
+    out_file = str(tmp_path / "clip.mp4")
+    items = [
+        _MockStreamResponse("application/json", {"type": "response", "params": {"session_id": 42}}),
+        _MockStreamResponse("application/json", {
+            "type": "notification",
+            "params": {"event_type": "stream_status", "status": "finished"},
+        }),
+    ]
+    monkeypatch.setattr(pytapo.media_stream.session, "HttpMediaSession",
+                        lambda **kwargs: _MockMediaSession(stream_items=items, **kwargs))
+    res = hubclient.download_clip("192.0.2.1", "cloudpw", DEV, MAC, 100, 200, out_file)
+    assert res is None
+    assert not os.path.exists(out_file)
+
+
+def test_download_clip_refused_error(monkeypatch, tmp_path):
+    out_file = str(tmp_path / "clip.mp4")
+    items = [
+        _MockStreamResponse("application/json", {"type": "response", "params": {"error_code": -71114}}),
+    ]
+    monkeypatch.setattr(pytapo.media_stream.session, "HttpMediaSession",
+                        lambda **kwargs: _MockMediaSession(stream_items=items, **kwargs))
+    res = hubclient.download_clip("192.0.2.1", "cloudpw", DEV, MAC, 100, 200, out_file)
+    assert res is None
+    assert not os.path.exists(out_file)
+
+
+def test_download_clip_refused_error_after_chunks(monkeypatch, tmp_path):
+    out_file = str(tmp_path / "clip.mp4")
+    items = [
+        _MockStreamResponse("application/json", {"type": "response", "params": {"session_id": 42}}),
+        _MockStreamResponse("video/mp2t", b"chunk1"),
+        _MockStreamResponse("application/json", {"type": "response", "params": {"error_code": -71114}}),
+    ]
+    monkeypatch.setattr(pytapo.media_stream.session, "HttpMediaSession",
+                        lambda **kwargs: _MockMediaSession(stream_items=items, **kwargs))
+    res = hubclient.download_clip("192.0.2.1", "cloudpw", DEV, MAC, 100, 200, out_file)
+    assert res is None
+    assert not os.path.exists(out_file)

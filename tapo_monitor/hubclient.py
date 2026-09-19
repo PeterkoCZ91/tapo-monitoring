@@ -29,7 +29,12 @@ import logging
 import time as _time
 import uuid
 
+from . import snapshot
+
 log = logging.getLogger(__name__)
+
+_safe_unlink = snapshot.safe_unlink
+safe_unlink = _safe_unlink
 
 # Ask the hub which cameras are bound to it for recording.
 DEVICE_LIST_PARAMS: dict[str, dict] = {"general_camera_manage": {"paired_general_device_list": {}}}
@@ -461,6 +466,7 @@ def download_clip(host, cloud_password, device_id, mac, start_time, end_time, ou
         chunks = 0
         messages = 0
         session_id = None
+        finished = False
         with open(out_path, "wb") as out:
             async with session:
                 stream = session.transceive(payload)
@@ -479,10 +485,12 @@ def download_clip(host, cloud_password, device_id, mac, start_time, end_time, ou
                         kind, value = stream_event(message)
                         if kind == "error":
                             log.info("hub clip download refused: error_code %s", value)
+                            _safe_unlink(out_path)
                             return None
                         if kind == "session":
                             session_id = value
                         elif kind == "finished":
+                            finished = True
                             break
                     elif resp.mimetype == "video/mp2t":
                         out.write(resp.plaintext)
@@ -507,6 +515,12 @@ def download_clip(host, cloud_password, device_id, mac, start_time, end_time, ou
             # failed" while this function had returned None without a word about why.
             log.info("hub clip download produced no video parts (session=%s, json=%d)",
                      session_id, messages)
+            _safe_unlink(out_path)
+            return None
+        if not finished:
+            log.info("hub clip download incomplete or interrupted (chunks=%d, finished=False)",
+                     chunks)
+            _safe_unlink(out_path)
             return None
         return out_path
 
@@ -536,6 +550,7 @@ def download_clip(host, cloud_password, device_id, mac, start_time, end_time, ou
         return asyncio.run(run())
     except Exception:  # noqa: BLE001 - a missed frame is not worth killing the tick
         log.info("hub clip download failed", exc_info=True)
+        _safe_unlink(out_path)
         return None
 
 
