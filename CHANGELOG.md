@@ -5,6 +5,23 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `ldc` (Lens Distortion Correction): per-camera boolean option asserting on-sensor barrel distortion
+  correction for wide-angle 4K sensors (e.g. C560WS, C260). Straightens vertical and horizontal
+  perspective lines across the scene, boosting YOLO person detection confidence near frame edges.
+  Monitored continuously for configuration drift via Digital Twin (`video.ldc.enabled`).
+- `tamper_detection` and `tamper_sensitivity` (`low`/`normal`/`high`): per-camera options re-asserting
+  tamper monitoring every control tick so that lens spray, physical covering, or camera redirection
+  cannot remain silently disabled. In the alert funnel, tamper events bypass visual subject confidence
+  gates to alert immediately. Watched as a `critical` drift key in the Digital Twin.
+- `whitelamp_force_time` (5–300 s) and `whitelamp_intensity` (1–100 %): per-camera options overriding
+  the 300 s (5 minute) firmware floodlight default on detection triggers, allowing polite, short night
+  illumination pulses (e.g. 30 s).
+- `set_osd_safe`: wraps OSD updates via standard `executeFunction` JSON-RPC rather than pytapo's raw
+  `performRequest`, preventing connection drops and firmware IP lockouts on outdoor models.
+- `tapo-monitor learn-face <name>`: CLI helper listening for live on-device face detection events to
+  capture stable `face_id`s and output matching `FACE_ID_NAMES` entries.
+- `faces.ignore_known`: suppresses alerts when all detected faces belong to enrolled household members,
+  logging the recognized name in the audit trail while keeping unconfirmed or unknown faces alertable.
 - Hub clip delivery is retried: a failed Telegram send goes to a bounded queue (4 attempts,
   600 s TTL) instead of being lost after the cursor moved on, and the hub cursor is kept in
   `hub_cursor.json` so a restart no longer skips clips from the downtime (capped at 4 h).

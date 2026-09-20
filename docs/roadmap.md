@@ -271,7 +271,8 @@ These stay separate from production until repeatable evidence exists:
 3. Read light/luma/Smart-AE capabilities and measure whether exposure profiles improve
    subject sharpness before allowing adaptive writes.
 4. Explore privacy-preserving known/unknown-face alert policy using local mappings; do not
-   store biometric artifacts in the ledger.
+   store biometric artifacts in the ledger. (**Shipped:** `learn-face` CLI helper and
+   `faces.ignore_known` filtering in `tapo_monitor`).
 5. Extend the capability manifest across camera models and firmware versions to replace
    model assumptions with adapters selected from observed support.
 

@@ -42,6 +42,12 @@ recorder and scorer can complement the daemon, but neither is required for the b
   session while reconnect/control runs on a slower interval.
 - **Firmware-safe camera control** — day/night policy, people-only SmartTrack, presets,
   rain gating, sensitivity control and optional ONVIF soft pan limits.
+- **Hardware-aligned optics & safety** — on-sensor Lens Distortion Correction (LDC)
+  straightens wide-angle 4K frames for sharper peripheral YOLO scoring, tamper monitoring
+  is self-healed every control pass, and white floodlight activation duration scales down
+  to polite 30 s pulses instead of the 5-minute firmware default.
+- **On-device face intelligence** — `learn-face` CLI helper captures on-device face enrollment
+  events, and `faces.ignore_known` quiets alerts for familiar household members.
 - **Reliable event media** — live RTSP first, then an event-time SD-card or local-recorder
   follow-up when the first frame misses the subject; the subject zoom can be cropped from
   a native-resolution grab so a distant figure stays legible.
