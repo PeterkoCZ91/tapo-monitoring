@@ -200,8 +200,8 @@ Status: **pilot v1 deployed (2026-08-25)**
 
 The first slice is deliberately limited to configured camera groups. It leaves camera
 motion untouched, does not use `handoff_preset`, shares one gate across live/sampler/SD
-delivery paths, and persists the event watermark after each detection pass. The first
-production pilot uses two cameras with overlapping views.
+delivery paths, and persists the event watermark after each detection pass. Live multi-camera
+PTZ handoffs are staged for future deployment when a second overlapping camera is added to the site.
 
 ## Phase 6 — Deployment and fleet integrity
 
@@ -275,6 +275,11 @@ These stay separate from production until repeatable evidence exists:
    `faces.ignore_known` filtering in `tapo_monitor`).
 5. Extend the capability manifest across camera models and firmware versions to replace
    model assumptions with adapters selected from observed support.
+6. Standalone battery camera onboarding (hubless protocol). (**Paused:** BLE pairing key
+   extraction was inconclusive and test hub hardware is no longer available locally;
+   production `hubpoll` clip ingestion remains active for existing paired setups).
+7. High Light Compensation (HLC) and Overexposure Suppression for night street monitoring
+   to prevent moving car headlights from blinding the optical sensor.
 
 ## Delivery sequence for contributors
 
