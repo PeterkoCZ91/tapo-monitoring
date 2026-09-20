@@ -20,7 +20,7 @@ import time as _time
 
 log = logging.getLogger(__name__)
 
-PING_ECHOES = 2
+PING_ECHOES = 3
 PING_INTERVAL = "0.3"
 
 

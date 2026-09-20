@@ -45,6 +45,7 @@ def evaluate_snapshot(camera_name, plan, snapshot):
         "detection.vehicle.enabled": False,
         "detection.motion.sensitivity": int(plan.motion_sensitivity),
         "tracking.auto.enabled": bool(plan.autotrack_on),
+        "clock.synchronized": True,
     }
     actual = {
         "privacy.enabled": _enabled(_probe_value(snapshot, "privacy", "lens_mask")),
@@ -56,6 +57,9 @@ def evaluate_snapshot(camera_name, plan, snapshot):
             _probe_value(snapshot, "detection", "motion")
         ),
         "tracking.auto.enabled": _enabled(_probe_value(snapshot, "track", "auto_target")),
+        "clock.synchronized": _clock_synced(
+            _probe_value(snapshot, "basic", "clock_correction")
+        ),
     }
     severities = {
         "privacy.enabled": "critical",
@@ -63,6 +67,7 @@ def evaluate_snapshot(camera_name, plan, snapshot):
         "detection.vehicle.enabled": "warning",
         "detection.motion.sensitivity": "warning",
         "tracking.auto.enabled": "critical",
+        "clock.synchronized": "warning",
     }
     report = drift.evaluate_drift(
         desired, actual, severities=severities, scope=str(camera_name)
@@ -256,6 +261,20 @@ def _sensitivity(value):
     raw = value.get("digital_sensitivity", value.get("sensitivity", drift.UNKNOWN))
     try:
         return int(raw)
+    except (TypeError, ValueError):
+        return drift.UNKNOWN
+
+
+def _clock_synced(value, max_skew=5.0):
+    if value in (drift.UNKNOWN, drift.UNSUPPORTED):
+        return value
+    if isinstance(value, Mapping):
+        value = value.get("seconds", value.get("time_correction", value.get("offset", drift.UNKNOWN)))
+        if value in (drift.UNKNOWN, drift.UNSUPPORTED):
+            return value
+    try:
+        offset = float(value)
+        return abs(offset) <= max_skew
     except (TypeError, ValueError):
         return drift.UNKNOWN
 

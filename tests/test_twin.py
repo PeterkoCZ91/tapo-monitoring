@@ -185,3 +185,22 @@ def test_cameras_in_privacy_reports_only_a_confirmed_parked_lens():
 def test_cameras_in_privacy_survives_a_missing_or_broken_fleet():
     assert twin.cameras_in_privacy(None) == set()
     assert twin.cameras_in_privacy({"yard": "not-a-mapping"}) == set()
+
+
+def test_clock_synchronized_within_tolerance_is_clean():
+    snapshot = _snapshot()
+    snapshot["groups"]["basic"] = {"clock_correction": {"state": "available", "value": 2.1}}
+    evaluation = twin.evaluate_snapshot("camera-a", _plan(), snapshot)
+    assert evaluation["drift"]["clean"] is True
+    assert evaluation["actual"]["clock.synchronized"] is True
+
+
+def test_clock_skew_exceeding_tolerance_reports_warning_drift():
+    snapshot = _snapshot()
+    snapshot["groups"]["basic"] = {"clock_correction": {"state": "available", "value": 14.5}}
+    evaluation = twin.evaluate_snapshot("camera-a", _plan(), snapshot)
+    assert evaluation["drift"]["clean"] is False
+    assert evaluation["actual"]["clock.synchronized"] is False
+    results = {item["path"]: item for item in twin.alertable_results(evaluation)}
+    assert "clock.synchronized" in results
+    assert results["clock.synchronized"]["severity"] == "warning"

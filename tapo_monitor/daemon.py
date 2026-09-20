@@ -488,7 +488,7 @@ class MonitorState:
     ledger_handler: object | None = None
     pending_sd: list = field(default_factory=list)
     groups: dict = field(default_factory=dict)
-    scene_coordinator: object = field(default_factory=scene.SceneCoordinator)
+    scene_coordinator: scene.SceneCoordinator = field(default_factory=scene.SceneCoordinator)
     pan_guard: dict = field(default_factory=dict)   # per-camera ONVIF pan-limit state
     # Wall time of the last pan_limit recall per camera (the tick's own `now`, so it is
     # directly comparable to the sampler's): lets an expiring hold tell "no second frame
@@ -1167,6 +1167,12 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             # follow-up: a zoom to Telegram, the whole scene to the sent log.
             started = _time.monotonic()
             try:
+                if (state.scene_coordinator is not None and getattr(_cfg, "coordinator", None)
+                        and _cfg.coordinator.group):
+                    state.scene_coordinator.record_candidate(
+                        _cfg.coordinator.group, _cfg.name, image, score, captured_at=now,
+                        window=_cfg.coordinator.scene_window,
+                    )
                 return send_alert_photo(_cfg, secrets, image, caption, score=score)
             finally:
                 observe_latency("telegram", _time.monotonic() - started)
@@ -2187,6 +2193,18 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
 
         try:
             snapshot_data = probe(cam)
+            if hasattr(state, "scene_coordinator") and state.scene_coordinator is not None:
+                corr_probe = (
+                    (snapshot_data.get("groups") or {})
+                    .get("basic", {})
+                    .get("clock_correction", {})
+                )
+                if isinstance(corr_probe, dict) and corr_probe.get("state") == "available":
+                    try:
+                        corr_val = float(corr_probe.get("value"))
+                        state.scene_coordinator.record_clock_reading(cfg.name, now, now - corr_val)
+                    except (TypeError, ValueError):
+                        pass
             layers = capabilities.derive_health(
                 snapshot_data,
                 network=state.network_reachable.get(cfg.name),
@@ -2402,10 +2420,16 @@ def fleet_health_snapshot(app: AppConfig, state: MonitorState, *, now,
     fetch_metrics = fetch_metrics or _fetch_scorer_metrics
     cameras = {}
     for cfg in app.cameras:
-        cameras[cfg.name] = {
+        entry = {
             "reachable": state.network_reachable.get(cfg.name),
             "events": state.events_reachable.get(cfg.name),
         }
+        if hasattr(state, "scene_coordinator") and state.scene_coordinator is not None:
+            clock_offset = state.scene_coordinator.clock_offset(cfg.name)
+            if clock_offset is not None:
+                entry["clock_offset"] = clock_offset
+                entry["clock_skew"] = abs(clock_offset) > 5.0
+        cameras[cfg.name] = entry
 
     stalled = None if state.tick_fail_since is None else max(0.0,
                                                             now - state.tick_fail_since)

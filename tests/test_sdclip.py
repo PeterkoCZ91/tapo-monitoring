@@ -387,3 +387,24 @@ def test_extractor_is_told_the_segment_start_not_the_event_start():
                            extract_frames=extract_frames, segment_bounds=segment_bounds)
 
     assert seen["clip_start"] == 940
+
+
+def test_download_timeout_scales_with_span():
+    assert sdclip.download_timeout(36) == 150
+    assert sdclip.download_timeout(48) == 150
+    assert sdclip.download_timeout(80) == 230
+    assert sdclip.download_timeout(100) == 280
+
+
+def test_fetch_subprocess_scales_timeout_with_span():
+    captured = {}
+
+    def run(argv, **kw):
+        captured["timeout"] = kw.get("timeout")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    sdclip.fetch_sd_frames_subprocess(_cfg(), 1000, span=80, run=run, python="PY")
+    assert captured["timeout"] == 230
+
+    sdclip.fetch_sd_frames_subprocess(_cfg(), 1000, span=80, run=run, python="PY", timeout=99)
+    assert captured["timeout"] == 99

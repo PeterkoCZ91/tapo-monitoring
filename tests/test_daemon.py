@@ -818,6 +818,25 @@ def test_fleet_health_snapshot_reads_what_the_daemon_already_knows():
     assert snap["repairs"] == {"smarttrack": 3}
 
 
+def test_fleet_health_snapshot_reports_camera_clock_offset_and_skew():
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "a", "host": "203.0.113.10"},
+        {"name": "b", "host": "203.0.113.11"},
+    ]})
+    state = daemon.MonitorState()
+    state.network_reachable = {"a": True, "b": True}
+    state.events_reachable = {"a": True, "b": True}
+    # a has 1.2s offset (within 5s), b has 8.5s offset (exceeds 5s skew)
+    state.scene_coordinator.record_clock_reading("a", 1000.0, 1001.2)
+    state.scene_coordinator.record_clock_reading("b", 1000.0, 1008.5)
+
+    snap = daemon.fleet_health_snapshot(app, state, now=1000, fetch_metrics=lambda u: None)
+    assert round(snap["cameras"]["a"]["clock_offset"], 1) == 1.2
+    assert snap["cameras"]["a"]["clock_skew"] is False
+    assert round(snap["cameras"]["b"]["clock_offset"], 1) == 8.5
+    assert snap["cameras"]["b"]["clock_skew"] is True
+
+
 def test_fleet_health_snapshot_reports_a_stalled_tick():
     app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
     state = daemon.MonitorState()

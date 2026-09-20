@@ -36,6 +36,7 @@ log = logging.getLogger(__name__)
 # real load. The follow-up is already deferred, so a slightly later photo is fine.
 SD_DOWNLOAD_TIMEOUT = 150
 
+
 # Seconds of recording to pull from the event start. The camera fires the event at motion
 # start, but the subject often only walks into clear view 15-25 s in (confirmed 2026-07-02:
 # a real person+dog appeared ~20 s into a 60 s clip while offsets 0-9 s were empty grass),
@@ -43,6 +44,15 @@ SD_DOWNLOAD_TIMEOUT = 150
 # subject with margin; kept below the full segment because a 60 s pull (~107 s, ~25 MB) is
 # too close to SD_DOWNLOAD_TIMEOUT on the Pi Zero.
 SD_SPAN = 36
+
+
+def download_timeout(span=SD_SPAN):
+    """Seconds to wait for the download subprocess before giving up.
+
+    Scales with the requested span so wider retry windows (e.g. 80 s) do not time out
+    prematurely while preserving the proven 150 s floor.
+    """
+    return max(SD_DOWNLOAD_TIMEOUT, int(span * 2.5) + 30)
 # Ceiling for an event-sized window (see event_span): 48 s downloads in ~90 s on the
 # Pi Zero, comfortably under SD_DOWNLOAD_TIMEOUT where a full 60 s pull (~107 s) is not.
 SD_SPAN_CAP = 48
@@ -322,7 +332,7 @@ _FRAME_MARKER = "FRAME:"
 
 
 def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
-                               every=None, run=None, python=None):
+                               every=None, run=None, python=None, timeout=None):
     """Download SD frames in a FRESH subprocess and return its JPEG paths ([] on failure).
 
     The in-process download silently fails inside the daemon: its long-lived getEvents
@@ -339,12 +349,14 @@ def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
     python = python or _sys.executable
     if every is None:
         every = frame_every(span)
+    if timeout is None:
+        timeout = download_timeout(span)
     argv = [python, "-m", "tapo_monitor.sdclip", "download",
             cfg.host, cfg.user_env or "", cfg.password_env or "",
             cfg.cloud_password_env or "", str(int(start_time)), out_dir,
             str(int(span)), str(int(every)), str(int(getattr(cfg, "rotate", 0)))]
     try:
-        proc = run(argv, capture_output=True, text=True, timeout=SD_DOWNLOAD_TIMEOUT)
+        proc = run(argv, capture_output=True, text=True, timeout=timeout)
     except Exception as exc:
         log.warning("SD subprocess failed to run: %r", exc)
         return []

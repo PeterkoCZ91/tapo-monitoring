@@ -82,6 +82,8 @@ class SceneCoordinator:
 
     def __init__(self):
         self._deliveries: dict[str, list[_Delivery]] = {}
+        self._candidates: dict[str, list[dict]] = {}
+        self._clock_readings: dict[str, list[tuple[float, float]]] = {}
 
     @staticmethod
     def _active(deliveries, event_at, window):
@@ -147,6 +149,66 @@ class SceneCoordinator:
         return SceneEvent(group, event_at, lead, follow,
                           active[-1].event_at - active[0].event_at,
                           direction, cameras)
+
+    def record_candidate(self, group, camera, frame_path, score, *, captured_at=None, window=15):
+        """Record an alert candidate frame for cross-camera selection.
+
+        Candidates within the correlation window are tracked per group so the best
+        available frame across cameras can be identified.
+        """
+        if not group or not frame_path:
+            return
+        try:
+            score = float(score)
+        except (TypeError, ValueError):
+            return
+        candidates = self._candidates.setdefault(group, [])
+        now_ts = float(captured_at if captured_at is not None else 0.0)
+        candidates[:] = [
+            item for item in candidates
+            if abs(item.get("captured_at", now_ts) - now_ts) <= max(window, 1) * 2
+        ]
+        candidates.append({
+            "camera": str(camera),
+            "frame": str(frame_path),
+            "score": score,
+            "captured_at": now_ts,
+        })
+        if len(candidates) > 32:
+            del candidates[:-32]
+
+    def best_candidate(self, group, event_at, *, window=15):
+        """Return the highest-scoring candidate frame across the group, or None."""
+        if not group or group not in self._candidates:
+            return None
+        try:
+            event_at = float(event_at)
+        except (TypeError, ValueError):
+            return None
+        candidates = self._candidates[group]
+        active = [
+            item for item in candidates
+            if abs(item.get("captured_at", event_at) - event_at) <= window
+        ]
+        return choose_best_frame(active)
+
+    def record_clock_reading(self, camera, host_time, camera_time):
+        """Record an observed (host_time, camera_time) pair for clock offset estimation."""
+        if not camera:
+            return
+        try:
+            h, c = float(host_time), float(camera_time)
+        except (TypeError, ValueError):
+            return
+        readings = self._clock_readings.setdefault(camera, [])
+        readings.append((h, c))
+        if len(readings) > 32:
+            del readings[:-32]
+
+    def clock_offset(self, camera):
+        """Return the estimated clock offset (camera - host) in seconds, or None."""
+        readings = self._clock_readings.get(camera)
+        return estimate_clock_offset(readings) if readings else None
 
 
 # Phase 5 read-only scene summary is exposed through SceneCoordinator.scene_event.

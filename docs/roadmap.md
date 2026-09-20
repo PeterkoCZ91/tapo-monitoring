@@ -178,16 +178,15 @@ Status: **pilot v1 deployed (2026-08-25)**
 - [x] Correlate adjacent-camera observations into a durable scene event (offline-capable ledger path; live pair still required for production validation).
 - [x] Preserve lead/follow camera pairs with event-time delta and an explicit measured camera order;
   direction remains unknown until that order is supplied. Clock-offset calibration remains open; never infer biometric identity.
-- [ ] Select the best frame across cameras.
+- [x] Select the best frame across cameras.
 - [x] Acquire a hub-backed test pair (compatible hub plus battery camera) for validation.
   Hub storage and indexed clips let the `hubpoll` path and the 24/7-recording guard be
   tested end to end against real hardware.
-- [ ] Measure and report each camera's clock offset. The duplicate gate compares event
+- [x] Measure and report each camera's clock offset. The duplicate gate compares event
   times across cameras, so a skew larger than the window makes it silently inert — and any
-  later lead/follow inference would be worse than inert. First production evidence: on the
-  pilot pair the suppressed events' start times differed by one to two seconds, so the gate
-  is genuinely deciding rather than inert. That is an observation, not the reported metric
-  this item asks for.
+  later lead/follow inference would be worse than inert. Clock readings are sampled from
+  the digital twin probe, tracked via `SceneCoordinator.clock_offset`, evaluated in drift,
+  and reported in the daily fleet health digest when skew exceeds tolerance.
 - [ ] Re-measure the gate's reach whenever a new delivery path appears. The gate is shared
   across live, sampler and follow-up paths, so giving below-threshold motion a recorder
   look multiplied its firing rate roughly sevenfold on the pilot pair — the same policy,

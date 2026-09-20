@@ -149,3 +149,33 @@ def test_offline_scene_pipeline_round_trip(tmp_path):
         direction=event.direction,
     ) == 1
     assert len(ledger.scene_events(start=0, end=2000, group="yard")) == 1
+
+
+def test_coordinator_tracks_and_selects_best_candidate_across_cameras():
+    coordinator = SceneCoordinator()
+    coordinator.record_candidate("yard", "cam-a", "/tmp/a.jpg", 0.65, captured_at=100.0)
+    coordinator.record_candidate("yard", "cam-b", "/tmp/b.jpg", 0.92, captured_at=102.0)
+    coordinator.record_candidate("yard", "cam-a", "/tmp/a_late.jpg", 0.80, captured_at=104.0)
+
+    best = coordinator.best_candidate("yard", 101.0, window=10)
+    assert best is not None
+    assert best["camera"] == "cam-b"
+    assert best["frame"] == "/tmp/b.jpg"
+    assert best["score"] == 0.92
+
+    # Window exclusion:
+    assert coordinator.best_candidate("yard", 150.0, window=5) is None
+    assert coordinator.best_candidate(None, 101.0) is None
+
+
+def test_coordinator_tracks_and_estimates_clock_offset():
+    coordinator = SceneCoordinator()
+    assert coordinator.clock_offset("cam-a") is None
+
+    coordinator.record_clock_reading("cam-a", 1000.0, 1002.5)
+    coordinator.record_clock_reading("cam-a", 1060.0, 1062.6)
+    coordinator.record_clock_reading("cam-a", 1120.0, 1122.4)
+
+    offset = coordinator.clock_offset("cam-a")
+    assert offset is not None
+    assert round(offset, 1) == 2.5

@@ -220,10 +220,14 @@ def fleet_lines(health):
                  if (s or {}).get("reachable") is None]
     no_events = [n for n, s in sorted(cameras.items())
                  if (s or {}).get("reachable") is True and (s or {}).get("events") is False]
+    clock_skew = [n for n, s in sorted(cameras.items())
+                  if (s or {}).get("clock_skew")]
     if unreachable:
         problems.append(f"{', '.join(unreachable)} unreachable")
     if no_events:
         problems.append(f"{', '.join(no_events)} event API down")
+    if clock_skew:
+        problems.append(f"{', '.join(clock_skew)} clock skew > 5s")
     if unchecked:
         detail.append(f"not checked yet: {', '.join(unchecked)}")
 

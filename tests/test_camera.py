@@ -22,8 +22,8 @@ def test_ping_reachable_uses_a_bounded_shell_free_probe():
 
     assert camera.ping_reachable("203.0.113.10", run=run) is True
     argv, kwargs = calls[0]
-    assert argv == ["ping", "-n", "-c", "2", "-i", "0.3", "-W", "1", "203.0.113.10"]
-    assert kwargs["timeout"] == 3
+    assert argv == ["ping", "-n", "-c", "3", "-i", "0.3", "-W", "1", "203.0.113.10"]
+    assert kwargs["timeout"] == 4
     assert kwargs["check"] is False
 
 

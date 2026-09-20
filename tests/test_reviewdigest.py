@@ -417,6 +417,17 @@ def test_fleet_lines_stays_silent_about_subsystems_it_could_not_check():
     assert text.startswith("\U0001f49a Fleet OK")
 
 
+def test_fleet_lines_flags_clock_skew():
+    lines = reviewdigest.fleet_lines({
+        "cameras": {"front": {"reachable": True, "events": True, "clock_skew": True},
+                    "yard": {"reachable": True, "events": True, "clock_skew": False}},
+        "tick": {"ok": True}, "scorer": None, "recorder": None, "repairs": {},
+    })
+    text = "\n".join(lines)
+    assert "Fleet OK" not in text
+    assert "front" in text and "clock skew" in text
+
+
 def test_fleet_lines_reports_a_camera_refusing_its_self_heal():
     lines = reviewdigest.fleet_lines({
         "cameras": {"front": {"reachable": True, "events": True}},
