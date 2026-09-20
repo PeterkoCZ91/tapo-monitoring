@@ -1289,3 +1289,61 @@ def test_run_monitor_does_not_trigger_whitelamp_when_etype_mismatches():
     )
     assert len(triggered) == 0
 
+
+def test_run_monitor_triggers_whitelamp_with_configured_force_time():
+    from datetime import datetime
+    triggered_kwargs = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    cfg = config.load_config_from_dict({"cameras": [{
+        "name": "a", "host": "203.0.113.10",
+        "light_trigger": "20:00-04:30",
+        "whitelamp_force_time": 60,
+    }]}).cameras[0]
+
+    now_in = datetime(2026, 1, 1, 21, 0).timestamp()
+
+    def fake_trigger(cam, **kwargs):
+        triggered_kwargs.append(kwargs)
+        return True
+
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=now_in, groq_key="", telegram_token="", telegram_chat="",
+        snapshot=lambda *a: None, time_str=lambda e: "t",
+        trigger_whitelamp=fake_trigger,
+    )
+    assert len(triggered_kwargs) == 1
+    assert triggered_kwargs[0] == {"force_time": 60}
+
+
+def test_run_monitor_triggers_whitelamp_fallback_on_legacy_callable():
+    from datetime import datetime
+    triggered = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    cfg = config.load_config_from_dict({"cameras": [{
+        "name": "a", "host": "203.0.113.10",
+        "light_trigger": "20:00-04:30",
+        "whitelamp_force_time": 60,
+    }]}).cameras[0]
+
+    now_in = datetime(2026, 1, 1, 21, 0).timestamp()
+
+    def legacy_trigger(cam):
+        triggered.append(cam)
+        return True
+
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=now_in, groq_key="", telegram_token="", telegram_chat="",
+        snapshot=lambda *a: None, time_str=lambda e: "t",
+        trigger_whitelamp=legacy_trigger,
+    )
+    assert len(triggered) == 1
+
+

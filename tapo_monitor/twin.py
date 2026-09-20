@@ -81,6 +81,18 @@ def evaluate_snapshot(camera_name, plan, snapshot):
             _probe_value(snapshot, "video", "ldc")
         )
         severities["video.ldc.enabled"] = "warning"
+    if getattr(plan, "whitelamp_force_time", None) is not None:
+        desired["light.whitelamp.force_time"] = int(plan.whitelamp_force_time)
+        cfg_val = _probe_value(snapshot, "light", "whitelamp_config")
+        actual_val = drift.UNKNOWN
+        if isinstance(cfg_val, Mapping):
+            raw_wtl = cfg_val.get("wtl_force_time", drift.UNKNOWN)
+            try:
+                actual_val = int(raw_wtl)
+            except (TypeError, ValueError):
+                actual_val = drift.UNKNOWN
+        actual["light.whitelamp.force_time"] = actual_val
+        severities["light.whitelamp.force_time"] = "warning"
     if getattr(plan, "smarttrack", None):
         smart_val = _probe_value(snapshot, "track", "smart_config")
         if isinstance(smart_val, Mapping):

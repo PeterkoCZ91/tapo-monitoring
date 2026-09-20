@@ -243,3 +243,20 @@ def test_smarttrack_pet_drift_reports_warning():
     assert "tracking.smart.pet_enabled" in results
     assert results["tracking.smart.pet_enabled"]["severity"] == "warning"
     assert results["tracking.smart.pet_enabled"]["actual"] is True
+
+
+def test_whitelamp_force_time_drift_reports_warning():
+    snapshot = _snapshot()
+    snapshot["groups"]["light"] = {
+        "whitelamp_config": {"state": "available", "value": {"wtl_force_time": "300"}},
+    }
+    plan = _plan(whitelamp_force_time=60)
+    evaluation = twin.evaluate_snapshot("camera-a", plan, snapshot)
+    assert evaluation["drift"]["clean"] is False
+    results = {item["path"]: item for item in twin.alertable_results(evaluation)}
+    assert "light.whitelamp.force_time" in results
+    assert results["light.whitelamp.force_time"]["severity"] == "warning"
+    assert results["light.whitelamp.force_time"]["actual"] == 300
+    assert results["light.whitelamp.force_time"]["expected"] == 60
+    assert evaluation["desired"]["light.whitelamp.force_time"] == 60
+

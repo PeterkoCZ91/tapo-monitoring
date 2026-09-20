@@ -256,6 +256,20 @@ def test_trigger_whitelamp_with_force_time():
     assert configured_time == [30]
 
 
+def test_trigger_whitelamp_with_force_time_survives_config_error():
+    class Client:
+        def getWhitelampStatus(self):
+            return {"status": 0}
+        def reverseWhitelampStatus(self):
+            pass
+        def setWhitelampConfig(self, forceTime=None):
+            raise RuntimeError("API error")
+
+    client = Client()
+    assert camera.trigger_whitelamp(client, force_time=30) is True
+
+
+
 def test_set_lens_distortion_correction():
     calls = []
     class Client:
