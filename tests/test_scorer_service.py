@@ -654,3 +654,28 @@ def test_cli_survives_quoted_empty_metrics_variables():
     assert args.metrics_file is None
     assert args.metrics_persist_seconds == 60.0
     assert args.metrics_retention_files == 8
+
+
+def test_select_providers_defaults_to_cpu_and_opts_into_openvino_gpu():
+    from tapo_monitor import scorer_service as ss
+    assert ss.select_providers({}) == (["CPUExecutionProvider"], None)
+    assert ss.select_providers({ss.ENV_PROVIDER: "cpu"}) == (["CPUExecutionProvider"], None)
+    assert ss.select_providers({ss.ENV_PROVIDER: " OpenVINO-GPU "}) == (
+        ["OpenVINOExecutionProvider"], [{"device_type": "GPU"}])
+
+
+def test_open_session_falls_back_to_cpu_when_gpu_start_fails(monkeypatch):
+    from tapo_monitor import scorer_service as ss
+    monkeypatch.setenv(ss.ENV_PROVIDER, "openvino-gpu")
+    calls = []
+
+    class Ort:
+        @staticmethod
+        def InferenceSession(path, providers, provider_options=None):
+            calls.append(providers)
+            if providers[0] == "OpenVINOExecutionProvider":
+                raise RuntimeError("no GPU device")
+            return "cpu-session"
+
+    assert ss._open_session(Ort, "m.onnx") == "cpu-session"
+    assert calls == [["OpenVINOExecutionProvider"], ["CPUExecutionProvider"]]

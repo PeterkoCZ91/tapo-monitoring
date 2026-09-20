@@ -12,6 +12,10 @@ OnFailure=pi-failure-notify@%n.service
 [Service]
 Type=simple
 User=@SCORER_USER@
+# Intel iGPU inference (TAPO_SCORER_PROVIDER=openvino-gpu) opens /dev/dri/renderD128;
+# without this group only a logged-in seat's ACL grants access, and a headless boot
+# would silently fall back to CPU.
+SupplementaryGroups=render
 EnvironmentFile=/etc/tapo-monitor/scorer.env
 # With `-m`, Python imports the package from the working directory, so a host that keeps
 # the package as a copy here and one that pip-installed it into the venv both work.

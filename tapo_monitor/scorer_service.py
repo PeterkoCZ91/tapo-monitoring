@@ -563,6 +563,45 @@ def combine_rect_scores(rect_results):
     return combined
 
 
+ENV_PROVIDER = "TAPO_SCORER_PROVIDER"
+
+
+def select_providers(env=None):
+    """ONNX Runtime ``(providers, provider_options)`` for the configured backend. Pure.
+
+    ``TAPO_SCORER_PROVIDER=openvino-gpu`` runs on the Intel iGPU through OpenVINO;
+    anything else, including unset, keeps the CPU provider so an unconfigured host
+    behaves exactly as before.
+    """
+    env = os.environ if env is None else env
+    if (env.get(ENV_PROVIDER) or "").strip().lower() == "openvino-gpu":
+        return ["OpenVINOExecutionProvider"], [{"device_type": "GPU"}]
+    return ["CPUExecutionProvider"], None
+
+
+def _open_session(ort, model_path):
+    """Create the inference session; a GPU that is missing must not take scoring down.
+
+    A failed GPU start (no /dev/dri access, runtime not installed, provider not built
+    in) falls back to CPU with a loud warning: a scorer that answers slowly beats one
+    that does not answer, and the scorer being down blocks every camera's gating.
+    """
+    providers, options = select_providers()
+    if providers != ["CPUExecutionProvider"]:
+        try:
+            session = ort.InferenceSession(
+                model_path, providers=providers, provider_options=options)
+            if session.get_providers()[0] == providers[0]:
+                log.info("scorer inference provider: %s", providers[0])
+                return session
+            log.warning("scorer provider %s not active (got %s); falling back to CPU",
+                        providers[0], session.get_providers())
+        except Exception as exc:  # noqa: BLE001 - any GPU start failure means CPU
+            log.warning("scorer provider %s failed to start (%s: %s); falling back to CPU",
+                        providers[0], type(exc).__name__, exc)
+    return ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+
+
 def build_score_fn(model_path, input_size=416):
     """Load the ONNX model once and return score_fn(jpeg_bytes, tiles=1) -> dict.
 
@@ -577,7 +616,7 @@ def build_score_fn(model_path, input_size=416):
     import onnxruntime as ort
     from PIL import Image
 
-    session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+    session = _open_session(ort, model_path)
     input_name = session.get_inputs()[0].name
 
     def _run(img):
