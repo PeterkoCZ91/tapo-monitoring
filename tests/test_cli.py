@@ -361,3 +361,48 @@ def test_selfcheck_skips_a_camera_that_names_no_credential_env(tmp_path, capsys,
 
     assert cli.main(["selfcheck", str(config_path)]) == 0
     assert "credentials: ok" in capsys.readouterr().out
+
+
+def test_learn_face_success(tmp_path, capsys, monkeypatch):
+    from tapo_monitor import camera as camera_mod
+
+    config_path = tmp_path / "cameras.yaml"
+    config_path.write_text("cameras:\n  - name: lab\n    host: 203.0.113.10\n", encoding="utf-8")
+
+    class MockClient:
+        def getEvents(self, startTime=None, endTime=None):
+            return [{"start_time": 100, "event_info": [{"face_id": 68132274181}]}]
+
+    monkeypatch.setattr(camera_mod, "connect", lambda factory, retries=1: (MockClient(), None))
+
+    assert cli.main(["learn-face", "alice", "--config", str(config_path)]) == 0
+    out = capsys.readouterr().out
+    assert "SUCCESS: Captured face ID 68132274181 for 'alice'" in out
+    assert "FACE_ID_NAMES=68132274181:alice" in out
+
+
+def test_learn_face_timeout(tmp_path, capsys, monkeypatch):
+    from tapo_monitor import camera as camera_mod
+
+    config_path = tmp_path / "cameras.yaml"
+    config_path.write_text("cameras:\n  - name: lab\n    host: 203.0.113.10\n", encoding="utf-8")
+
+    class MockClient:
+        def getEvents(self, startTime=None, endTime=None):
+            return [{"start_time": 100, "event_info": []}]
+
+    monkeypatch.setattr(camera_mod, "connect", lambda factory, retries=1: (MockClient(), None))
+
+    assert cli.main(["learn-face", "alice", "--config", str(config_path), "--timeout", "1"]) == 1
+    err = capsys.readouterr().err
+    assert "No face detected within 1s timeout" in err
+
+
+def test_learn_face_camera_not_found(tmp_path, capsys):
+    config_path = tmp_path / "cameras.yaml"
+    config_path.write_text("cameras:\n  - name: lab\n    host: 203.0.113.10\n", encoding="utf-8")
+
+    assert cli.main(["learn-face", "alice", "--camera", "missing", "--config", str(config_path)]) == 2
+    err = capsys.readouterr().err
+    assert "No camera named 'missing'" in err
+

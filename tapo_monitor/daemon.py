@@ -109,6 +109,11 @@ class CameraPlan:
     # Day/night mode to assert this tick ("on" = IR/B&W, "off" = day/colour, "auto"), or
     # None to leave the camera's day/night mode untouched.
     night_vision: str | None = None
+    ldc: bool | None = None
+    tamper_detection: bool | None = None
+    tamper_sensitivity: str | None = None
+    whitelamp_force_time: int | None = None
+    whitelamp_intensity: int | None = None
 
 
 def plan_camera(cfg: CameraConfig, night: bool, rain_active: bool) -> CameraPlan:
@@ -147,6 +152,11 @@ def plan_camera(cfg: CameraConfig, night: bool, rain_active: bool) -> CameraPlan
         person_sensitivity=cfg.person_sensitivity,
         night_vision=night_vision,
         back_time=back_time,
+        ldc=cfg.ldc,
+        tamper_detection=cfg.tamper_detection,
+        tamper_sensitivity=cfg.tamper_sensitivity,
+        whitelamp_force_time=cfg.whitelamp_force_time,
+        whitelamp_intensity=cfg.whitelamp_intensity,
     )
 
 
@@ -314,6 +324,25 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
     if _repair_allowed(reliability_config, "vehicle_detection"):
         _repair("vehicle_detection", lambda: cam.setVehicleDetection(False),
                 repair_failures)
+    if plan.ldc is not None and _repair_allowed(reliability_config, "ldc"):
+        if hasattr(cam, "setLensDistortionCorrection"):
+            _repair("ldc", lambda: cam.setLensDistortionCorrection(plan.ldc),
+                    repair_failures)
+    if plan.tamper_detection is not None and _repair_allowed(reliability_config, "tamper_detection"):
+        if hasattr(cam, "setTamperDetection"):
+            def _tamper():
+                cam.setTamperDetection(plan.tamper_detection, plan.tamper_sensitivity or "normal")
+            _repair("tamper_detection", _tamper, repair_failures)
+    if (plan.whitelamp_force_time is not None or plan.whitelamp_intensity is not None) and _repair_allowed(reliability_config, "whitelamp_config"):
+        if hasattr(cam, "setWhitelampConfig"):
+            def _wtl():
+                kwargs = {}
+                if plan.whitelamp_force_time is not None:
+                    kwargs["forceTime"] = plan.whitelamp_force_time
+                if plan.whitelamp_intensity is not None:
+                    kwargs["intensityLevel"] = plan.whitelamp_intensity
+                cam.setWhitelampConfig(**kwargs)
+            _repair("whitelamp_config", _wtl, repair_failures)
     # A refused recall must be visible: the camera answers configuration calls happily
     # while sitting off-target, so a silent failure here is indistinguishable from a
     # healthy camera. One sat aimed at the ground for two days (2026-08-20) while this
@@ -1189,6 +1218,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             can_alert=can_alert,
             on_alert=on_alert,
             face_names=secrets.get("face_names"),
+            ignore_known=bool(secrets.get("ignore_known", False)),
             defer=defer_fn,
             score=score,
             corroborate=corroborate,
@@ -1890,6 +1920,10 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
                           if image in frames else image)
                 description = _caption_describe(cfg, secrets["groq_key"], images)
             label = enrich.face_label(monitor.face_ids(event), secrets.get("face_names"))
+            if (app.faces or {}).get("ignore_known") and etype != "motion" and monitor.has_known_face(event, secrets.get("face_names")):
+                log.info("skip %s: known face present [sd] (ignored: %s)", etype, label)
+                monitor.audit_event(cfg, event, etype, "sd", "ignore_known", detail=label)
+                continue
             light = camera.whitelamp_on(cam) if cfg.enrich.light_status else None
             caption = notify.build_caption(
                 monitor.TYPE_EMOJI.get(etype, "👤"), time_str(event),

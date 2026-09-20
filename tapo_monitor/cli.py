@@ -9,6 +9,7 @@ Usage:
   tapo-monitor shadow-record ...        # ingest an independent local observation
   tapo-monitor shadow-report ...        # compare camera and shadow observations
   tapo-monitor shadow-scan ...          # nightly recorder audit batch
+  tapo-monitor learn-face <name>        # capture face ID from camera events and output FACE_ID_NAMES
   tapo-monitor audit-log [logfile|-]    # summarize scorer/Telegram audit lines
   tapo-monitor version                  # release plus a fingerprint of the deployed package
   tapo-monitor selfcheck [cameras.yaml] # is this host able to run? (imports, config, deps)
@@ -463,6 +464,81 @@ def _print_table(headers, rows):
         print(line(row))
 
 
+def _learn_face(argv):
+    from . import camera as camera_mod
+    from . import monitor
+    from .config import load_config
+
+    parser = argparse.ArgumentParser(
+        prog="tapo-monitor learn-face",
+        description="Capture face ID from camera events and output FACE_ID_NAMES entry",
+    )
+    parser.add_argument("name", help="Name to assign to the detected face (e.g. petr)")
+    parser.add_argument("--camera", dest="camera", default=None, help="Camera name in cameras.yaml")
+    parser.add_argument("--config", dest="config", default="cameras.yaml", help="Path to cameras.yaml")
+    parser.add_argument("--timeout", type=int, default=20, help="Listening timeout in seconds (default: 20)")
+    args = parser.parse_args(argv)
+
+    try:
+        app = load_config(args.config)
+    except Exception as exc:
+        print(f"Error loading {args.config}: {exc}", file=sys.stderr)
+        return 2
+
+    cameras = app.cameras
+    if args.camera:
+        selected = [c for c in cameras if c.name == args.camera]
+        if not selected:
+            print(f"No camera named {args.camera!r} in {args.config}", file=sys.stderr)
+            return 2
+        cam_cfg = selected[0]
+    elif cameras:
+        cam_cfg = cameras[0]
+    else:
+        print(f"No cameras defined in {args.config}", file=sys.stderr)
+        return 2
+
+    print(f"Connecting to {cam_cfg.name} ({cam_cfg.host})...", file=sys.stderr)
+    factory = camera_mod.tapo_factory(
+        cam_cfg.host,
+        os.environ.get(cam_cfg.user_env or "", ""),
+        os.environ.get(cam_cfg.password_env or "", ""),
+        os.environ.get(cam_cfg.cloud_password_env or "", "") or None,
+    )
+    client, error = camera_mod.connect(factory, retries=1)
+    if client is None:
+        print(f"Connection failed: {error}", file=sys.stderr)
+        return 1
+
+    print(f"Listening for face on {cam_cfg.name} for {args.timeout}s...", file=sys.stderr)
+    print("Please look directly into the camera lens.", file=sys.stderr)
+    start = time.time()
+    seen_fid = None
+    while time.time() - start < args.timeout:
+        now_ts = int(time.time())
+        try:
+            events = client.getEvents(startTime=now_ts - 45, endTime=now_ts + 15)
+            for ev in (events if isinstance(events, list) else []):
+                fids = monitor.face_ids(ev)
+                if fids:
+                    seen_fid = fids[0]
+                    break
+        except Exception:
+            pass
+        if seen_fid is not None:
+            break
+        time.sleep(1.0)
+
+    if seen_fid is not None:
+        print(f"SUCCESS: Captured face ID {seen_fid} for '{args.name}'")
+        print(f"FACE_ID_NAMES={seen_fid}:{args.name}")
+        return 0
+    else:
+        print(f"No face detected within {args.timeout}s timeout.", file=sys.stderr)
+        print("Ensure face detection is enabled in Tapo app and lighting is adequate.", file=sys.stderr)
+        return 1
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     cmd = argv[0] if argv else "run"
@@ -500,6 +576,8 @@ def main(argv=None):
     if cmd == "shadow-scan":
         from .shadowscan import main as shadow_scan_main
         return shadow_scan_main(argv[1:])
+    if cmd == "learn-face":
+        return _learn_face(argv[1:])
     print(__doc__)
     return 2
 

@@ -174,6 +174,7 @@ TYPE_EMOJI = {"person": "👤", "vehicle": "🚗", "pet": "🐾", "tamper": "⚠
 
 def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_chat,
                 snapshot, time_str, can_alert=None, on_alert=None, face_names=None,
+                ignore_known=False,
                 defer=None, score=None, observe=None, poll_observe=None,
                 media_observe=None, latency_observe=None, mute=False, corroborate=None,
                 burst_sent=None,
@@ -242,8 +243,18 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             if lt.window is None or scheduling.in_clock_window(
                 lt.window, datetime.fromtimestamp(now)
             ):
-                if trigger_whitelamp is not None and trigger_whitelamp(cam):
-                    log.info("light_trigger: turned on white lamp for %s (%s)", cfg.name, etype)
+                if trigger_whitelamp is not None:
+                    force_time = getattr(cfg, "whitelamp_force_time", None)
+                    lamp_triggered = False
+                    if force_time is not None:
+                        try:
+                            lamp_triggered = trigger_whitelamp(cam, force_time=force_time)
+                        except TypeError:
+                            lamp_triggered = trigger_whitelamp(cam)
+                    else:
+                        lamp_triggered = trigger_whitelamp(cam)
+                    if lamp_triggered:
+                        log.info("light_trigger: turned on white lamp for %s (%s)", cfg.name, etype)
         event_flags = detection.decode_events_1(event.get("events_1"))
         defer_motion = (
             etype == "motion"
@@ -256,6 +267,11 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 or (cfg.sd_motion and event_flags["pir"])
             )
         )
+        if ignore_known and etype != "motion" and has_known_face(event, face_names):
+            label = enrich.face_label(face_ids(event), face_names)
+            log.info("skip %s: known face present (ignored: %s)", etype, label)
+            audit_event(cfg, event, etype, "live", "ignore_known", detail=label)
+            continue
         if not _can_alert(can_alert, etype, event):
             if etype != "motion" and has_known_face(event, face_names):
                 # A known face is new information, not a burst duplicate — the cooldown
@@ -318,6 +334,9 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             else:
                 # Groq disabled = raw mode: there is no arbiter to declare a scene
                 # empty, so nothing is — every live frame goes straight out.
+                empty = False
+            if etype == "tamper":
+                # Tamper events indicate camera blinding or covering; visual person scorer must not drop them.
                 empty = False
             if etype == "motion" and empty and defer_motion:
                 # This has to come before the corroborate gate. `empty` is

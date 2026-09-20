@@ -204,3 +204,42 @@ def test_clock_skew_exceeding_tolerance_reports_warning_drift():
     results = {item["path"]: item for item in twin.alertable_results(evaluation)}
     assert "clock.synchronized" in results
     assert results["clock.synchronized"]["severity"] == "warning"
+
+
+def test_tamper_detection_drift_reports_critical():
+    snapshot = _snapshot()
+    snapshot["groups"]["detection"]["tamper"] = {"state": "available", "value": {"enabled": "off"}}
+    plan = _plan(tamper_detection=True)
+    evaluation = twin.evaluate_snapshot("camera-a", plan, snapshot)
+    assert evaluation["drift"]["clean"] is False
+    results = {item["path"]: item for item in twin.alertable_results(evaluation)}
+    assert "detection.tamper.enabled" in results
+    assert results["detection.tamper.enabled"]["severity"] == "critical"
+    assert results["detection.tamper.enabled"]["actual"] is False
+
+
+def test_ldc_drift_reports_warning():
+    snapshot = _snapshot()
+    snapshot["groups"]["video"] = {"ldc": {"state": "available", "value": False}}
+    plan = _plan(ldc=True)
+    evaluation = twin.evaluate_snapshot("camera-a", plan, snapshot)
+    assert evaluation["drift"]["clean"] is False
+    results = {item["path"]: item for item in twin.alertable_results(evaluation)}
+    assert "video.ldc.enabled" in results
+    assert results["video.ldc.enabled"]["severity"] == "warning"
+    assert results["video.ldc.enabled"]["actual"] is False
+
+
+def test_smarttrack_pet_drift_reports_warning():
+    snapshot = _snapshot()
+    snapshot["groups"]["track"]["smart_config"] = {
+        "state": "available",
+        "value": {"smart_track_info": {"people_enabled": "on", "pet_enabled": "on"}},
+    }
+    plan = _plan(smarttrack=("people",))
+    evaluation = twin.evaluate_snapshot("camera-a", plan, snapshot)
+    assert evaluation["drift"]["clean"] is False
+    results = {item["path"]: item for item in twin.alertable_results(evaluation)}
+    assert "tracking.smart.pet_enabled" in results
+    assert results["tracking.smart.pet_enabled"]["severity"] == "warning"
+    assert results["tracking.smart.pet_enabled"]["actual"] is True

@@ -239,3 +239,56 @@ def test_newest_start():
 
 def test_newest_start_empty():
     assert camera.newest_start([]) is None
+
+
+def test_trigger_whitelamp_with_force_time():
+    configured_time = []
+    class Client:
+        def getWhitelampStatus(self):
+            return {"status": 0}
+        def reverseWhitelampStatus(self):
+            pass
+        def setWhitelampConfig(self, forceTime=None):
+            configured_time.append(forceTime)
+
+    client = Client()
+    assert camera.trigger_whitelamp(client, force_time=30) is True
+    assert configured_time == [30]
+
+
+def test_set_lens_distortion_correction():
+    calls = []
+    class Client:
+        def setLensDistortionCorrection(self, enabled):
+            calls.append(enabled)
+
+    client = Client()
+    assert camera.set_lens_distortion_correction(client, True) is True
+    assert calls == [True]
+
+
+def test_set_tamper_detection():
+    calls = []
+    class Client:
+        def setTamperDetection(self, enabled, sensitivity):
+            calls.append((enabled, sensitivity))
+
+    client = Client()
+    assert camera.set_tamper_detection(client, True, "high") is True
+    assert calls == [(True, "high")]
+
+
+def test_set_osd_safe():
+    executed = []
+    class Client:
+        def executeFunction(self, method, payload):
+            executed.append((method, payload))
+
+    client = Client()
+    assert camera.set_osd_safe(client, label="FRONT", date_enabled=True, week_enabled=True) is True
+    assert len(executed) == 1
+    method, payload = executed[0]
+    assert method == "setOsd"
+    assert payload["OSD"]["label_info_1"]["text"] == "FRONT"
+    assert payload["OSD"]["date"]["enabled"] == "on"
+    assert payload["OSD"]["week"]["enabled"] == "on"

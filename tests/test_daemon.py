@@ -429,6 +429,44 @@ def test_apply_plan_disables_vehicle_detection(monkeypatch):
     assert cam.vehicle is False
 
 
+def test_apply_plan_enforces_ldc_tamper_and_whitelamp(monkeypatch):
+    from tapo_monitor import tracking
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+
+    class FakeCam:
+        def __init__(self):
+            self.ldc = None
+            self.tamper = None
+            self.whitelamp = None
+        def executeFunction(self, *a, **k):
+            pass
+        def setMotionDetection(self, sensitivity=False):
+            pass
+        def setPersonDetection(self, enabled, sensitivity=False):
+            pass
+        def setVehicleDetection(self, enabled, sensitivity=False):
+            pass
+        def setLensDistortionCorrection(self, enabled):
+            self.ldc = enabled
+        def setTamperDetection(self, enabled, sensitivity="normal"):
+            self.tamper = (enabled, sensitivity)
+        def setWhitelampConfig(self, **kwargs):
+            self.whitelamp = kwargs
+        def setAutoTrackTarget(self, enabled):
+            pass
+        def getAutoTrackTarget(self):
+            return {"enabled": "off"}
+
+    cam = FakeCam()
+    camera_cfg = _cam(ldc=True, tamper_detection=True, tamper_sensitivity="high",
+                      whitelamp_force_time=30, whitelamp_intensity=90)
+    plan = daemon.plan_camera(camera_cfg, night=False, rain_active=False)
+    daemon.apply_plan(cam, plan)
+    assert cam.ldc is True
+    assert cam.tamper == (True, "high")
+    assert cam.whitelamp == {"forceTime": 30, "intensityLevel": 90}
+
+
 def test_repair_policy_is_inert_while_reliability_is_disabled():
     # The person/vehicle/SmartTrack re-assertions predate the reliability feature and
     # have always run every control pass. With `reliability.enabled: false` the whole

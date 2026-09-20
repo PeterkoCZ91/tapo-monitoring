@@ -244,6 +244,11 @@ class CameraConfig:
     coordinator: CoordinatorConfig = field(default_factory=CoordinatorConfig)
     pan_limit: PanLimitConfig = field(default_factory=PanLimitConfig)
     light_trigger: LightTriggerConfig = field(default_factory=LightTriggerConfig)
+    ldc: bool | None = None
+    tamper_detection: bool | None = None
+    tamper_sensitivity: str | None = None
+    whitelamp_force_time: int | None = None
+    whitelamp_intensity: int | None = None
 
 
 @dataclass
@@ -727,6 +732,31 @@ def _camera(data, index):
             # its detail while buying nothing.
             raise ConfigError(f"{where}: 'crop_from_native' is not supported with detection "
                               f"source 'hubpoll' (no native frame is grabbed)")
+    ldc = data.get("ldc")
+    if ldc is not None and not isinstance(ldc, bool):
+        raise ConfigError(f"{where}: 'ldc' must be a boolean")
+    tamper_detection = data.get("tamper_detection")
+    if tamper_detection is not None and not isinstance(tamper_detection, bool):
+        raise ConfigError(f"{where}: 'tamper_detection' must be a boolean")
+    tamper_sensitivity = data.get("tamper_sensitivity")
+    if tamper_sensitivity is not None and tamper_sensitivity not in ("low", "normal", "high"):
+        raise ConfigError(f"{where}: 'tamper_sensitivity' must be one of 'low', 'normal', 'high'")
+    whitelamp_force_time = data.get("whitelamp_force_time")
+    if whitelamp_force_time is not None:
+        try:
+            whitelamp_force_time = int(whitelamp_force_time)
+        except (TypeError, ValueError):
+            raise ConfigError(f"{where}: 'whitelamp_force_time' must be an integer") from None
+        if not 5 <= whitelamp_force_time <= 300:
+            raise ConfigError(f"{where}: 'whitelamp_force_time' must be between 5 and 300 seconds")
+    whitelamp_intensity = data.get("whitelamp_intensity")
+    if whitelamp_intensity is not None:
+        try:
+            whitelamp_intensity = int(whitelamp_intensity)
+        except (TypeError, ValueError):
+            raise ConfigError(f"{where}: 'whitelamp_intensity' must be an integer") from None
+        if not 1 <= whitelamp_intensity <= 100:
+            raise ConfigError(f"{where}: 'whitelamp_intensity' must be between 1 and 100")
     return CameraConfig(
         name=name,
         host=host,
@@ -776,6 +806,11 @@ def _camera(data, index):
             scene_window=scene_window,
             camera_order=camera_order,
         ),
+        ldc=ldc,
+        tamper_detection=tamper_detection,
+        tamper_sensitivity=tamper_sensitivity,
+        whitelamp_force_time=whitelamp_force_time,
+        whitelamp_intensity=whitelamp_intensity,
     )
 
 

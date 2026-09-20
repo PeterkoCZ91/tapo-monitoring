@@ -38,6 +38,23 @@ documented below as *available* but intentionally **not implemented** — see "A
   re-asserts the camera's own day/night switch. A colour night mode under a streetlight
   runs a slow shutter that smears moving subjects, so IR's faster shutter keeps the event
   frame sharper.
+- **Lens Distortion Correction (LDC)** (optional, per camera) — `ldc: true` toggles hardware
+  barrel-distortion correction directly on wide-angle 4K sensors (e.g. C560WS, C260).
+  Straightening vertical and horizontal lines across the field of view prevents subjects
+  at the frame perimeter from being distorted, boosting YOLO scorer bounding-box precision.
+  State is continuously tracked for drift by the Digital Twin (`video.ldc.enabled`).
+- **Tamper detection self-healing** (optional, per camera) — `tamper_detection: true` with
+  `tamper_sensitivity: low|normal|high` re-asserts tamper monitoring every control tick.
+  Blinding, lens covering, or physical redirection can no longer remain silently disabled.
+  In the alert funnel, tamper events bypass visual subject confidence thresholds to ensure
+  covered or blacked-out lenses trigger alerts immediately. Drift is reported as `critical`.
+- **Scaled whitelamp pulse duration** (optional, per camera) — `whitelamp_force_time: 30`
+  (5–300 s) overrides the excessive 300 s (5 minute) firmware default on white floodlight
+  activation. Paired with `whitelamp_intensity: 1–100`, detection-triggered lighting stays
+  polite, short, and focused without illuminating the street unnecessarily.
+- **Safe OSD formatting** — `set_osd_safe` wraps on-screen display updates via standard
+  `executeFunction` JSON-RPC rather than raw `performRequest`, avoiding connection drops and
+  firmware IP lockouts on outdoor models.
 
 ## 3. Enrichment & notification
 

@@ -31,6 +31,7 @@ _SAFE_PROBES = (
     ("storage", "record_plan", "getRecordPlan"),
     ("storage", "circular_recording", "getCircularRecordingConfig"),
     ("alerts", "event_types", "getAlertEventType"),
+    ("alerts", "led", "getLED"),
     # The one switch that stops a camera watching altogether: privacy mode parks the
     # lens and the camera records nothing, detects nothing and answers every motor
     # call with MOTOR_BUSY. Two cameras sat like that for nine hours on 2026-08-29
@@ -42,11 +43,19 @@ _SAFE_PROBES = (
     ("detection", "pet", "getPetDetection"),
     ("detection", "tamper", "getTamperDetection"),
     ("detection", "line_crossing", "getLinecrossingDetection"),
+    ("detection", "baby_cry", "getBabyCryDetection"),
+    ("detection", "bark", "getBarkDetection"),
+    ("detection", "glass_break", "getGlassBreakDetection"),
+    ("detection", "meow", "getMeowDetection"),
     ("track", "auto_target", "getAutoTrackTarget"),
     ("track", "smart_config", "getSmartTrackConfig"),
     ("track", "rotation", "getRotationStatus"),
+    ("light", "whitelamp_status", "getWhitelampStatus"),
+    ("light", "whitelamp_config", "getWhitelampConfig"),
     ("video", "qualities", "getVideoQualities"),
     ("video", "capability", "getVideoCapability"),
+    ("video", "ldc", "getLensDistortionCorrection"),
+    ("video", "osd", "getOsd"),
 )
 
 _SENSITIVE_KEYS = {

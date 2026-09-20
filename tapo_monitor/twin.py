@@ -69,6 +69,35 @@ def evaluate_snapshot(camera_name, plan, snapshot):
         "tracking.auto.enabled": "critical",
         "clock.synchronized": "warning",
     }
+    if getattr(plan, "tamper_detection", None) is not None:
+        desired["detection.tamper.enabled"] = bool(plan.tamper_detection)
+        actual["detection.tamper.enabled"] = _enabled(
+            _probe_value(snapshot, "detection", "tamper")
+        )
+        severities["detection.tamper.enabled"] = "critical"
+    if getattr(plan, "ldc", None) is not None:
+        desired["video.ldc.enabled"] = bool(plan.ldc)
+        actual["video.ldc.enabled"] = _enabled(
+            _probe_value(snapshot, "video", "ldc")
+        )
+        severities["video.ldc.enabled"] = "warning"
+    if getattr(plan, "smarttrack", None):
+        smart_val = _probe_value(snapshot, "track", "smart_config")
+        if isinstance(smart_val, Mapping):
+            st_info = (
+                smart_val.get("smart_track", {}).get("smart_track_info")
+                if isinstance(smart_val.get("smart_track"), Mapping)
+                else smart_val.get("smart_track_info")
+            )
+            if isinstance(st_info, Mapping):
+                if "pet_enabled" in st_info:
+                    desired["tracking.smart.pet_enabled"] = ("pet" in plan.smarttrack)
+                    actual["tracking.smart.pet_enabled"] = _enabled(st_info.get("pet_enabled"))
+                    severities["tracking.smart.pet_enabled"] = "warning"
+                if "vehicle_enabled" in st_info:
+                    desired["tracking.smart.vehicle_enabled"] = ("vehicle" in plan.smarttrack)
+                    actual["tracking.smart.vehicle_enabled"] = _enabled(st_info.get("vehicle_enabled"))
+                    severities["tracking.smart.vehicle_enabled"] = "warning"
     report = drift.evaluate_drift(
         desired, actual, severities=severities, scope=str(camera_name)
     )
@@ -240,6 +269,13 @@ def _probe_value(snapshot, group, name):
 def _enabled(value):
     if value in (drift.UNKNOWN, drift.UNSUPPORTED):
         return value
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        if value.lower() in {"on", "true", "1", "enabled"}:
+            return True
+        if value.lower() in {"off", "false", "0", "disabled"}:
+            return False
     if not isinstance(value, Mapping):
         return drift.UNKNOWN
     raw = value.get("enabled", drift.UNKNOWN)

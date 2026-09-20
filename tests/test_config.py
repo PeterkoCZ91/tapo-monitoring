@@ -1069,3 +1069,55 @@ def test_inactivity_alert_days_requires_hubpoll():
         cfg.load_config_from_dict(
             {"cameras": [{"name": "front", "host": "192.0.2.50",
                           "inactivity_alert_days": 7}]})
+
+
+def test_camera_ldc_tamper_and_whitelamp_options_parsed():
+    app = cfg.load_config_from_dict({
+        "cameras": [{
+            "name": "front",
+            "host": "192.0.2.50",
+            "ldc": True,
+            "tamper_detection": True,
+            "tamper_sensitivity": "high",
+            "whitelamp_force_time": 30,
+            "whitelamp_intensity": 80,
+        }]
+    })
+    cam = app.cameras[0]
+    assert cam.ldc is True
+    assert cam.tamper_detection is True
+    assert cam.tamper_sensitivity == "high"
+    assert cam.whitelamp_force_time == 30
+    assert cam.whitelamp_intensity == 80
+
+
+def test_camera_ldc_rejects_non_bool():
+    with pytest.raises(cfg.ConfigError, match="'ldc' must be a boolean"):
+        cfg.load_config_from_dict({
+            "cameras": [{"name": "front", "host": "192.0.2.50", "ldc": "yes"}]
+        })
+
+
+def test_camera_tamper_sensitivity_rejects_invalid():
+    with pytest.raises(cfg.ConfigError, match="'tamper_sensitivity' must be one of"):
+        cfg.load_config_from_dict({
+            "cameras": [{"name": "front", "host": "192.0.2.50", "tamper_sensitivity": "extreme"}]
+        })
+
+
+def test_camera_whitelamp_force_time_rejects_out_of_range():
+    with pytest.raises(cfg.ConfigError, match="'whitelamp_force_time' must be between"):
+        cfg.load_config_from_dict({
+            "cameras": [{"name": "front", "host": "192.0.2.50", "whitelamp_force_time": 2}]
+        })
+    with pytest.raises(cfg.ConfigError, match="'whitelamp_force_time' must be between"):
+        cfg.load_config_from_dict({
+            "cameras": [{"name": "front", "host": "192.0.2.50", "whitelamp_force_time": 600}]
+        })
+
+
+def test_camera_whitelamp_intensity_rejects_out_of_range():
+    with pytest.raises(cfg.ConfigError, match="'whitelamp_intensity' must be between"):
+        cfg.load_config_from_dict({
+            "cameras": [{"name": "front", "host": "192.0.2.50", "whitelamp_intensity": 150}]
+        })

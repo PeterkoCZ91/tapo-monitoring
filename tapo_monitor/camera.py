@@ -102,8 +102,12 @@ def whitelamp_on(client):
     return status.get("status") in (1, "1", True)
 
 
-def trigger_whitelamp(client):
-    """Turn on the camera's white lamp if supported and not already on. Never raises."""
+def trigger_whitelamp(client, force_time=None):
+    """Turn on the camera's white lamp if supported and not already on. Never raises.
+
+    If force_time is given, set the automatic pulse duration (e.g. 30s instead of
+    firmware default 300s) before triggering.
+    """
     def lamp_on():
         status = client.getWhitelampStatus()
         if not isinstance(status, dict):
@@ -111,6 +115,11 @@ def trigger_whitelamp(client):
         return status.get("status") in (1, "1", True)
 
     try:
+        if force_time is not None and hasattr(client, "setWhitelampConfig"):
+            try:
+                client.setWhitelampConfig(forceTime=int(force_time))
+            except Exception:
+                pass
         try:
             state = lamp_on()
         except Exception:  # noqa: BLE001 - transient (-40214 right after a switch); retry once
@@ -139,6 +148,51 @@ def trigger_whitelamp(client):
         log.warning("failed to trigger whitelamp: %s", exc)
         return False
     return False
+
+
+def set_lens_distortion_correction(client, enabled: bool) -> bool:
+    """Safely configure Lens Distortion Correction (LDC). Never raises."""
+    try:
+        if hasattr(client, "setLensDistortionCorrection"):
+            client.setLensDistortionCorrection(bool(enabled))
+            return True
+    except Exception as exc:
+        log.warning("failed to set LDC (%s): %s", enabled, exc)
+    return False
+
+
+def set_tamper_detection(client, enabled: bool, sensitivity: str = "normal") -> bool:
+    """Safely configure tamper detection. Never raises."""
+    try:
+        if hasattr(client, "setTamperDetection"):
+            client.setTamperDetection(bool(enabled), sensitivity)
+            return True
+    except Exception as exc:
+        log.warning("failed to set tamper detection: %s", exc)
+    return False
+
+
+def set_osd_safe(client, label: str = "", date_enabled: bool = True, week_enabled: bool = False) -> bool:
+    """Safely set OSD using executeFunction to avoid raw performRequest IP lockout."""
+    try:
+        payload = {
+            "OSD": {
+                "date": {"enabled": "on" if date_enabled else "off", "x_coor": 0, "y_coor": 0},
+                "week": {"enabled": "on" if week_enabled else "off", "x_coor": 6000, "y_coor": 500},
+            }
+        }
+        if label:
+            payload["OSD"]["label_info_1"] = {
+                "enabled": "on",
+                "text": label[:16],
+                "x_coor": 0,
+                "y_coor": 500,
+            }
+        client.executeFunction("setOsd", payload)
+        return True
+    except Exception as exc:
+        log.warning("failed to set OSD safely: %s", exc)
+        return False
 
 
 def new_events(events, last_seen):

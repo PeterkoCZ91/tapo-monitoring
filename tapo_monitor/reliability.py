@@ -12,8 +12,22 @@ import math
 import os
 from collections.abc import Iterable, Mapping
 
-REPAIR_NAMES = frozenset({"person_detection", "vehicle_detection", "smarttrack"})
-DEFAULT_REPAIRS = ("person_detection", "vehicle_detection", "smarttrack")
+REPAIR_NAMES = frozenset({
+    "person_detection",
+    "vehicle_detection",
+    "smarttrack",
+    "tamper_detection",
+    "ldc",
+    "whitelamp_config",
+})
+DEFAULT_REPAIRS = (
+    "person_detection",
+    "vehicle_detection",
+    "smarttrack",
+    "tamper_detection",
+    "ldc",
+    "whitelamp_config",
+)
 SEGMENT_SUFFIXES = (".mkv", ".mp4", ".ts")
 
 

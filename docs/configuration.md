@@ -314,6 +314,27 @@ guard recalls it within a `poll_interval` regardless of any hold.
 Setting `track_hold` without `back_time` is warned about at startup — the firmware would
 still swing the lens home on its own timer, so the hold buys no footage.
 
+### Hardware enhancements (LDC, tamper, whitelamp)
+
+```yaml
+ldc: true
+tamper_detection: true
+tamper_sensitivity: normal
+whitelamp_force_time: 30
+whitelamp_intensity: 100
+```
+
+- `ldc` (`true`/`false`, default unset) — enables on-sensor Lens Distortion Correction to remove
+  wide-angle fisheye/barrel distortion. Straightening perimeter lines prevents edge-of-frame
+  distortions from lowering YOLO person detection confidence.
+- `tamper_detection` (`true`/`false`, default unset) and `tamper_sensitivity` (`low`/`normal`/`high`, default `normal`) —
+  re-asserts tamper monitoring every control tick so that lens spray, physical covering, or
+  camera diversion cannot remain quietly turned off. In the alert funnel, tamper events bypass
+  visual object confidence gates and alert immediately.
+- `whitelamp_force_time` (5 to 300 seconds, default unset) — overrides the 300-second (5 minute)
+  firmware floodlight timer on detection triggers, allowing polite, short night pulses (e.g. 30 s).
+- `whitelamp_intensity` (1 to 100 %, default unset) — sets the floodlight brightness level.
+
 ### Weather policy
 
 ```yaml
