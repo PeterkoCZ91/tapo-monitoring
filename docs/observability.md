@@ -64,17 +64,25 @@ Health is reported independently for:
 | RTSP | latest event-triggered snapshot outcome |
 | storage | safe SD-card status getter |
 
-The desired-state comparison currently covers privacy mode off, person detection enabled,
-vehicle detection disabled, motion sensitivity and auto-track state. Unknown and
-unsupported actual values never alert.
+The desired-state comparison validates hardware state against policy every control tick:
 
-Privacy mode is the one state the control pass also acts on. A parked lens answers every
-motor call with `MOTOR_BUSY`, so a camera the twin last saw in privacy mode is sent its
-configuration calls but no preset recall — the recall would refuse however often it were
-re-sent, and the parked lens is already reported as critical drift. The skip is deliberately
-narrow: only a privacy value actually read from the camera stops the recall, an unknown one
-does not, and the aim is restored on the first control pass after privacy goes off. Stable drift keys deduplicate repeated mismatches; with `drift_alerts: true`,
-Telegram receives only a newly observed drift and its later recovery.
+| Drift Path | Severity | Expected / Policy |
+| --- | --- | --- |
+| `privacy.enabled` | `critical` | Privacy mode off (camera unparked and reporting). |
+| `detection.tamper.enabled` | `critical` | Tamper detection active (`tamper_detection: true`). |
+| `detection.person.enabled` | `critical` | On-device person detection active. |
+| `detection.vehicle.enabled` | `warning` | On-device vehicle detection state matches policy. |
+| `video.ldc.enabled` | `warning` | Lens Distortion Correction matches `ldc` setting. |
+| `light.whitelamp.force_time`| `warning` | Floodlight duration matches `whitelamp_force_time`. |
+| `tracking.smart.pet_enabled` | `warning` | SmartTrack pet filter matches `smarttrack` policy. |
+| `tracking.smart.vehicle_enabled` | `warning` | SmartTrack vehicle filter matches `smarttrack` policy. |
+| `motion.sensitivity` | `warning` | Digital motion sensitivity matches weather plan. |
+| `autotrack.enabled` | `warning` | PTZ tracking master switch matches role and day/night schedule. |
+| `clock.synchronized` | `warning` | Camera clock within skew tolerance (≤5.0 s). |
+
+Unknown and unsupported actual values never trigger alerts. Stable drift keys deduplicate
+repeated mismatches; with `drift_alerts: true`, Telegram receives only newly observed drift
+and its later recovery.
 
 Latest state is stored atomically with mode `0600` at
 `$XDG_STATE_HOME/tapo-monitor/twin.json` (normally

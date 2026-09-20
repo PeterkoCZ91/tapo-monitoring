@@ -218,12 +218,23 @@ its window. Checks, cheapest first:
   not fire the lamp.
 - Only the `getevents` detection source triggers it; sampler, SD and hub follow-ups do not.
 - On the C560WS (firmware 1.1.10) `getWhitelampStatus` and `reverseWhitelampStatus` work and
-  the lamp switches itself off after about 300 s. `setForceWhitelampState` is not supported
-  there. `reverseWhitelampStatus` is a toggle, so the daemon only fires it after a status
-  read that says the lamp is off, and never when the state is unreadable.
+  by default the lamp switches itself off after 300 s (5 minutes). Setting `whitelamp_force_time: 30`
+  or `60` overrides this in firmware via `setWhitelampConfig(forceTime=...)` so the lamp stays on
+  only for that duration.
+- `setForceWhitelampState` is not supported on this model. `reverseWhitelampStatus` is a toggle,
+  so the daemon only fires it after a status read that confirms the lamp is off, and never when
+  the state is unreadable.
 - A transient `-40214` right after a switch is normal; the daemon retries the status read once.
 - The log line is `light_trigger: turned on white lamp ...`; it is also written when the lamp
   was already on.
+
+## Tamper detection alerts immediately with score 0.00
+
+Tamper detection (`tamper_detection: true`) triggers when a lens is physically covered,
+sprayed with paint, or redirected. Because a covered or obscured lens contains no recognizable
+objects, the YOLO visual scorer returns a zero score (`0.00`). The monitoring pipeline
+intentionally bypasses visual confidence filtering for `etype == "tamper"` so that active
+sabotage alerts immediately rather than being dropped as an empty scene.
 
 ## Telegram delivery failures
 

@@ -21,7 +21,7 @@ detector, while optional scorer and recorder services improve evidence quality.
 - Continuous local inference on every frame.
 - Guaranteed support for every Tapo model/firmware combination.
 - Automatic firmware upgrades, SD formatting, calibration or destructive recovery.
-- Active alarm actions such as siren, speaker or floodlight control.
+- Acoustic alarm actions (siren, speaker audio playback) are prohibited to prevent outdoor public disturbance. Controlled white lamp courtesy illumination is supported (`light_trigger`).
 
 ## Components
 

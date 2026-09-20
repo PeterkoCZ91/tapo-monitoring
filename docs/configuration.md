@@ -166,6 +166,11 @@ authentication pressure without improving event latency.
 | `night_only` | boolean | Drains events but suppresses all Telegram traffic during daytime. |
 | `quiet_hours` | `"HH:MM-HH:MM"`, unset | Mutes INSIDE a fixed local clock window (the camera alerts outside it): detections are drained silently and all Telegram, including camera-down notices, is suppressed. The inverse gate of `night_only`, which reports only during the astral night. Wraps past midnight if end ≤ start. Mutually exclusive with `night_only`. To keep reporting all day and only switch the white lamp on in a night window, use `light_trigger` instead. |
 | `night_vision` | `ir`, `auto`, unset | Force IR by schedule, re-assert camera auto mode, or leave untouched. |
+| `ldc` | boolean, unset | On-sensor Lens Distortion Correction (LDC) to straighten wide-angle edges. |
+| `tamper_detection` | boolean, unset | Re-asserts tamper / anti-masking detection every tick. Tamper events bypass scorer. |
+| `tamper_sensitivity` | `low`, `normal`, `high` | Tamper detection sensitivity level (default `normal`). |
+| `whitelamp_force_time` | 5–300, unset | Scaled duration (seconds) for floodlight pulse on detection (overrides 300 s default). |
+| `whitelamp_intensity` | 1–100, unset | Floodlight pulse brightness percentage. |
 
 ### Credentials and streams
 

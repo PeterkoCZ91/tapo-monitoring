@@ -146,16 +146,16 @@ Rain makes auto-tracking cameras chase raindrops and IR reflections. Using open-
 - Deployment, health and calibration runbook ([`operations.md`](operations.md)), including
   setups that share one scorer across several caller services.
 
-## Actuators (available, documented, NOT implemented)
+## Actuators (hardware capabilities & safety policy)
 
 The firmware exposes an active-response layer reachable through the local API:
 
-- **Siren + light alarm** — `startManualAlarm` / `stopManualAlarm` / `playAlarm`.
-- **Floodlight / spotlight** — `setForceWhitelampState`, `manualFloodlightOp`.
-- **Speaker / two-way audio** — `setSpeakerVolume`, `testUsrDefAudio` (play a warning).
-
-These are listed for completeness. This project deliberately ships no code that triggers
-them; it stays a passive observe-and-notify stack.
+- **Acoustic siren + alarm** — `startManualAlarm` / `stopManualAlarm` / `playAlarm`. Intentionally
+  **not implemented** and prohibited to prevent public neighborhood nuisance on street cameras.
+- **Speaker / two-way audio** — `setSpeakerVolume`, `testUsrDefAudio`. Intentionally **not implemented**.
+- **Floodlight / white lamp pulse** — `reverseWhitelampStatus` and `setWhitelampConfig`. **Implemented**
+  as opt-in `light_trigger` with duration scaling (`whitelamp_force_time: 30–60 s`) to illuminate
+  subjects without triggering loud acoustic alarms or blinding neighbors.
 
 ## Beyond pytapo — what this project adds
 

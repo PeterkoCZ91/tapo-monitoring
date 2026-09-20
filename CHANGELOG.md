@@ -15,7 +15,7 @@ All notable changes to this project are documented here.
   gates to alert immediately. Watched as a `critical` drift key in the Digital Twin.
 - `whitelamp_force_time` (5–300 s) and `whitelamp_intensity` (1–100 %): per-camera options overriding
   the 300 s (5 minute) firmware floodlight default on detection triggers, allowing polite, short night
-  illumination pulses (e.g. 30 s).
+  illumination pulses (e.g. 30 s). Watched for drift in the Digital Twin (`light.whitelamp.force_time`).
 - `set_osd_safe`: wraps OSD updates via standard `executeFunction` JSON-RPC rather than pytapo's raw
   `performRequest`, preventing connection drops and firmware IP lockouts on outdoor models.
 - `tapo-monitor learn-face <name>`: CLI helper listening for live on-device face detection events to
