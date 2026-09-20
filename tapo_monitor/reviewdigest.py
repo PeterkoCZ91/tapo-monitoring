@@ -27,8 +27,12 @@ ENV_TIME = "TAPO_REVIEW_DIGEST_TIME"
 ENV_MAX_PHOTOS = "TAPO_REVIEW_DIGEST_MAX_PHOTOS"
 ENV_EXPECTED_FINGERPRINT = "TAPO_EXPECTED_FINGERPRINT"
 DEFAULT_MAX_PHOTOS = 4
+# Scorer failures below this share of requests are noise (a handful of timeouts in
+# 190k requests), shown in the detail line but not worth a "degraded" headline.
+SCORER_FAILURE_RATE_LIMIT = 0.01
 WINDOW_SECONDS = 86400.0
 STATE_NAME = ".digest-sent"
+SCORER_BASELINE_NAME = ".digest-scorer"
 
 
 def digest_time_from_env(env=None):
@@ -240,11 +244,15 @@ def fleet_lines(health):
     scorer = health.get("scorer")
     if isinstance(scorer, dict):
         if scorer.get("ok"):
+            failed = int(scorer.get("failed", 0) or 0)
+            requests = int(scorer.get("requests", 0) or 0)
+            rate = f" ({failed / requests:.3%})" if failed and requests else ""
             detail.append(
-                f"scorer {scorer.get('failed', 0)} failed / "
-                f"{scorer.get('requests', 0)} req, p95 {float(scorer.get('p95', 0.0)):.2f}s")
-            if scorer.get("failed"):
-                problems.append(f"scorer {scorer['failed']} failed request(s)")
+                f"scorer {failed} failed / {requests} req{rate}"
+                f"{' (24h)' if scorer.get('window') else ''}, "
+                f"p95 {float(scorer.get('p95', 0.0)):.2f}s")
+            if failed and (not requests or failed / requests > SCORER_FAILURE_RATE_LIMIT):
+                problems.append(f"scorer {failed} failed request(s)")
         else:
             problems.append(f"scorer unreachable ({scorer.get('error', 'no answer')})")
 
@@ -375,6 +383,44 @@ def photo_caption(entry):
     return f"{entry.get('verdict', 'hold')} {entry.get('camera', 'cam')} {score} {when}"
 
 
+def _scorer_baseline(review_dir):
+    try:
+        with open(os.path.join(review_dir, SCORER_BASELINE_NAME), encoding="utf-8") as f:
+            data = json.load(f)
+        return int(data["requests"]), int(data["failed"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def scorer_daily_delta(scorer, baseline):
+    """Scorer health with lifetime counters turned into since-last-digest counts. Pure.
+
+    The scorer's counters persist across restarts, so the raw numbers are lifetime
+    totals and one bad week stays in every later digest. A counter below the baseline
+    means the state was reset; the current value is then the whole delta. Without a
+    baseline (first digest) the totals are shown as they are.
+    """
+    if not isinstance(scorer, dict) or not scorer.get("ok") or baseline is None:
+        return scorer
+    requests, failed = int(scorer.get("requests", 0) or 0), int(scorer.get("failed", 0) or 0)
+    base_requests, base_failed = baseline
+    if requests < base_requests or failed < base_failed:
+        return scorer
+    return {**scorer, "requests": requests - base_requests, "failed": failed - base_failed,
+            "window": "24h"}
+
+
+def _save_scorer_baseline(review_dir, scorer):
+    if not isinstance(scorer, dict) or not scorer.get("ok"):
+        return
+    try:
+        with open(os.path.join(review_dir, SCORER_BASELINE_NAME), "w", encoding="utf-8") as f:
+            json.dump({"requests": int(scorer.get("requests", 0) or 0),
+                       "failed": int(scorer.get("failed", 0) or 0)}, f)
+    except OSError:
+        log.warning("could not save scorer digest baseline", exc_info=True)
+
+
 def run_if_due(*, env=None, now=None, send_text, send_photo, health=None):
     """Send the daily digest when configured and due. Returns True when it went out.
 
@@ -400,6 +446,10 @@ def run_if_due(*, env=None, now=None, send_text, send_photo, health=None):
         context = scan_context_line(review_dir, now)
         if context is not None:
             text = f"{text}\n{context}"
+        raw_scorer = health.get("scorer") if isinstance(health, dict) else None
+        if isinstance(health, dict):
+            health = {**health,
+                      "scorer": scorer_daily_delta(raw_scorer, _scorer_baseline(review_dir))}
         fleet = fleet_lines(health)
         alerts = alert_lines(sentlog.archive_dir_from_env(env), now)
         # Alerts belong under the fleet header when there is one: the indent is what says
@@ -415,6 +465,7 @@ def run_if_due(*, env=None, now=None, send_text, send_photo, health=None):
             send_photo(os.path.join(review_dir, str(entry["file"])), photo_caption(entry))
             photos += 1
         mark_sent(review_dir, now)
+        _save_scorer_baseline(review_dir, raw_scorer)
         # Say it out loud. Only failures used to log, so a working digest was
         # indistinguishable in the journal from one that had quietly stopped running, and
         # the only evidence either way was the state file.

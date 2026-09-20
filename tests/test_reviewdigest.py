@@ -608,3 +608,21 @@ def test_scan_context_reports_degraded_extraction(tmp_path):
     assert "incomplete coverage: front" in line
     assert "7 degraded segment(s), 7 extraction timeout(s)" in line
     assert "aborted" in line
+
+
+def test_fleet_lines_scorer_failure_noise_is_not_degraded():
+    base = {"cameras": {"a": {"reachable": True, "events": True}}}
+    quiet = reviewdigest.fleet_lines({**base, "scorer": {
+        "ok": True, "requests": 190815, "failed": 11, "p95": 1.87}})
+    assert quiet[0].startswith("\U0001f49a") and "0.006%" in quiet[1]
+    loud = reviewdigest.fleet_lines({**base, "scorer": {
+        "ok": True, "requests": 100, "failed": 5, "p95": 1.0}})
+    assert loud[0].startswith("\U0001f7e0")
+
+
+def test_scorer_daily_delta():
+    s = {"ok": True, "requests": 1000, "failed": 12, "p95": 1.0}
+    out = reviewdigest.scorer_daily_delta(s, (900, 10))
+    assert (out["requests"], out["failed"], out["window"]) == (100, 2, "24h")
+    assert reviewdigest.scorer_daily_delta(s, None) is s
+    assert reviewdigest.scorer_daily_delta(s, (5000, 10)) is s  # counters reset
