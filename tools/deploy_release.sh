@@ -26,6 +26,10 @@
 #                        e.g. --restart-cmd 'systemctl --user restart tapo-monitor'.
 #   --env-file PATH      env file on the host to snapshot and source for the selfcheck
 #                        (default: discovered from the unit's EnvironmentFile=)
+#   --health-wait SECS   after the restart, wait this long and require the unit to be
+#                        active and not crash-looping; if it is not, re-point `current`
+#                        at the release that was live before and restart again
+#                        (default 30, 0 disables; skipped for --restart-cmd true)
 #
 # Manual dry run (nothing needs to be a production host): point it at any ssh-reachable
 # account whose ~/tapo-monitor is expendable, seed ~/tapo-monitor/cameras.yaml and an env
@@ -40,13 +44,14 @@ die() { echo "deploy_release: $*" >&2; exit 1; }
 # shellcheck disable=SC2088  # the tilde is deliberately literal here: the remote side
 # expands it against the host's $HOME, not the workstation's.
 host="" ref="" unit="tapo-monitor.service" python_bin="~/tapo-env/bin/python"
-restart_cmd="" env_file=""
+restart_cmd="" env_file="" health_wait=30
 while (($#)); do
     case "$1" in
         --unit)        unit="${2:?--unit needs a value}"; shift 2 ;;
         --python)      python_bin="${2:?--python needs a value}"; shift 2 ;;
         --restart-cmd) restart_cmd="${2:?--restart-cmd needs a value}"; shift 2 ;;
         --env-file)    env_file="${2:?--env-file needs a value}"; shift 2 ;;
+        --health-wait) health_wait="${2:?--health-wait needs a value}"; shift 2 ;;
         -*)            die "unknown option $1" ;;
         # "$ref is still empty" is the test for "no ref given yet": using the default
         # value as the sentinel meant an explicit HEAD reopened the slot, so a third
@@ -60,6 +65,7 @@ done
 [[ -n "$host" ]] || die "usage: deploy_release.sh <ssh-host> [git-ref] [options]"
 ref="${ref:-HEAD}"
 restart_cmd="${restart_cmd:-sudo systemctl restart $unit}"
+[[ "$health_wait" =~ ^[0-9]+$ ]] || die "--health-wait needs a whole number of seconds"
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 stage="$(mktemp -d)"
@@ -139,6 +145,9 @@ chmod 600 "$snapshot"/*
 # Atomic switch: `ln -sfn` onto an existing link is unlink+symlink, two syscalls with a
 # no-`current` window between them that a unit restart could land in. Build the new link
 # aside and rename it over — rename(2) is atomic.
+# Remember what `current` pointed at, for the health check after the restart.
+prev_target="$(readlink "$root/current" 2>/dev/null || true)"
+printf '%s\n' "${prev_target#releases/}" > "$root/.previous_release"
 tmp_link="$root/.current.next.$$"
 ln -s "releases/$release" "$tmp_link"
 mv -T "$tmp_link" "$root/current"
@@ -157,9 +166,49 @@ REMOTE
 
 # ── restart, then believe only what the host reports back ─────────────────────────────
 echo "deploy_release: restarting via: $restart_cmd"
+# What was live before this deploy (written just before the switch) and how often
+# systemd had already restarted the unit — the reference for the health check below.
+# shellcheck disable=SC2029  # unit is composed here on purpose, it is a plain unit name.
+prev_release="$(ssh "$host" 'cat "$HOME/tapo-monitor/.previous_release" 2>/dev/null' || true)"
+# shellcheck disable=SC2029
+restarts_before="$(ssh "$host" "systemctl show -p NRestarts --value $unit 2>/dev/null" || true)"
 # shellcheck disable=SC2029  # client-side expansion is the point: the arguments are
 # %q-quoted (or a literal command) composed here and executed on the host.
 ssh "$host" "$restart_cmd"
+
+# Believe the unit, not the exit code of the restart command: a release that passed its
+# selfcheck can still crash-loop once it runs for real. NRestarts counts only automatic
+# restarts (Restart=always), so a manual `systemctl restart` does not move it and two or
+# more new ones inside the window mean the unit is flapping.
+if ((health_wait > 0)) && [[ "$restart_cmd" != "true" ]]; then
+    if [[ ! "$restarts_before" =~ ^[0-9]+$ ]]; then
+        echo "deploy_release: health check skipped — cannot read NRestarts of $unit on $host" >&2
+    else
+        echo "deploy_release: waiting ${health_wait}s to see the unit stay up"
+        sleep "$health_wait"
+        # shellcheck disable=SC2029
+        state="$(ssh "$host" "systemctl is-active $unit" || true)"
+        # shellcheck disable=SC2029
+        restarts_after="$(ssh "$host" "systemctl show -p NRestarts --value $unit" || true)"
+        [[ "$restarts_after" =~ ^[0-9]+$ ]] || restarts_after="$restarts_before"
+        if [[ "$state" != "active" ]] || ((restarts_after - restarts_before >= 2)); then
+            echo "deploy_release: HEALTH CHECK FAILED — $unit is '$state', $((restarts_after - restarts_before)) automatic restarts in ${health_wait}s" >&2
+            if [[ -n "$prev_release" && "$prev_release" != "$release" && "$prev_release" != "current" ]]; then
+                echo "deploy_release: rolling back to releases/$prev_release" >&2
+                # shellcheck disable=SC2029
+                ssh "$host" "set -e; cd \"\$HOME/tapo-monitor\"
+                    test -d \"releases/$prev_release\"
+                    ln -s \"releases/$prev_release\" .current.rollback.\$\$
+                    mv -T .current.rollback.\$\$ current"
+                # shellcheck disable=SC2029
+                ssh "$host" "$restart_cmd"
+                die "rolled back to releases/$prev_release; the failed release is kept in releases/$release"
+            fi
+            die "no previous release to roll back to; $unit needs attention on $host"
+        fi
+        echo "deploy_release: $unit stayed active, $((restarts_after - restarts_before)) automatic restarts"
+    fi
+fi
 
 remote_args="$(printf ' %q' "$fingerprint" "$python_bin" "$KEEP_RELEASES")"
 # shellcheck disable=SC2029  # client-side expansion is the point: the arguments are

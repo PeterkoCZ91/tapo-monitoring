@@ -74,3 +74,7 @@ docs/production-readiness-review-*.md
 # Local drafts and patch backups
 *.orig
 ha-forum-post.md
+
+# Stray GPU/kernel compiler debug dumps (e.g. from OpenVINO iGPU work), not repo content
+kernel.errors.txt
+*.kernel.errors.txt
