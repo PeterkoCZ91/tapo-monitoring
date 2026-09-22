@@ -16,27 +16,30 @@ A single event can carry several bits at once — e.g. `events_1 = 524290` is bi
 | bit | value | meaning | notes |
 |----:|------:|---------|-------|
 | 1   | 2        | motion          | basic/software motion; a frequent false positive on its own |
-| 5   | 32       | PIR sensor      | named by the firmware docs; fired exactly once in our captures (2026-09-22, `alarm_type=6`, see below) against a long run of never firing before that |
+| 5   | 32       | PIR sensor      | fires 1:1 with `alarm_type=6` — confirmed over ~10,400 events across two C560WS cameras over 2.5 months (2026-07 to 2026-09), never once alongside any other `alarm_type` |
 | 19  | 524288   | AI person       | the on-device AI confirmed a person — this is what `strict_people` alerts on |
 
-Where other docs mention hardware PIR, that confirmation arrives via `alarm_type`, not
-via bit 5 — the decoder still maps the bit, and `alarm_type` is logged with every event
-so the mapping stays checkable against real traffic.
+## `alarm_type`: two parallel channels, only one hardware-corroborated
 
-## `alarm_type = 6`: motion+PIR without the AI-person bit, but the companion app said "person"
+`alarm_type` isn't just correlated with the bits above, it gates which of two channels an
+event came in on. Across both fleet cameras' full retained history (674 events on one,
+9,722 on the other):
 
-One capture (2026-09-22, night, C560WS): `events_1 = 34` (bits 1 + 5, motion and PIR —
-both already-named bits, no `unknown_bits`), `alarm_type = 6`. Bit 19 (AI person) never
-set, in this single poll or any later one for the same event. The Tapo phone app tagged
-the same event "Person" — a subject slowly walking through frame, not running, despite
-the app also showing a running-person icon on the thumbnail.
+| `alarm_type` | PIR (bit 5) | share of events | AI-person (bit 19) rate |
+|-------------:|:-----------:|-----------------:|-------------------------:|
+| 2            | never       | ~82%             | 2–7%                     |
+| 6            | always      | ~18%             | 36–43%                   |
 
-So `alarm_type = 6` correlates with a real person here, but not through any bit our
-decoder can see — the app's classification isn't sourced from local `getEvents` at all
-(cloud-side or a richer on-device pipeline this API doesn't expose). `strict_people`
-alerts would have missed this event outright were it not for a downstream image scorer
-independently confirming a person from the frame. One capture is not a mapping — logged
-so a second one can confirm or contradict it.
+So `alarm_type=6` is the **PIR-corroborated** counterpart of the plain motion/person
+class (`alarm_type=2`), not a rare or unmapped value — earlier text in this doc claimed
+PIR "never once observed firing" and treated one `alarm_type=6` capture as a fluke; both
+were wrong, corrected 2026-09-22 against the real fleet history instead of a ~24h sample.
+
+The practical upshot: an `alarm_type=6` event is 5–15× more likely to carry the AI-person
+bit than a plain `alarm_type=2` one, but well under half still don't — a PIR hit raises
+the odds, it doesn't confirm a person by itself. `strict_people` still gates on bit 19
+alone, so an unconfirmed `alarm_type=6` event (motion+PIR, no person bit) can still only
+alert via a downstream image scorer, same as unconfirmed `alarm_type=2`.
 
 ## Observed but not yet ground-truthed
 
