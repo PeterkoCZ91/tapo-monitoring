@@ -16,12 +16,27 @@ A single event can carry several bits at once — e.g. `events_1 = 524290` is bi
 | bit | value | meaning | notes |
 |----:|------:|---------|-------|
 | 1   | 2        | motion          | basic/software motion; a frequent false positive on its own |
-| 5   | 32       | PIR sensor      | named by the firmware docs, but **never once observed firing** in our `getEvents` captures |
+| 5   | 32       | PIR sensor      | named by the firmware docs; fired exactly once in our captures (2026-09-22, `alarm_type=6`, see below) against a long run of never firing before that |
 | 19  | 524288   | AI person       | the on-device AI confirmed a person — this is what `strict_people` alerts on |
 
 Where other docs mention hardware PIR, that confirmation arrives via `alarm_type`, not
-via this never-observed bit 5 — the decoder still maps the bit, and `alarm_type` is
-logged with every event so the mapping stays checkable against real traffic.
+via bit 5 — the decoder still maps the bit, and `alarm_type` is logged with every event
+so the mapping stays checkable against real traffic.
+
+## `alarm_type = 6`: motion+PIR without the AI-person bit, but the companion app said "person"
+
+One capture (2026-09-22, night, C560WS): `events_1 = 34` (bits 1 + 5, motion and PIR —
+both already-named bits, no `unknown_bits`), `alarm_type = 6`. Bit 19 (AI person) never
+set, in this single poll or any later one for the same event. The Tapo phone app tagged
+the same event "Person" — a subject slowly walking through frame, not running, despite
+the app also showing a running-person icon on the thumbnail.
+
+So `alarm_type = 6` correlates with a real person here, but not through any bit our
+decoder can see — the app's classification isn't sourced from local `getEvents` at all
+(cloud-side or a richer on-device pipeline this API doesn't expose). `strict_people`
+alerts would have missed this event outright were it not for a downstream image scorer
+independently confirming a person from the frame. One capture is not a mapping — logged
+so a second one can confirm or contradict it.
 
 ## Observed but not yet ground-truthed
 
