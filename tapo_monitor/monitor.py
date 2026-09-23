@@ -239,6 +239,12 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
     for event, etype in alertable:
         audit_event(cfg, event, etype, "getevents", "detect")
         lt = getattr(cfg, "light_trigger", None)
+        if (lt is not None and lt.enabled and getattr(lt, "mode", "software") == "firmware"
+                and cfg.enrich.light_status):
+            # The firmware lights the lamp itself; read it while it is likely still lit
+            # (~20 s after the event) so a later SD/sampler caption can still show it.
+            camera.whitelamp_seen(cam, cfg.name, event.get("start_time"), now=now,
+                                  force_time=getattr(cfg, "whitelamp_force_time", None))
         if (lt is not None and lt.enabled and etype in lt.types
                 and getattr(lt, "mode", "software") == "software"):
             if lt.window is None or scheduling.in_clock_window(
@@ -255,6 +261,8 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                     else:
                         lamp_triggered = trigger_whitelamp(cam)
                     if lamp_triggered:
+                        camera.note_whitelamp(cfg.name, now,
+                                              now + (force_time or camera.LAMP_DEFAULT_FORCE_TIME))
                         log.info("light_trigger: turned on white lamp for %s (%s)", cfg.name, etype)
         event_flags = detection.decode_events_1(event.get("events_1"))
         defer_motion = (
@@ -431,7 +439,9 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 if notify.is_empty_scene(description):
                     description = ""
             label = enrich.face_label(face_ids(event), face_names)
-            light = camera.whitelamp_on(cam) if cfg.enrich.light_status else None
+            light = (camera.whitelamp_seen(cam, cfg.name, event.get("start_time"),
+                                           force_time=cfg.whitelamp_force_time)
+                     if cfg.enrich.light_status else None)
             caption = notify.build_caption(
                 TYPE_EMOJI.get(etype, "👁"), time_str(event),
                 description=description or None, detail=label or None, score=s,

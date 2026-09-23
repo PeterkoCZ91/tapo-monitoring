@@ -21,3 +21,13 @@ class FakeResponse:
 
     def __exit__(self, *exc):
         return False
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fresh_lamp_spans(monkeypatch):
+    """Give every test its own record of when a lamp was seen lit (module-level state)."""
+    from tapo_monitor import camera
+    monkeypatch.setattr(camera, "_lamp_spans", {})

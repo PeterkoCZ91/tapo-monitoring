@@ -119,6 +119,39 @@ def test_whitelamp_on_none_when_unsupported():
             raise Exception("UNSUPPORTED_METHOD")
     assert camera.whitelamp_on(Client()) is None
 
+def _lamp(status, rest=0):
+    class Client:
+        def getWhitelampStatus(self):
+            if status is None:
+                raise Exception("-40214")
+            return {"status": status, "rest_time": rest}
+    return Client()
+
+
+def test_whitelamp_seen_true_when_lit_during_event_though_dark_at_send():
+    # 2026-09-23: lit 03:04:04 for 60 s, event 03:03:50, SD alert sent 165 s later.
+    camera.note_whitelamp("c", 1004, 1064)
+    assert camera.whitelamp_seen(_lamp(0), "c", 990, now=1169) is True
+
+
+def test_whitelamp_seen_false_when_lit_only_outside_the_event():
+    camera.note_whitelamp("c", 1004, 1064)
+    assert camera.whitelamp_seen(_lamp(0), "c", 2000, now=2100) is False
+    assert camera.whitelamp_seen(_lamp(0), "other", 990, now=1169) is False
+
+
+def test_whitelamp_seen_records_a_lit_read_for_a_later_caption():
+    # Firmware-lit lamp read at detection (60 s force, 40 s left) -> lit 980..1040.
+    assert camera.whitelamp_seen(_lamp(1, rest=40), "c", 975, now=1000, force_time=60) is True
+    assert camera.whitelamp_seen(_lamp(0), "c", 975, now=1165) is True
+
+
+def test_whitelamp_seen_unknown_without_record_stays_none():
+    assert camera.whitelamp_seen(_lamp(None), "c", 975, now=1000) is None
+    camera.note_whitelamp("c", 990, 1050)
+    assert camera.whitelamp_seen(_lamp(None), "c", 975, now=1100) is True
+
+
 def test_whitelamp_on_none_on_malformed_response():
     class Client:
         def getWhitelampStatus(self):

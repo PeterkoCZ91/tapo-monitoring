@@ -102,6 +102,57 @@ def whitelamp_on(client):
     return status.get("status") in (1, "1", True)
 
 
+# Per camera: (lit_from, lit_until) spans in which the white lamp was seen lit. The
+# caption's 🔦 used to be the lamp state at send time, but an SD/sampler alert goes out
+# minutes after the event, long after a 60 s lamp has gone dark again (2026-09-23 03:04:
+# lit on time, alert at 03:06:49 without the icon). The spans let it mean "lit during
+# the event" instead.
+_lamp_spans: dict = {}
+LAMP_EVENT_SPAN = 120        # seconds after an event's start that still count as "during"
+LAMP_DEFAULT_FORCE_TIME = 300  # firmware's own on-time when whitelamp_force_time is unset
+_LAMP_KEEP = 3600
+
+
+def note_whitelamp(camera, lit_from, lit_until):
+    """Record that ``camera``'s lamp was lit over ``[lit_from, lit_until]``."""
+    spans = _lamp_spans.setdefault(camera, [])
+    spans[:] = [sp for sp in spans if sp[1] >= lit_until - _LAMP_KEEP]
+    spans.append((float(lit_from), float(lit_until)))
+
+
+def whitelamp_seen(client, camera, event_start, *, now=None, force_time=None,
+                   span=LAMP_EVENT_SPAN):
+    """Whether the lamp is lit now or was seen lit during the event. Never raises.
+
+    A lamp read as lit is recorded first: ``rest_time`` says when it goes dark, and with
+    the configured on-time also roughly when it came on. True when it is lit now or a
+    recorded span overlaps ``[event_start, event_start + span]``; otherwise the current
+    read (False, or None when it failed), so an unknown state still says nothing.
+    """
+    now = _time.time() if now is None else now
+    on = None
+    rest = None
+    try:
+        status = client.getWhitelampStatus()
+        if isinstance(status, dict):
+            on = status.get("status") in (1, "1", True)
+            rest = int(status.get("rest_time") or 0)
+    except Exception:  # noqa: BLE001 - best-effort caption enrichment only
+        on = None
+    if on:
+        total = force_time or LAMP_DEFAULT_FORCE_TIME
+        note_whitelamp(camera, now - max(total - (rest or 0), 0), now + (rest or 0))
+        return True
+    try:
+        start = float(event_start)
+    except (TypeError, ValueError):
+        return on
+    for lit_from, lit_until in _lamp_spans.get(camera, ()):
+        if lit_from <= start + span and lit_until >= start:
+            return True
+    return on
+
+
 def trigger_whitelamp(client, force_time=None):
     """Turn on the camera's white lamp if supported and not already on. Never raises.
 

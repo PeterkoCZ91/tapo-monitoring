@@ -1974,7 +1974,9 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
                 log.info("skip %s: known face present [sd] (ignored: %s)", etype, label)
                 monitor.audit_event(cfg, event, etype, "sd", "ignore_known", detail=label)
                 continue
-            light = camera.whitelamp_on(cam) if cfg.enrich.light_status else None
+            light = (camera.whitelamp_seen(cam, cfg.name, event.get("start_time"),
+                                           force_time=cfg.whitelamp_force_time)
+                     if cfg.enrich.light_status else None)
             caption = notify.build_caption(
                 monitor.TYPE_EMOJI.get(etype, "👤"), time_str(event),
                 description=description or None, detail=label or None,
@@ -2168,7 +2170,9 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                 continue
             description = _caption_describe(cfg, secrets["groq_key"], image)
             label = enrich.face_label(monitor.face_ids(group["event"]), secrets.get("face_names"))
-            light = camera.whitelamp_on(cam) if cfg.enrich.light_status else None
+            light = (camera.whitelamp_seen(cam, cfg.name, group["event"].get("start_time"),
+                                           force_time=cfg.whitelamp_force_time)
+                     if cfg.enrich.light_status else None)
             caption = notify.build_caption(
                 monitor.TYPE_EMOJI.get(etype, "👁"), time_str(group["event"]),
                 description=description or None, detail=label or None, score=s,
