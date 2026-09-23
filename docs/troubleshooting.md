@@ -227,6 +227,13 @@ its window. Checks, cheapest first:
 - A transient `-40214` right after a switch is normal; the daemon retries the status read once.
 - The log line is `light_trigger: turned on white lamp ...`; it is also written when the lamp
   was already on.
+- The lamp comes on late. The default (`mode: software`) toggles it when the polled event
+  arrives, and on the C560WS `getEvents` lags the event by ~20 s (median), so a person
+  walking past is often out of frame by then. `light_trigger: {window: ..., mode: firmware}`
+  instead switches the camera to smart night vision (`md_night_vision`) inside the window,
+  so the firmware lights the lamp itself on detection, and back to IR (`inf_night_vision`)
+  outside it; the log line is `night vision mode <old> -> <new>`. The firmware reacts to
+  any motion it detects, and the window `types` do not apply in this mode.
 
 ## Tamper detection alerts immediately with score 0.00
 

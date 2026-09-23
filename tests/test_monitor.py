@@ -1268,6 +1268,28 @@ def test_run_monitor_does_not_trigger_whitelamp_when_disabled():
     assert len(triggered) == 0
 
 
+def test_run_monitor_leaves_lamp_to_firmware_in_firmware_mode():
+    from datetime import datetime
+    triggered = []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    cfg = config.load_config_from_dict({"cameras": [{
+        "name": "a", "host": "203.0.113.10",
+        "light_trigger": {"window": "00:30-04:30", "mode": "firmware"},
+    }]}).cameras[0]
+
+    now_in = datetime(2026, 1, 1, 2, 0).timestamp()
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=now_in, groq_key="", telegram_token="", telegram_chat="",
+        snapshot=lambda *a: None, time_str=lambda e: "t",
+        trigger_whitelamp=lambda cam: triggered.append(cam) or True,
+    )
+    assert triggered == []
+
+
 def test_run_monitor_does_not_trigger_whitelamp_when_etype_mismatches():
     from datetime import datetime
     triggered = []

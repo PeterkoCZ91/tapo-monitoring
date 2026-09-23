@@ -347,6 +347,52 @@ def test_apply_plan_forces_ir_at_night(monkeypatch):
     assert cam.daynight == "on"
 
 
+def test_plan_night_vision_mode_follows_light_trigger_window():
+    from datetime import datetime
+    firmware = _cam(light_trigger={"window": "00:30-04:30", "mode": "firmware"})
+    inside, outside = datetime(2026, 1, 1, 3, 4), datetime(2026, 1, 1, 23, 1)
+    assert daemon.plan_camera(firmware, True, False, inside).night_vision_mode == "md_night_vision"
+    assert daemon.plan_camera(firmware, True, False, outside).night_vision_mode == "inf_night_vision"
+    software = _cam(light_trigger="00:30-04:30")
+    assert daemon.plan_camera(software, True, False, inside).night_vision_mode is None
+    assert daemon.plan_camera(_cam(), True, False, inside).night_vision_mode is None
+
+
+def test_apply_night_vision_mode_writes_only_on_change(caplog):
+    class Cam:
+        def __init__(self, mode):
+            self.mode, self.writes = mode, []
+
+        def getNightVisionModeConfig(self):
+            return {"image": {"switch": {"night_vision_mode": self.mode}}}
+
+        def setNightVisionModeConfig(self, mode):
+            self.writes.append(mode)
+            self.mode = mode
+
+    cam = Cam("md_night_vision")
+    daemon._apply_night_vision_mode(cam, "md_night_vision")
+    assert cam.writes == []
+    cam = Cam("inf_night_vision")
+    with caplog.at_level("INFO"):
+        daemon._apply_night_vision_mode(cam, "md_night_vision", "c")
+    assert cam.writes == ["md_night_vision"]
+    assert "inf_night_vision -> md_night_vision on c" in caplog.text
+
+
+def test_apply_night_vision_mode_counts_refusal():
+    class Cam:
+        def getNightVisionModeConfig(self):
+            raise RuntimeError("unreadable")
+
+        def setNightVisionModeConfig(self, mode):
+            raise RuntimeError("-40106")
+
+    failures = {}
+    daemon._apply_night_vision_mode(Cam(), "md_night_vision", failures=failures)
+    assert failures == {"night_vision_mode": 1}
+
+
 def test_apply_plan_ir_daytime_restores_colour(monkeypatch):
     # By day the same camera must be put back to day/colour ("off"), not left on IR.
     FakeCam, tracking = _nightvision_fakecam()

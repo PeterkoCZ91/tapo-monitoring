@@ -27,6 +27,7 @@ DETECTION_SOURCES = {"onvif", "getevents", "motion", "hubpoll"}
 SMARTTRACK_KINDS = {"people", "vehicle", "pet", "baby"}
 SNAPSHOT_SOURCES = {"rtsp", "sd"}
 LIGHT_TRIGGER_TYPES = {"person", "motion", "pet", "tamper", "vehicle"}
+LIGHT_TRIGGER_MODES = ("software", "firmware")
 
 
 class ConfigError(ValueError):
@@ -131,6 +132,10 @@ class LightTriggerConfig:
     enabled: bool = False
     window: tuple[int, int] | None = None  # (start_minute, end_minute)
     types: tuple[str, ...] = ("person", "motion")
+    # "software": the daemon toggles the lamp when a polled event arrives (getEvents lags
+    # the event by ~20 s, so a passer-by is usually gone). "firmware": inside the window
+    # the camera runs smart night vision and lights the lamp itself on detection.
+    mode: str = "software"
 
 
 @dataclass
@@ -581,7 +586,12 @@ def _light_trigger(data, where):
             if not isinstance(t, str) or t not in LIGHT_TRIGGER_TYPES:
                 opts = ", ".join(sorted(LIGHT_TRIGGER_TYPES))
                 raise ConfigError(f"{where}: 'light_trigger.types' has invalid {t!r}; allowed: [{opts}]")
-        return LightTriggerConfig(enabled=enabled, window=window, types=tuple(raw_types))
+        mode = data.get("mode", "software")
+        if mode not in LIGHT_TRIGGER_MODES:
+            raise ConfigError(f"{where}: 'light_trigger.mode' must be one of "
+                              f"{', '.join(LIGHT_TRIGGER_MODES)}")
+        return LightTriggerConfig(enabled=enabled, window=window, types=tuple(raw_types),
+                                  mode=mode)
     raise ConfigError(f"{where}: 'light_trigger' must be a string or mapping")
 
 

@@ -725,6 +725,22 @@ def test_light_trigger_dict_window_defaults_enabled_true():
     assert lt.types == ("person", "motion")
 
 
+def test_light_trigger_mode_defaults_to_software_and_parses_firmware():
+    base = {"name": "a", "host": "203.0.113.10"}
+    app = cfg.load_config_from_dict({"cameras": [dict(base, light_trigger="00:30-04:30")]})
+    assert app.cameras[0].light_trigger.mode == "software"
+    app = cfg.load_config_from_dict({"cameras": [dict(
+        base, light_trigger={"window": "00:30-04:30", "mode": "firmware"})]})
+    assert app.cameras[0].light_trigger.mode == "firmware"
+
+
+def test_light_trigger_rejects_unknown_mode():
+    data = {"cameras": [{"name": "a", "host": "203.0.113.10",
+                         "light_trigger": {"window": "00:30-04:30", "mode": "loud"}}]}
+    with pytest.raises(cfg.ConfigError, match="light_trigger.mode"):
+        cfg.load_config_from_dict(data)
+
+
 def test_light_trigger_rejects_bad_string_window():
     data = {"cameras": [{"name": "a", "host": "203.0.113.10", "light_trigger": "invalid"}]}
     with pytest.raises(cfg.ConfigError, match="light_trigger"):

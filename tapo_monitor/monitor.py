@@ -239,7 +239,8 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
     for event, etype in alertable:
         audit_event(cfg, event, etype, "getevents", "detect")
         lt = getattr(cfg, "light_trigger", None)
-        if lt is not None and lt.enabled and etype in lt.types:
+        if (lt is not None and lt.enabled and etype in lt.types
+                and getattr(lt, "mode", "software") == "software"):
             if lt.window is None or scheduling.in_clock_window(
                 lt.window, datetime.fromtimestamp(now)
             ):

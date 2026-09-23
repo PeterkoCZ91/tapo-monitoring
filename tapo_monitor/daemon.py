@@ -114,10 +114,34 @@ class CameraPlan:
     tamper_sensitivity: str | None = None
     whitelamp_force_time: int | None = None
     whitelamp_intensity: int | None = None
+    # Firmware night-vision mode ("md_night_vision" = smart: the camera lights its own white
+    # lamp on detection), or None to leave it alone. Set only by light_trigger mode firmware.
+    night_vision_mode: str | None = None
 
 
-def plan_camera(cfg: CameraConfig, night: bool, rain_active: bool) -> CameraPlan:
-    """Pure: decide the camera-control actions for one tick."""
+SMART_NIGHT_VISION = "md_night_vision"
+IR_NIGHT_VISION = "inf_night_vision"
+
+
+def plan_night_vision_mode(cfg: CameraConfig, clock: datetime | None = None) -> str | None:
+    """Pure: the firmware night-vision mode for a light_trigger in firmware mode.
+
+    The polled lamp toggle lands ~20 s after the event (median getEvents lag on the
+    C560WS, 2026-09-16..23), when someone walking past is already out of frame. Inside
+    the window the camera's own smart night vision lights the lamp on detection instead;
+    outside it the camera is kept on plain IR so the lamp stays dark.
+    """
+    lt = getattr(cfg, "light_trigger", None)
+    if lt is None or not lt.enabled or getattr(lt, "mode", "software") != "firmware":
+        return None
+    if lt.window is None or scheduling.in_clock_window(lt.window, clock):
+        return SMART_NIGHT_VISION
+    return IR_NIGHT_VISION
+
+
+def plan_camera(cfg: CameraConfig, night: bool, rain_active: bool,
+                clock: datetime | None = None) -> CameraPlan:
+    """Pure: decide the camera-control actions for one tick (``clock`` = local time)."""
     autotrack_on, rain_parked = tracking.decide_tracking(
         cfg.role, night, rain_active, cfg.weather.strategy, cfg.weather.storm_park
     )
@@ -157,6 +181,7 @@ def plan_camera(cfg: CameraConfig, night: bool, rain_active: bool) -> CameraPlan
         tamper_sensitivity=cfg.tamper_sensitivity,
         whitelamp_force_time=cfg.whitelamp_force_time,
         whitelamp_intensity=cfg.whitelamp_intensity,
+        night_vision_mode=plan_night_vision_mode(cfg, clock),
     )
 
 
@@ -279,6 +304,28 @@ def _recall_preset(cam, preset, camera=None) -> bool:
     return True
 
 
+def _apply_night_vision_mode(cam, mode, camera=None, failures=None):
+    """Switch the firmware night-vision mode, writing only when it differs.
+
+    Unlike the other re-assertions this one is read first: an image-pipeline write every
+    control pass is not free, and the switch happens only twice a night.
+    """
+    try:
+        current = cam.getNightVisionModeConfig()["image"]["switch"].get("night_vision_mode")
+    except Exception:  # noqa: BLE001 - unreadable: write it anyway, the write is idempotent
+        current = None
+    if current == mode:
+        return
+    try:
+        cam.setNightVisionModeConfig(mode)
+    except Exception as exc:  # noqa: BLE001 - a camera control failure must not stop polling
+        log.warning("self-heal night_vision_mode refused by camera: %s", exc)
+        if failures is not None:
+            failures["night_vision_mode"] = failures.get("night_vision_mode", 0) + 1
+        return
+    log.info("night vision mode %s -> %s%s", current, mode, f" on {camera}" if camera else "")
+
+
 def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
                repair_failures=None, camera=None, privacy_on=False, hold=False):
     """Apply a CameraPlan to a connected camera in firmware-safe order.
@@ -343,6 +390,8 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
                     kwargs["intensityLevel"] = plan.whitelamp_intensity
                 cam.setWhitelampConfig(**kwargs)
             _repair("whitelamp_config", _wtl, repair_failures)
+    if plan.night_vision_mode is not None and hasattr(cam, "setNightVisionModeConfig"):
+        _apply_night_vision_mode(cam, plan.night_vision_mode, camera, repair_failures)
     # A refused recall must be visible: the camera answers configuration calls happily
     # while sitting off-target, so a silent failure here is indistinguishable from a
     # healthy camera. One sat aimed at the ground for two days (2026-08-20) while this
@@ -408,7 +457,8 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
                 threshold=cfg.weather.precip_threshold,
                 poll_interval=cfg.weather.poll_interval,
             )
-        plan = plan_camera(cfg, effective_night(cfg, night), rain_active)
+        plan = plan_camera(cfg, effective_night(cfg, night), rain_active,
+                           datetime.fromtimestamp(now))
         plans[cfg.name] = plan
         if connect is not None:
             cam, _err = connect(cfg)
