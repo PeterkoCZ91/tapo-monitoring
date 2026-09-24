@@ -1253,22 +1253,29 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                 elif pending["etype"] == etype:
                     log.info("drop %s: SD follow-up already pending for %s", etype, _name)
                     return
-            state.pending_sd.append({
+            # A local recording is cheap to read twice, so it gets an early first look
+            # at the event's opening seconds; the SD card (a slow download behind
+            # pytapo's freshness guard) keeps its single window.
+            early = recclip.early_span(first_span) if _source == "recording" else None
+            entry = {
                 "camera": _name,
                 "etype": etype,
                 "event": event,
-                "span": first_span,
+                "span": early or first_span,
                 "full_span": full_span,
                 # Window and due time follow the camera's own event seconds (end_time),
                 # bounded by the camera's hardware budget (sd_span_cap): a longer event
                 # needs a wider window AND a later fetch, or the window end is still
                 # inside pytapo's freshness guard and downloads empty.
                 "due_at": (event.get("start_time") or now)
-                          + (recclip.fresh_delay(first_span)
+                          + (recclip.fresh_delay(early or first_span)
                              if _source == "recording"
                              else sdclip.fresh_delay(first_span)),
                 "live_sent": live_sent,
-            })
+            }
+            if early:
+                entry["rest_span"] = first_span     # read the remainder if the look is empty
+            state.pending_sd.append(entry)
         defer_fn = defer if cfg.sd_snapshot else None
         raw_snapshot = snapshot_for(cfg)
         raw_score = score_for(cfg)
@@ -2037,9 +2044,12 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
         if span is None:  # backwards-compatible with entries queued by older daemons
             span = sdclip.event_span(event, cap=cfg.sd_span_cap)
         full_span = entry.get("full_span", sdclip.event_span(event, cap=cfg.sd_span_cap))
+        # Seconds into the event this window starts: > 0 once an early look has read
+        # the opening seconds, so the remainder is not scored twice.
+        offset = entry.get("offset", 0)
         fetch_started = _time.monotonic()
         try:
-            frames = fetch(cfg, start_time, span=span, out_dir=job_dir)
+            frames = fetch(cfg, start_time + offset, span=span, out_dir=job_dir)
         finally:
             if app.reliability.enabled and app.reliability.latency_metrics:
                 reliability.observe_latency(
@@ -2072,11 +2082,25 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
                 if not cfg.enrich.groq or not notify.is_empty_scene(desc):
                     image, description = frame, desc          # subject found in this frame
                     break
+            if image is None and entry.get("rest_span"):
+                # The early look found nobody (or the recording had nothing yet): read the
+                # rest of the window at the time the whole window would have been read.
+                # No live fallback here — the full look below still owns that decision.
+                rest = entry.pop("rest_span")
+                entry["offset"] = offset + span
+                entry["span"] = rest - entry["offset"]
+                entry["due_at"] = start_time + recclip.fresh_delay(rest)
+                remaining.append(entry)
+                monitor.audit_event(cfg, event, etype, "sd", "retry",
+                                    reason=f"early_look={span}->{rest}")
+                log.info("retry %s: no subject in the first %ss of the recording; "
+                         "reading the rest at %ss", etype, span, rest)
+                continue
             if image is None:
                 if frames:
-                    if (etype == "motion" and span < full_span
+                    if (etype == "motion" and offset + span < full_span
                             and not entry.get("extended_retry")):
-                        entry["span"] = full_span
+                        entry["span"] = full_span - offset
                         entry["extended_retry"] = True
                         entry["due_at"] = now
                         remaining.append(entry)

@@ -185,6 +185,10 @@ All notable changes to this project are documented here.
   that outlives the hosts' retention, for labelling with `tapo-monitor label`.
 
 ### Changed
+- Recording follow-ups (`snapshot_source: recording`) come sooner: the window is read 15 s
+  after it ends instead of 60 s (a live recorder trails the clock by 2-3 s), and a window
+  over 28 s first reads the event's opening 24 s, sending as soon as a subject is there and
+  reading only the remainder otherwise (audited as `sd retry reason=early_look=...`).
 - Privacy mode is read on the control pass itself (one getter on the connected client),
   so a parked lens gets no recall on the very pass it parks and its aim is restored on
   the first pass after, instead of up to one twin probe (900 s) later. A guard recall the

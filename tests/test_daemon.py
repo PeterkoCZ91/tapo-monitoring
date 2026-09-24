@@ -2968,6 +2968,100 @@ def test_pending_recording_source_sends_sharpest(monkeypatch, source):
 
 
 
+def _recording_followup(monkeypatch, source="recording"):
+    # A confirmed person whose live frame is empty, on a camera that reads the local
+    # recording (or the SD card): the follow-up is queued by the real live pass.
+    monkeypatch.setattr(daemon.notify, "send_photo", lambda *a, **k: True)
+    monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "empty scene")
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
+                                  "snapshot_source": source, "sd_span_cap": 120}]})
+    state = daemon.MonitorState()
+
+    class Cam:
+        def getEvents(self):
+            return [{"start_time": 500, "end_time": 640,
+                     "events_1": 524290, "alarm_type": 2}]
+
+    secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
+    daemon.run_monitor_pass(app, {"a": Cam()}, state, now=2000, secrets=secrets,
+                            snapshot_for=lambda _cfg: (lambda cam, ev: "/tmp/live.jpg"),
+                            time_str=lambda ev: "T")
+    return app, state, Cam, secrets
+
+
+def test_recording_followup_takes_an_early_look_at_the_opening_seconds(monkeypatch):
+    _, state, _, _ = _recording_followup(monkeypatch)
+    entry = state.pending_sd[0]
+    assert entry["span"] == daemon.recclip.RECORDING_EARLY_SPAN
+    assert entry["rest_span"] == 120
+    assert entry["due_at"] == 500 + daemon.recclip.fresh_delay(
+        daemon.recclip.RECORDING_EARLY_SPAN)
+
+
+def test_sd_card_followup_keeps_one_window(monkeypatch):
+    # The SD card is a slow download behind pytapo's freshness guard: no second read.
+    _, state, _, _ = _recording_followup(monkeypatch, source="sd")
+    entry = state.pending_sd[0]
+    assert entry["span"] == 120 and "rest_span" not in entry
+    assert entry["due_at"] == 500 + daemon.sdclip.fresh_delay(120)
+
+
+def test_early_look_with_a_subject_sends_without_reading_the_rest(monkeypatch):
+    app, state, Cam, secrets = _recording_followup(monkeypatch)
+    calls, sent = [], []
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap, **k: sent.append(img) or True)
+    monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "Person")
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
+        calls.append((start_time, span))
+        return ["/tmp/rec.jpg"]
+    due = state.pending_sd[0]["due_at"]
+    daemon.process_pending_sd(app, {"a": Cam()}, state, now=due, secrets=secrets,
+                              snapshot_for=lambda _cfg: (lambda cam, ev: None),
+                              time_str=lambda ev: "T", fetch_frames=fetch_frames)
+    assert calls == [(500, daemon.recclip.RECORDING_EARLY_SPAN)]
+    assert sent == ["/tmp/rec.jpg"] and state.pending_sd == []
+
+
+def test_empty_early_look_reads_only_the_rest_at_the_full_windows_time(monkeypatch):
+    app, state, Cam, secrets = _recording_followup(monkeypatch)
+    early = daemon.recclip.RECORDING_EARLY_SPAN
+    calls, sent, live = [], [], []
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap, **k: sent.append(img) or True)
+    frames = {"early": [], "rest": ["/tmp/rest.jpg"]}
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
+        calls.append((start_time, span))
+        # Nothing on disk yet for the opening seconds: no live fallback may fire.
+        return frames["early" if len(calls) == 1 else "rest"]
+    def snapshot_for(_cfg):
+        return lambda cam, ev: live.append(ev) or "/tmp/live.jpg"
+    run = lambda now: daemon.process_pending_sd(  # noqa: E731
+        app, {"a": Cam()}, state, now=now, secrets=secrets, snapshot_for=snapshot_for,
+        time_str=lambda ev: "T", fetch_frames=fetch_frames)
+
+    run(state.pending_sd[0]["due_at"])
+    assert sent == [] and live == []
+    entry = state.pending_sd[0]
+    assert (entry["offset"], entry["span"]) == (early, 120 - early)
+    assert entry["due_at"] == 500 + daemon.recclip.fresh_delay(120)
+    run(entry["due_at"] - 1)
+    assert len(calls) == 1                         # not due yet
+
+    monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "Person")
+    run(entry["due_at"])
+    assert calls == [(500, early), (500 + early, 120 - early)]
+    assert sent == ["/tmp/rest.jpg"] and state.pending_sd == []
+
+
+def test_early_span_needs_room_for_a_second_read():
+    early = daemon.recclip.RECORDING_EARLY_SPAN
+    step = daemon.recclip.RECORDING_FRAME_EVERY
+    assert daemon.recclip.early_span(early + step) == early
+    assert daemon.recclip.early_span(early + step - 1) is None
+
+
 def _pending(cam_clients, sent, *, sd_ok=True, rtsp_ok=True, snapshot_calls=None):
     """Build app+state+collaborators for process_pending_sd tests."""
     app = cfg.load_config_from_dict(

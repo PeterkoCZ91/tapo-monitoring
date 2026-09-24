@@ -30,7 +30,15 @@ SEGMENT_SECONDS = 900
 RECORDING_FRAME_EVERY = 4
 # The recorder flushes continuously, but wait past the event's window so its trailing
 # frames are on disk before we read them. No pytapo freshness guard applies (local file).
-RECORDING_READY_MARGIN = 60
+# A live segment measured 2-3 s behind the wall clock; the event's start comes from the
+# camera clock, which the digest flags once it drifts past 5 s. 15 s covers both plus a
+# poll tick. It was 60, which alone held every recording follow-up back ~45 s.
+RECORDING_READY_MARGIN = 15
+# First look at a recording follow-up: the opening seconds of the event, read as soon as
+# they are on disk, so a subject already in view is alerted ~40 s after the event instead
+# of after the whole window. Six frames at RECORDING_FRAME_EVERY. The rest of the window
+# is read at its usual time only when this look finds no subject.
+RECORDING_EARLY_SPAN = 24
 
 _PREFIX = "zaznam_"
 _SUFFIX = ".mkv"
@@ -182,6 +190,17 @@ def select_sharpest(candidates):
 def fresh_delay(span):
     """Seconds to wait after the event before its window is flushed to disk."""
     return int(span) + RECORDING_READY_MARGIN
+
+
+def early_span(span):
+    """The first-look window for a ``span``-second follow-up, or None when it is too short.
+
+    Pure. A window that ends barely later than the first look would read almost the same
+    frames twice, so the split needs at least one more frame interval beyond it.
+    """
+    if int(span) >= RECORDING_EARLY_SPAN + RECORDING_FRAME_EVERY:
+        return RECORDING_EARLY_SPAN
+    return None
 
 
 def _run_ffmpeg(args):  # pragma: no cover - subprocess I/O

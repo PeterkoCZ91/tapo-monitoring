@@ -386,7 +386,12 @@ sd_jobs_per_tick: 1
   appears empty.
 - `snapshot_source: sd` downloads from the camera card.
 - `snapshot_source: recording` reads a local continuous recorder and requires
-  `sd_snapshot: true`.
+  `sd_snapshot: true`. A window is read 15 s after it ends (the recorder trails the
+  wall clock by a few seconds). A window longer than 28 s is read in two parts: the
+  event's first 24 s as soon as they are on disk, then the rest at the usual time only
+  when the first part shows no subject, so a subject already in view is alerted about
+  40 s after the event starts. The camera card (`sd`) keeps one window behind pytapo's
+  60 s freshness guard.
 - `sd_span_cap` bounds the event window downloaded/scanned.
 - `sd_motion_span_cap` bounds the first window for unconfirmed motion/PIR; one empty
   result retries with `sd_span_cap`. Confirmed person events use the full window directly.
