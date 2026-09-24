@@ -79,6 +79,12 @@ recorder and scorer can complement the daemon, but neither is required for the b
 - **Restart-safe, traceable alerts** — queued alerts and cooldowns survive a deploy;
   every alert carries an incident ID you can follow with `tapo-monitor incident`, and
   `tapo-monitor replay` checks a config change against a recorded night before it ships.
+- **Thresholds from your own frames, not guesswork** — a collector keeps every host's
+  sent and held frames beyond their retention, a larger teacher model labels the frames
+  it and the scorer agree on, and a local page shows you only the disagreements. On the
+  first pilot pass this turned 815 frames into 86 clicks, and showed that most frames
+  held back for corroboration were real people — the kind of finding a threshold tweak
+  by feel never produces.
 
 See the complete [capability catalog](docs/capabilities.md) and
 [architecture](docs/architecture.md).
@@ -193,8 +199,11 @@ aggregate-only runtime counters at `/metrics` for operational monitoring.
 Two opt-in calibration aids help tune thresholds by frame rather than by guesswork: an
 archive of every photo sent to Telegram (`TAPO_SENT_LOG_DIR`, self-pruning) and
 `python -m tapo_monitor.scene_probe`, which scores a live frame internally without alerting.
-See [Operations](docs/operations.md#inspecting-alert-frames); collected frames can be
-labeled with `tapo-monitor label` ([Labeling](docs/labeling.md)).
+See [Operations](docs/operations.md#inspecting-alert-frames). To calibrate from ground
+truth, `tools/collect_frames.sh` gathers every host's frames into one dataset,
+`tapo-monitor autolabel` pre-labels the easy ones with a larger teacher model and
+`tapo-monitor label` serves the rest on a local page; `label-stats` then reports the
+false-alarm rate, the misses and the best-separating threshold ([Labeling](docs/labeling.md)).
 
 ## Safety and privacy
 

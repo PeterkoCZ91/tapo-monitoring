@@ -10,13 +10,18 @@ threshold that would have separated the labeled frames best.
 
 ## Collecting a dataset
 
-Copy the sent-log and review-log folders off the hosts into one directory, in any layout:
+`tools/collect_frames.sh` pulls every host's sent and review logs into one directory and
+is safe to run nightly (for example from a user timer):
 
 ```bash
-mkdir -p dataset/host-a dataset/host-b
-rsync -a host-a:/var/lib/tapo/sent-log   dataset/host-a/
-rsync -a host-b:/var/lib/tapo/review-log dataset/host-b/
+tools/collect_frames.sh ~/tapo-dataset host-a host-b    # SSH aliases of the hosts
 ```
+
+It never deletes: frames stay after the host prunes them, and each host's
+`index.jsonl` is merged into the local one rather than copied over it, so entries the
+host has already forgotten are kept. Raise `TAPO_SENT_LOG_RETENTION_DAYS` /
+`TAPO_REVIEW_LOG_RETENTION_DAYS` on the hosts if the collector cannot run daily. Any
+other layout works too — a plain `rsync -a host:…/sent-log dataset/host/` is enough.
 
 Every `index.jsonl` under the directory is read, recursively. A record with a `verdict`
 field is a review frame; any other record is a sent frame. Records whose JPEG was pruned
