@@ -39,6 +39,8 @@ log = logging.getLogger(__name__)
 
 INDEX_NAME = "index.jsonl"
 LABELS_NAME = "labels.jsonl"
+# Teacher-model person scores written by tapo_monitor.autolabel, keyed by image hash.
+TEACHER_NAME = "teacher.jsonl"
 LABELS = ("person", "no_person", "unsure")
 UNLABELED = "unlabeled"
 GRAY_LOW = 0.30
@@ -155,18 +157,39 @@ def latest_labels(dataset_dir):
     return {sha: rec for sha, rec in latest.items() if rec.get("label") in LABELS}
 
 
-def build_queue(frames, labeled, *, seed=None, low_sample=None):
+def teacher_scores(dataset_dir):
+    """``{sha256: teacher person score}`` from ``teacher.jsonl``; latest line wins."""
+    scores = {}
+    for record in _read_jsonl(os.path.join(dataset_dir, TEACHER_NAME)):
+        sha, person = record.get("sha256"), _number(record.get("person"))
+        if isinstance(sha, str) and person is not None:
+            scores[sha] = person
+    return scores
+
+
+def build_queue(frames, labeled, *, seed=None, low_sample=None, teacher=None):
     """Unlabeled frames in review order. Pure apart from the seeded shuffle.
 
-    Gray zone first (the threshold's own uncertainty), then a random sample of low
-    scores (possible misses), then high scores (possible false alarms, nearest the gray
-    zone first), then frames without a score.
+    Frames a teacher model has scored come first, biggest disagreement with the
+    production score first: after :mod:`tapo_monitor.autolabel` has labeled every
+    frame both models agree on, what is left is exactly where one of them is wrong.
+    Then the gray zone (the threshold's own uncertainty), a random sample of low scores
+    (possible misses), high scores (possible false alarms, nearest the gray zone first)
+    and frames without a score.
     """
     rng = random.Random(seed)
+    teacher = teacher or {}
+    disputed = []
     by_band = {name: [] for name in BANDS}
     for frame in frames:
-        if frame.sha256 not in labeled:
+        if frame.sha256 in labeled:
+            continue
+        if frame.sha256 in teacher:
+            disputed.append(frame)
+        else:
             by_band[band(frame.score)].append(frame)
+    disputed.sort(key=lambda f: (-abs(teacher[f.sha256] - (0.5 if f.score is None
+                                                           else f.score)), f.path))
     by_band["gray"].sort(key=lambda f: (f.ts or 0.0, f.path))
     low = sorted(by_band["low"], key=lambda f: f.path)
     rng.shuffle(low)
@@ -174,7 +197,7 @@ def build_queue(frames, labeled, *, seed=None, low_sample=None):
         low = low[:max(0, int(low_sample))]
     by_band["high"].sort(key=lambda f: (f.score, f.path))
     by_band["none"].sort(key=lambda f: (f.ts or 0.0, f.path))
-    return by_band["gray"] + low + by_band["high"] + by_band["none"]
+    return disputed + by_band["gray"] + low + by_band["high"] + by_band["none"]
 
 
 class LabelSession:
@@ -188,8 +211,9 @@ class LabelSession:
         self.root_real = os.path.realpath(dataset_dir)
         self.frames = {f.path: f for f in load_frames(dataset_dir)}
         self._labeled = latest_labels(dataset_dir)
+        self._teacher = teacher_scores(dataset_dir)
         self._queue = build_queue(self.frames.values(), self._labeled,
-                                  seed=seed, low_sample=low_sample)
+                                  seed=seed, low_sample=low_sample, teacher=self._teacher)
         self._history: list[tuple] = []
         self._lock = threading.Lock()
 
@@ -266,7 +290,10 @@ class LabelSession:
     def state(self):
         with self._lock:
             frame = self._queue[0] if self._queue else None
-            return {"frame": _frame_view(frame), "remaining": len(self._queue),
+            view = _frame_view(frame)
+            if view is not None:
+                view["teacher"] = self._teacher.get(frame.sha256)
+            return {"frame": view, "remaining": len(self._queue),
                     "labeled": len(self._labeled), "can_undo": bool(self._history)}
 
     def image_path(self, rel):
@@ -352,6 +379,8 @@ def compute_stats(dataset_dir):
     stats["cameras"] = {cam: _summarize([r for r in records
                                          if str(r.get("camera") or "unknown") == cam])
                         for cam in cameras}
+    auto = sum(1 for r in records if str(r.get("by") or "").startswith("auto"))
+    stats["by"] = {"auto": auto, "human": len(records) - auto}
     stats["threshold"] = best_threshold(
         (r["score"], r["label"] == "person") for r in records
         if r["score"] is not None and r["label"] != "unsure")
@@ -399,7 +428,10 @@ def format_stats(stats):
 
     out = [line(STATS_HEADERS), line(tuple("-" * w for w in widths))]
     out += [line(r) for r in rows]
-    out += ["", _threshold_line(stats["threshold"]),
+    by = stats.get("by") or {}
+    out += ["", f"labels: {by.get('human', 0)} by a person, {by.get('auto', 0)} automatic "
+                "(both models agreed)",
+            _threshold_line(stats["threshold"]),
             "false alarms = sent frames labeled no_person; misses = review (held) frames "
             "labeled person; unsure excluded"]
     return "\n".join(out)
@@ -439,7 +471,7 @@ a{color:inherit}
 <img id="img" alt="frame">
 <div id="meta"><span>camera <b id="camera"></b></span><span id="time"></span>
 <span>source <b id="source"></b></span><span>person <b id="score"></b> <span id="band">
-</span></span></div>
+</span></span><span>teacher <b id="teacher"></b></span></div>
 <div id="buttons">
 <button data-label="person">&#9989; person <kbd>1</kbd></button>
 <button data-label="no_person">&#10060; no person <kbd>2</kbd></button>
@@ -467,6 +499,7 @@ function show(s) {
   $("time").textContent = current.time || "";
   $("source").textContent = current.source;
   $("score").textContent = current.score == null ? "n/a" : current.score.toFixed(2);
+  $("teacher").textContent = current.teacher == null ? "n/a" : current.teacher.toFixed(2);
   $("band").textContent = "(" + current.band + ")";
 }
 async function call(url, body) {

@@ -145,6 +145,9 @@ All notable changes to this project are documented here.
 - The daily digest's fleet block reports motor moves the arbiter held back and what the
   last restart carried over from `runtime.json`.
 
+- `tapo-monitor autolabel`: a larger teacher model labels the frames it and the
+  production scorer agree on, so the labeling page only shows disagreements, biggest
+  first.
 - `tools/collect_frames.sh` pulls every host's sent and review logs into one dataset
   that outlives the hosts' retention, for labelling with `tapo-monitor label`.
 

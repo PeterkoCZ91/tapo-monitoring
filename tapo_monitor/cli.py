@@ -13,6 +13,7 @@ Usage:
   tapo-monitor learn-face <name>        # capture face ID from camera events and output FACE_ID_NAMES
   tapo-monitor audit-log [logfile|-]    # summarize scorer/Telegram audit lines
   tapo-monitor incident <id>            # everything recorded for one incident ID
+  tapo-monitor autolabel <dataset> --model M  # teacher auto-labels frames it agrees on
   tapo-monitor label <dataset_dir>      # label collected alert frames in a local web page
   tapo-monitor label-stats <dataset_dir> # false alarms, misses and best threshold from labels
   tapo-monitor version                  # release plus a fingerprint of the deployed package
@@ -561,6 +562,9 @@ def main(argv=None):
     if cmd == "audit-log":
         from .audit import main as audit_main
         return audit_main(argv[1:])
+    if cmd == "autolabel":
+        from .autolabel import main as autolabel_main
+        return autolabel_main(argv[1:])
     if cmd == "incident":
         from .incident import main as incident_main
         return incident_main(argv[1:])

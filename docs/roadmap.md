@@ -463,11 +463,14 @@ shadows. The generic detector has never seen this fleet's IR night scenes.
 - [ ] Keep more of what matters: archive a sample of below-threshold frames (not only held
   ones) so possible misses keep reaching the labelling queue.
 
-### 9.3 — Teacher model on the GPU host
+### 9.3 — Teacher model
 
-- [ ] Run a larger detector over the collected dataset on the shared GPU host and queue
-  first the frames where it and the production scorer disagree — the most likely errors,
-  labelled first. Observe-only; nothing on the alert path changes.
+- [x] `tapo-monitor autolabel`: a larger detector (YOLOX-x) scores every collected frame
+  once; frames it and the production scorer agree on are labelled automatically, and the
+  labelling page queues the biggest disagreements first — the most likely errors, and
+  the only frames a person has to look at. Runs on the CPU of the operator's machine
+  (about 2 s a frame on two threads); observe-only, nothing on the alert path changes.
+- [ ] Move the teacher to the shared GPU host only when the dataset outgrows a CPU run.
 - [ ] Rules for the shared host: announce every write, work in one own directory, check
   free disk and GPU use first, clean up after each run.
 

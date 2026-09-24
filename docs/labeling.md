@@ -22,6 +22,32 @@ Every `index.jsonl` under the directory is read, recursively. A record with a `v
 field is a review frame; any other record is a sent frame. Records whose JPEG was pruned
 before the copy are skipped. The same image copied twice is shown once.
 
+## Let a teacher model label the easy frames first
+
+Nobody labels hundreds of frames by hand. A larger detector than the production scorer
+scores every frame once and labels the ones it agrees on:
+
+```bash
+tapo-monitor autolabel DATASET_DIR --model /path/to/yolox_x.onnx --threads 2
+```
+
+- production and teacher both at or above 0.65 → `person`; production below the gray
+  zone and teacher below 0.20 → `no_person`; frames without a production score need the
+  teacher alone at ≥ 0.80 / ≤ 0.10;
+- everything else — disagreements and the gray zone — is left for the labeling page,
+  which now shows the biggest disagreement first and the teacher score next to the
+  production one;
+- automatic labels carry `"by": "auto:<model>"` and the teacher score; a human label
+  always wins, and `label-stats` says how many labels were automatic;
+- teacher scores are cached in `teacher.jsonl` by image hash, so a rerun (for example
+  after the nightly collection) only scores new frames.
+
+Agreement is not ground truth: two detectors can share a blind spot. It only takes the
+frames nobody needs to look at out of the queue. The teacher needs the scorer extras
+(`onnxruntime`, `Pillow`); on a host that also runs the production scorer, keep
+`--threads` low and run it under `nice`. YOLOX-x (Apache-2.0) is published on the
+[YOLOX releases page](https://github.com/Megvii-BaseDetection/YOLOX/releases).
+
 ## Labeling
 
 ```bash
