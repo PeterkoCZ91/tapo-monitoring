@@ -262,7 +262,7 @@ so the canonical unit edit becomes cosmetic rather than blocking.
 
 ## Phase 7 — Runtime correctness and deterministic behaviour
 
-Status: **in progress** (7.1 done)
+Status: **in progress** (7.1–7.2 done)
 
 A gap review against a generic "autonomous PTZ platform" wish list found that most of
 it already exists here (digital twin, drift, self-healing, clock offsets, host watch,
@@ -298,12 +298,12 @@ Every deploy restarts the daemon, and a restart currently drops the hub retry qu
 only copy of those alerts), pending SD follow-ups and the alert cooldowns — the last one
 means a restart mid-incident can re-send an alert that was already delivered.
 
-- [ ] Persist `pending_hub`, `pending_sd` and the cooldown state (`last_alert`,
+- [x] Persist `pending_hub`, `pending_sd` and the cooldown state (`last_alert`,
   `last_event_start`) atomically next to the existing health state, with a schema version
   and a maximum age so a week-old queue is discarded rather than replayed.
-- [ ] Reload on start; entries whose media no longer exists are dropped with a log line,
+- [x] Reload on start; entries whose media no longer exists are dropped with a log line,
   never silently.
-- [ ] Tests: restart with a queued hub alert delivers it once; restart inside a cooldown
+- [x] Tests: restart with a queued hub alert delivers it once; restart inside a cooldown
   does not re-send; stale and corrupt files fall back to an empty state.
 
 ### 7.3 — Clean shutdown and thread-safe status reads

@@ -221,6 +221,7 @@ High-frequency state remains in memory. Only durable operational observations ar
 | Health | `~/.local/state/tapo-monitor/health.json` | Uptime/outage transitions, reconnect counts and pending recovery state. |
 | Digital Twin | `~/.local/state/tapo-monitor/twin.json` | Latest redacted fleet snapshot, health, drift and alert deduplication keys. |
 | Shadow ledger | `~/.local/state/tapo-monitor/events.sqlite3` | Normalized observations and pipeline decisions, no media. |
+| Runtime | `~/.local/state/tapo-monitor/runtime.json` | Hub delivery retries, pending SD follow-ups and alert cooldowns, carried across a restart; discarded when older than an hour. |
 
 Paths honor `XDG_STATE_HOME` and their respective overrides:
 `TAPO_HEALTH_STATE_FILE`, `TAPO_TWIN_STATE_FILE` and `TAPO_LEDGER_FILE`. JSON writes are

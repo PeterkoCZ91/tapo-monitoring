@@ -65,6 +65,14 @@ Network health transitions survive daemon restarts in
 with mode `0600` only when durable health state changes; high-frequency detection state
 remains in memory.
 
+Alert work in flight survives a restart too: hub delivery retries, pending SD follow-ups
+and the alert cooldowns are written to `runtime.json` beside the health file whenever they
+change, and restored on start (logged as `runtime state restored: ...`). A restart in the
+middle of a passage therefore neither drops a queued alert nor sends the same person
+twice. A queued hub retry whose frame file has meanwhile disappeared is dropped with a
+warning, and a file older than an hour is discarded whole — its entries' own ten-minute
+TTLs have long expired.
+
 Telegram delivery is part of the alert transition, not a fire-and-forget side effect.
 Failed outage and recovery messages remain pending until Telegram confirms delivery; a
 failed SD follow-up stays queued, and a failed sampler send leaves its group open. A failed

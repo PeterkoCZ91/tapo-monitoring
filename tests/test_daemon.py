@@ -5823,6 +5823,21 @@ def test_hubpoll_failed_delivery_is_queued_and_retried(monkeypatch, tmp_path):
     assert not os.path.exists(entry["image"])
 
 
+def test_hub_retry_queued_before_a_restart_is_delivered_once_after_it(monkeypatch, tmp_path):
+    # The hub cursor is already past the clip, so the retry queue is the only copy of this
+    # alert; a deploy restart used to drop it.
+    from tapo_monitor import runtime_state
+    app, state, calls = _hub_fail_once(tmp_path, monkeypatch, [False])
+    path = tmp_path / "runtime.json"
+    runtime_state.save(path, runtime_state.snapshot(state), now=1300)
+
+    restarted = daemon.MonitorState()
+    runtime_state.load(path, restarted, now=1320)
+    daemon.process_pending_hub(app, restarted, now=1361, secrets=_hub_secrets())
+    daemon.process_pending_hub(app, restarted, now=1500, secrets=_hub_secrets())
+    assert len(calls) == 2 and restarted.pending_hub == []
+
+
 def test_hubpoll_retry_gives_up_after_max_attempts(monkeypatch, tmp_path):
     app, state, calls = _hub_fail_once(tmp_path, monkeypatch, [False] * 10)
     image = state.pending_hub[0]["image"]

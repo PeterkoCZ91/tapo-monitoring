@@ -48,6 +48,7 @@ from . import (
     recclip,
     reliability,
     reviewdigest,
+    runtime_state,
     sampler,
     scene,
     scheduling,
@@ -592,6 +593,10 @@ class MonitorState:
     # Per camera, refused motor moves by "<requester>:<reason>" (see tapo_monitor.motion),
     # so a lens held on purpose is distinguishable from one nothing is trying to move.
     motion_refusals: dict = field(default_factory=dict)
+    # Queues and cooldowns persisted across a restart (see tapo_monitor.runtime_state):
+    # the file path, and the snapshot last written so an unchanged tick skips the write.
+    runtime_path: str | None = None
+    runtime_saved: dict | None = None
     # Per camera, the recent intervals in which the lens is known to have been off its
     # allowed span. The SD follow-up arrives ~2 minutes after the event and re-scores what
     # the camera *recorded*, so the guard having fixed the aim by then does not help: the
@@ -2695,6 +2700,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     drain(app, cam_clients, state, now=now, secrets=secrets, night=night)
     guard(app, cam_clients, state, now=now, secrets=secrets, night=night)
     digest(now=now, secrets=secrets, app=app, state=state)
+    runtime_state.save_if_changed(state, now, logger=log)
     return last_control
 
 
@@ -2722,6 +2728,12 @@ def main(argv=None):  # pragma: no cover - thin entry point
         state.hub_inactive_path, _time.time(), logger=log, max_age=math.inf)
     state.health_path = health.default_state_path()
     restored = health.load_state(state.health_path, state, logger=log)
+    state.runtime_path = runtime_state.default_path()
+    carried = runtime_state.load(state.runtime_path, state, _time.time(), logger=log)
+    if any(carried.values()):
+        log.info("runtime state restored: %d hub retr%s, %d SD follow-up(s), %d cooldown(s)",
+                 carried["pending_hub"], "y" if carried["pending_hub"] == 1 else "ies",
+                 carried["pending_sd"], carried["cooldowns"])
     state.twin_path = twin.default_state_path()
     state.twin_fleet = twin.load_state(state.twin_path, logger=log)
     state.twin_alerted = {
