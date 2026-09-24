@@ -65,3 +65,12 @@ def test_bounds_window_is_inclusive_at_its_edges():
     tilts = [("1", -1.0), ("2", -0.6), ("3", 0.5)]
 
     assert panlimit.bounds_from_presets(tilts, low=-1.0, high=-0.6) == (-1.0, "1", -0.6, "2")
+
+
+def test_motor_busy_is_a_refusal_and_transport_errors_are_not():
+    assert panlimit.is_motor_refusal(Exception("Error: MOTOR_BUSY, Error Code: -64304"))
+    assert panlimit.is_motor_refusal(RuntimeError("fault: -64304"))
+    assert not panlimit.is_motor_refusal(ConnectionError("MOTOR_BUSY"))
+    assert not panlimit.is_motor_refusal(TimeoutError("timed out"))
+    assert not panlimit.is_motor_refusal(OSError("connection reset"))
+    assert not panlimit.is_motor_refusal(Exception("Unknown error: 401"))

@@ -110,6 +110,23 @@ def read_preset_bounds(ptz, profile_token):  # pragma: no cover - network I/O
     return bounds_from_presets(pairs)
 
 
+# Markers of a motor that answered and said no, as opposed to a transport that failed:
+# a lens parked by privacy mode refuses every move with MOTOR_BUSY (-64304).
+_MOTOR_REFUSAL_MARKERS = ("motor_busy", "-64304", "privacy", "lens mask", "lens_mask")
+
+
+def is_motor_refusal(exc):
+    """True when ``exc`` is the camera refusing a move, not a failed transport. Pure.
+
+    A socket, timeout or connection error is always transport (the client must be
+    rebuilt); anything else counts as a refusal only when it names a busy/parked motor.
+    """
+    if isinstance(exc, (OSError, TimeoutError, ConnectionError)):
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in _MOTOR_REFUSAL_MARKERS)
+
+
 def goto_preset(ptz, profile_token, preset_token):  # pragma: no cover - network I/O
     """Recall the camera to a preset via ONVIF."""
     ptz.GotoPreset({"ProfileToken": profile_token, "PresetToken": str(preset_token)})

@@ -826,7 +826,7 @@ def test_loop_step_gives_the_control_pass_the_state_repair_counter(monkeypatch):
     seen = {}
 
     def fake_run_control(app_, *, now, connect, repair_failures=None, privacy=None, hold=None,
-                         motion_refusals=None):
+                         motion_refusals=None, privacy_seen=None):
         seen["got"] = repair_failures
         return {}
 
@@ -848,7 +848,7 @@ def test_loop_step_tells_the_control_pass_which_cameras_are_parked():
     seen = {}
 
     def fake_run_control(app_, *, now, connect, repair_failures=None, privacy=None, hold=None,
-                         motion_refusals=None):
+                         motion_refusals=None, privacy_seen=None):
         seen["privacy"] = privacy
         return {}
 
@@ -1293,7 +1293,7 @@ def test_loop_step_decouples_control_from_event_poll():
     calls = {"control": 0, "watchdog": 0, "monitor": 0, "drain": 0}
 
     def fake_control(app, now, connect, repair_failures=None, privacy=None, hold=None,
-                         motion_refusals=None):
+                         motion_refusals=None, privacy_seen=None):
         calls["control"] += 1
         connect(app.cameras[0])  # populate cam_clients like the real connect does
 
@@ -6180,3 +6180,29 @@ def test_shutdown_survives_a_failing_hub_close():
     state.hub_clients["hub"] = Hub()
     daemon.shutdown(state, now=1000)
     assert state.hub_clients == {}
+
+
+def test_read_privacy_parses_the_switch_and_never_guesses_parked():
+    from types import SimpleNamespace
+
+    def cam(answer):
+        def getter():
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        return SimpleNamespace(getPrivacyMode=getter)
+
+    assert daemon.read_privacy(cam({"enabled": "on"})) is True
+    assert daemon.read_privacy(cam({"enabled": "off"})) is False
+    assert daemon.read_privacy(cam({})) is None
+    assert daemon.read_privacy(cam(Exception("-40401"))) is None
+    assert daemon.read_privacy(SimpleNamespace()) is None
+
+
+def test_parked_lenses_prefers_the_control_pass_read_over_the_twin():
+    state = daemon.MonitorState()
+    state.twin_fleet = {"a": {"actual": {"privacy.enabled": True}},
+                        "b": {"actual": {"privacy.enabled": False}},
+                        "c": {"actual": {"privacy.enabled": True}}}
+    state.privacy_seen = {"a": False, "b": True}
+    assert daemon.parked_lenses(state) == {"b", "c"}

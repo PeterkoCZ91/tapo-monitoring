@@ -80,12 +80,13 @@ def test_a_subject_that_never_leaves_still_gets_the_preset_back(monkeypatch, tmp
 
 # ── privacy mode ─────────────────────────────────────────────────────────────
 
-def test_a_lens_parked_by_privacy_gets_no_motor_calls_once_the_twin_saw_it(
+def test_a_lens_parked_by_privacy_gets_no_motor_calls_once_a_control_pass_saw_it(
         monkeypatch, tmp_path):
     # Privacy mode parks the lens (here outside the pan span) and answers every motor call
-    # with MOTOR_BUSY. Until the twin has read the switch, both paths still try; from the
-    # probe that reads it on, neither sends a thing. When it goes off again, the guard
-    # restores the aim on the tick the twin reads it and the schedule follows.
+    # with MOTOR_BUSY. Between control passes the guard still tries — and its refusals are
+    # counted, not treated as ONVIF failures; from the control pass that reads the switch
+    # on, neither path sends a thing. When it goes off again, the first control pass
+    # restores the aim, and the twin keeps reporting the state on its own probes.
     sc = Scenario(monkeypatch, tmp_path, [tracking_camera()],
                   observability={"digital_twin": True, "probe_interval": 60})
     cam = sc.cams["a"]
@@ -93,20 +94,21 @@ def test_a_lens_parked_by_privacy_gets_no_motor_calls_once_the_twin_saw_it(
     cam.privacy = True                           # someone flips it in the app
     cam.pan_x = 0.95
     sc.run(210)                                  # 90..295
+    assert sc.state.twin_fleet["a"]["actual"]["privacy.enabled"] is True
     cam.privacy = False
     sc.run(90)                                   # 300..385
 
     stale = [a for t, a in sc.timeline if at(90) <= t < at(120)]
-    assert stale == [("goto", "a", "3")] * 3     # 90, 100, 110: the twin has not looked
-    assert sc.when(("recall", "a", "2")) == [at(0), at(60), at(120), at(120), at(360)]
-    parked = [a for t, a in sc.timeline if at(120) < t < at(300)
+    assert stale == [("goto", "a", "3")] * 3     # 90, 100, 110: no control pass yet
+    assert sc.when(("recall", "a", "2")) == [at(0), at(60), at(300), at(360)]
+    parked = [a for t, a in sc.timeline if at(120) <= t < at(300)
               and a[0] in ("recall", "goto")]
-    assert parked == []                          # twin saw it at 120: hands off
-    assert sc.state.motion_refusals["a"]["schedule:privacy"] == 3     # 180, 240, 300
+    assert parked == []                          # control pass read it at 120: hands off
+    assert sc.state.motion_refusals["a"]["schedule:privacy"] == 3     # 120, 180, 240
     assert collapse(sc.motor(since=at(300))) == [
-        ("goto", "a", "3"),                      # 300: twin reads "off", guard fixes aim
-        ("recall", "a", "2"),                    # 360: first control pass that knows
+        ("recall", "a", "2"),                    # 300: the control pass reads "off"
     ]
+    assert sc.state.twin_fleet["a"]["actual"]["privacy.enabled"] is False
     assert cam.pan_x == 0.50
 
 
@@ -126,6 +128,91 @@ def test_firmware_without_a_privacy_read_never_blocks_the_recall(monkeypatch, tm
     assert sc.state.twin_fleet["a"]["actual"]["privacy.enabled"] == "unsupported"
     assert twin.cameras_in_privacy(sc.state.twin_fleet) == set()
     assert "a" not in sc.state.motion_refusals
+
+
+def test_the_control_pass_reads_privacy_itself_on_the_pass_it_goes_on(monkeypatch, tmp_path):
+    # The twin probes every 15 minutes (the default); privacy goes on just before a
+    # control pass. That pass reads the switch on its own connected client, so it sends
+    # neither the recall nor its retry, and the guard in the same tick keeps its hands off.
+    sc = Scenario(monkeypatch, tmp_path, [tracking_camera()],
+                  observability={"digital_twin": True})
+    cam = sc.cams["a"]
+    sc.run(60)                                   # 0..55: twin read "off" at 0
+    cam.privacy = True
+    cam.pan_x = 0.95                             # parked outside the span
+    sc.run(130)                                  # 60..185
+
+    assert sc.when(("recall", "a", "2")) == [at(0)]
+    assert sc.motor(since=at(60)) == []
+    assert sc.state.motion_refusals["a"]["schedule:privacy"] == 3     # 60, 120, 180
+    assert sc.state.twin_fleet["a"]["actual"]["privacy.enabled"] is False  # not probed yet
+
+
+def test_aim_comes_back_on_the_first_control_pass_after_privacy_goes_off(
+        monkeypatch, tmp_path):
+    # Privacy on at 60, off at 190. The twin would not look again until 900; the control
+    # pass at 240 reads "off" itself and restores the aim, and the guard (same tick, after
+    # the recall) finds the lens back inside its span.
+    sc = Scenario(monkeypatch, tmp_path, [tracking_camera()],
+                  observability={"digital_twin": True})
+    cam = sc.cams["a"]
+    sc.run(60)
+    cam.privacy = True
+    cam.pan_x = 0.95
+    sc.run(130)                                  # 60..185
+    cam.privacy = False
+    sc.run(60)                                   # 190..245
+
+    assert sc.motor(since=at(190)) == [("recall", "a", "2")]
+    assert sc.when(("recall", "a", "2")) == [at(0), at(240)]
+    assert cam.pan_x == 0.50
+
+
+def test_a_failed_privacy_read_falls_back_to_the_twin(monkeypatch, tmp_path):
+    # The quick read failing must never be taken for "parked": with the twin saying off,
+    # the recall still goes out every pass.
+    sc = Scenario(monkeypatch, tmp_path, [tracking_camera(pan_limit={"enabled": False})],
+                  observability={"digital_twin": True})
+    cam = sc.cams["a"]
+
+    def broken():
+        raise Exception("-40401 read refused")
+    cam.getPrivacyMode = broken
+    sc.run(180)
+
+    assert sc.when(("recall", "a", "2")) == [at(0), at(60), at(120)]
+    assert "a" not in sc.state.motion_refusals
+
+
+def test_a_guard_goto_refused_by_a_parked_lens_keeps_the_onvif_client(monkeypatch, tmp_path):
+    # Privacy goes on between control passes, so the guard still tries its GotoPreset and
+    # the parked lens answers MOTOR_BUSY. That is a refusal, not a transport failure: it is
+    # counted as one and the ONVIF client is kept, not rebuilt every poll. From the next
+    # control pass on the guard does not even try; after privacy goes off it restores the
+    # aim on the next control pass.
+    builds = []
+    sc = Scenario(monkeypatch, tmp_path, [tracking_camera()],
+                  observability={"digital_twin": True})
+    build = sc._build_ptz
+
+    def counting_build(*a, **k):
+        builds.append(sc.clock.now)
+        return build(*a, **k)
+    monkeypatch.setattr("tapo_monitor.daemon.panlimit.build_ptz", counting_build)
+    cam = sc.cams["a"]
+    sc.run(90)                                   # 0..85
+    cam.privacy = True
+    cam.pan_x = 0.95
+    sc.run(90)                                   # 90..175
+    cam.privacy = False
+    sc.run(20)                                   # 180..195
+
+    assert builds == [at(0)]
+    assert sc.when(("goto", "a", "3")) == [at(90), at(100), at(110)]
+    # 90..110 refused by the lens, 120..170 skipped because the control pass read it
+    assert sc.state.motion_refusals["a"]["pan_limit:privacy"] == 3 + 6
+    assert sc.motor(since=at(180)) == [("recall", "a", "2")]
+    assert cam.pan_x == 0.50
 
 
 # ── connectivity ─────────────────────────────────────────────────────────────

@@ -406,9 +406,9 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
     # ...unless the lens is parked. Privacy mode answers every motor call with
     # MOTOR_BUSY, so the recall cannot land however often it is re-sent: two cameras
     # spent ten hours refusing it 1140 times on 2026-08-29. Skipping is safe precisely
-    # because it is narrow — only a privacy state the twin actually read turns it off,
-    # an unknown one still recalls, and the aim is restored on the first pass after the
-    # switch goes off. The camera is not silently un-repaired either: privacy.enabled is
+    # because it is narrow — only a privacy state actually read (this pass, else by the
+    # twin) turns it off, an unknown one still recalls, and the aim is restored on the
+    # first pass after the switch goes off. The camera is not silently un-repaired either: privacy.enabled is
     # a critical drift key, so the twin reports the parked lens itself.
     if plan.preset:
         move = motion.decide(motion.SCHEDULE, privacy_on=privacy_on, hold=hold,
@@ -436,8 +436,44 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
     return tracking.ensure_autotrack(cam, plan.autotrack_on, back_time=plan.back_time)
 
 
+def read_privacy(cam):
+    """Read the privacy switch on an already-connected client: True, False or None.
+
+    One getter call, no login: the twin probes privacy only every ``probe_interval``
+    (15 min by default), which let the first control pass after the switch went on send
+    a recall the parked lens could only refuse, and restored the aim up to a probe late
+    after it went off. ``None`` — firmware without the call, a refused or odd answer —
+    means "not known" and callers fall back to the twin; it is never read as parked.
+    """
+    getter = getattr(cam, "getPrivacyMode", None)
+    if not callable(getter):
+        return None
+    try:
+        return twin.privacy_from_reading(getter())
+    except Exception as exc:  # noqa: BLE001 - an optional read must not stop the pass
+        log.debug("privacy read failed: %s", exc)
+        return None
+
+
+def parked_lenses(state):
+    """Cameras whose lens privacy mode has parked, freshest reading first. Pure.
+
+    The twin's last probe, overridden per camera by the control pass's own read of the
+    switch (``state.privacy_seen``), which is never older than the probe: the twin only
+    probes on control passes, right after that read. A ``None`` read keeps the twin value.
+    """
+    parked = twin.cameras_in_privacy(state.twin_fleet)
+    for name, seen in (state.privacy_seen or {}).items():
+        if seen is True:
+            parked.add(name)
+        elif seen is False:
+            parked.discard(name)
+    return parked
+
+
 def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=None,
-             repair_failures=None, privacy=None, hold=None, motion_refusals=None):
+             repair_failures=None, privacy=None, hold=None, motion_refusals=None,
+             privacy_seen=None):
     """One pass over all cameras. Dependencies injectable for testing.
 
     Returns a dict {camera_name: CameraPlan} of what was planned. ``repair_failures`` is
@@ -446,6 +482,10 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
     parked; they get every configuration call but no motor call. ``hold`` names the
     cameras whose auto-track is currently on a subject; they keep every configuration call
     too, but their preset recall waits (see :func:`cameras_holding_recall`).
+
+    A camera that moves (a preset or the pan guard) also has its privacy switch read on
+    the connected client this pass (:func:`read_privacy`); a definite answer overrides the
+    twin's ``privacy`` for this pass and is stored in ``privacy_seen`` for the guard.
     """
     now = now if now is not None else _time.time()
     is_night = is_night or scheduling.is_night
@@ -474,16 +514,25 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
         plan = plan_camera(cfg, effective_night(cfg, night), rain_active,
                            datetime.fromtimestamp(now))
         plans[cfg.name] = plan
+        if privacy_seen is not None:
+            privacy_seen.pop(cfg.name, None)
         if connect is not None:
             cam, _err = connect(cfg)
             if cam is not None:
+                privacy_on = cfg.name in (privacy or ())
+                if plan.preset or cfg.pan_limit.enabled:
+                    fresh = read_privacy(cam)
+                    if fresh is not None:
+                        privacy_on = fresh
+                        if privacy_seen is not None:
+                            privacy_seen[cfg.name] = fresh
                 # apply_plan asserts auto-track last and verifies it. Dropping that answer
                 # made a camera that refuses auto-track indistinguishable from a healthy
                 # one: every other control call is accepted, and the one setting the night
                 # depends on never takes — with not a single log line to show for it.
                 if not apply_plan(cam, plan, app.reliability,
                                   repair_failures=repair_failures, camera=cfg.name,
-                                  privacy_on=cfg.name in (privacy or ()),
+                                  privacy_on=privacy_on,
                                   hold=cfg.name in (hold or ()),
                                   motion_refusals=motion_refusals):
                     log.warning("auto-track %s not confirmed for %s: the camera took the "
@@ -584,6 +633,9 @@ class MonitorState:
     groups: dict = field(default_factory=dict)
     scene_coordinator: scene.SceneCoordinator = field(default_factory=scene.SceneCoordinator)
     pan_guard: dict = field(default_factory=dict)   # per-camera ONVIF pan-limit state
+    # Per camera, the privacy switch as the last control pass read it (True/False); absent
+    # when unread, so the twin's probe applies (see parked_lenses).
+    privacy_seen: dict = field(default_factory=dict)
     # Wall time of the last pan_limit recall per camera (the tick's own `now`, so it is
     # directly comparable to the sampler's): lets an expiring hold tell "no second frame
     # ever came" from "the guard yanked the subject out of view mid-corroboration".
@@ -2480,10 +2532,12 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
     client rebuilt next poll — the guard must never kill the loop.
 
     Every recall is cleared with :func:`tapo_monitor.motion.decide` first: a lens parked by
-    privacy mode is not touched at all, and one a ``track_hold`` keeps on a subject is
-    recalled only after ``pan_limit.hold_grace`` seconds of continuous out-of-bounds.
+    privacy mode is not touched at all (see :func:`parked_lenses`), and one a
+    ``track_hold`` keeps on a subject is recalled only after ``pan_limit.hold_grace``
+    seconds of continuous out-of-bounds. A ``GotoPreset`` the motor refuses (the lens
+    parked between control passes) is counted as a privacy refusal and keeps the client.
     """
-    parked = twin.cameras_in_privacy(state.twin_fleet)
+    parked = parked_lenses(state)
     for cfg in app.cameras:
         pl = cfg.pan_limit
         if not pl.enabled:
@@ -2543,7 +2597,22 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
                 continue
             g.pop("refused", None)
             _archive_panlimit_frame(cfg, axis, value, now=now)
-            panlimit.goto_preset(g["ptz"], g["token"], target)
+            try:
+                panlimit.goto_preset(g["ptz"], g["token"], target)
+            except Exception as e:  # noqa: BLE001 - classified below, re-raised if transport
+                if not panlimit.is_motor_refusal(e):
+                    raise
+                # The lens was parked between control passes: the camera answered, the
+                # motor refused. Keep the client — rebuilding it every poll only adds
+                # logins to a camera that is answering fine.
+                motion.count_refusal(state.motion_refusals, cfg.name, motion.GUARD,
+                                     motion.PRIVACY)
+                if g.get("refused") != motion.PRIVACY:
+                    log.info("pan_limit %s: recall preset %s refused by a parked lens: %s",
+                             cfg.name, target, e)
+                g["refused"] = motion.PRIVACY
+                g.pop("out_since", None)
+                continue
             g.pop("out_since", None)
             state.pan_limit_recall_at[cfg.name] = now
             _record_out_of_bounds(state, cfg.name, now, pl.poll_interval)
@@ -2702,6 +2771,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
         plans = run_control(app, now=now, connect=connect_factory(cam_clients, state, now),
                             repair_failures=state.repair_failures,
                             privacy=twin.cameras_in_privacy(state.twin_fleet),
+                            privacy_seen=state.privacy_seen,
                             hold=cameras_holding_recall(app, state, now),
                             motion_refusals=state.motion_refusals)
         if isinstance(plans, Mapping):

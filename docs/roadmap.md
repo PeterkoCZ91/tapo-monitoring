@@ -388,12 +388,16 @@ the delivery sequence prescribes — observe first, promote later — and fixes 
 
 ### 8.2 — Privacy mode seen on the pass it changes
 
-- [ ] The control pass runs before the twin probe, so the first pass after privacy goes
+- [x] The control pass runs before the twin probe, so the first pass after privacy goes
   on still sends a refused recall (plus its retry), and the aim is restored one twin
   probe after privacy goes off — up to `probe_interval` (default 900 s) late. Read the
   privacy switch cheaply on the control pass itself and let the twin keep reporting it.
-- [ ] A refused guard `GotoPreset` in that window is treated as an ONVIF failure and
+- [x] A refused guard `GotoPreset` in that window is treated as an ONVIF failure and
   rebuilds the client every poll; count it as a refusal instead.
+
+Done: the control pass reads `getPrivacyMode` on its connected client (fallback: the
+twin) and the guard classifies a MOTOR_BUSY `GotoPreset` as a refusal; pinned by
+scenarios in `tests/test_scenarios.py`.
 
 ### 8.3 — One outage, one notice
 

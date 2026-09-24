@@ -319,7 +319,11 @@ bounds for `pan_limit.hold_grace` seconds (default 20; `0` recalls at once, the 
 before the grace existed). Without a running hold the guard recalls within a
 `poll_interval` as always. Both paths ask one arbiter (`tapo_monitor.motion`) before
 moving: privacy mode blocks every move, the hold blocks the scheduled recall, the guard
-overrides the hold after the grace. Refused moves are counted per camera.
+overrides the hold after the grace. Refused moves are counted per camera. The control pass
+reads the privacy switch itself (one `getPrivacyMode` call on the already-connected client,
+for cameras with a preset or the guard), so a recall is skipped on the very pass privacy
+goes on and the aim is restored on the first pass after it goes off; an unreadable switch
+falls back to the twin's last probe and is never taken for "parked".
 
 Setting `track_hold` without `back_time` is warned about at startup — the firmware would
 still swing the lens home on its own timer, so the hold buys no footage.
@@ -585,8 +589,10 @@ pan_limit:
 
 The guard reads current/preset pan positions over ONVIF and recalls the nearest bounding
 preset when auto-track moves outside their span. It does not create a hard motor limit.
-ONVIF errors are isolated from the event loop. While the twin reads privacy mode as on,
-the guard does not poll at all: a parked lens can only answer `MOTOR_BUSY`.
+ONVIF errors are isolated from the event loop. While privacy mode is known to be on (read
+by the last control pass, else by the twin), the guard does not poll at all: a parked lens
+can only answer `MOTOR_BUSY`. A `GotoPreset` the motor refuses between control passes is
+counted as a privacy refusal and keeps the ONVIF client; only transport errors rebuild it.
 
 The guard needs the `onvif-zeep` package: `pip install -e ".[onvif]"` (or
 `pip install onvif-zeep`) into the daemon's venv. The import is deliberately lazy — it

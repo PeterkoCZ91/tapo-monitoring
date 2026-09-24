@@ -135,6 +135,16 @@ def cameras_in_privacy(fleet):
     return names
 
 
+def privacy_from_reading(value):
+    """``True``/``False`` for a raw ``getPrivacyMode`` answer, ``None`` when unreadable. Pure.
+
+    The same parsing the twin applies to its probe, for callers that read the switch
+    themselves; ``None`` means "not known" and must never be taken for "parked".
+    """
+    result = _enabled(value)
+    return result if isinstance(result, bool) else None
+
+
 def _alertable_paths(entry):
     results = (entry or {}).get("drift", {}).get("results", [])
     return {str(item.get("path", "")) for item in results
