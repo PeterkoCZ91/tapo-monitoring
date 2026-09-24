@@ -279,7 +279,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         if ignore_known and etype != "motion" and has_known_face(event, face_names):
             label = enrich.face_label(face_ids(event), face_names)
             log.info("skip %s: known face present (ignored: %s)", etype, label)
-            audit_event(cfg, event, etype, "live", "ignore_known", detail=label)
+            audit_event(cfg, event, etype, "live", "ignore_known", reason="known_face")
             continue
         if not _can_alert(can_alert, etype, event):
             if etype != "motion" and has_known_face(event, face_names):

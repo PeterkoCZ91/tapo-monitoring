@@ -414,12 +414,12 @@ def test_cooldown_overridden_by_recognized_face(monkeypatch):
     assert len(sent) == 1     # known face event alerts despite the active cooldown
 
 
-def test_known_face_ignored_when_ignore_known_enabled(monkeypatch):
+def test_known_face_ignored_when_ignore_known_enabled(monkeypatch, caplog):
+    # The real audit_event runs here: a stub accepting any keyword hid that the skip
+    # passed one audit_event does not take, so the first known face raised TypeError.
     sent = []
-    audited = []
     monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
     monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "A person")
-    monkeypatch.setattr(monitor, "audit_event", lambda *a, **k: audited.append((a, k)))
 
     event = dict(_person_event(100), event_info=[{"face_id": 7}])
 
@@ -429,13 +429,17 @@ def test_known_face_ignored_when_ignore_known_enabled(monkeypatch):
 
     cfg = config.load_config_from_dict(
         {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0]
-    monitor.run_monitor(
-        Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
-        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
-        face_names={7: "Alice"},
-        ignore_known=True)
+    with caplog.at_level("INFO", logger="tapo_monitor.monitor"):
+        monitor.run_monitor(
+            Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
+            snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+            face_names={7: "Alice"},
+            ignore_known=True)
     assert sent == []
-    assert any(k.get("detail") == "Alice" for a, k in audited)
+    audit = [r.getMessage() for r in caplog.records if r.getMessage().startswith("audit ")]
+    assert any("action=ignore_known" in line and "reason=known_face" in line
+               for line in audit)
+    assert not any("Alice" in line for line in audit)   # the ledger holds no identities
 
 
 def test_unknown_face_alerts_when_ignore_known_enabled(monkeypatch):

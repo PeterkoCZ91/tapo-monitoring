@@ -4123,6 +4123,26 @@ def test_run_monitor_pass_mutes_night_only_camera_by_day(monkeypatch):
     assert state.last_seen["a"] == 42          # watermark still advanced (silent drain)
 
 
+def test_run_monitor_pass_honours_faces_ignore_known_from_the_config(monkeypatch):
+    # The live pass read the switch from the resolved secrets, which never carry it, so
+    # faces.ignore_known silently did nothing on the live path (the SD path read the
+    # config and worked).
+    captured = {}
+
+    def fake_run_monitor(cam, c, last_seen, **kw):
+        captured["ignore_known"] = kw.get("ignore_known")
+        return 0
+
+    monkeypatch.setattr(daemon.monitor, "run_monitor", fake_run_monitor)
+    app = cfg.load_config_from_dict({"faces": {"names_env": "N", "ignore_known": True},
+                                     "cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    secrets = {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
+    daemon.run_monitor_pass(app, {"a": object()}, daemon.MonitorState(), now=1,
+                            secrets=secrets, snapshot_for=_no_snapshot,
+                            time_str=lambda e: "t", night=True)
+    assert captured["ignore_known"] is True
+
+
 def test_run_monitor_pass_active_night_only_camera_at_night(monkeypatch):
     app = cfg.load_config_from_dict(
         {"cameras": [{"name": "a", "host": "203.0.113.10", "night_only": True}]})

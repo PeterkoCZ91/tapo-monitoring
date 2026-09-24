@@ -1292,7 +1292,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             can_alert=can_alert,
             on_alert=on_alert,
             face_names=secrets.get("face_names"),
-            ignore_known=bool(secrets.get("ignore_known", False)),
+            ignore_known=bool((app.faces or {}).get("ignore_known", False)),
             defer=defer_fn,
             score=score,
             corroborate=corroborate,
@@ -1996,7 +1996,7 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
             label = enrich.face_label(monitor.face_ids(event), secrets.get("face_names"))
             if (app.faces or {}).get("ignore_known") and etype != "motion" and monitor.has_known_face(event, secrets.get("face_names")):
                 log.info("skip %s: known face present [sd] (ignored: %s)", etype, label)
-                monitor.audit_event(cfg, event, etype, "sd", "ignore_known", detail=label)
+                monitor.audit_event(cfg, event, etype, "sd", "ignore_known", reason="known_face")
                 continue
             light = (camera.whitelamp_seen(cam, cfg.name, event.get("start_time"),
                                            force_time=cfg.whitelamp_force_time)
