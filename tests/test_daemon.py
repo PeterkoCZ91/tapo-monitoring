@@ -3080,6 +3080,50 @@ def test_empty_early_look_reads_only_the_rest_at_the_full_windows_time(monkeypat
     assert sent == ["/tmp/rest.jpg"] and state.pending_sd == []
 
 
+def test_recording_frames_are_scored_while_the_next_is_extracted(monkeypatch):
+    # The fake extractor hands over frame 0 and then waits until someone scores it:
+    # only a follow-up that scores during extraction gets past the wait.
+    import threading
+    app, state, Cam, secrets = _recording_followup(monkeypatch)
+    scored_first = threading.Event()
+    calls, sent = [], []
+    def fetch(cfg_, start_time, span=None, out_dir=None, on_frame=None):
+        on_frame("/f0.jpg")
+        assert scored_first.wait(5), "frame 0 was not scored during extraction"
+        on_frame("/f1.jpg")
+        return ["/f0.jpg", "/f1.jpg"]
+    def score(frame):
+        calls.append(frame)
+        if frame == "/f0.jpg":
+            scored_first.set()
+        return {"/f0.jpg": 0.2, "/f1.jpg": 0.9}[frame]
+    score.boxes = {}
+    monkeypatch.setattr(daemon.recclip, "fetch_recording_frames", fetch)
+    monkeypatch.setattr(daemon, "score_for", lambda cfg_: score)
+    monkeypatch.setattr(daemon.recclip, "blur_score", lambda f, **k: 1.0)
+    monkeypatch.setattr(daemon, "_caption_describe", lambda *a, **k: "")
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap, **k: sent.append(img) or True)
+    daemon.process_pending_sd(app, {"a": Cam()}, state, now=state.pending_sd[0]["due_at"],
+                              secrets=secrets, snapshot_for=lambda _cfg: (lambda cam, ev: None),
+                              time_str=lambda ev: "T")
+    assert sorted(calls) == ["/f0.jpg", "/f1.jpg"]       # each frame scored exactly once
+    assert sent == ["/f1.jpg"]
+
+
+def test_prescorer_answers_like_the_scorer_it_wraps():
+    boxes = {"/a.jpg": [1, 2, 3, 4]}
+    def score(frame):
+        return 0.7
+    score.boxes = boxes
+    pre = daemon._Prescorer(score)
+    pre.submit("/a.jpg")
+    assert pre.score("/a.jpg") == 0.7
+    assert pre.score("/never-submitted.jpg") == 0.7       # scored inline
+    assert pre.score.boxes is boxes
+    pre.close()
+
+
 def test_early_span_needs_room_for_a_second_read():
     early = daemon.recclip.RECORDING_EARLY_SPAN
     step = daemon.recclip.RECORDING_FRAME_EVERY

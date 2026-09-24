@@ -209,10 +209,12 @@ def _run_ffmpeg(args):  # pragma: no cover - subprocess I/O
 
 
 def extract_frames(mkv, seg_start, event_start, span, every, out_dir, base, runner=None,
-                   rotate=0):
+                   rotate=0, on_frame=None):
     """One JPEG every ``every`` sec across ``span``, seeking from the event's offset in
     the segment. Returns paths (oldest first); clips the window to the segment end.
-    Names carry the segment epoch plus actual seek offset for pan-window filtering."""
+    Names carry the segment epoch plus actual seek offset for pan-window filtering.
+    ``on_frame(path)`` is called as each frame lands, so the caller can start scoring it
+    while the next one is still being decoded."""
     runner = runner or _run_ffmpeg
     out_dir = out_dir.rstrip("/")
     vf = snapshot.scaled_vf(rotate)
@@ -228,12 +230,14 @@ def extract_frames(mkv, seg_start, event_start, span, every, out_dir, base, runn
             continue
         if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
             paths.append(out_path)
+            if on_frame is not None:
+                on_frame(out_path)
     return paths
 
 
 def fetch_recording_frames(cfg, event_start, span, out_dir,
                            base_dir=None,
-                           segment_for=segment_for, extract=extract_frames):
+                           segment_for=segment_for, extract=extract_frames, on_frame=None):
     """Candidate JPEGs from the local recording around the event; ``[]`` when no segment.
 
     ``base_dir`` defaults to the ``RECORDING_ROOT`` env var — the same recorder tree the
@@ -256,4 +260,4 @@ def fetch_recording_frames(cfg, event_start, span, out_dir,
     mkv, seg_start = seg
     base = f"rec_{int(event_start)}_{int(_time.time() * 1000)}"
     return extract(mkv, seg_start, event_start, span, RECORDING_FRAME_EVERY, out_dir, base,
-                   rotate=getattr(cfg, "rotate", 0))
+                   rotate=getattr(cfg, "rotate", 0), on_frame=on_frame)

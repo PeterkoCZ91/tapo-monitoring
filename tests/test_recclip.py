@@ -1,4 +1,5 @@
 import os
+import pathlib
 import sys
 from datetime import datetime, timedelta
 
@@ -212,3 +213,12 @@ def test_laplacian_variance_real_image(tmp_path):
     sharp = recclip.blur_score(path, box=[100, 300, 200, 500])
     flat = recclip.blur_score(path, box=[800, 300, 900, 500])
     assert flat > sharp
+
+
+def test_extract_frames_reports_each_frame_as_it_lands(tmp_path):
+    seen = []
+    def runner(args):
+        pathlib.Path(args[-1]).write_bytes(b"\xff\xd8")
+    paths = recclip.extract_frames("seg.mkv", 1000, 1010, 12, 4, str(tmp_path), "b",
+                                   runner=runner, on_frame=seen.append)
+    assert seen == paths and len(paths) == 3

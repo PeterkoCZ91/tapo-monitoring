@@ -1908,6 +1908,34 @@ def _score_all(score, frames):
         return list(pool.map(score, frames))
 
 
+class _Prescorer:
+    """Scores frames as they are extracted; ``score`` then answers from the result.
+
+    ``submit`` is the extractor's ``on_frame`` hook. ``score(frame)`` waits for that
+    frame's request, or scores inline a frame that was never submitted, so it is a drop-in
+    for the scorer it wraps, ``boxes`` included. ``close`` waits for requests still in
+    flight; each is bounded by the scorer's own timeout.
+    """
+
+    def __init__(self, score):
+        self._score = score
+        self._pool = ThreadPoolExecutor(max_workers=SCORE_PARALLEL)
+        self._pending = {}
+
+        def result(frame):
+            pending = self._pending.get(frame)
+            return pending.result() if pending is not None else score(frame)
+
+        result.boxes = getattr(score, "boxes", None)
+        self.score = result
+
+    def submit(self, frame):
+        self._pending[frame] = self._pool.submit(self._score, frame)
+
+    def close(self):
+        self._pool.shutdown(wait=True)
+
+
 def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
                             *, path="sd", keep_below=False, audit_extra=None):
     """Pick the sharpest subject from an already-extracted, bounded frame sequence.
@@ -2066,9 +2094,20 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
         # Seconds into the event this window starts: > 0 once an early look has read
         # the opening seconds, so the remainder is not scored twice.
         offset = entry.get("offset", 0)
+        score = score_for(cfg)
+        # A local recording yields its frames one ffmpeg seek at a time: score each as it
+        # lands instead of after the last one, so decoding and the (uplink-bound) scoring
+        # overlap. The camera card downloads one clip, so there is nothing to overlap.
+        prescore = (_Prescorer(score) if score is not None
+                    and fetch is recclip.fetch_recording_frames else None)
         fetch_started = _time.monotonic()
         try:
-            frames = fetch(cfg, start_time + offset, span=span, out_dir=job_dir)
+            if prescore is not None:
+                frames = fetch(cfg, start_time + offset, span=span, out_dir=job_dir,
+                               on_frame=prescore.submit)
+                score = prescore.score
+            else:
+                frames = fetch(cfg, start_time + offset, span=span, out_dir=job_dir)
         finally:
             if app.reliability.enabled and app.reliability.latency_metrics:
                 reliability.observe_latency(
@@ -2077,7 +2116,6 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
                 )
         image, description, fallback_image = None, "", None
         selected_score = None
-        score = score_for(cfg)
         try:
             # Both sources carry capture epochs. Filter before either scorer selection;
             # retain the original frames so an all-filtered batch cannot trigger a blind
@@ -2189,6 +2227,8 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
                                 threshold=cfg.scorer.threshold if score is not None else None,
                                 telegram=ok)
         finally:
+            if prescore is not None:
+                prescore.close()
             shutil.rmtree(job_dir, ignore_errors=True)   # frames + any orphaned mp4/partials
             _safe_unlink(fallback_image)
     state.pending_sd = remaining
