@@ -168,6 +168,8 @@ available frame contains the subject.
 | `tapo-monitor shadow-scan ...` | Nightly recorder audit: re-score yesterday's segments for miss candidates. |
 | `tapo-monitor incident <camera>-<start>` | Everything recorded for one incident: ledger rows and sent-log frames (read-only). |
 | `tapo-monitor replay cameras.yaml ...` | Replay a recorded ledger window through the alert gates and recorded SD/sampler/hub deliveries (read-only); `--compare` a candidate config or threshold, `--scene-reach` to measure the scene gate. |
+| `tapo-monitor label <dataset_dir> [--port 8791] [--bind 127.0.0.1]` | Label collected sent/review-log frames in a local web page; verdicts go to `labels.jsonl`. |
+| `tapo-monitor label-stats <dataset_dir> [--json]` | False-alarm rate, misses and the best-separating threshold from the labels. |
 
 ## Optional local scorer
 
@@ -190,7 +192,8 @@ aggregate-only runtime counters at `/metrics` for operational monitoring.
 Two opt-in calibration aids help tune thresholds by frame rather than by guesswork: an
 archive of every photo sent to Telegram (`TAPO_SENT_LOG_DIR`, self-pruning) and
 `python -m tapo_monitor.scene_probe`, which scores a live frame internally without alerting.
-See [Operations](docs/operations.md#inspecting-alert-frames).
+See [Operations](docs/operations.md#inspecting-alert-frames); collected frames can be
+labeled with `tapo-monitor label` ([Labeling](docs/labeling.md)).
 
 ## Safety and privacy
 
@@ -215,6 +218,7 @@ understand the session and sequential-request limitations.
 | [Operations](docs/operations.md) | You are deploying, monitoring or calibrating a live instance. |
 | [Capabilities](docs/capabilities.md) | You need the implemented/planned feature inventory. |
 | [Observability](docs/observability.md) | You are enabling Digital Twin or Shadow Auditor. |
+| [Labeling](docs/labeling.md) | You want ground truth for collected alert frames. |
 | [Troubleshooting](docs/troubleshooting.md) | You hit authentication, RTSP, SD or firmware-specific problems. |
 | [`events_1` bitmask](docs/events1-bitmask.md) | Your firmware returns incomplete event types. |
 | [Roadmap](docs/roadmap.md) | You want current gaps and planned product phases. |

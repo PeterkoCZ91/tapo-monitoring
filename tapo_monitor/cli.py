@@ -13,6 +13,8 @@ Usage:
   tapo-monitor learn-face <name>        # capture face ID from camera events and output FACE_ID_NAMES
   tapo-monitor audit-log [logfile|-]    # summarize scorer/Telegram audit lines
   tapo-monitor incident <id>            # everything recorded for one incident ID
+  tapo-monitor label <dataset_dir>      # label collected alert frames in a local web page
+  tapo-monitor label-stats <dataset_dir> # false alarms, misses and best threshold from labels
   tapo-monitor version                  # release plus a fingerprint of the deployed package
   tapo-monitor selfcheck [cameras.yaml] # is this host able to run? (imports, config, deps)
 
@@ -584,6 +586,12 @@ def main(argv=None):
     if cmd == "replay":
         from .replay import main as replay_main
         return replay_main(argv[1:])
+    if cmd == "label":
+        from .labeling import label_main
+        return label_main(argv[1:])
+    if cmd == "label-stats":
+        from .labeling import stats_main
+        return stats_main(argv[1:])
     if cmd == "learn-face":
         return _learn_face(argv[1:])
     print(__doc__)
