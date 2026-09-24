@@ -530,7 +530,7 @@ busiest site.
 
 ### 10.2 — Do not let a held person expire
 
-- [ ] A held marginal frame whose corroboration never came is dropped as `hold_expired`
+- [x] A held marginal frame whose corroboration never came is dropped as `hold_expired`
   unless a pan-limit recall broke the corroboration. Add an expiry policy for the sampler:
   send the best held frame when the hold expires and its score reaches a configured
   floor, with an `observe` mode that only audits what it would have sent.
