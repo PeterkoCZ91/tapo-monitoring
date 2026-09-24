@@ -56,6 +56,12 @@ the daemon leaves the watermark unchanged, records the exception in the audit st
 uses `alerts.event_failure_threshold` / `alerts.event_restart_threshold` for warning and
 optional one-time recovery. A successful poll clears the episode and emits a recovery
 notice when a warning was delivered.
+One outage is one notice: while the camera fails its ping (a network outage is open,
+before or after the 🔴 alert), the event-API watchdog stands down — no warning, no
+restart, no "restored" line — because `getEvents` cannot succeed without the camera.
+The event clock restarts when the camera is reachable again, so an event endpoint that
+is still broken after the return warns a full `event_failure_threshold` later. A warning
+already delivered before the network dropped stays open and gets its recovery notice.
 
 
 Network health transitions survive daemon restarts in

@@ -269,3 +269,89 @@ def test_rain_parks_a_tracking_camera_on_its_day_preset_despite_a_hold(
     assert sc.when(("recall", "a", "2")) == [at(60), at(120), at(180)]
     assert "schedule:hold" not in sc.state.motion_refusals.get("a", {})
     assert sc.state.desired_plans["a"].rain_parked is False
+
+
+# ── one outage, one notice ───────────────────────────────────────────────────
+
+def _texts(sc):
+    return [(t - START, a[1]) for t, a in sc.timeline if a[0] == "text"]
+
+
+def _record_reboots(monkeypatch, sc, cam):
+    def reboot():
+        sc._record(("reboot", cam.name))
+        cam._require_online()
+    monkeypatch.setattr(cam, "reboot", reboot)
+
+
+def test_offline_camera_with_default_thresholds_sends_one_notice_each_way(
+        monkeypatch, tmp_path):
+    # A camera drops off the network for 20 minutes with the default thresholds (outage
+    # 900 s, event API 300 s, event restart 900 s). Without a client getEvents cannot
+    # succeed, so the event-API watchdog used to fire too: "event API unavailable" at
+    # 360 s (before the outage alert itself), a reboot of the camera the moment it came
+    # back, and "event API restored after 0s". One outage is one 🔴 and one 🟢.
+    sc = Scenario(monkeypatch, tmp_path, [tracking_camera(pan_limit={"enabled": False})])
+    cam = sc.cams["a"]
+    _record_reboots(monkeypatch, sc, cam)
+    sc.run(30)
+    cam.online = False
+    sc.run(1200)                                 # 30..1225
+    cam.online = True
+    sc.run(600)                                  # 1230..1825: events healthy again
+
+    assert _texts(sc) == [
+        (960.0, "🔴 camera 'a' unreachable after 1m observed uptime"),
+        (1260.0, "🟢 camera 'a' back online after 20m outage"),
+    ]
+    assert sc.actions("reboot") == []
+    assert not sc.state.event_alerted.get("a")
+    assert "a" not in sc.state.event_fail_since
+    assert sc.state.events_reachable["a"] is True
+
+
+def test_event_api_failure_on_a_reachable_camera_still_alerts(monkeypatch, tmp_path):
+    # The camera answers ping and login but getEvents fails: that is the event watchdog's
+    # own job and the network stand-down must not hide it. Alert at the threshold, one
+    # restart at the restart threshold, restored with the real duration once it answers.
+    sc = Scenario(monkeypatch, tmp_path, [tracking_camera(pan_limit={"enabled": False})])
+    cam = sc.cams["a"]
+    _record_reboots(monkeypatch, sc, cam)
+    sc.run(30)
+    cam.events_error = TimeoutError("getEvents timed out")
+    sc.run(1000)                                 # 30..1025
+    cam.events_error = None
+    sc.run(200)
+
+    texts = _texts(sc)
+    assert [m.split(" for camera")[0] for _, m in texts] == [
+        "event API unavailable", "event API restart requested", "event API restored"]
+    assert texts[0][0] == 360.0                  # first watchdog pass >= 300 s after 30
+    assert "TimeoutError" in texts[0][1]
+    assert sc.when(("reboot", "a")) == [at(960)]
+    assert texts[2][0] == 1080.0
+    assert texts[2][1].endswith("after 17m 30s")  # 30 -> 1080, not "after 0s"
+    assert not any("unreachable" in m for _, m in texts)
+
+
+def test_event_api_still_broken_after_an_outage_alerts_only_after_its_threshold(
+        monkeypatch, tmp_path):
+    # The camera comes back on the network but its event endpoint stays broken. The event
+    # clock starts when the camera is reachable again, so the event alert comes a full
+    # event_failure_threshold after the return, not the instant it answers ping.
+    sc = Scenario(monkeypatch, tmp_path, [tracking_camera(pan_limit={"enabled": False})])
+    cam = sc.cams["a"]
+    _record_reboots(monkeypatch, sc, cam)
+    sc.run(30)
+    cam.online = False
+    cam.events_error = TimeoutError("getEvents timed out")
+    sc.run(1200)                                 # 30..1225
+    cam.online = True
+    sc.run(400)                                  # 1230..1625
+
+    texts = _texts(sc)
+    assert [t for t, _ in texts] == [960.0, 1260.0, 1560.0]
+    assert "unreachable" in texts[0][1]
+    assert "back online" in texts[1][1]
+    assert texts[2][1].startswith("event API unavailable for camera a after 5m")
+    assert sc.actions("reboot") == []            # restart clock restarted too

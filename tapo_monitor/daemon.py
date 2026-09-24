@@ -1255,7 +1255,10 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
         def poll_observe(ok, error=None, *, _name=name):
             state.events_reachable[_name] = bool(ok)
             if ok:
-                state.event_fail_since.pop(_name, None)
+                # An alerted episode keeps its start until the watchdog has sent the
+                # "restored" notice, which reports the episode's length from it.
+                if not state.event_alerted.get(_name):
+                    state.event_fail_since.pop(_name, None)
                 state.event_error.pop(_name, None)
             else:
                 state.event_fail_since.setdefault(_name, now)
@@ -2938,6 +2941,16 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
             continue
         name = cfg.name
         event_ok = state.events_reachable.get(name)
+        if event_ok is False and name in state.fail_since:
+            # The network layer already owns this outage (ping fails, 🔴/🟢 above): with
+            # no client getEvents cannot succeed, and a second notice, a reboot of the
+            # camera the moment it returns or a "restored" line would all describe the
+            # same outage. Stand down and restart the event clock, so a still-broken
+            # event API counts its threshold from when the camera is reachable again.
+            # An episode already alerted before the outage keeps its start and flag.
+            if not state.event_alerted.get(name):
+                state.event_fail_since.pop(name, None)
+            continue
         if event_ok is False:
             started = state.event_fail_since.setdefault(name, now)
             age = max(0, now - started)

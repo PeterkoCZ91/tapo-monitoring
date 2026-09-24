@@ -397,10 +397,14 @@ the delivery sequence prescribes — observe first, promote later — and fixes 
 
 ### 8.3 — One outage, one notice
 
-- [ ] A camera that is simply offline likely also trips the event-API watchdog once
+- [x] A camera that is simply offline likely also trips the event-API watchdog once
   `event_failure_threshold` passes, because `events_reachable` stays false without a
   client. Pin the behaviour with a scenario, then suppress the event-API notice while
   the network layer already reports the outage.
+  Confirmed and worse than suspected: with default thresholds a 20-minute outage sent
+  the event warning before the 🔴 alert, rebooted the camera the moment it returned and
+  closed with "restored after 0s". The event watchdog now stands down while a network
+  outage is open and restarts its clock on return.
 
 ### 8.4 — Replay beyond the live path
 
