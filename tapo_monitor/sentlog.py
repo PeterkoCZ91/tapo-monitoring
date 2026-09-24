@@ -27,6 +27,16 @@ ENV_RETENTION = "TAPO_SENT_LOG_RETENTION_DAYS"
 DEFAULT_RETENTION_DAYS = 2.0
 INDEX_NAME = "index.jsonl"
 
+# Which delivery path sent a frame: the sent-log index's ``path`` field. The names are
+# the audit paths (``live``, ``sampler``, ``sd``, ``hubpoll``) where a path sends in one
+# way; the sends the audit tells apart only by ``reason`` get a name of their own here,
+# because each has its own latency: ``hubpoll_retry`` (audit ``hubpoll`` / ``retry``),
+# ``hold_rescue`` (``sampler`` / ``hold_rescue_recall``) and ``hold_expiry``
+# (``sampler`` / ``hold_expiry_send``). ``sd`` covers the SD clip and the recording
+# follow-up alike, as the audit does.
+SEND_PATHS = ("live", "sampler", "sd", "hubpoll", "hubpoll_retry", "hold_rescue",
+              "hold_expiry")
+
 # Review log: the frames corroboration *suppressed* (held, never sent). The sent log only
 # keeps what went out, so it can't show whether a hold correctly dropped an animal/empty
 # scene or wrongly dropped a person. Opt-in, best-effort, defaults to a week of retention.
@@ -111,13 +121,15 @@ def prune_old(archive_dir, now, retention_days):
 
 def archive_sent(archive_dir, image_bytes, caption, *, now,
                  retention_days=DEFAULT_RETENTION_DAYS, delivered=True,
-                 camera=None, score=None, incident=None):
+                 camera=None, score=None, incident=None, send_path=None):
     """Copy one sent frame + index line into ``archive_dir``; prune stale files.
 
     ``camera`` and ``score`` are optional: a host running two cameras cannot otherwise
     tell from the index which one sent what. ``incident`` adds the incident ID and its
-    ``event_start``, so the frames of one visit group without guessing from timestamps. Absent values are left out rather than
-    written as null, so a reader of the old shape sees exactly what it always saw.
+    ``event_start``, so the frames of one visit group without guessing from timestamps.
+    ``send_path`` is written as ``path``: the delivery path that sent the frame (see
+    :data:`SEND_PATHS`). Absent values are left out rather than written as null, so a
+    reader of the old shape sees exactly what it always saw.
 
     Returns the saved JPEG path, or None on any failure — it never raises, so a full
     disk or a bad path degrades to "no archive", never a lost alert.
@@ -132,6 +144,8 @@ def archive_sent(archive_dir, image_bytes, caption, *, now,
         if camera:
             record["camera"] = camera
         record.update(incident_mod.index_fields(incident))
+        if send_path:
+            record["path"] = str(send_path)
         if score is not None and hasattr(score, "person"):
             record["person"] = float(score.person)
             record["animal"] = float(score.animal)
@@ -145,7 +159,7 @@ def archive_sent(archive_dir, image_bytes, caption, *, now,
 
 
 def archive_if_configured(image_bytes, caption, *, delivered=True, now=None, env=None,
-                          camera=None, score=None, incident=None):
+                          camera=None, score=None, incident=None, send_path=None):
     """Archive a sent frame when ``TAPO_SENT_LOG_DIR`` is set; otherwise a no-op."""
     archive_dir = archive_dir_from_env(env)
     if archive_dir is None:
@@ -153,7 +167,8 @@ def archive_if_configured(image_bytes, caption, *, delivered=True, now=None, env
     now = time.time() if now is None else now
     return archive_sent(archive_dir, image_bytes, caption, now=now,
                         retention_days=retention_days_from_env(env), delivered=delivered,
-                        camera=camera, score=score, incident=incident)
+                        camera=camera, score=score, incident=incident,
+                        send_path=send_path)
 
 
 def panlimit_dir_from_env(env=None):

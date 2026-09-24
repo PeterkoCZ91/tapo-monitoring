@@ -557,6 +557,7 @@ def test_send_delivers_the_held_frame_once_when_the_hold_expires(monkeypatch, tm
     sc.run(120)                                  # 15..130: well past the expiry
 
     assert sc.when(("send", "a")) == [at(35)]    # exactly once, at the expiry tick
+    assert sc.notifier.send_paths == ["hold_expiry"]         # named so in the sent log
     assert _expiry_audits(audits) == [("sampler", "send", "hold_expiry_send", None)]
     assert sc.state.last_alert[("a", "motion")] == at(35)     # arms the motion cooldown
 

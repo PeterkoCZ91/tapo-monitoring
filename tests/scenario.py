@@ -198,13 +198,18 @@ class FakeCamera:
 
 
 class Notifier:
-    """Records Telegram traffic instead of sending it. ``down`` refuses every send."""
+    """Records Telegram traffic instead of sending it. ``down`` refuses every send.
+
+    ``send_paths`` lists the delivery path each photo send named for the sent log.
+    """
 
     def __init__(self, record):
         self._record = record
         self.down = False
+        self.send_paths = []
 
     def send_photo(self, token, chat, image, caption, *a, camera=None, **k):
+        self.send_paths.append(k.get("send_path"))
         if self.down:
             self._record(("send_failed", camera))
             return False

@@ -500,10 +500,25 @@ also copied there as a timestamped JPEG beside an `index.jsonl` line: timestamp,
 caption and delivery flag, plus the camera name and the scorer's `person`/`animal`
 confidences when they are known. The camera name is what lets a host running two cameras
 tell from the archive which one fired. A frame sent for a camera event (every alert path:
-live, sampler, SD follow-up, hub clip and its retry, hold rescue) also records `incident`
-(`<camera>-<event start>`, see [observability](observability.md#following-one-incident))
-and `event_start`, the event's start in whole epoch seconds, so the frames of one visit
-group without guessing from timestamps; frames with no event behind them omit both. Files older than `TAPO_SENT_LOG_RETENTION_DAYS`
+live, sampler, SD follow-up, hub clip and its retry, hold rescue, hold expiry) also records
+`incident` (`<camera>-<event start>`, see
+[observability](observability.md#following-one-incident)) and `event_start`, the event's
+start in whole epoch seconds, so the frames of one visit group without guessing from
+timestamps; frames with no event behind them omit both. Every alert frame also records
+`path`, the delivery path that sent it — the audit line's path, split where the audit
+tells sends apart only by `reason`:
+
+| `path` | sent by | audit line |
+|---|---|---|
+| `live` | the live pass, right after `getEvents` | `live` `send` |
+| `sampler` | a sampler follow-up grab (also a corroborated hold) | `sampler` `send` |
+| `sd` | the SD clip or local-recording follow-up | `sd` `send` |
+| `hubpoll` | a hub clip | `hubpoll` `send` |
+| `hubpoll_retry` | a hub clip whose first delivery failed | `hubpoll` `send` `reason=retry` |
+| `hold_rescue` | a held frame after a pan-limit recall | `sampler` `send` `reason=hold_rescue_recall` |
+| `hold_expiry` | a held frame when its hold expired (`sampler.hold_expiry: send`) | `sampler` `send` `reason=hold_expiry_send` |
+
+Records written before `path` existed have none. Files older than `TAPO_SENT_LOG_RETENTION_DAYS`
 (default 2) are pruned on each write, and the index is rotated on the same window so it
 cannot outlive the frames it points at. It is inert when the variable is unset and never
 raises into the send path — a full disk degrades to "no archive", never a lost alert.

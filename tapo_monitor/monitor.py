@@ -223,7 +223,8 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
       send_alert(image, caption, score) -> bool — delivers one alert frame. The daemon
         passes a sender that crops to the subject and archives the uncropped scene, the
         same route the sampler and the SD follow-up already take. The default posts the
-        frame as-is, so a caller that does not care keeps the old behaviour.
+        frame as-is, so a caller that does not care keeps the old behaviour. It also
+        gets ``incident=`` and ``send_path="live"`` for the sent-log index.
       scene_alert(etype, event) -> bool — optional cross-camera group gate checked after
         the per-camera cooldown and before snapshot capture.
       hold_archive(image, etype, score, event) -> archives one held (corroboration-suppressed)
@@ -465,9 +466,10 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 light=light,
             )
             incident = incident_id(cfg.name, event)
-            ok = (send_alert(image, caption, s, incident=incident) if send_alert is not None
+            ok = (send_alert(image, caption, s, incident=incident, send_path="live")
+                  if send_alert is not None
                   else notify.send_photo(telegram_token, telegram_chat, image, caption,
-                                         incident=incident))
+                                         incident=incident, send_path="live"))
             audit_event(cfg, event, etype, "live", "send", score=s,
                         threshold=cfg.scorer.threshold if score is not None else None,
                         telegram=ok)

@@ -1138,7 +1138,7 @@ def _reduced(src, out_dir, run=None, width=None):
 
 
 def send_alert_photo(cfg, secrets, image, caption, downscale=None, score=None,
-                     incident=None):
+                     incident=None, send_path=None):
     """Send one alert frame: the zoom goes to Telegram, the whole scene to the sent log.
 
     ``crop_to_subject`` cameras push a close-up, which is what the user wants to look at
@@ -1149,6 +1149,9 @@ def send_alert_photo(cfg, secrets, image, caption, downscale=None, score=None,
     :class:`snapshot.Frame`) the crop is taken from that instead, so the zoom keeps the
     camera's detail while everything sent stays small. No config flag is read here: the
     frame either brought the detail along or it did not.
+
+    ``incident`` and ``send_path`` (the delivery path, :data:`sentlog.SEND_PATHS`) go to
+    the sent-log index with the frame.
     """
     token, chat = secrets["telegram_token"], secrets["telegram_chat"]
     out_dir = os.path.dirname(image)
@@ -1162,9 +1165,11 @@ def send_alert_photo(cfg, secrets, image, caption, downscale=None, score=None,
     try:
         if to_send == image:        # nothing replaced the frame, nothing extra to archive
             return notify.send_photo(token, chat, to_send, caption,
-                                     camera=cfg.name, score=score, incident=incident)
+                                     camera=cfg.name, score=score, incident=incident,
+                                     send_path=send_path)
         return notify.send_photo(token, chat, to_send, caption, archive_path=image,
-                                 camera=cfg.name, score=score, incident=incident)
+                                 camera=cfg.name, score=score, incident=incident,
+                                 send_path=send_path)
     finally:
         for temp in (small_crop, crop_temp):
             _safe_unlink(temp)
@@ -1367,7 +1372,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
         def media_observe(ok, error=None, *, _name=name):
             state.rtsp_reachable[_name] = bool(ok)
 
-        def send_alert(image, caption, score, incident=None, _cfg=cfg):
+        def send_alert(image, caption, score, incident=None, send_path="live", _cfg=cfg):
             # The live pass takes the same crop+archive route as the sampler and the SD
             # follow-up: a zoom to Telegram, the whole scene to the sent log.
             started = _time.monotonic()
@@ -1379,7 +1384,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                         window=_cfg.coordinator.scene_window,
                     )
                 return send_alert_photo(_cfg, secrets, image, caption, score=score,
-                                        incident=incident)
+                                        incident=incident, send_path=send_path)
             finally:
                 observe_latency("telegram", _time.monotonic() - started)
 
@@ -1600,7 +1605,8 @@ def process_pending_hub(app, state, *, now, secrets):
         entry["attempts"] += 1
         ok = send_alert_photo(cfg, secrets, entry["image"], entry["caption"],
                               score=entry["score"],
-                              incident=incident.incident_id(cfg.name, event))
+                              incident=incident.incident_id(cfg.name, event),
+                              send_path="hubpoll_retry")
         monitor.audit_event(cfg, event, "motion", "hubpoll", "send", score=entry["score"],
                             threshold=cfg.scorer.threshold if entry["score"] is not None else None,
                             telegram=ok, reason="retry", extra=entry.get("audit_extra"))
@@ -1849,7 +1855,8 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
                     description=description or None, score=s,
                 )
                 ok = send_alert_photo(cfg, secrets, image, caption, score=s,
-                                      incident=incident.incident_id(cfg.name, event))
+                                      incident=incident.incident_id(cfg.name, event),
+                                      send_path="hubpoll")
                 monitor.audit_event(cfg, event, etype, "hubpoll", "send", score=s,
                                     threshold=cfg.scorer.threshold if score is not None else None,
                                     telegram=ok, extra=clip_extra)
@@ -2117,7 +2124,8 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
                 score=selected_score, light=light,
             )
             ok = send_alert_photo(cfg, secrets, image, caption, score=selected_score,
-                                  incident=incident.incident_id(cfg.name, event))
+                                  incident=incident.incident_id(cfg.name, event),
+                                  send_path="sd")
             # SD follow-up is a real user-visible alert. Record it in the same gate as
             # live sends, otherwise a person rescued from SD can be followed minutes
             # later by a duplicate motion SD alert from the same passage.
@@ -2175,12 +2183,14 @@ def _suppress_sampler_frame(cfg, group, etype, s, scfg, image, verdict, *, now):
                             score=s, threshold=scfg.low_score, reason="low_score_streak")
 
 
-def _send_held_frame(app, cfg, state, group, *, now, secrets, time_str, reason, threshold):
+def _send_held_frame(app, cfg, state, group, *, now, secrets, time_str, reason, threshold,
+                     send_path):
     """Send the group's archived held frame through the normal alert path; audit it.
 
     Shared by the pan_limit rescue and the hold expiry policy, whose callers have already
     cleared the gates. ``reason`` tags the audit ``send`` line and ``threshold`` is what
-    the score was held against there. A delivery arms the motion cooldown and records the
+    the score was held against there; ``send_path`` names the send in the sent log
+    (``hold_rescue`` / ``hold_expiry``). A delivery arms the motion cooldown and records the
     scene delivery exactly like a sampler send. Returns the Telegram result.
     """
     path = group["hold_path"]
@@ -2191,7 +2201,8 @@ def _send_held_frame(app, cfg, state, group, *, now, secrets, time_str, reason, 
         monitor.TYPE_EMOJI.get("motion", "👁"), time_str(group["event"]),
         description=description or None, score=s)
     ok = send_alert_photo(cfg, secrets, path, caption, score=s,
-                          incident=incident.incident_id(cfg.name, group["event"]))
+                          incident=incident.incident_id(cfg.name, group["event"]),
+                          send_path=send_path)
     monitor.audit_event(cfg, group["event"], "motion", "sampler", "send", score=s,
                         threshold=threshold, telegram=ok, reason=reason)
     if ok:
@@ -2234,7 +2245,8 @@ def _rescue_expired_hold(app, cfg, state, group, *, now, secrets, time_str):
     if not can_alert("motion"):
         return False
     _send_held_frame(app, cfg, state, group, now=now, secrets=secrets, time_str=time_str,
-                     reason="hold_rescue_recall", threshold=cfg.scorer.threshold)
+                     reason="hold_rescue_recall", threshold=cfg.scorer.threshold,
+                     send_path="hold_rescue")
     return True
 
 
@@ -2285,7 +2297,8 @@ def _expire_hold(app, cfg, state, group, *, now, secrets, time_str):
         blocked = _hold_expiry_blocked(app, cfg, state, group, now=now)
         if blocked is None and policy == "send":
             _send_held_frame(app, cfg, state, group, now=now, secrets=secrets,
-                             time_str=time_str, reason="hold_expiry_send", threshold=floor)
+                             time_str=time_str, reason="hold_expiry_send", threshold=floor,
+                             send_path="hold_expiry")
             return
         if blocked is None:
             s = sampler.held_score(group)
@@ -2407,7 +2420,8 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                 light=light,
             )
             ok = send_alert_photo(cfg, secrets, image, caption, score=s,
-                                  incident=incident.incident_id(cfg.name, group["event"]))
+                                  incident=incident.incident_id(cfg.name, group["event"]),
+                                  send_path="sampler")
             monitor.audit_event(cfg, group["event"], etype, "sampler", "send", score=s,
                                 threshold=cfg.scorer.threshold if score is not None else None,
                                 telegram=ok)

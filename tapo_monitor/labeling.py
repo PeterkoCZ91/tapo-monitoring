@@ -38,7 +38,7 @@ import urllib.parse
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import incident
+from . import incident, sentlog
 
 log = logging.getLogger(__name__)
 
@@ -546,6 +546,8 @@ CAPTION_START_MAX_AGE = 3600.0
 _CAPTION_TIME = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
 INCIDENT_STATUSES = ("person", "no_person", "unsure", "unlabeled")
 REVIEW_VERDICTS = ("hold", "drop", "shadow")
+# A sent frame from before the sent log named its delivery path.
+UNKNOWN_PATH = "unknown"
 
 
 def _incident_start(value):
@@ -579,7 +581,8 @@ def incident_frames(dataset_dir, labels=None):
     record of that host names the same one, else None. ``labels`` is ``{path: label}``;
     no hashing, so it stays cheap enough for every ``/stats`` request. A sent record
     without ``delivered`` counts as delivered: the sent log writes False only when
-    delivery failed.
+    delivery failed. ``send_path`` is the delivery path a sent record names (its index
+    ``path``), else None.
     """
     labels = labels or {}
     frames = []
@@ -597,6 +600,8 @@ def incident_frames(dataset_dir, labels=None):
             "source": "review" if "verdict" in record else "sent",
             "verdict": _verdict(record),
             "delivered": "verdict" not in record and record.get("delivered", True) is not False,
+            "send_path": (str(record["path"]) if "verdict" not in record and record.get("path")
+                          else None),
             "label": labels.get(rel),
         })
     named = {}
@@ -667,7 +672,8 @@ def summarize_incident(inc):
     ``alerted``: a delivered sent frame. ``start``: the camera's event start (a frame's
     ``event_start``, else the one in the incident ID, else the earliest caption time),
     else the first frame's time; ``start_source`` says which. ``delay`` runs from there
-    to the first delivered sent frame.
+    to the first delivered sent frame, and ``first_path`` is the delivery path that sent
+    that frame (``unknown`` when its record names none; None when not alerted).
     """
     frames = inc["frames"]
     labels = [f["label"] for f in frames if f["label"]]
@@ -691,6 +697,10 @@ def summarize_incident(inc):
     alerts = [f for f in frames if f["source"] == "sent" and f["delivered"]]
     alert_times = [f["ts"] for f in alerts if f["ts"] is not None]
     delay = min(alert_times) - start if alert_times and start is not None else None
+    first_path = None
+    if alerts:
+        first = min(alerts, key=lambda f: (f["ts"] is None, f["ts"] or 0.0))
+        first_path = first.get("send_path") or UNKNOWN_PATH
     verdicts = {}
     for frame in frames:
         if frame["source"] == "review":
@@ -701,7 +711,7 @@ def summarize_incident(inc):
     return {"id": inc["id"], "host": inc["host"], "camera": inc["camera"],
             "start": start, "start_source": source, "status": status,
             "frames": len(frames), "labeled": len(labels), "alerted": bool(alerts),
-            "delay": delay, "verdicts": verdicts}
+            "delay": delay, "first_path": first_path, "verdicts": verdicts}
 
 
 def _percentile(values, fraction):
@@ -709,6 +719,37 @@ def _percentile(values, fraction):
     if not values:
         return None
     return values[max(0, math.ceil(fraction * len(values)) - 1)]
+
+
+def _delay_block(incidents):
+    """``n``, ``from_event_start``, median and p90 of the incidents' alert delays. Pure."""
+    timed = [i for i in incidents if i["delay"] is not None]
+    delays = sorted(i["delay"] for i in timed)
+    return {"n": len(delays),
+            "from_event_start": sum(1 for i in timed if i["start_source"] != "first_frame"),
+            "median": statistics.median(delays) if delays else None,
+            "p90": _percentile(delays, 0.9)}
+
+
+def _path_order(name):
+    """Sort key: the daemon's delivery paths in their order, others by name, unknown last."""
+    if name in sentlog.SEND_PATHS:
+        return (0, sentlog.SEND_PATHS.index(name), name)
+    return (2 if name == UNKNOWN_PATH else 1, 0, name)
+
+
+def _first_alert_block(incidents):
+    """Per delivery path of the first delivered frame: how many alerted incidents it
+    opened, their share and their delay from event start. Over every alerted incident,
+    labeled or not: which path is late does not depend on a label. Pure."""
+    alerted = [i for i in incidents if i["alerted"]]
+    paths = {}
+    for inc in alerted:
+        paths.setdefault(inc.get("first_path") or UNKNOWN_PATH, []).append(inc)
+    return {name: {"incidents": len(paths[name]),
+                   "share": _rate(len(paths[name]), len(alerted)),
+                   "delay": _delay_block(paths[name])}
+            for name in sorted(paths, key=_path_order)}
 
 
 def _incident_block(incidents):
@@ -721,9 +762,6 @@ def _incident_block(incidents):
     alerted = [i for i in incidents if i["alerted"]]
     decided = [i for i in alerted if i["status"] in ("person", "no_person")]
     false_alarms = sum(1 for i in decided if i["status"] == "no_person")
-    delays = sorted(i["delay"] for i in person if i["alerted"] and i["delay"] is not None)
-    from_event = sum(1 for i in person if i["alerted"] and i["delay"] is not None
-                     and i["start_source"] != "first_frame")
     # Which review verdicts the frames of missed incidents had: a person in a held frame
     # means the hold swallowed the visit, one only in dropped frames the threshold did.
     verdicts = {}
@@ -745,11 +783,10 @@ def _incident_block(incidents):
                    "rate": _rate(len(missed), len(person))},
         "false_alarms": {"count": false_alarms, "decided": len(decided),
                          "rate": _rate(false_alarms, len(decided))},
-        "delay": {"n": len(delays), "from_event_start": from_event,
-                  "median": statistics.median(delays) if delays else None,
-                  "p90": _percentile(delays, 0.9)},
+        "delay": _delay_block([i for i in person if i["alerted"]]),
         "missed_verdicts": {name: verdicts[name] for name in
                             sorted(verdicts, key=lambda v: (order.get(v, len(order)), v))},
+        "first_alert": _first_alert_block(incidents),
     }
 
 
@@ -940,14 +977,44 @@ def _incident_notes(section):
     return out
 
 
+FIRST_ALERT_HEADERS = ("group", "path", "first alerts", "share", "delay n",
+                       "delay median", "delay p90")
+
+
+def _first_alert_rows(section):
+    """``(group, path, incidents, share, n, median, p90)`` rows; groups without an alert
+    are left out."""
+    groups = [("all", section["all"])]
+    groups += [(f"camera {cam}", block) for cam, block in section["cameras"].items()]
+    parts = section.get("day_night") or {}
+    groups += [(name, parts[name]) for name in DAY_NIGHT if name in parts]
+    rows = []
+    for name, block in groups:
+        for path, entry in block.get("first_alert", {}).items():
+            delay = entry["delay"]
+            rows.append((name, path, str(entry["incidents"]), _pct(entry["share"]),
+                         str(delay["n"]), _seconds(delay["median"]), _seconds(delay["p90"])))
+    return rows
+
+
+def _first_alert_summary():
+    return ("first alert by delivery path (every alerted incident, labeled or not; delay "
+            "= event start to the first delivered alert, sent by that path; unknown = a "
+            "sent-log record from before the path was recorded)")
+
+
 def format_incidents(section):
     out = [_incident_summary(section) + ":"]
     if not section["all"]["labeled"]:
         out.append("no incident has a labeled frame yet: label frames to measure missed "
                    "people per incident")
-        return out
-    out += _table(INCIDENT_HEADERS, _incident_rows(section))
-    out += _incident_notes(section)
+    else:
+        out += _table(INCIDENT_HEADERS, _incident_rows(section))
+        out += _incident_notes(section)
+    rows = _first_alert_rows(section)
+    if rows:
+        out += ["", _first_alert_summary() + ":"]
+        out += _table(FIRST_ALERT_HEADERS, rows)
     return out
 
 
@@ -1088,6 +1155,10 @@ def stats_page(stats):
                       + "</p>")
         else:
             extra += "<p>No incident has a labeled frame yet.</p>"
+        rows = _first_alert_rows(section)
+        if rows:
+            extra += (f"<h2>First alert by path</h2><p>{html.escape(_first_alert_summary())}"
+                      f"</p>{_html_table(FIRST_ALERT_HEADERS, rows)}")
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

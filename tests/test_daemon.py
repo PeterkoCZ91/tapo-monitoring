@@ -6378,11 +6378,11 @@ def test_parked_lenses_prefers_the_control_pass_read_over_the_twin():
 # ── incident on every archived frame ─────────────────────────────────────────
 
 def _capture_incidents(monkeypatch):
-    """Record the incident each delivery path hands to send_alert_photo."""
+    """Record the incident and the path name each delivery path hands to send_alert_photo."""
     incidents = []
     monkeypatch.setattr(daemon, "send_alert_photo",
                         lambda cfg_, secrets, image, caption, **k:
-                        incidents.append(k.get("incident")) or True)
+                        incidents.append((k.get("incident"), k.get("send_path"))) or True)
     return incidents
 
 
@@ -6397,7 +6397,7 @@ def test_live_send_names_the_incident(monkeypatch):
                                      "groq_key": ""},
                             snapshot_for=lambda c: (lambda cam, ev: "/tmp/x.jpg"),
                             time_str=lambda e: "t")
-    assert incidents == ["a-100"]
+    assert incidents == [("a-100", "live")]
 
 
 def test_sampler_send_names_the_incident(monkeypatch):
@@ -6405,7 +6405,7 @@ def test_sampler_send_names_the_incident(monkeypatch):
     state = daemon.MonitorState()
     state.groups["a"] = _group()
     _run_sampler(_sampler_app(), state, 1035, [], monkeypatch, score=0.9)
-    assert incidents == ["a-1000"]
+    assert incidents == [("a-1000", "sampler")]
 
 
 def test_sd_follow_up_names_the_incident(monkeypatch):
@@ -6414,14 +6414,14 @@ def test_sd_follow_up_names_the_incident(monkeypatch):
     state.pending_sd = [{"camera": "a", "etype": "person",
                          "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
     _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, [], monkeypatch)
-    assert incidents == ["a-1000"]
+    assert incidents == [("a-1000", "sd")]
 
 
 def test_hub_clip_send_and_retry_name_the_incident(monkeypatch, tmp_path):
     app, state, _calls = _hub_fail_once(tmp_path, monkeypatch, [False])
     incidents = _capture_incidents(monkeypatch)
     daemon.process_pending_hub(app, state, now=1361, secrets=_hub_secrets())
-    assert incidents == ["gate-1100"]            # the retry names the clip's incident
+    assert incidents == [("gate-1100", "hubpoll_retry")]   # the clip's incident
 
     incidents.clear()
     hub = _FakeHub(clips=[[_clip(1200)]])
@@ -6430,7 +6430,7 @@ def test_hub_clip_send_and_retry_name_the_incident(monkeypatch, tmp_path):
     daemon.run_hubpoll_pass(app, {}, fresh, now=1300, secrets=_hub_secrets(),
                             hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
                             clip_frame_for=_clip_frames(tmp_path))
-    assert incidents == ["gate-1200"]
+    assert incidents == [("gate-1200", "hubpoll")]
 
 
 def test_hold_rescue_names_the_incident(monkeypatch, tmp_path):
@@ -6439,7 +6439,7 @@ def test_hold_rescue_names_the_incident(monkeypatch, tmp_path):
     state.groups["a"], _frame = _rescue_group(tmp_path)
     state.pan_limit_recall_at["a"] = 1150
     _run_sampler(_sampler_app(threshold=0.3, motion_send=0.6), state, 1271, [], monkeypatch)
-    assert incidents == ["a-1000"]
+    assert incidents == [("a-1000", "hold_rescue")]
 
 
 def test_sent_log_record_carries_incident_and_event_start(monkeypatch, tmp_path):
@@ -6449,9 +6449,29 @@ def test_sent_log_record_carries_incident_and_event_start(monkeypatch, tmp_path)
     frame = tmp_path / "f.jpg"
     frame.write_bytes(b"\xff\xd8FRAME")
     assert daemon.send_alert_photo(_cam(), {"telegram_token": "t", "telegram_chat": "c"},
-                                   str(frame), "cap", incident="c-1000")
+                                   str(frame), "cap", incident="c-1000", send_path="sd")
     record = json.loads((tmp_path / "sent" / "index.jsonl").read_text())
     assert record["incident"] == "c-1000" and record["event_start"] == 1000
+    assert record["path"] == "sd"
+
+
+def test_live_pass_names_its_path_in_the_sent_log(monkeypatch, tmp_path):
+    # The live pass reaches the index through the daemon's send_alert closure.
+    monkeypatch.setenv("TAPO_SENT_LOG_DIR", str(tmp_path / "sent"))
+    monkeypatch.setattr(daemon.notify, "_post_photo", lambda *a: True)
+    monkeypatch.setattr(daemon.monitor.notify, "is_empty_scene", lambda d: False)
+    frame = tmp_path / "f.jpg"
+    frame.write_bytes(b"\xff\xd8FRAME")
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10", "enrich": {"groq": False}}]})
+    cam = _FakeEventCam([[{"start_time": 100, "event_type": "personDetection"}]])
+    daemon.run_monitor_pass(app, {"a": cam}, daemon.MonitorState(), now=1000,
+                            secrets={"telegram_token": "t", "telegram_chat": "c",
+                                     "groq_key": ""},
+                            snapshot_for=lambda c: (lambda cam, ev: str(frame)),
+                            time_str=lambda e: "t")
+    record = json.loads((tmp_path / "sent" / "index.jsonl").read_text())
+    assert (record["incident"], record["path"]) == ("a-100", "live")
 
 
 

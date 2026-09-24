@@ -5,6 +5,11 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Sent-log index records name the delivery path that sent the frame in `path` (`live`,
+  `sampler`, `sd`, `hubpoll`, `hubpoll_retry`, `hold_rescue`, `hold_expiry`), and
+  `label-stats` / `/stats` report, per path of the first delivered frame, how many alerted
+  incidents it delivered first and their delay from event start (n, median, p90), under a
+  new `first_alert` key in every incident block. Older records count as `unknown`.
 - Daily digest fleet block: size and file count of the sent, review and pan-limit logs and
   the free space under them. The daemon warns once on Telegram when free space falls below
   `TAPO_LOG_DISK_MIN_FREE_MB` (default 1024, 0 off) and re-arms after recovery.

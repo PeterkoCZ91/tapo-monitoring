@@ -540,9 +540,11 @@ busiest site.
 
 ### 10.4 — Alert latency
 
-- [ ] Record which delivery path sent each archived frame (live, sampler, SD/recording,
+- [x] Record which delivery path sent each archived frame (live, sampler, SD/recording,
   hub clip, hold rescue) and report first-alert delay per path in `label-stats`, so the
-  90–150 s peak is attributed to a path before anything is changed.
+  90–150 s peak is attributed to a path before anything is changed. Sent records carry
+  `path`; the per-path table needs a few days of new records before it says anything,
+  since older frames count as `unknown`.
 - [ ] Shorten the slowest path that carries most first alerts, verified by the same
   per-incident delay report before and after.
 

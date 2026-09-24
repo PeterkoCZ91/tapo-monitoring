@@ -47,7 +47,10 @@ Every record of a frame taken for a camera event — sent, held, sampled or hub-
 carries `incident` (`<camera>-<event start>`) and `event_start` (the event's start in
 whole epoch seconds), so the frames of one visit and its delivered alert group by ID.
 Records written before these fields existed, and frames with no camera event behind them
-(shadow-scan finds), have neither.
+(shadow-scan finds), have neither. A sent record also names the delivery path that sent it
+in `path` (`live`, `sampler`, `sd`, `hubpoll`, `hubpoll_retry`, `hold_rescue`,
+`hold_expiry` — see [Operations](operations.md#inspecting-alert-frames) for how they map
+to audit lines), the same field a sampled drop uses for where it was dropped.
 
 Every `index.jsonl` under the directory is read, recursively. A record with a `verdict`
 field is a review frame; any other record is a sent frame. Records whose JPEG was pruned
@@ -264,3 +267,36 @@ lower bound. The JSON adds a top-level `incidents` key; the other keys are uncha
 
 `day_night` is there only with `--config`; `missed` lists every missed person incident
 (`id` is null for one grouped by time), oldest first, to look at by hand.
+
+### First alert by delivery path
+
+A late alert has a cause, and it lives in one delivery path. So the incident section
+ends with a table that takes the **first delivered frame** of every alerted incident —
+labeled or not, since which path is late does not depend on a label — and groups the
+incidents by the `path` that frame's sent record names. Per path: how many incidents it
+delivered first, their share of the alerted incidents and the delay from event start
+(n, median, p90). A later frame of the same incident from another path does not count.
+A sent record from before `path` was written counts as `unknown`. Rows follow for every
+camera and, with `--config`, for day and night; the table is printed even before any
+frame is labeled.
+
+```
+first alert by delivery path (every alerted incident, labeled or not; …):
+group         path     first alerts  share  delay n  delay median  delay p90
+all           live     120           40.0%  120      18 s          35 s
+all           sd       90            30.0%  90       118 s         160 s
+all           unknown  90            30.0%  90       95 s          190 s
+```
+
+In the JSON every incident block (`all`, each camera, each day/night slice) gains
+`first_alert`, keyed by path in delivery-path order, `unknown` last:
+
+```json
+"first_alert": {"live": {"incidents": 120, "share": 0.4,
+                         "delay": {"n": 120, "from_event_start": 120,
+                                   "median": 18.0, "p90": 35.0}},
+                "sd": {…}, "unknown": {…}}
+```
+
+Unlike the `delay` of the incident table, which covers alerted *person* incidents, these
+delays cover every alerted incident, so a path's median can differ from that column.

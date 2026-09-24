@@ -164,6 +164,15 @@ def test_archive_sent_omits_absent_camera_and_score(tmp_path):
     assert set(rec) == {"ts", "file", "caption", "delivered"}
 
 
+def test_archive_names_the_delivery_path(tmp_path):
+    env = {"TAPO_SENT_LOG_DIR": str(tmp_path)}
+    sentlog.archive_if_configured(b"jpeg", "cap", now=1785200000.0, env=env,
+                                  incident="yard-1785199900", send_path="hold_expiry")
+    rec = json.loads((tmp_path / "index.jsonl").read_text().strip())
+    assert (rec["path"], rec["event_start"]) == ("hold_expiry", 1785199900)
+    assert rec["path"] in sentlog.SEND_PATHS
+
+
 def test_archive_sent_omits_scores_for_a_plain_float(tmp_path):
     sentlog.archive_sent(str(tmp_path), b"jpeg", "cap", now=1785200000.0,
                          camera="yard", score=0.8)

@@ -160,14 +160,15 @@ def _archive_bytes(archive_path, sent_image):
 
 
 def send_photo(token, chat_id, image_path, caption, archive_path=None,
-               camera=None, score=None, archive=True, incident=None):
+               camera=None, score=None, archive=True, incident=None, send_path=None):
     """Send a photo with a caption via multipart/form-data. Returns True on success.
 
     ``archive_path`` names a different frame to keep in the sent log: ``crop_to_subject``
     cameras push a zoom, and only the uncropped scene shows whether the alert was a false
     positive. Unreadable? The sent frame is archived instead — never nothing.
     ``archive=False`` keeps non-alert traffic (the review digest) out of the sent log,
-    which is read as the record of delivered alerts.
+    which is read as the record of delivered alerts. ``incident`` and ``send_path`` (the
+    delivery path, :data:`sentlog.SEND_PATHS`) only go to the sent-log index.
     """
     try:
         with open(image_path, "rb") as f:
@@ -183,7 +184,7 @@ def send_photo(token, chat_id, image_path, caption, archive_path=None,
         # Best-effort diagnostic copy of the frame (opt-in via env).
         sentlog.archive_if_configured(_archive_bytes(archive_path, image), caption,
                                       delivered=ok, camera=camera, score=score,
-                                      incident=incident)
+                                      incident=incident, send_path=send_path)
     return ok
 
 

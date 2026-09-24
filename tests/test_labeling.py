@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -695,13 +696,14 @@ def test_stats_page_shows_day_and_night(day_night_dataset):
 # ── incidents ────────────────────────────────────────────────────────────────
 
 def _f(ts, *, source="sent", camera="front", host="h", incident=None, event_start=None,
-       label=None, delivered=True, verdict="hold", caption_start=None):
+       label=None, delivered=True, verdict="hold", caption_start=None, send_path=None):
     """One frame as labeling.incident_frames returns it."""
     return {"path": f"{host}/{source}-log/{ts}.jpg", "host": host, "camera": camera,
             "ts": ts, "incident": incident, "event_start": event_start,
             "caption_start": caption_start, "source": source,
             "verdict": verdict if source == "review" else None,
-            "delivered": source == "sent" and delivered, "label": label}
+            "delivered": source == "sent" and delivered, "send_path": send_path,
+            "label": label}
 
 
 def _groups(frames, gap=labeling.INCIDENT_GAP):
@@ -761,6 +763,20 @@ def test_incident_status_alert_and_delay():
     assert labeling.summarize_incident(captioned)["delay"] == 50.0
 
 
+def test_incident_first_path_is_the_path_of_the_first_delivered_frame():
+    inc = {"id": "front-990", "host": "h", "camera": "front", "frames": [
+        _f(1000.0, delivered=False, send_path="live"),   # failed: not the first alert
+        _f(1090.0, send_path="sampler"),
+        _f(1030.0, send_path="sd")]}
+    s = labeling.summarize_incident(inc)
+    assert (s["first_path"], s["delay"]) == ("sd", 40.0)
+    inc["frames"][2]["send_path"] = None                  # an older record: no path
+    assert labeling.summarize_incident(inc)["first_path"] == "unknown"
+    unsent = {"id": None, "host": "h", "camera": "front",
+              "frames": [_f(1010.0, delivered=False, send_path="live")]}
+    assert labeling.summarize_incident(unsent)["first_path"] is None
+
+
 @pytest.mark.parametrize("labels,status", [
     ([None, None], "unlabeled"), (["no_person", None], "no_person"),
     (["no_person", "unsure"], "unsure"), (["unsure"], "unsure"),
@@ -783,12 +799,12 @@ def _incident_dataset(root):
     """Five visits on "front" and one on "yard", labeled."""
     _write_log(str(root / "h" / "sent-log"), [
         # A: person, alerted 20 s after the event start in its ID.
-        {**_sent("a1.jpg", 0.9, ts=1000.0), "incident": "front-980"},
-        {**_sent("a2.jpg", 0.9, ts=1030.0), "incident": "front-980"},
+        {**_sent("a1.jpg", 0.9, ts=1000.0), "incident": "front-980", "path": "sd"},
+        {**_sent("a2.jpg", 0.9, ts=1030.0), "incident": "front-980", "path": "live"},
         # C: an alert that failed to deliver, and a held person: missed.
         {**_sent("c1.jpg", 0.8, ts=3000.0), "delivered": False},
         # D: alerted, labeled no_person: a false alarm.
-        {**_sent("d1.jpg", 0.7, ts=4000.0), "event_start": 3950.0},
+        {**_sent("d1.jpg", 0.7, ts=4000.0), "event_start": 3950.0, "path": "sampler"},
         # yard at night: person, alerted 60 s after its event start.
         {**_sent("y1.jpg", 0.9, camera="yard", ts=NIGHT_TS), "event_start": NIGHT_TS - 60},
     ])
@@ -833,6 +849,34 @@ def test_incident_stats_missed_false_alarms_and_delay(tmp_path):
     assert "incidents: 6 from 10 frames" in text
     assert "2/4 (50.0%)" in text and "40 s" in text
     assert "hold 2 (person labeled in 1), drop 1 (person labeled in 1)" in text
+
+
+def test_incident_stats_first_alert_by_path(tmp_path):
+    root = _incident_dataset(tmp_path / "dataset")
+    section = labeling.compute_stats(root)["incidents"]
+    first = section["all"]["first_alert"]
+    # A's first delivery came from SD (its later live frame does not count), D from the
+    # sampler, and the yard record predates the path field. C's send failed: no alert.
+    assert list(first) == ["sampler", "sd", "unknown"]
+    assert first["sd"] == {"incidents": 1, "share": pytest.approx(1 / 3),
+                           "delay": {"n": 1, "from_event_start": 1, "median": 20.0,
+                                     "p90": 20.0}}
+    assert first["sampler"]["delay"]["median"] == 50.0      # counted though no_person
+    assert first["unknown"]["incidents"] == 1
+    assert list(section["cameras"]["yard"]["first_alert"]) == ["unknown"]
+    text = labeling.format_stats(labeling.compute_stats(root))
+    assert "first alert by delivery path" in text
+    assert re.search(r"all\s+sd\s+1\s+33\.3%\s+1\s+20 s\s+20 s", text)
+    assert "First alert by path" in labeling.stats_page(labeling.compute_stats(root))
+
+
+def test_first_alert_by_path_shows_without_labels(tmp_path):
+    _write_log(str(tmp_path / "h" / "sent-log"), [
+        {**_sent("x1.jpg", 0.9, ts=1100.0), "incident": "front-1000", "path": "sd"}])
+    section = labeling.compute_stats(str(tmp_path))["incidents"]
+    assert section["all"]["first_alert"]["sd"]["delay"]["median"] == 100.0
+    text = "\n".join(labeling.format_incidents(section))
+    assert "no incident has a labeled frame yet" in text and "100 s" in text
 
 
 def test_incident_stats_by_day_and_night(tmp_path):
