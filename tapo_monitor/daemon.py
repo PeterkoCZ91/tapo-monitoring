@@ -27,6 +27,7 @@ import subprocess
 import tempfile
 import time as _time
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -94,6 +95,11 @@ HUB_INACTIVITY_RETRY = 3600
 # A single transient scorer timeout would otherwise flip the whole frame to passthrough
 # (unfiltered spam). Retry once after this delay before degrading.
 SCORER_RETRY_DELAY = 0.5
+# Frames of one extracted sequence scored at once. Scoring a remote site's frames is
+# bound by its uplink (six 1280 px frames took 5.9 s one by one, 3.5 s together, with
+# identical scores); downscaling instead is not an option — it moved gray-band scores by
+# up to 0.45. The scoring service is threaded, so a few concurrent requests are cheap.
+SCORE_PARALLEL = 4
 
 
 _safe_unlink = snapshot.safe_unlink
@@ -1889,19 +1895,32 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
                         _safe_unlink(frame)
 
 
+def _score_all(score, frames):
+    """Scores of ``frames`` in order, requested concurrently (``SCORE_PARALLEL``).
+
+    Same answers as scoring one by one; only the wall time changes. A single frame is
+    scored inline, without a thread.
+    """
+    frames = list(frames)
+    if len(frames) < 2:
+        return [score(f) for f in frames]
+    with ThreadPoolExecutor(max_workers=min(SCORE_PARALLEL, len(frames))) as pool:
+        return list(pool.map(score, frames))
+
+
 def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
                             *, path="sd", keep_below=False, audit_extra=None):
     """Pick the sharpest subject from an already-extracted, bounded frame sequence.
 
-    Missing blur measurements fall back to detection score. A scorer failure stops
-    further requests; retain a confirmed candidate if available, otherwise preserve
-    the existing unscored passthrough. Hub callers keep the best rejected candidate
+    Missing blur measurements fall back to detection score. Frames are scored
+    concurrently (:func:`_score_all`); a scorer failure ends the selection there: retain
+    a confirmed candidate if available, otherwise preserve the existing unscored
+    passthrough. Hub callers keep the best rejected candidate
     so their normal threshold gate can audit the rejected clip once.
     """
     blur_score = blur_score or recclip.blur_score
     above, below = [], []
-    for frame in frames:
-        s = score(frame)
+    for frame, s in zip(frames, _score_all(score, frames), strict=True):
         if s is None:
             monitor.audit_event(cfg, event, etype, path, "scorer_unavailable",
                                 extra=audit_extra)

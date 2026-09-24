@@ -485,6 +485,31 @@ def test_select_recording_frame_picks_sharpest_above_threshold():
     assert s == 0.7
 
 
+def test_score_all_scores_concurrently_and_keeps_the_order():
+    # A barrier only opens when two requests are in flight at once: scored one by one,
+    # the first call would wait out its timeout and raise.
+    import threading
+    barrier = threading.Barrier(2, timeout=5)
+    def score(frame):
+        barrier.wait()
+        return {"/a.jpg": 0.1, "/b.jpg": 0.9}[frame]
+    assert daemon._score_all(score, ["/a.jpg", "/b.jpg"]) == [0.1, 0.9]
+    assert daemon._score_all(lambda f: 0.5, ["/only.jpg"]) == [0.5]
+    assert daemon._score_all(lambda f: 0.5, []) == []
+
+
+def test_select_recording_frame_keeps_the_sequence_order_when_a_score_fails():
+    # Concurrent scoring must not change the decision: a failure after a confirmed
+    # candidate keeps that candidate, exactly as the one-by-one loop did.
+    cam = _cam(sd_snapshot=True, snapshot_source="recording",
+               scorer={"url": "http://x/score", "threshold": 0.5})
+    scores = {"/f0.jpg": 0.8, "/f1.jpg": None, "/f2.jpg": 0.95}
+    image, s = daemon._select_recording_frame(
+        cam, {"start_time": 1}, "motion", ["/f0.jpg", "/f1.jpg", "/f2.jpg"],
+        lambda f: scores[f], blur_score=lambda f, **k: 1.0)
+    assert (image, s) == ("/f0.jpg", 0.8)
+
+
 def test_select_recording_frame_none_when_all_below():
     cam = _cam(sd_snapshot=True, snapshot_source="recording",
                scorer={"url": "http://x/score", "threshold": 0.4})

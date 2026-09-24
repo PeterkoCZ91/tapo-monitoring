@@ -185,6 +185,8 @@ All notable changes to this project are documented here.
   that outlives the hosts' retention, for labelling with `tapo-monitor label`.
 
 ### Changed
+- Frames of one SD, recording or hub-clip sequence are scored concurrently (up to 4 at a
+  time): identical scores, but a remote site's six-frame look took 3.5 s instead of 5.9 s.
 - Recording follow-ups (`snapshot_source: recording`) come sooner: the window is read 15 s
   after it ends instead of 60 s (a live recorder trails the clock by 2-3 s), and a window
   over 28 s first reads the event's opening 24 s, sending as soon as a subject is there and

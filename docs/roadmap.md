@@ -564,9 +564,16 @@ busiest site.
   24 s that sends as soon as a subject is there. First sends after the change left 56-58 s
   after the event.
 - [ ] Confirm on a few days of first alerts per path (median and p90 before and after).
-- [ ] The early look still takes ~15 s to extract and score six frames, and the main loop
-  waits for it; measure extraction against scoring, then batch the extraction or move the
-  follow-up off the main loop.
+- [x] Measure the early look's ~15 s (on the busiest site, 4K recording, two cores): frame
+  extraction 3.2 s, scoring 7.3 s, blur 0.8 s for six frames; scoring is bound by the site's
+  uplink. Scoring the frames concurrently gives identical scores in 3.5 s instead of 5.9 s.
+  Sending smaller frames was measured and rejected: 640 px frames moved gray-band scores
+  by up to 0.45 and would have flipped 5 of 93 labelled decisions at a 0.45 threshold.
+- [ ] Overlap extraction with scoring (score each frame as soon as ffmpeg writes it), which
+  would bring the early look near the longer of the two, about 3.5 s.
+- [ ] Run SD/recording follow-ups off the main loop: while one is read and scored, every
+  camera's `getEvents` poll and sampler grab on that host waits, and a due follow-up waits
+  for the sampler pass of the same tick.
 - [ ] Camera-card follow-ups (a median 175-200 s on the sites that use them) stay behind
   pytapo's 60 s freshness guard plus a slow download; try a smaller first window there only
   once the recording change is confirmed.
