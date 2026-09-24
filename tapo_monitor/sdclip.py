@@ -110,6 +110,31 @@ def frame_every(span):
     return max(SD_FRAME_EVERY, int(span) // 8)
 
 
+# Denser frames at the start of a clip (config ``sd_dense_start``). The camera fires when
+# motion starts, so a subject walking *away* is at its largest in the first few seconds
+# and a 6 s grid can skip that moment entirely: a person entering at +3 s was seen only
+# at +6 s, at half the size. Every DENSE_START_EVERY seconds over the first
+# DENSE_START_SECONDS of the event, then the normal grid.
+DENSE_START_SECONDS = 12
+DENSE_START_EVERY = 2
+
+
+def frame_offsets(span, every, dense=None, dense_from=0):
+    """Seek offsets (seconds, ascending, unique) for a ``span``-second clip. Pure.
+
+    The normal grid ``0, every, 2*every, ...``; with ``dense = (seconds, step)`` also
+    every ``step`` seconds over ``[dense_from, dense_from + seconds)``. The dense frames
+    are added to the grid, never replace it, so the old candidates stay candidates.
+    """
+    span, every = max(int(span), 1), max(int(every), 1)
+    offsets = set(range(0, span, every))
+    if dense:
+        seconds, step = (int(v) for v in dense)
+        start = max(int(dense_from), 0)
+        offsets.update(range(start, min(start + seconds, span), max(step, 1)))
+    return sorted(offsets)
+
+
 _safe_unlink = snapshot.safe_unlink
 
 
@@ -228,16 +253,17 @@ def frame_capture_time(path):
 
 
 def _extract_frames(mp4_path, out_dir, base, span, every, rotate=0,
-                    clip_start=None):  # pragma: no cover - subprocess I/O
+                    clip_start=None, dense=None, dense_from=0):  # pragma: no cover - I/O
     """Extract one JPEG every ``every`` seconds across ``span``. Returns paths (in order).
 
     With ``clip_start`` the name also carries each frame's capture epoch, which is what
     lets a consumer ask *when* a frame was taken — see :func:`frame_capture_time`.
+    ``dense``/``dense_from`` add the denser opening frames (:func:`frame_offsets`).
     """
     out_dir = out_dir.rstrip("/")
     vf = snapshot.scaled_vf(rotate)
     paths = []
-    for offset in range(0, max(span, 1), every):
+    for offset in frame_offsets(span, every, dense, dense_from):
         stamp = "" if clip_start is None else f"_at{int(clip_start) + offset}"
         out_path = os.path.join(out_dir, f"{base}_{offset:02d}{stamp}.jpg")
         try:
@@ -290,11 +316,13 @@ def _segment_bounds(client, event_start, lookback=SD_SEG_LOOKBACK, lookahead=SD_
 
 def fetch_sd_frames(client, start_time, out_dir="/tmp", span=SD_SPAN, every=SD_FRAME_EVERY,
                     download=_download_segment, extract_frames=_extract_frames,
-                    segment_bounds=_segment_bounds, rotate=0):
+                    segment_bounds=_segment_bounds, rotate=0, dense=None):
     """Return candidate JPEG paths spanning the event, oldest first (empty list on failure).
 
     ``client`` should be a dedicated, freshly-connected pytapo client (see
-    :func:`build_client`).
+    :func:`build_client`). ``dense = (seconds, step)`` adds denser frames over the
+    event's opening seconds (:data:`DENSE_START_SECONDS`), counted from the event start
+    even when the camera's segment began earlier.
     """
     try:
         time_correction = client.getTimeCorrection() or 0
@@ -317,8 +345,10 @@ def fetch_sd_frames(client, start_time, out_dir="/tmp", span=SD_SPAN, every=SD_F
         return []
     try:
         base = f"sdf_{int(start_time)}_{int(_time.time() * 1000)}"
+        extra = ({"dense": dense, "dense_from": max(int(start_time - dl_start), 0)}
+                 if dense else {})
         frames = extract_frames(mp4, out_dir, base, dl_span, every, rotate=rotate,
-                                clip_start=dl_start)
+                                clip_start=dl_start, **extra)
         if not frames:
             print(f"SD fetch: extracted 0 frames from {mp4}", file=sys.stderr)
         return frames
@@ -332,7 +362,8 @@ _FRAME_MARKER = "FRAME:"
 
 
 def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
-                               every=None, run=None, python=None, timeout=None):
+                               every=None, run=None, python=None, timeout=None,
+                               dense=None):
     """Download SD frames in a FRESH subprocess and return its JPEG paths ([] on failure).
 
     The in-process download silently fails inside the daemon: its long-lived getEvents
@@ -341,6 +372,8 @@ def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
     the client built in-process is already tainted). A standalone process has no such
     state and downloads reliably, so we shell out to one. Credentials are inherited from
     the daemon's environment (systemd EnvironmentFile); we pass only the env-var *names*.
+    ``dense = (seconds, step)`` travels as two trailing arguments, appended only when
+    set, so the argv without it is exactly the older one.
     """
     import subprocess as _sp
     import sys as _sys
@@ -355,6 +388,8 @@ def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
             cfg.host, cfg.user_env or "", cfg.password_env or "",
             cfg.cloud_password_env or "", str(int(start_time)), out_dir,
             str(int(span)), str(int(every)), str(int(getattr(cfg, "rotate", 0)))]
+    if dense:
+        argv += [str(int(dense[0])), str(int(dense[1]))]
     try:
         proc = run(argv, capture_output=True, text=True, timeout=timeout)
     except Exception as exc:
@@ -379,12 +414,14 @@ def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
 def download_main(argv):  # pragma: no cover - subprocess entry, real camera I/O
     """Entry for the download subprocess: build a fresh client, fetch frames, print paths.
 
-    argv: host user_env password_env cloud_env start out_dir span every [rotate]
+    argv: host user_env password_env cloud_env start out_dir span every [rotate
+    [dense_seconds dense_every]]
     """
     from . import camera
 
     host, user_env, pass_env, cloud_env, start, out_dir, span, every = argv[:8]
     rotate = int(argv[8]) if len(argv) > 8 else 0
+    dense = (int(argv[9]), int(argv[10])) if len(argv) > 10 else None
     user = os.environ.get(user_env, "") if user_env else ""
     password = os.environ.get(pass_env, "") if pass_env else ""
     cloud = (os.environ.get(cloud_env, "") if cloud_env else "") or password
@@ -394,7 +431,8 @@ def download_main(argv):  # pragma: no cover - subprocess entry, real camera I/O
         print(f"SD connect failed: {_err}", file=sys.stderr)
         return 4
     frames = fetch_sd_frames(client, int(start), out_dir=out_dir,
-                             span=int(span), every=int(every), rotate=rotate)
+                             span=int(span), every=int(every), rotate=rotate,
+                             dense=dense)
     for path in frames:
         print(f"{_FRAME_MARKER}{path}")
     return 0

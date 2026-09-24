@@ -30,6 +30,7 @@ SNAPSHOT_SOURCES = {"rtsp", "sd"}
 LIGHT_TRIGGER_TYPES = {"person", "motion", "pet", "tamper", "vehicle"}
 LIGHT_TRIGGER_MODES = ("software", "firmware")
 HOLD_EXPIRY_POLICIES = {"off", "observe", "send"}
+SD_FRAME_PICKS = {"sharpest", "largest"}
 
 
 class ConfigError(ValueError):
@@ -199,6 +200,13 @@ class CameraConfig:
     # Optional per-camera backpressure for slow hosts: process at most this many due
     # SD follow-ups for this camera per daemon loop. None drains all due work.
     sd_jobs_per_tick: int | None = None
+    # How the follow-up picks among its above-threshold frames: "sharpest" (lowest subject
+    # blur) or "largest" (biggest person box among frames not much blurrier than the
+    # sharpest; sharpest again when a frame has no box).
+    sd_frame_pick: str = "sharpest"
+    # Extra frames every 2 s over the event's first 12 s of the follow-up window. Unset in
+    # the YAML it follows sd_frame_pick: on for "largest", off for "sharpest".
+    sd_dense_start: bool = False
     # Optional AI person-detection sensitivity (0-100) re-asserted every control tick.
     # None leaves the camera's value unchanged; lower = fewer false AI-person detections.
     person_sensitivity: int | None = None
@@ -788,6 +796,13 @@ def _camera(data, index):
             raise ConfigError(f"{where}: 'sd_jobs_per_tick' must be an integer") from None
         if sd_jobs_per_tick < 1:
             raise ConfigError(f"{where}: 'sd_jobs_per_tick' must be >= 1")
+    sd_frame_pick = _check_enum(data.get("sd_frame_pick", "sharpest"), SD_FRAME_PICKS,
+                                "sd_frame_pick", where)
+    sd_dense_start = data.get("sd_dense_start")
+    if sd_dense_start is None:
+        sd_dense_start = sd_frame_pick == "largest"
+    elif not isinstance(sd_dense_start, bool):
+        raise ConfigError(f"{where}: 'sd_dense_start' must be true or false")
     night_vision = data.get("night_vision")
     if night_vision is not None and night_vision not in ("ir", "auto"):
         raise ConfigError(f"{where}: 'night_vision' must be 'ir' or 'auto'")
@@ -908,6 +923,8 @@ def _camera(data, index):
         sd_span_cap=int(data["sd_span_cap"]) if data.get("sd_span_cap") is not None else None,
         sd_motion=bool(data.get("sd_motion", False)),
         sd_jobs_per_tick=sd_jobs_per_tick,
+        sd_frame_pick=sd_frame_pick,
+        sd_dense_start=sd_dense_start,
         person_sensitivity=int(data["person_sensitivity"]) if data.get("person_sensitivity") is not None else None,
         night_only=bool(data.get("night_only", False)),
         quiet_hours=quiet_hours,

@@ -645,6 +645,32 @@ def test_camera_config_parses_sd_jobs_per_tick():
     assert app.cameras[1].sd_jobs_per_tick is None
 
 
+def test_camera_config_sd_frame_pick_defaults_to_todays_behaviour():
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10"},
+                     {"name": "b", "host": "203.0.113.11", "sd_frame_pick": "largest"},
+                     {"name": "c", "host": "203.0.113.12", "sd_frame_pick": "largest",
+                      "sd_dense_start": False},
+                     {"name": "d", "host": "203.0.113.13", "sd_dense_start": True}]})
+    picks = [(c.sd_frame_pick, c.sd_dense_start) for c in app.cameras]
+    # Dense start follows the pick unless set: alone it lets "sharpest" choose a later,
+    # smaller subject, so it is on by default only together with "largest".
+    assert picks == [("sharpest", False), ("largest", True), ("largest", False),
+                     ("sharpest", True)]
+
+
+def test_camera_config_rejects_bad_sd_frame_pick_and_dense_start():
+    with pytest.raises(cfg.ConfigError, match="sd_frame_pick"):
+        cfg.load_config_from_dict(
+            {"cameras": [{"name": "a", "host": "203.0.113.10", "sd_frame_pick": "biggest"}]})
+    with pytest.raises(cfg.ConfigError, match="sd_dense_start"):
+        cfg.load_config_from_dict(
+            {"cameras": [{"name": "a", "host": "203.0.113.10", "sd_dense_start": "yes"}]})
+    with pytest.raises(cfg.ConfigError, match="did you mean 'sd_frame_pick'"):
+        cfg.load_config_from_dict(
+            {"cameras": [{"name": "a", "host": "203.0.113.10", "sd_frame_pik": "largest"}]})
+
+
 # ── sampler and scorer config ────────────────────────────────────────────────
 
 def test_sampler_scorer_defaults_off():

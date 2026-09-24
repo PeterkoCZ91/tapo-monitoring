@@ -126,6 +126,13 @@ cameras:
     #                          # off on weak hosts; software-only motion still drops.
     # sd_jobs_per_tick: 1    # optional; slow-host backpressure. Process at most this
     #                          # many due SD follow-ups per daemon loop; unset drains all.
+    # sd_frame_pick: sharpest  # optional; which above-threshold follow-up frame to send.
+    #                          # "sharpest" (default) = least blurred person crop, which
+    #                          # favours a small, far-away subject. "largest" = biggest
+    #                          # person box, skipping frames >3x blurrier than the sharpest
+    #                          # and keeping the sharpest unless the box is >=1.25x larger.
+    # sd_dense_start: false    # optional; also take a frame every 2 s over the event's
+    #                          # first 12 s (+3-6 frames). Unset = on with "largest".
     # night_only: false      # optional; detect and alert only during the astral night
     #                          # window. Camera control/tracking still runs 24/7, but by
     #                          # day detection is muted (events drained silently so the

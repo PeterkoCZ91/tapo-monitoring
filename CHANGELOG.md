@@ -5,6 +5,17 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Per-camera `sd_frame_pick` (`sharpest` | `largest`, default `sharpest`) and
+  `sd_dense_start` for the SD and recorder follow-ups. `largest` sends the
+  above-threshold frame with the biggest person box. It skips a frame more than 3x
+  blurrier than the sharpest one and keeps the sharpest unless the box is at least 1.25x
+  larger. Without a box for every frame it picks the sharpest. `sd_dense_start` adds a
+  frame every 2 s over the event's first 12 s; left unset, it follows `largest`. The
+  old frames are all still taken. Both constants come from 45 recorder events: with the
+  guards, 15 of the 28 events that had a subject changed their pick, the subject's box
+  height grew by a median of 1.32x, and no pick got smaller. Candidates above 3x blur
+  were smeared or cut off at the frame edge. The SD download subprocess takes the dense
+  window as two optional trailing arguments, so the argv without them is unchanged.
 - Sent-log index records name the delivery path that sent the frame in `path` (`live`,
   `sampler`, `sd`, `hubpoll`, `hubpoll_retry`, `hold_rescue`, `hold_expiry`), and
   `label-stats` / `/stats` report, per path of the first delivered frame, how many alerted

@@ -25,6 +25,7 @@ import time as _time
 from datetime import datetime
 
 from . import snapshot
+from .sdclip import frame_offsets
 
 SEGMENT_SECONDS = 900
 RECORDING_FRAME_EVERY = 4
@@ -185,6 +186,65 @@ def select_sharpest(candidates):
     return min(with_blur, key=lambda fb: fb[1])[0]
 
 
+# The ``largest`` pick (config ``sd_frame_pick: largest``). The subject-crop blur score
+# favours small subjects (a distant walker packs more edges per pixel) and IR grain reads
+# as detail, so "sharpest" tends to send the person when they are already far away.
+#
+# Blur guard: a candidate more than LARGEST_MAX_BLUR_RATIO times blurrier than the
+# sharpest one is out. Checked by eye on 45 recorder events (4K, day and IR night): every
+# candidate the guard removed (4.2x, 4.6x) was visibly smeared or cut at the frame edge,
+# while the kept ones up to 3.0x were fine or better (at night the "sharp" frame is often
+# just noisier). 2.0 would have also dropped an IR frame at 2.4x whose subject was 2.4x
+# taller, and the motivating SD clip needs 2.5.
+# Minimum gain: the largest must beat the sharpest candidate's box area by this factor,
+# otherwise the sharpest stays. Without it near-ties (box area +3 %) swapped a sharp,
+# whole subject for one cut at the frame edge; with it no pick got shorter.
+LARGEST_MAX_BLUR_RATIO = 3.0
+LARGEST_MIN_GAIN = 1.25
+
+
+def box_area(box):
+    """Area of an ``[x1, y1, x2, y2]`` box, or None when it is not a usable box. Pure."""
+    try:
+        x1, y1, x2, y2 = (float(v) for v in box)
+    except (TypeError, ValueError):
+        return None
+    area = abs(x2 - x1) * abs(y2 - y1)
+    return area if math.isfinite(area) else None
+
+
+def select_largest(candidates, max_blur_ratio=LARGEST_MAX_BLUR_RATIO,
+                   min_gain=LARGEST_MIN_GAIN):
+    """Frame whose subject box is largest, skipping ones much blurrier than the sharpest.
+
+    ``candidates`` is ``(frame_path, blur_or_None, box)`` in the same order as for
+    :func:`select_sharpest`. A frame whose blur exceeds ``max_blur_ratio`` times the
+    sharpest candidate's is out (one without a blur value too, unless none has one).
+    The largest remaining box wins only when its area is at least ``min_gain`` times the
+    sharpest candidate's; otherwise the sharpest does. When any candidate lacks a usable
+    box the sizes are not comparable and the choice is :func:`select_sharpest`. Ties
+    keep the earlier (higher-scoring) candidate. Returns None for empty input.
+    """
+    if not candidates:
+        return None
+    areas = [box_area(box) if box else None for _f, _b, box in candidates]
+    if any(a is None for a in areas):
+        return select_sharpest([(f, b) for f, b, _box in candidates])
+    blurs = [b for _f, b, _box in candidates if b is not None]
+    ceiling = min(blurs) * max_blur_ratio if blurs else None
+    best = None
+    for (frame, blur, _box), area in zip(candidates, areas, strict=True):
+        if ceiling is not None and (blur is None or blur > ceiling):
+            continue
+        if best is None or area > best[1]:
+            best = (frame, area)
+    sharpest = select_sharpest([(f, b) for f, b, _box in candidates])
+    sharpest_area = areas[[f for f, _b, _box in candidates].index(sharpest)]
+    if best is None or best[1] < sharpest_area * min_gain:
+        return sharpest
+    return best[0]
+
+
 # ── frame extraction + fetch entry point ─────────────────────────────────────
 
 def fresh_delay(span):
@@ -209,19 +269,21 @@ def _run_ffmpeg(args):  # pragma: no cover - subprocess I/O
 
 
 def extract_frames(mkv, seg_start, event_start, span, every, out_dir, base, runner=None,
-                   rotate=0, on_frame=None):
+                   rotate=0, on_frame=None, dense=None):
     """One JPEG every ``every`` sec across ``span``, seeking from the event's offset in
     the segment. Returns paths (oldest first); clips the window to the segment end.
     Names carry the segment epoch plus actual seek offset for pan-window filtering.
     ``on_frame(path)`` is called as each frame lands, so the caller can start scoring it
-    while the next one is still being decoded."""
+    while the next one is still being decoded. ``dense = (seconds, step)`` adds denser
+    frames over the window's opening seconds (``sdclip.frame_offsets``)."""
     runner = runner or _run_ffmpeg
     out_dir = out_dir.rstrip("/")
     vf = snapshot.scaled_vf(rotate)
     base_offset = max(int(event_start - seg_start), 0)
     limit = min(base_offset + max(int(span), 1), SEGMENT_SECONDS)
+    offsets = [base_offset + o for o in frame_offsets(span, every, dense)]
     paths = []
-    for k, offset in enumerate(range(base_offset, limit, max(int(every), 1))):
+    for k, offset in enumerate(o for o in offsets if o < limit):
         out_path = os.path.join(out_dir, f"{base}_{k:02d}_at{int(seg_start + offset)}.jpg")
         try:
             runner(["ffmpeg", "-y", "-ss", str(offset), "-i", mkv, "-frames:v", "1",
@@ -237,7 +299,8 @@ def extract_frames(mkv, seg_start, event_start, span, every, out_dir, base, runn
 
 def fetch_recording_frames(cfg, event_start, span, out_dir,
                            base_dir=None,
-                           segment_for=segment_for, extract=extract_frames, on_frame=None):
+                           segment_for=segment_for, extract=extract_frames, on_frame=None,
+                           dense=None):
     """Candidate JPEGs from the local recording around the event; ``[]`` when no segment.
 
     ``base_dir`` defaults to the ``RECORDING_ROOT`` env var — the same recorder tree the
@@ -245,7 +308,7 @@ def fetch_recording_frames(cfg, event_start, span, out_dir,
     the recorder location in exactly one place. Empty/unset root -> ``[]`` (caller falls
     back to the SD/live path). Signature-compatible with
     ``sdclip.fetch_sd_frames_subprocess`` so the daemon's SD follow-up pass can accept it
-    via ``fetch_frames=``.
+    via ``fetch_frames=``. ``dense`` is passed to the extractor only when set.
     """
     base_dir = base_dir or os.getenv("RECORDING_ROOT", "")
     host = getattr(cfg, "host", None)
@@ -259,5 +322,6 @@ def fetch_recording_frames(cfg, event_start, span, out_dir,
         return []
     mkv, seg_start = seg
     base = f"rec_{int(event_start)}_{int(_time.time() * 1000)}"
+    extra = {"dense": dense} if dense else {}
     return extract(mkv, seg_start, event_start, span, RECORDING_FRAME_EVERY, out_dir, base,
-                   rotate=getattr(cfg, "rotate", 0), on_frame=on_frame)
+                   rotate=getattr(cfg, "rotate", 0), on_frame=on_frame, **extra)

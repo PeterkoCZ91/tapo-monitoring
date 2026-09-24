@@ -2991,6 +2991,77 @@ def test_pending_recording_source_sends_sharpest(monkeypatch, source):
     assert sent == ["/f2.jpg"]
 
 
+@pytest.mark.parametrize("source", ["recording", "sd"])
+def test_pending_largest_pick_sends_the_bigger_subject_from_a_dense_start(monkeypatch,
+                                                                            source):
+    # sd_frame_pick: largest (dense start follows it): the fetch is asked for the dense
+    # opening frames, and the frame with the biggest person box within the blur guard
+    # goes out instead of the sharpest, smaller one.
+    sent, fetches = [], []
+    app = cfg.load_config_from_dict({"groq": {}, "cameras": [
+        {"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
+         "snapshot_source": source, "sd_frame_pick": "largest",
+         "scorer": {"url": "http://x/score", "threshold": 0.3}}]})
+    state = daemon.MonitorState()
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+    scores = {"/f00.jpg": 0.05, "/f04.jpg": 0.86, "/f06.jpg": 0.86, "/f10.jpg": 0.71}
+    boxes = {"/f04.jpg": [1074, 311, 1115, 421], "/f06.jpg": [1026, 270, 1070, 364],
+             "/f10.jpg": [1020, 290, 1047, 357]}
+    blur = {"/f04.jpg": 0.260, "/f06.jpg": 0.112, "/f10.jpg": 0.104}
+    def score(frame):
+        if frame in boxes:
+            score.boxes[frame] = boxes[frame]
+        return scores[frame]
+    score.boxes = {}
+    def fetch(c, s, span=None, out_dir=None, **kw):
+        fetches.append(kw.get("dense"))
+        return list(scores)
+    monkeypatch.setattr(daemon, "score_for", lambda cfg_: score)
+    monkeypatch.setattr(daemon.recclip, "blur_score", lambda f, box=None: blur[f])
+    monkeypatch.setattr(daemon, "_caption_describe", lambda *a, **k: "")
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap, **k: sent.append(img) or True)
+    secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
+    daemon.process_pending_sd(
+        app, {"a": object()}, state, now=1075, secrets=secrets,
+        snapshot_for=lambda cfg_: (lambda cam, ev: None), time_str=lambda ev: "T",
+        fetch_frames=fetch)
+    assert fetches == [(daemon.sdclip.DENSE_START_SECONDS, daemon.sdclip.DENSE_START_EVERY)]
+    assert sent == ["/f04.jpg"]       # "sharpest" would send the far-away /f10.jpg
+
+
+def test_pending_default_pick_asks_for_no_dense_frames(monkeypatch):
+    fetches = []
+    app, state, Cam, secrets = _recording_followup(monkeypatch)
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None, **kw):
+        fetches.append(kw)
+        return []
+    daemon.process_pending_sd(app, {"a": Cam()}, state, now=state.pending_sd[0]["due_at"],
+                              secrets=secrets, snapshot_for=lambda _cfg: (lambda cam, ev: None),
+                              time_str=lambda ev: "T", fetch_frames=fetch_frames)
+    assert fetches == [{}]
+
+
+def test_dense_start_only_for_the_window_that_starts_at_the_event(monkeypatch):
+    # The early look reads the event's opening seconds densely; the rest of the window,
+    # read after an empty early look, starts 24 s in and keeps the normal spacing.
+    app, state, Cam, secrets = _recording_followup(monkeypatch)
+    app.cameras[0].sd_dense_start = True
+    calls = []
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None, **kw):
+        calls.append((start_time, kw.get("dense")))
+        return []
+    run = lambda now: daemon.process_pending_sd(  # noqa: E731
+        app, {"a": Cam()}, state, now=now, secrets=secrets,
+        snapshot_for=lambda _cfg: (lambda cam, ev: None), time_str=lambda ev: "T",
+        fetch_frames=fetch_frames)
+    run(state.pending_sd[0]["due_at"])
+    run(state.pending_sd[0]["due_at"])
+    dense = (daemon.sdclip.DENSE_START_SECONDS, daemon.sdclip.DENSE_START_EVERY)
+    assert calls == [(500, dense), (500 + daemon.recclip.RECORDING_EARLY_SPAN, None)]
+
+
 
 
 def _recording_followup(monkeypatch, source="recording"):

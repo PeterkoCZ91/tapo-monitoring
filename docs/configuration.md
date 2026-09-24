@@ -397,6 +397,26 @@ sd_jobs_per_tick: 1
   result retries with `sd_span_cap`. Confirmed person events use the full window directly.
 - `sd_motion` also gives PIR-backed bare motion a second chance; it can be expensive.
 - `sd_jobs_per_tick` adds per-camera backpressure for slow hosts.
+- `sd_frame_pick` chooses among the follow-up's frames that pass the scorer threshold:
+  - `sharpest` (default) sends the one whose person crop is least blurred;
+  - `largest` sends the one with the biggest person box. Two guards keep that from sending a
+    worse photo: a frame more than 3x blurrier than the sharpest one is skipped, and the
+    largest must have at least 1.25x the sharpest frame's box area, otherwise the sharpest
+    one is sent. When the scorer returns no box for one of the frames, `sharpest` is used.
+  The blur score rates a small, distant subject as sharp, so with `sharpest` a person walking
+  away from the camera tends to be sent when they are already far off.
+- `sd_dense_start` adds a frame every 2 s over the event's first 12 s. The event fires when
+  motion starts, and a subject who walks away is largest in those first seconds, which a 6 s
+  grid can skip. Frames on the normal grid are still taken. This adds 3 to 6 frames per
+  follow-up, and each one costs a seek and a scorer call. Left unset, it is on for
+  `largest` and off for `sharpest`. With `sharpest`, the extra early frames can make the
+  follow-up send a later, smaller subject. Only a window that starts at the event gets the
+  dense frames; the rest of a window after the recorder's early look keeps the normal
+  spacing.
+
+```yaml
+sd_frame_pick: largest     # sd_dense_start follows: true
+```
 
 With `snapshot_source: recording`, bare motion whose live frame scores below the threshold
 also gets a recorder look — that is the point of a local recorder, since a live frame can

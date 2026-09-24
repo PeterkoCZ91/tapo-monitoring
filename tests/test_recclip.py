@@ -72,6 +72,52 @@ def test_select_sharpest_empty_is_none():
     assert recclip.select_sharpest([]) is None
 
 
+def _box(h, w=40):
+    return [100, 100, 100 + w, 100 + h]
+
+
+def test_select_largest_prefers_the_bigger_subject_within_the_blur_guard():
+    # The motivating clip: +4 s is 1.16x taller than +6 s and 2.5x blurrier than the
+    # sharpest (+10 s, a small far-away subject); the guard is 3x.
+    cands = [("+6", 0.112, [1026, 270, 1070, 364]), ("+4", 0.260, [1074, 311, 1115, 421]),
+             ("+8", 0.120, [1030, 280, 1061, 359]), ("+10", 0.104, [1020, 290, 1047, 357])]
+    assert recclip.select_sharpest([(f, b) for f, b, _ in cands]) == "+10"
+    assert recclip.select_largest(cands) == "+4"
+
+
+def test_select_largest_skips_a_candidate_much_blurrier_than_the_sharpest():
+    cands = [("sharp", 0.10, _box(100)), ("smeared", 0.31, _box(300)),
+             ("ok", 0.29, _box(200))]
+    assert recclip.select_largest(cands) == "ok"
+    assert recclip.select_largest(cands, max_blur_ratio=4.0) == "smeared"
+
+
+def test_select_largest_keeps_the_sharpest_on_a_near_tie():
+    # 10 % more area is not worth a softer frame (often one cut at the frame edge).
+    cands = [("sharp", 0.01, _box(100)), ("bigger", 0.015, _box(110))]
+    assert recclip.select_largest(cands) == "sharp"
+    assert recclip.select_largest(cands, min_gain=1.0) == "bigger"
+
+
+def test_select_largest_falls_back_to_sharpest_without_every_box():
+    cands = [("big", 0.5, _box(300)), ("sharp", 0.1, None)]
+    assert recclip.select_largest(cands) == "sharp"
+    assert recclip.select_largest([("a", 0.2, "junk"), ("b", 0.1, _box(10))]) == "b"
+
+
+def test_select_largest_without_blur_values_takes_the_largest():
+    cands = [("a", None, _box(100)), ("b", None, _box(200))]
+    assert recclip.select_largest(cands) == "b"
+    assert recclip.select_largest([]) is None
+
+
+def test_box_area():
+    assert recclip.box_area([10, 20, 30, 60]) == 800
+    assert recclip.box_area([30, 60, 10, 20]) == 800
+    assert recclip.box_area(None) is None
+    assert recclip.box_area(["x", 1, 2, 3]) is None
+
+
 # ── extraction + fetch + delay ───────────────────────────────────────────────
 
 def test_fresh_delay_has_no_pytapo_guard():
@@ -222,3 +268,42 @@ def test_extract_frames_reports_each_frame_as_it_lands(tmp_path):
     paths = recclip.extract_frames("seg.mkv", 1000, 1010, 12, 4, str(tmp_path), "b",
                                    runner=runner, on_frame=seen.append)
     assert seen == paths and len(paths) == 3
+
+
+def test_extract_frames_dense_start_adds_early_frames_with_parseable_names(tmp_path):
+    from tapo_monitor import sdclip
+    calls = []
+    def runner(args):
+        calls.append(args[args.index("-ss") + 1])
+        pathlib.Path(args[-1]).write_bytes(b"\xff\xd8")
+    seen = []
+    paths = recclip.extract_frames("seg.mkv", 1000, 1010, 24, 4, str(tmp_path), "b",
+                                   runner=runner, on_frame=seen.append, dense=(12, 2))
+    assert calls == ["10", "12", "14", "16", "18", "20", "22", "26", "30"]
+    assert seen == paths and len(set(paths)) == 9
+    assert [sdclip.frame_capture_time(p) for p in paths] == [
+        1010, 1012, 1014, 1016, 1018, 1020, 1022, 1026, 1030]
+    assert paths == sorted(paths)                  # names order like the frames
+
+
+def test_extract_frames_dense_start_stops_at_the_segment_end(tmp_path):
+    calls = []
+    def runner(args):
+        calls.append(int(args[args.index("-ss") + 1]))
+        pathlib.Path(args[-1]).write_bytes(b"\xff\xd8")
+    recclip.extract_frames("seg.mkv", 0, recclip.SEGMENT_SECONDS - 5, 24, 4,
+                           str(tmp_path), "b", runner=runner, dense=(12, 2))
+    assert calls == [recclip.SEGMENT_SECONDS - 5, recclip.SEGMENT_SECONDS - 3,
+                     recclip.SEGMENT_SECONDS - 1]
+
+
+def test_fetch_recording_frames_passes_dense_only_when_set():
+    seen = []
+    def extract(*a, **k):
+        seen.append(k)
+        return []
+    for dense in (None, (12, 2)):
+        recclip.fetch_recording_frames(
+            cfg=None, event_start=1000.0, span=24, out_dir="/tmp", base_dir="/r",
+            segment_for=lambda *a, **k: ("/r/x.mkv", 900.0), extract=extract, dense=dense)
+    assert "dense" not in seen[0] and seen[1]["dense"] == (12, 2)

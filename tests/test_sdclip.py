@@ -408,3 +408,70 @@ def test_fetch_subprocess_scales_timeout_with_span():
 
     sdclip.fetch_sd_frames_subprocess(_cfg(), 1000, span=80, run=run, python="PY", timeout=99)
     assert captured["timeout"] == 99
+
+
+# ── dense start: more frames over the event's opening seconds ────────────────────
+
+def test_frame_offsets_default_is_the_old_grid():
+    assert sdclip.frame_offsets(36, 6) == [0, 6, 12, 18, 24, 30]
+    assert sdclip.frame_offsets(36, 6) == list(range(0, 36, 6))
+
+
+def test_frame_offsets_dense_start_adds_to_the_grid():
+    dense = (sdclip.DENSE_START_SECONDS, sdclip.DENSE_START_EVERY)
+    assert sdclip.frame_offsets(36, 6, dense) == [0, 2, 4, 6, 8, 10, 12, 18, 24, 30]
+    # A wide window keeps its whole old grid; the dense frames only add.
+    wide = sdclip.frame_offsets(120, 15, dense)
+    assert set(range(0, 120, 15)) <= set(wide) and len(wide) == 13
+    # Counted from where the event sits in the downloaded segment, clipped to the span.
+    assert sdclip.frame_offsets(12, 6, (12, 2), dense_from=7) == [0, 6, 7, 9, 11]
+
+
+def test_fetch_frames_dense_counts_from_the_event_not_the_segment():
+    seen = {}
+    def extract_frames(mp4, out_dir, base, span, every, rotate=0, clip_start=None, **kw):
+        seen.update(kw, clip_start=clip_start)
+        return ["/tmp/a.jpg"]
+    sdclip.fetch_sd_frames(
+        _Cam(), 1000, span=36, every=6, download=lambda *a, **k: "/tmp/clip.mp4",
+        extract_frames=extract_frames, segment_bounds=lambda c, s: (995, 1100),
+        dense=(12, 2))
+    assert seen == {"dense": (12, 2), "dense_from": 5, "clip_start": 995}
+
+
+def test_fetch_frames_without_dense_calls_the_extractor_as_before():
+    seen = {}
+    def extract_frames(mp4, out_dir, base, span, every, rotate=0, clip_start=None):
+        seen["ok"] = True
+        return ["/tmp/a.jpg"]
+    sdclip.fetch_sd_frames(_Cam(), 1000, span=12, every=6,
+                           download=lambda *a, **k: "/tmp/clip.mp4",
+                           extract_frames=extract_frames, segment_bounds=lambda c, s: None)
+    assert seen == {"ok": True}
+
+
+def test_fetch_subprocess_passes_dense_as_two_trailing_args():
+    argvs = []
+    def run(argv, **kw):
+        argvs.append(argv)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    sdclip.fetch_sd_frames_subprocess(_cfg(), 1000, span=36, run=run, python="PY")
+    sdclip.fetch_sd_frames_subprocess(_cfg(), 1000, span=36, run=run, python="PY",
+                                      dense=(12, 2))
+    assert argvs[0][-3:] == ["36", "6", "0"]          # unchanged argv without dense
+    assert argvs[1] == argvs[0] + ["12", "2"]
+
+
+def test_download_main_reads_old_and_new_argv(monkeypatch):
+    from tapo_monitor import camera
+    seen = []
+    monkeypatch.setattr(camera, "tapo_factory", lambda *a: None)
+    monkeypatch.setattr(camera, "connect", lambda factory: (object(), None))
+    monkeypatch.setattr(sdclip, "fetch_sd_frames",
+                        lambda client, start, **kw: seen.append(kw) or [])
+    base = ["203.0.113.12", "", "", "", "1000", "/tmp", "36", "6"]
+    assert sdclip.download_main(base) == 0
+    assert sdclip.download_main(base + ["90"]) == 0
+    assert sdclip.download_main(base + ["90", "12", "2"]) == 0
+    assert [(k["rotate"], k["dense"]) for k in seen] == [(0, None), (90, None),
+                                                         (90, (12, 2))]

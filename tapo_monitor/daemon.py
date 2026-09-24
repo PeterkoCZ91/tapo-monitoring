@@ -1937,9 +1937,13 @@ class _Prescorer:
 
 
 def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
-                            *, path="sd", keep_below=False, audit_extra=None):
+                            *, path="sd", keep_below=False, audit_extra=None,
+                            pick="sharpest"):
     """Pick the sharpest subject from an already-extracted, bounded frame sequence.
 
+    ``pick="largest"`` instead takes the frame with the largest subject box among
+    candidates not much blurrier than the sharpest (:func:`recclip.select_largest`);
+    without a box for every candidate it stays with the sharpest.
     Missing blur measurements fall back to detection score. Frames are scored
     concurrently (:func:`_score_all`); a scorer failure ends the selection there: retain
     a confirmed candidate if available, otherwise preserve the existing unscored
@@ -1981,12 +1985,17 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
     use_boxes = all(boxes.get(f) for f, _ in above)
     ranked = [(f, blur_score(f, box=boxes[f]) if use_boxes else blur_score(f))
               for f, _ in above]
-    image = recclip.select_sharpest(ranked)
+    if pick == "largest" and use_boxes:
+        image = recclip.select_largest([(f, b, boxes[f]) for f, b in ranked])
+    else:
+        pick = "sharpest"
+        image = recclip.select_sharpest(ranked)
     selected = next(s for f, s in above if f == image)
     selected_blur = next(b for f, b in ranked if f == image)
-    log.info("frame selection %s [%s]: picked %d/%d, subjects=%d score=%.3f blur=%s",
-             cfg.name, path, frames.index(image) + 1, len(frames), len(above),
-             selected, selected_blur)
+    area = recclip.box_area(boxes[image]) if use_boxes else None
+    log.info("frame selection %s [%s]: picked %d/%d (%s), subjects=%d score=%.3f blur=%s "
+             "box_area=%s", cfg.name, path, frames.index(image) + 1, len(frames), pick,
+             len(above), selected, selected_blur, None if area is None else int(area))
     return image, selected
 
 
@@ -2100,14 +2109,20 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
         # overlap. The camera card downloads one clip, so there is nothing to overlap.
         prescore = (_Prescorer(score) if score is not None
                     and fetch is recclip.fetch_recording_frames else None)
+        # Denser frames over the event's opening seconds, only for a window that starts
+        # at the event (not the rest after an early look). Passed only when on, so an
+        # injected fetch without the keyword keeps working.
+        dense_kw = ({"dense": (sdclip.DENSE_START_SECONDS, sdclip.DENSE_START_EVERY)}
+                    if cfg.sd_dense_start and offset == 0 else {})
         fetch_started = _time.monotonic()
         try:
             if prescore is not None:
                 frames = fetch(cfg, start_time + offset, span=span, out_dir=job_dir,
-                               on_frame=prescore.submit)
+                               on_frame=prescore.submit, **dense_kw)
                 score = prescore.score
             else:
-                frames = fetch(cfg, start_time + offset, span=span, out_dir=job_dir)
+                frames = fetch(cfg, start_time + offset, span=span, out_dir=job_dir,
+                               **dense_kw)
         finally:
             if app.reliability.enabled and app.reliability.latency_metrics:
                 reliability.observe_latency(
@@ -2131,7 +2146,7 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
             scored_pick = score is not None
             if scored_pick:
                 image, selected_score = _select_recording_frame(
-                    cfg, event, etype, eligible_frames, score)
+                    cfg, event, etype, eligible_frames, score, pick=cfg.sd_frame_pick)
             # Without a local scorer, retain the caption-based/raw selection.
             for frame in (() if scored_pick else eligible_frames):
                 desc = enrich.groq_describe(secrets["groq_key"], frame) if cfg.enrich.groq else ""
