@@ -326,12 +326,13 @@ means a restart mid-incident can re-send an alert that was already delivered.
 The test suite already injects every dependency; what is missing is a shared harness, so
 multi-tick scenarios are written once rather than rebuilt by hand in each test.
 
-- [ ] A scenario harness: fake clock, scripted camera (events, presets, refusals,
+- [x] A scenario harness: fake clock, scripted camera (events, presets, refusals,
   disconnects), fake ONVIF, recording notifier. Assert on the sequence of transitions,
-  not just the final state.
-- [ ] Scenarios: event during hold, camera disconnect mid-alert, duplicate events, rain
+  not just the final state. (`tests/scenario.py`, driving the real `loop_step`.)
+- [x] Scenarios: event during hold, camera disconnect mid-alert, duplicate events, rain
   change during tracking, restart during a pending delivery, RTSP down while the API is
-  alive, capability missing on the camera.
+  alive, capability missing on the camera (`tests/test_scenarios.py`; restart inside a
+  cooldown is a strict xfail until 7.2 persists it).
 - [ ] `tapo-monitor replay`: feed a recorded audit log/ledger window through the same
   production decision logic with media and delivery stubbed, and print the decisions it
   would take — so a policy change can be checked against a real night before it ships.
