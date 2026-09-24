@@ -371,7 +371,7 @@ multi-tick scenarios are written once rather than rebuilt by hand in each test.
 
 ## Phase 8 — Prove phase 7 in production, close what it exposed
 
-Status: **planned**
+Status: **in progress** (8.2–8.4 done; 8.1 trial running on one camera; 8.5 waits for a second camera)
 
 Phase 7 was built and tested against fakes; the scenario harness and a replay of a real
 recorded day then surfaced a handful of smaller gaps. This phase ships phase 7 the way
@@ -383,8 +383,9 @@ the delivery sequence prescribes — observe first, promote later — and fixes 
   week of `hold_rescue_recall` sends, pan-limit frames and `motion_refusals` before and
   after; the arbiter is worth keeping only if the rescue stops firing in the ordinary
   case without the lens lingering out of bounds.
-- [ ] Carry `motion_refusals` and a "runtime state restored" count in the daily digest's
-  fleet block, so the trial is read from Telegram rather than from logs.
+- [x] Carry `motion_refusals` and a "runtime state restored" count in the daily digest's
+  fleet block, so the trial is read from Telegram rather than from logs (detail lines,
+  never a failed check).
 
 ### 8.2 — Privacy mode seen on the pass it changes
 

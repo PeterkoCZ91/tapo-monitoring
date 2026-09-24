@@ -906,6 +906,20 @@ def test_fleet_health_snapshot_reads_what_the_daemon_already_knows():
     assert snap["repairs"] == {"smarttrack": 3}
 
 
+def test_fleet_health_snapshot_carries_motion_refusals_and_restart_carry_over():
+    # Phase 8.1 is read from the digest: how often the arbiter held a move back, and
+    # what the last restart carried over instead of dropping.
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    state = daemon.MonitorState()
+    state.motion_refusals = {"a": {"pan_limit:hold": 3}}
+    state.runtime_restored = {"pending_hub": 1, "pending_sd": 0, "cooldowns": 2}
+    snap = daemon.fleet_health_snapshot(app, state, now=1000)
+    assert snap["motion_refusals"] == {"a": {"pan_limit:hold": 3}}
+    assert snap["runtime_restored"] == {"pending_hub": 1, "pending_sd": 0, "cooldowns": 2}
+    state.motion_refusals["a"]["pan_limit:hold"] = 9      # the snapshot is a copy
+    assert snap["motion_refusals"]["a"]["pan_limit:hold"] == 3
+
+
 def test_fleet_health_snapshot_reports_camera_clock_offset_and_skew():
     app = cfg.load_config_from_dict({"cameras": [
         {"name": "a", "host": "203.0.113.10"},

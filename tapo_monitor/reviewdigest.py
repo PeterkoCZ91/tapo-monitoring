@@ -270,6 +270,22 @@ def fleet_lines(health):
         problems.append("self-heal refused: "
                         + ", ".join(f"{name} {count}\u00d7" for name, count in refused.items()))
 
+    # Held motor moves are the arbiter doing its job (a hold keeping the lens on a
+    # subject, a parked lens left alone), so they are detail, never a failed check.
+    held = [f"{name} " + ", ".join(f"{key} {count}\u00d7"
+                                   for key, count in sorted(counts.items()) if count)
+            for name, counts in sorted((health.get("motion_refusals") or {}).items())
+            if any(counts.values())]
+    if held:
+        detail.append("motor moves held since start: " + "; ".join(held))
+    carried = health.get("runtime_restored") or {}
+    if any(carried.values()):
+        hub = int(carried.get("pending_hub", 0))
+        detail.append(
+            f"restart carried {hub} hub retr{'y' if hub == 1 else 'ies'}, "
+            f"{int(carried.get('pending_sd', 0))} SD follow-up(s), "
+            f"{int(carried.get('cooldowns', 0))} cooldown(s)")
+
     # Which code the host runs. Deploys are rsync copies, so this fingerprint is the only
     # version statement a host can make \u2014 and silent drift has twice been found only by
     # manual inventory, after the fact. With an expectation configured, drift is a failed

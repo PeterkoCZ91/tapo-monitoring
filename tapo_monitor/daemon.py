@@ -651,6 +651,8 @@ class MonitorState:
     # the file path, and the snapshot last written so an unchanged tick skips the write.
     runtime_path: str | None = None
     runtime_saved: dict | None = None
+    # What the last start restored from runtime.json (counts), reported in the digest.
+    runtime_restored: dict = field(default_factory=dict)
     # Detached view the status endpoint serves, republished by the main thread every tick
     # (see statusd.publish); the endpoint thread never reads the live dicts above.
     status_view: dict | None = None
@@ -2707,7 +2709,10 @@ def fleet_health_snapshot(app: AppConfig, state: MonitorState, *, now,
 
     return {"cameras": cameras, "tick": tick, "scorer": scorer_health,
             "recorder": recorder, "repairs": dict(state.repair_failures),
-            "package": package}
+            "package": package,
+            "motion_refusals": {name: dict(counts)
+                                for name, counts in state.motion_refusals.items()},
+            "runtime_restored": dict(state.runtime_restored)}
 
 
 def _review_digest_pass(*, now, secrets, app=None, state=None):
@@ -2818,6 +2823,7 @@ def main(argv=None):  # pragma: no cover - thin entry point
     restored = health.load_state(state.health_path, state, logger=log)
     state.runtime_path = runtime_state.default_path()
     carried = runtime_state.load(state.runtime_path, state, _time.time(), logger=log)
+    state.runtime_restored = dict(carried)
     if any(carried.values()):
         log.info("runtime state restored: %d hub retr%s, %d SD follow-up(s), %d cooldown(s)",
                  carried["pending_hub"], "y" if carried["pending_hub"] == 1 else "ies",

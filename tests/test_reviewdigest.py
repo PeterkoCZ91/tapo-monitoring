@@ -365,6 +365,30 @@ def test_fleet_lines_reports_ok_and_names_what_it_checked():
     assert "47s" in text
 
 
+def test_fleet_lines_report_motion_refusals_and_restart_carry_over_as_detail():
+    lines = reviewdigest.fleet_lines({
+        "cameras": {"front": {"reachable": True, "events": True}},
+        "tick": {"ok": True}, "scorer": None, "recorder": None, "repairs": {},
+        "motion_refusals": {"front": {"schedule:hold": 12, "pan_limit:hold": 3}},
+        "runtime_restored": {"pending_hub": 1, "pending_sd": 2, "cooldowns": 4},
+    })
+    text = "\n".join(lines)
+    assert text.startswith("\U0001f49a Fleet OK")        # information, not a failure
+    assert "motor moves held since start: front pan_limit:hold 3\u00d7, schedule:hold 12\u00d7" in text
+    assert "restart carried 1 hub retry, 2 SD follow-up(s), 4 cooldown(s)" in text
+
+
+def test_fleet_lines_stay_quiet_without_refusals_or_carry_over():
+    lines = reviewdigest.fleet_lines({
+        "cameras": {"front": {"reachable": True, "events": True}},
+        "tick": {"ok": True}, "scorer": None, "recorder": None, "repairs": {},
+        "motion_refusals": {"front": {}},
+        "runtime_restored": {"pending_hub": 0, "pending_sd": 0, "cooldowns": 0},
+    })
+    text = "\n".join(lines)
+    assert "held" not in text and "restart carried" not in text
+
+
 def test_fleet_lines_never_says_ok_when_a_camera_is_unreachable():
     lines = reviewdigest.fleet_lines({
         "cameras": {"front": {"reachable": False, "events": True},

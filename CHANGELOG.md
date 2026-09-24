@@ -136,7 +136,17 @@ All notable changes to this project are documented here.
 - Configuration: `coordinator.camera_order` must name cameras of its own group, and a
   renamed key can be accepted with a warning for one release (`RENAMED_KEYS`).
 
+- `tapo-monitor replay` also replays recorded SD, sampler and hub deliveries (so their
+  cooldowns count), re-applies a candidate `scorer.threshold` to recorded scores, and
+  measures the scene gate's reach (`--scene-reach`, `--summary-only`).
+- The daily digest's fleet block reports motor moves the arbiter held back and what the
+  last restart carried over from `runtime.json`.
+
 ### Changed
+- Privacy mode is read on the control pass itself (one getter on the connected client),
+  so a parked lens gets no recall on the very pass it parks and its aim is restored on
+  the first pass after, instead of up to one twin probe (900 s) later. A guard recall the
+  camera refuses as a motor refusal is counted, not treated as an ONVIF failure.
 - A stop signal inside a tick now waits for the tick to finish (a second signal, or one
   between ticks, still exits at once), so a restart never cuts a preset recall or a
   Telegram send in half. On exit the audit-ledger queue gets a bounded 5 s to drain, and
@@ -157,6 +167,10 @@ All notable changes to this project are documented here.
   before the model loads.
 
 ### Fixed
+- One network outage no longer produces a pile of notices: the event-API watchdog stands
+  down while the camera is off the network, so an offline camera gets its 🔴/🟢 pair and
+  nothing else — no "event API unavailable" before the outage alert, no event-API reboot
+  right after the camera returns, and "restored" reports the real duration, not 0 s.
 - `faces.ignore_known` never took effect on the live path (it was read from the resolved
   secrets, which never carry it), and both the live and SD skips would have raised
   `TypeError` on the first known face.
