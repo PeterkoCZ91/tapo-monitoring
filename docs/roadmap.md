@@ -512,6 +512,12 @@ false alarms stay near 2–3 % of sent frames. The corroboration hold, not the s
 the largest source of missed people, and only an incident-level measure can show
 whether a change to it helps.
 
+The per-incident report (10.1) confirmed it: of 719 incidents with a labelled person, 18
+(2.5 %) got no delivered alert, and 17 of those had a held frame showing the person. It
+also showed the next problem: the first alert of an incident arrives a median 115 s
+after the camera event starts (p90 about 200 s), with a peak between 90 and 150 s on the
+busiest site.
+
 ### 10.1 — Quality per incident
 
 - [x] Every archived frame (sent log and review log, every delivery path) carries the
@@ -531,6 +537,14 @@ whether a change to it helps.
 - [ ] Replay the policy from recorded `hold`/`hold_expired` ledger rows so
   `replay --compare` estimates the added alerts before a camera switches it on; trial it
   in `observe` mode on one camera, then promote from incident-level numbers (10.1).
+
+### 10.4 — Alert latency
+
+- [ ] Record which delivery path sent each archived frame (live, sampler, SD/recording,
+  hub clip, hold rescue) and report first-alert delay per path in `label-stats`, so the
+  90–150 s peak is attributed to a path before anything is changed.
+- [ ] Shorten the slowest path that carries most first alerts, verified by the same
+  per-incident delay report before and after.
 
 ### 10.3 — Telemetry that fills disks
 
