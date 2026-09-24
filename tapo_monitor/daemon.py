@@ -42,6 +42,7 @@ from . import (
     incident_archive,
     ledger,
     monitor,
+    motion,
     notify,
     panlimit,
     recclip,
@@ -327,7 +328,8 @@ def _apply_night_vision_mode(cam, mode, camera=None, failures=None):
 
 
 def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
-               repair_failures=None, camera=None, privacy_on=False, hold=False):
+               repair_failures=None, camera=None, privacy_on=False, hold=False,
+               motion_refusals=None):
     """Apply a CameraPlan to a connected camera in firmware-safe order.
 
     SmartTrack / motion sensitivity / preset first; auto-track asserted LAST and verified.
@@ -338,6 +340,8 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
     lens on a subject. It is honoured ONLY while the plan actually tracks: with tracking
     off the recall is the single thing that repairs a drifted or nudged aim, so a hold
     leaking into the day would rebuild the two-day asphalt incident silently.
+    Both exceptions are decided by :func:`tapo_monitor.motion.decide`, the same arbiter
+    the pan-limit guard asks; refusals are counted into ``motion_refusals`` when given.
     """
     try:
         cam.setMotionDetection(sensitivity=int(plan.motion_sensitivity))
@@ -403,13 +407,20 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
     # an unknown one still recalls, and the aim is restored on the first pass after the
     # switch goes off. The camera is not silently un-repaired either: privacy.enabled is
     # a critical drift key, so the twin reports the parked lens itself.
-    if plan.preset and not privacy_on and not (hold and plan.autotrack_on):
-        _recall_preset(cam, plan.preset, camera)
-    elif hold and plan.autotrack_on and plan.preset:
-        # Said out loud: a lens that stays off its preset looks identical to a refused
-        # recall, and that failure mode has cost this fleet two days of blind asphalt.
-        log.info("preset %s recall held for %s: auto-track is on a subject",
-                 plan.preset, camera)
+    if plan.preset:
+        move = motion.decide(motion.SCHEDULE, privacy_on=privacy_on, hold=hold,
+                             autotrack_on=plan.autotrack_on)
+        if move.allowed:
+            _recall_preset(cam, plan.preset, camera)
+        else:
+            if motion_refusals is not None:
+                motion.count_refusal(motion_refusals, camera, motion.SCHEDULE, move.reason)
+            if move.reason == motion.HOLD:
+                # Said out loud: a lens that stays off its preset looks identical to a
+                # refused recall, and that failure mode has cost this fleet two days of
+                # blind asphalt.
+                log.info("preset %s recall held for %s: auto-track is on a subject",
+                         plan.preset, camera)
     # apply_smarttrack MUST be the LAST configuration call before ensure_autotrack.
     # Live evidence (2026-06-23) showed one of the calls above resets smart_track_info
     # to ALL-OFF; running SmartTrack first let those calls wipe the night people-only
@@ -423,7 +434,7 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
 
 
 def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=None,
-             repair_failures=None, privacy=None, hold=None):
+             repair_failures=None, privacy=None, hold=None, motion_refusals=None):
     """One pass over all cameras. Dependencies injectable for testing.
 
     Returns a dict {camera_name: CameraPlan} of what was planned. ``repair_failures`` is
@@ -470,7 +481,8 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
                 if not apply_plan(cam, plan, app.reliability,
                                   repair_failures=repair_failures, camera=cfg.name,
                                   privacy_on=cfg.name in (privacy or ()),
-                                  hold=cfg.name in (hold or ())):
+                                  hold=cfg.name in (hold or ()),
+                                  motion_refusals=motion_refusals):
                     log.warning("auto-track %s not confirmed for %s: the camera took the "
                                 "call but read back the other state",
                                 "on" if plan.autotrack_on else "off", cfg.name)
@@ -577,6 +589,9 @@ class MonitorState:
     # cameras_holding_recall). Cleared the moment the recall is let through again, so the
     # cap always measures one stretch rather than the whole night.
     recall_hold_since: dict = field(default_factory=dict)
+    # Per camera, refused motor moves by "<requester>:<reason>" (see tapo_monitor.motion),
+    # so a lens held on purpose is distinguishable from one nothing is trying to move.
+    motion_refusals: dict = field(default_factory=dict)
     # Per camera, the recent intervals in which the lens is known to have been off its
     # allowed span. The SD follow-up arrives ~2 minutes after the event and re-scores what
     # the camera *recorded*, so the guard having fixed the aim by then does not help: the
@@ -2443,7 +2458,12 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
     ``pan_limit.poll_interval``. ONVIF is independent of the pytapo ``cam_clients`` and its
     own client/bounds are cached in ``state.pan_guard``; any ONVIF error is logged and the
     client rebuilt next poll — the guard must never kill the loop.
+
+    Every recall is cleared with :func:`tapo_monitor.motion.decide` first: a lens parked by
+    privacy mode is not touched at all, and one a ``track_hold`` keeps on a subject is
+    recalled only after ``pan_limit.hold_grace`` seconds of continuous out-of-bounds.
     """
+    parked = twin.cameras_in_privacy(state.twin_fleet)
     for cfg in app.cameras:
         pl = cfg.pan_limit
         if not pl.enabled:
@@ -2452,6 +2472,14 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
         if g.get("last_poll") is not None and now - g["last_poll"] < pl.poll_interval:
             continue
         g["last_poll"] = now
+        if cfg.name in parked:
+            motion.count_refusal(state.motion_refusals, cfg.name, motion.GUARD,
+                                 motion.PRIVACY)
+            if g.get("refused") != motion.PRIVACY:
+                log.info("pan_limit %s: lens parked by privacy mode; not polling", cfg.name)
+            g["refused"] = motion.PRIVACY
+            g.pop("out_since", None)
+            continue
         try:
             if "ptz" not in g:
                 user = os.getenv(pl.onvif_user_env or "", "")
@@ -2472,13 +2500,35 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
                 y = panlimit.read_tilt_y(g["ptz"], g["token"])
                 target = panlimit.limit_target(y, g.get("tilt_bounds"), pl.margin)
                 axis, value = "tilt y", y
-            if target is not None:
-                _archive_panlimit_frame(cfg, axis, value, now=now)
-                panlimit.goto_preset(g["ptz"], g["token"], target)
-                state.pan_limit_recall_at[cfg.name] = now
-                _record_out_of_bounds(state, cfg.name, now, pl.poll_interval)
-                log.info("pan_limit %s: %s=%.4f out of bounds -> recall preset %s",
-                         cfg.name, axis, value, target)
+            if target is None:
+                g.pop("out_since", None)
+                g.pop("refused", None)
+                continue
+            out_since = g.setdefault("out_since", now)
+            plan = state.desired_plans.get(cfg.name)
+            held = hold_due(state.last_seen.get(cfg.name), now, cfg.tracking.track_hold,
+                            state.recall_hold_since.get(cfg.name))
+            move = motion.decide(motion.GUARD, hold=held,
+                                 autotrack_on=bool(getattr(plan, "autotrack_on", False)),
+                                 out_of_bounds_for=now - out_since,
+                                 hold_grace=pl.hold_grace)
+            if not move.allowed:
+                motion.count_refusal(state.motion_refusals, cfg.name, motion.GUARD,
+                                     move.reason)
+                if g.get("refused") != move.reason:
+                    log.info("pan_limit %s: %s=%.4f out of bounds; recall waits up to %ds "
+                             "while auto-track holds a subject",
+                             cfg.name, axis, value, pl.hold_grace)
+                g["refused"] = move.reason
+                continue
+            g.pop("refused", None)
+            _archive_panlimit_frame(cfg, axis, value, now=now)
+            panlimit.goto_preset(g["ptz"], g["token"], target)
+            g.pop("out_since", None)
+            state.pan_limit_recall_at[cfg.name] = now
+            _record_out_of_bounds(state, cfg.name, now, pl.poll_interval)
+            log.info("pan_limit %s: %s=%.4f out of bounds -> recall preset %s",
+                     cfg.name, axis, value, target)
         except Exception as e:  # noqa: BLE001 - an ONVIF hiccup must not kill the loop
             log.warning("pan_limit %s: %s", cfg.name, e)
             g.pop("ptz", None)          # force a clean rebuild on the next poll
@@ -2629,7 +2679,8 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
         plans = run_control(app, now=now, connect=connect_factory(cam_clients, state, now),
                             repair_failures=state.repair_failures,
                             privacy=twin.cameras_in_privacy(state.twin_fleet),
-                            hold=cameras_holding_recall(app, state, now))
+                            hold=cameras_holding_recall(app, state, now),
+                            motion_refusals=state.motion_refusals)
         if isinstance(plans, Mapping):
             state.desired_plans.update(plans)
         watchdog(app, cam_clients, state, now=now, secrets=secrets, night=night)

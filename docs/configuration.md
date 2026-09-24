@@ -312,9 +312,14 @@ drifted or nudged aim: one camera here sat pointed at asphalt for two days (2026
 because nothing in the system could bring it back. A hold that leaked into the day would
 rebuild that failure silently, so it is gated on the plan, not on a clock.
 
-`pan_limit` keeps working throughout. A dwell does not license the camera to sit staring
-into a wall or a neighbour's window: if auto-track drags it outside its preset span, the
-guard recalls it within a `poll_interval` regardless of any hold.
+`pan_limit` keeps working throughout, but gives the hold a short grace. A dwell does not
+license the camera to sit staring into a wall or a neighbour's window: if auto-track drags
+it outside its preset span, the guard recalls it once the lens has been continuously out of
+bounds for `pan_limit.hold_grace` seconds (default 20; `0` recalls at once, the behaviour
+before the grace existed). Without a running hold the guard recalls within a
+`poll_interval` as always. Both paths ask one arbiter (`tapo_monitor.motion`) before
+moving: privacy mode blocks every move, the hold blocks the scheduled recall, the guard
+overrides the hold after the grace. Refused moves are counted per camera.
 
 Setting `track_hold` without `back_time` is warned about at startup — the firmware would
 still swing the lens home on its own timer, so the hold buys no footage.
@@ -575,11 +580,13 @@ pan_limit:
   tilt: true          # also bound tilt (off by default)
   tilt_min: -1.0      # only presets inside this window may become a tilt bound
   tilt_max: -0.6
+  hold_grace: 20      # while track_hold holds a subject, wait this long out of bounds
 ```
 
 The guard reads current/preset pan positions over ONVIF and recalls the nearest bounding
 preset when auto-track moves outside their span. It does not create a hard motor limit.
-ONVIF errors are isolated from the event loop.
+ONVIF errors are isolated from the event loop. While the twin reads privacy mode as on,
+the guard does not poll at all: a parked lens can only answer `MOTOR_BUSY`.
 
 The guard needs the `onvif-zeep` package: `pip install -e ".[onvif]"` (or
 `pip install onvif-zeep`) into the daemon's venv. The import is deliberately lazy — it

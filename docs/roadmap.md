@@ -260,6 +260,104 @@ so the canonical unit edit becomes cosmetic rather than blocking.
   fleet's own notifier. Together with the mutual host watch polling `/health` from another
   machine, a dead scorer is now noticed both from outside and from within.
 
+## Phase 7 — Runtime correctness and deterministic behaviour
+
+Status: **in progress** (7.1 done)
+
+A gap review against a generic "autonomous PTZ platform" wish list found that most of
+it already exists here (digital twin, drift, self-healing, clock offsets, host watch,
+release deploys) or was decided against (see *Considered and declined* below). What
+remained were a few concrete defects in how the daemon moves cameras, what it forgets on
+restart and how it stops. Each stage lands as one reviewed, tested commit; deployment is
+a separate decision.
+
+### 7.1 — One owner for the motor
+
+Two paths move a lens and neither knows about the other: the control pass recalls the
+day/night preset through pytapo every `control_interval`, and the pan-limit guard sends
+ONVIF `GotoPreset` every `pan_limit.poll_interval`.
+
+- [x] Introduce a small motion arbiter (`tapo_monitor/motion.py`) with an explicit priority order —
+  privacy/parked > auto-track hold > pan-limit guard > scheduled preset recall — that
+  both paths consult before sending a motor command. No new behaviour, only refusals.
+- [x] The guard honours `track_hold` after a `pan_limit.hold_grace` (default 20 s) of
+  continuous out-of-bounds. Before, it could recall a lens off a held subject, and
+  `hold_rescue_recall` exists to send the frame that recall broke; the rescue stays as a
+  safety net but should stop firing in the ordinary case.
+- [x] The guard honours a privacy state the twin actually read. A parked lens answers
+  every motor call with `MOTOR_BUSY`; the guard used to re-send every few seconds.
+- [x] Log each refusal stretch once with owner, reason and camera, and count refusals per
+  camera (`MonitorState.motion_refusals`), so a lens that never moves is distinguishable
+  from one that is being held on purpose.
+- [x] Tests: guard vs hold (grace, restart of the grace, hold expiry, no tracking,
+  `hold_grace: 0`), guard vs privacy, scheduled recall refusals.
+
+### 7.2 — Survive a restart without losing alerts
+
+Every deploy restarts the daemon, and a restart currently drops the hub retry queue (the
+only copy of those alerts), pending SD follow-ups and the alert cooldowns — the last one
+means a restart mid-incident can re-send an alert that was already delivered.
+
+- [ ] Persist `pending_hub`, `pending_sd` and the cooldown state (`last_alert`,
+  `last_event_start`) atomically next to the existing health state, with a schema version
+  and a maximum age so a week-old queue is discarded rather than replayed.
+- [ ] Reload on start; entries whose media no longer exists are dropped with a log line,
+  never silently.
+- [ ] Tests: restart with a queued hub alert delivers it once; restart inside a cooldown
+  does not re-send; stale and corrupt files fall back to an empty state.
+
+### 7.3 — Clean shutdown and thread-safe status reads
+
+- [ ] On SIGTERM/SIGINT drain the audit-ledger queue with a bounded timeout, so the last
+  decisions before a restart reach SQLite.
+- [ ] Persist the 7.2 state on exit as well as on change.
+- [ ] `statusd` reads `MonitorState` from its own thread while the main loop mutates
+  dicts; serve it from a snapshot published by the main loop instead of reading live
+  state, so a status request can never see a half-updated dict or fail with a 500.
+- [ ] Guard the incident-preservation worker's attempt counter the same way.
+
+### 7.4 — Scenario harness and replay
+
+The test suite already injects every dependency; what is missing is a shared harness, so
+multi-tick scenarios are written once rather than rebuilt by hand in each test.
+
+- [ ] A scenario harness: fake clock, scripted camera (events, presets, refusals,
+  disconnects), fake ONVIF, recording notifier. Assert on the sequence of transitions,
+  not just the final state.
+- [ ] Scenarios: event during hold, camera disconnect mid-alert, duplicate events, rain
+  change during tracking, restart during a pending delivery, RTSP down while the API is
+  alive, capability missing on the camera.
+- [ ] `tapo-monitor replay`: feed a recorded audit log/ledger window through the same
+  production decision logic with media and delivery stubbed, and print the decisions it
+  would take — so a policy change can be checked against a real night before it ships.
+
+### 7.5 — Incident identity
+
+- [ ] Assign an incident ID when an alert candidate is first seen and carry it through
+  audit lines, ledger decisions, the sent-frame index and the Telegram caption metadata,
+  so detect → frame → score → delivery can be followed without matching timestamps.
+- [ ] `tapo-monitor audit --incident <id>` prints that chain.
+
+### 7.6 — Cheap configuration checks
+
+- [ ] `coordinator.camera_order` must name cameras of its own group.
+- [ ] A soft deprecation path: a renamed key is accepted with a warning for one release
+  instead of becoming a hard error immediately.
+
+### Considered and declined
+
+- **Patrol routes / preset tours.** Day policy is a fixed preset, night policy is
+  firmware auto-track; a patrol would fight both. Revisit only after 7.1 exists, and only
+  for a camera class that is neither tracked nor static.
+- **Event bus and package restructuring.** The daemon's direct pass sequence is simple and
+  fully injectable; a rewrite would put a working fleet at risk for no measured gain.
+- **Telegram as a command channel.** It would turn the bot token into a remote camera
+  controller. Status is already available through `statusd` and the CLI.
+- **Siren, vehicle tracking, Prometheus/MQTT exporter.** Decided earlier; see the
+  architecture non-goals and Phase 4.
+- **Generic multi-camera abstraction.** Runtime state is already keyed per camera; live
+  PTZ handoff (`handoff.py`) waits for a measured overlapping pair (Phase 5).
+
 ## Research tracks
 
 These stay separate from production until repeatable evidence exists:

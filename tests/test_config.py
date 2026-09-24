@@ -119,6 +119,20 @@ def test_pan_limit_parses():
     assert pl.onvif_user_env == "ONVIF_USER" and pl.onvif_port == 2020
 
 
+def test_pan_limit_hold_grace_defaults_to_twenty_seconds():
+    pl = cfg.load_config_from_dict(_minimal()).cameras[0].pan_limit
+    assert pl.hold_grace == 20
+
+
+def test_pan_limit_hold_grace_parses_and_rejects_negative():
+    data = {"cameras": [{"name": "f", "host": "192.0.2.50",
+                         "pan_limit": {"hold_grace": 0}}]}
+    assert cfg.load_config_from_dict(data).cameras[0].pan_limit.hold_grace == 0
+    data["cameras"][0]["pan_limit"]["hold_grace"] = -1
+    with pytest.raises(cfg.ConfigError, match="hold_grace"):
+        cfg.load_config_from_dict(data)
+
+
 def test_pan_limit_parses_tilt_window():
     data = {"cameras": [{"name": "f", "host": "192.0.2.50", "pan_limit": {
         "enabled": True, "tilt": True, "tilt_min": -1.0, "tilt_max": -0.6}}]}

@@ -125,6 +125,9 @@ class PanLimitConfig:
     tilt: bool = False
     tilt_min: float | None = None           # ignore presets outside this tilt window
     tilt_max: float | None = None
+    # While a track_hold keeps the lens on a subject, the guard waits this long of
+    # continuous out-of-bounds before recalling (0 = recall at once, as before).
+    hold_grace: int = 20
 
 
 @dataclass
@@ -532,11 +535,14 @@ def _pan_limit(data, where):
         margin = float(d.get("margin", 0.01))
         poll_interval = int(d.get("poll_interval", 6))
         onvif_port = int(d.get("onvif_port", 2020))
+        hold_grace = int(d.get("hold_grace", 20))
     except (TypeError, ValueError):
-        raise ConfigError(f"{where}: pan_limit margin/poll_interval/onvif_port must be numbers") \
-            from None
+        raise ConfigError(f"{where}: pan_limit margin/poll_interval/onvif_port/hold_grace "
+                          "must be numbers") from None
     if poll_interval < 1:
         raise ConfigError(f"{where}: pan_limit poll_interval must be >= 1")
+    if hold_grace < 0:
+        raise ConfigError(f"{where}: pan_limit hold_grace must be >= 0")
     tilt_min = d.get("tilt_min")
     tilt_max = d.get("tilt_max")
     try:
@@ -556,6 +562,7 @@ def _pan_limit(data, where):
         tilt=bool(d.get("tilt", False)),
         tilt_min=tilt_min,
         tilt_max=tilt_max,
+        hold_grace=hold_grace,
     )
 
 

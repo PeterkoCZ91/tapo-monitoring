@@ -73,7 +73,7 @@ The package modules follow these boundaries:
 | --- | --- | --- |
 | Configuration | `config.py` | Parse and validate YAML; resolve secret values from named environment variables. |
 | Camera transport | `camera.py`, `hubclient.py` | Ping, lockout-aware connect and event watermark helpers; one held, rate-limit-aware session per hub for battery cameras. |
-| Control policy | `scheduling.py`, `weather.py`, `tracking.py`, `panlimit.py` | Build and safely apply camera plans. |
+| Control policy | `scheduling.py`, `weather.py`, `tracking.py`, `panlimit.py`, `motion.py` | Build and safely apply camera plans; one arbiter decides which path may move a lens. |
 | Detection | `detection.py`, `monitor.py`, `daemon.py` | Classify events, gate alerts and coordinate retries. |
 | Media | `snapshot.py`, `sdclip.py`, `recclip.py`, `sampler.py` | Capture live or event-aligned candidate frames. |
 | Enrichment | `scorer.py`, `scorer_service.py`, `enrich.py` | Local subject confidence/boxes and optional captions. |

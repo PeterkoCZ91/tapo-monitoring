@@ -770,7 +770,8 @@ def test_run_once_passes_the_repair_sink_through_to_apply_plan(monkeypatch):
     seen = {}
 
     def fake_apply_plan(cam, plan, reliability_config=None, *, repair_failures=None,
-                        camera=None, privacy_on=False, hold=False):
+                        camera=None, privacy_on=False, hold=False,
+                        motion_refusals=None):
         seen["got"] = repair_failures
         if repair_failures is not None:
             repair_failures["smarttrack"] = repair_failures.get("smarttrack", 0) + 1
@@ -823,7 +824,8 @@ def test_loop_step_gives_the_control_pass_the_state_repair_counter(monkeypatch):
     state = daemon.MonitorState()
     seen = {}
 
-    def fake_run_control(app_, *, now, connect, repair_failures=None, privacy=None, hold=None):
+    def fake_run_control(app_, *, now, connect, repair_failures=None, privacy=None, hold=None,
+                         motion_refusals=None):
         seen["got"] = repair_failures
         return {}
 
@@ -844,7 +846,8 @@ def test_loop_step_tells_the_control_pass_which_cameras_are_parked():
     state.twin_fleet = {"a": {"actual": {"privacy.enabled": True}}}
     seen = {}
 
-    def fake_run_control(app_, *, now, connect, repair_failures=None, privacy=None, hold=None):
+    def fake_run_control(app_, *, now, connect, repair_failures=None, privacy=None, hold=None,
+                         motion_refusals=None):
         seen["privacy"] = privacy
         return {}
 
@@ -1288,7 +1291,8 @@ def test_loop_step_decouples_control_from_event_poll():
     secrets = {"telegram_token": "", "telegram_chat": "", "groq_key": ""}
     calls = {"control": 0, "watchdog": 0, "monitor": 0, "drain": 0}
 
-    def fake_control(app, now, connect, repair_failures=None, privacy=None, hold=None):
+    def fake_control(app, now, connect, repair_failures=None, privacy=None, hold=None,
+                         motion_refusals=None):
         calls["control"] += 1
         connect(app.cameras[0])  # populate cam_clients like the real connect does
 
@@ -2396,7 +2400,105 @@ def test_pan_guard_skips_grab_without_archive_dir(monkeypatch):
     assert gotos == ["3"]
 
 
-# ── crop_to_subject (zoom) ────────────────────────────────────────────────────
+def _held_guard(monkeypatch, pan_x, gotos, *, autotrack_on=True, hold_grace=None):
+    d = _raw_cam_dict()
+    d["tracking"] = {"track_hold": 180, "back_time": 180}
+    if hold_grace is not None:
+        d["pan_limit"]["hold_grace"] = hold_grace
+    app = cfg.load_config_from_dict({"cameras": [d]})
+    _patch_panlimit(monkeypatch, pan_x=pan_x, gotos=gotos)
+    state = daemon.MonitorState()
+    state.last_seen["camera-a"] = 95                     # a fresh event re-armed the hold
+    state.desired_plans["camera-a"] = daemon.CameraPlan(
+        autotrack_on=autotrack_on, rain_parked=False, motion_sensitivity=50,
+        smarttrack=(), preset="1")
+    return app, state
+
+
+def test_pan_guard_waits_out_the_hold_grace_before_recalling(monkeypatch):
+    # The dwell holds the lens on a subject; the guard used to yank it off within one
+    # poll. It now waits hold_grace (20 s) of continuous out-of-bounds before recalling.
+    gotos = []
+    app, state = _held_guard(monkeypatch, 0.63, gotos)
+    daemon._pan_guard_pass(app, {}, state, now=100, secrets={}, night=True)
+    daemon._pan_guard_pass(app, {}, state, now=107, secrets={}, night=True)
+    daemon._pan_guard_pass(app, {}, state, now=114, secrets={}, night=True)
+    assert gotos == []
+    assert state.motion_refusals["camera-a"]["pan_limit:hold"] == 3
+    daemon._pan_guard_pass(app, {}, state, now=121, secrets={}, night=True)
+    assert gotos == ["3"]
+    assert state.pan_limit_recall_at["camera-a"] == 121
+
+
+def test_pan_guard_grace_restarts_when_the_lens_comes_back(monkeypatch):
+    positions = iter([0.63, 0.58, 0.63, 0.63])
+    gotos = []
+    app, state = _held_guard(monkeypatch, 0.63, gotos)
+    monkeypatch.setattr(daemon.panlimit, "read_pan_x", lambda ptz, tok: next(positions))
+    for now in (100, 107, 114, 121):
+        daemon._pan_guard_pass(app, {}, state, now=now, secrets={}, night=True)
+    assert gotos == []                           # out since 114 only: 7 s < 20 s
+
+
+def test_pan_guard_ignores_a_hold_when_the_plan_does_not_track(monkeypatch):
+    gotos = []
+    app, state = _held_guard(monkeypatch, 0.63, gotos, autotrack_on=False)
+    daemon._pan_guard_pass(app, {}, state, now=100, secrets={}, night=True)
+    assert gotos == ["3"]
+
+
+def test_pan_guard_zero_grace_overrides_the_hold_at_once(monkeypatch):
+    gotos = []
+    app, state = _held_guard(monkeypatch, 0.63, gotos, hold_grace=0)
+    daemon._pan_guard_pass(app, {}, state, now=100, secrets={}, night=True)
+    assert gotos == ["3"]
+
+
+def test_pan_guard_recalls_at_once_after_the_hold_expires(monkeypatch):
+    gotos = []
+    app, state = _held_guard(monkeypatch, 0.63, gotos)
+    state.last_seen["camera-a"] = 100 - 181             # last event older than track_hold
+    daemon._pan_guard_pass(app, {}, state, now=100, secrets={}, night=True)
+    assert gotos == ["3"]
+
+
+def test_pan_guard_leaves_a_parked_lens_alone(monkeypatch):
+    # Privacy mode answers every motor call with MOTOR_BUSY; the guard re-sent it every
+    # poll. It now does not even open ONVIF while the twin reads privacy as on.
+    app = cfg.load_config_from_dict({"cameras": [_raw_cam_dict()]})
+    monkeypatch.setattr(daemon.panlimit, "build_ptz",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no ONVIF")))
+    state = daemon.MonitorState()
+    state.twin_fleet = {"camera-a": {"actual": {"privacy.enabled": True}}}
+    daemon._pan_guard_pass(app, {}, state, now=100, secrets={}, night=True)
+    daemon._pan_guard_pass(app, {}, state, now=107, secrets={}, night=True)
+    assert state.motion_refusals["camera-a"]["pan_limit:privacy"] == 2
+
+
+def test_scheduled_recall_refusals_are_counted(monkeypatch):
+    class Cam:
+        def __init__(self):
+            self.presets = []
+
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+        def setPreset(self, preset):
+            self.presets.append(preset)
+
+    plan = daemon.CameraPlan(autotrack_on=True, rain_parked=False, motion_sensitivity=50,
+                             smarttrack=(), preset="1")
+    monkeypatch.setattr(daemon.tracking, "apply_smarttrack", lambda *a, **k: None)
+    monkeypatch.setattr(daemon.tracking, "ensure_autotrack", lambda *a, **k: True)
+    counters = {}
+    cam = Cam()
+    daemon.apply_plan(cam, plan, camera="a", hold=True, motion_refusals=counters)
+    daemon.apply_plan(cam, plan, camera="a", privacy_on=True, motion_refusals=counters)
+    assert cam.presets == []
+    assert counters == {"a": {"schedule:hold": 1, "schedule:privacy": 1}}
+
+
+# ── crop_to_subject (zoom)────────────────────────────────────────────────────
 
 def test_compute_crop_pads_and_centres_on_box():
     # small box (100..140 x, 100..200 y) in a 1000x1000 frame -> padded, min-size crop
