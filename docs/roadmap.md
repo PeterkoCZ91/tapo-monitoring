@@ -452,11 +452,16 @@ shadows. The generic detector has never seen this fleet's IR night scenes.
 - [x] `tapo-monitor label` / `label-stats`: a localhost labelling page (person / no
   person / unsure), gray zone first, then a sample of low scores (possible misses), then
   high scores (possible false alarms); append-only `labels.jsonl` keyed by image hash.
-- [ ] Label the first few hundred frames and publish the first real numbers: false-alarm
-  rate of sent frames and miss rate of held frames, per camera and day/night.
+- [x] Label the first few hundred frames and publish the first real numbers. First pass
+  (815 frames, 699 labelled by the teacher, 86 by hand): about 2 % of sent frames were
+  false alarms, while 30 of 33 frames held back for corroboration showed a person.
 
 ### 9.2 — Calibrate from labels
 
+- [x] First calibration from labels: on the pilot sites the corroboration hold
+  (`motion_send_threshold`) was withholding mostly real people, so it was lowered, and
+  one site's `scorer.threshold` moved down after a replay estimated the added volume.
+  Re-check false alarms in the newly admitted score band once it has been labelled.
 - [ ] Split `scorer.threshold` by day and night (and per camera where labels justify it)
   using the threshold `label-stats` reports as best-separating; verify the change with
   `replay --compare` before shipping.
