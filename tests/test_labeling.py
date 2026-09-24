@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -462,9 +463,9 @@ def _old_block(total, person, no_person, unsure, fa, fa_decided, miss, miss_deci
 
 
 def _without_new_keys(stats):
-    """The stats as the JSON looked before verdicts and threshold support existed."""
+    """The stats as the JSON looked before verdicts, threshold support and incidents."""
     def strip(block):
-        return {k: v for k, v in block.items() if k != "verdicts"}
+        return {k: v for k, v in block.items() if k not in ("verdicts", "incidents")}
 
     old = strip(stats)
     old["bands"] = {k: strip(v) for k, v in stats["bands"].items()}
@@ -478,7 +479,9 @@ def test_stats_without_config_keep_the_previous_text_and_json(tmp_path, capsys):
     root = str(tmp_path)
     _label_lines(root, STATS_FIXTURE)
     assert cli.main(["label-stats", root]) == 0
-    assert capsys.readouterr().out == STATS_FIXTURE_TEXT
+    out = capsys.readouterr().out
+    # The incident section is appended; everything before it is unchanged.
+    assert out.startswith(STATS_FIXTURE_TEXT + "\nincidents: 0 from 0 frames")
     assert cli.main(["label-stats", root, "--json"]) == 0
     stats = json.loads(capsys.readouterr().out)
     assert "day_night" not in stats
@@ -623,7 +626,8 @@ def test_stats_split_by_day_and_night(day_night_dataset):
     assert "camera porch night" in text and "too few labels" in text
     assert "camera porch day" not in text              # no labels in that slice
     # The part before the day/night section is what label-stats printed without it.
-    assert text.startswith(labeling.format_stats(labeling.compute_stats(day_night_dataset)))
+    plain = labeling.format_stats(labeling.compute_stats(day_night_dataset))
+    assert text.startswith(plain[:plain.index("\nincidents:")])
 
 
 def test_day_night_threshold_per_slice(tmp_path):
@@ -686,3 +690,170 @@ def test_stats_page_shows_day_and_night(day_night_dataset):
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+# ── incidents ────────────────────────────────────────────────────────────────
+
+def _f(ts, *, source="sent", camera="front", host="h", incident=None, event_start=None,
+       label=None, delivered=True, verdict="hold", caption_start=None):
+    """One frame as labeling.incident_frames returns it."""
+    return {"path": f"{host}/{source}-log/{ts}.jpg", "host": host, "camera": camera,
+            "ts": ts, "incident": incident, "event_start": event_start,
+            "caption_start": caption_start, "source": source,
+            "verdict": verdict if source == "review" else None,
+            "delivered": source == "sent" and delivered, "label": label}
+
+
+def _groups(frames, gap=labeling.INCIDENT_GAP):
+    return [[f["ts"] for f in inc["frames"]]
+            for inc in labeling.group_incidents(frames, gap)]
+
+
+def test_incidents_group_by_id_even_across_a_long_gap():
+    frames = [_f(1000.0, incident="front-990"), _f(1500.0, incident="front-990"),
+              _f(1100.0, incident="front-1090")]
+    incidents = labeling.group_incidents(frames)
+    assert sorted((i["id"], len(i["frames"])) for i in incidents) \
+        == [("front-1090", 1), ("front-990", 2)]
+
+
+def test_incidents_group_by_gap_per_host_and_camera():
+    gap = labeling.INCIDENT_GAP
+    frames = [_f(1000.0), _f(1000.0 + gap), _f(1000.0 + 2 * gap + 1),
+              _f(1010.0, camera="yard"),                 # another camera: its own incident
+              _f(1020.0, host="h2")]                     # same name on another host
+    assert sorted(_groups(frames)) == [[1000.0, 1000.0 + gap], [1010.0], [1020.0],
+                                       [1000.0 + 2 * gap + 1]]
+
+
+def test_incidents_mixed_ids_and_gap_are_not_double_counted():
+    frames = [_f(1000.0, source="review"),                      # old path: no ID yet
+              _f(1030.0, incident="front-995"),                 # adopts the open incident
+              _f(1060.0, source="review"),                      # no ID, within the gap
+              _f(1100.0, incident="front-1090"),                # a new camera event
+              _f(1120.0),                                       # joins the latest one
+              _f(5000.0)]                                       # much later: new
+    incidents = labeling.group_incidents(frames)
+    assert [(i["id"], [f["ts"] for f in i["frames"]]) for i in incidents] == [
+        ("front-995", [1000.0, 1030.0, 1060.0]),
+        ("front-1090", [1100.0, 1120.0]),
+        (None, [5000.0])]
+
+
+def test_incident_status_alert_and_delay():
+    inc = {"id": "front-990", "host": "h", "camera": "front", "frames": [
+        _f(1000.0, source="review", label="no_person"),
+        _f(1010.0, delivered=False, label="person"),     # failed send: not an alert
+        _f(1030.0), _f(1060.0)]}
+    s = labeling.summarize_incident(inc)
+    assert (s["status"], s["alerted"], s["start"], s["start_source"]) \
+        == ("person", True, 990.0, "incident_id")
+    assert s["delay"] == 40.0                            # 990 -> first delivered, 1030
+    assert s["verdicts"] == {"hold": {"frames": 1, "person": 0}}
+    inc["frames"][0]["event_start"] = 985.0              # an explicit start wins
+    assert labeling.summarize_incident(inc)["delay"] == 45.0
+    unsent = {"id": None, "host": "h", "camera": "front",
+              "frames": [_f(1010.0, delivered=False, label="person")]}
+    s = labeling.summarize_incident(unsent)
+    assert (s["alerted"], s["delay"], s["start_source"]) == (False, None, "first_frame")
+    captioned = {"id": None, "host": "h", "camera": "front",
+                 "frames": [_f(1000.0, caption_start=950.0), _f(1030.0)]}
+    assert labeling.summarize_incident(captioned)["delay"] == 50.0
+
+
+@pytest.mark.parametrize("labels,status", [
+    ([None, None], "unlabeled"), (["no_person", None], "no_person"),
+    (["no_person", "unsure"], "unsure"), (["unsure"], "unsure"),
+    (["no_person", "person"], "person")])
+def test_incident_status_from_labels(labels, status):
+    inc = {"id": None, "host": "h", "camera": "front",
+           "frames": [_f(1000.0 + i, label=label) for i, label in enumerate(labels)]}
+    assert labeling.summarize_incident(inc)["status"] == status
+
+
+def test_caption_start_reads_the_event_time_and_rejects_implausible_ones():
+    start = time.mktime(time.strptime("2026-01-01 22:00:00", "%Y-%m-%d %H:%M:%S"))
+    assert labeling.caption_start("Person 2026-01-01 22:00:00", start + 30) == start
+    assert labeling.caption_start("Person 2026-01-01 22:00:00", start - 5) is None
+    assert labeling.caption_start("Person 2026-01-01 22:00:00", start + 7200) is None
+    assert labeling.caption_start("Person", start) is None
+
+
+def _incident_dataset(root):
+    """Five visits on "front" and one on "yard", labeled."""
+    _write_log(str(root / "h" / "sent-log"), [
+        # A: person, alerted 20 s after the event start in its ID.
+        {**_sent("a1.jpg", 0.9, ts=1000.0), "incident": "front-980"},
+        {**_sent("a2.jpg", 0.9, ts=1030.0), "incident": "front-980"},
+        # C: an alert that failed to deliver, and a held person: missed.
+        {**_sent("c1.jpg", 0.8, ts=3000.0), "delivered": False},
+        # D: alerted, labeled no_person: a false alarm.
+        {**_sent("d1.jpg", 0.7, ts=4000.0), "event_start": 3950.0},
+        # yard at night: person, alerted 60 s after its event start.
+        {**_sent("y1.jpg", 0.9, camera="yard", ts=NIGHT_TS), "event_start": NIGHT_TS - 60},
+    ])
+    _write_log(str(root / "h" / "review-log"), [
+        _review("a0.jpg", 0.5, camera="front", ts=990.0),
+        # B: held and dropped frames, nobody alerted: missed.
+        _review("b1.jpg", 0.5, camera="front", ts=2000.0),
+        {**_review("b2.jpg", 0.1, camera="front", ts=2030.0), "verdict": "drop",
+         "sample_rate": 0.05},
+        _review("c2.jpg", 0.5, camera="front", ts=3020.0),
+        # E: never labeled.
+        _review("e1.jpg", 0.4, camera="front", ts=8000.0),
+    ])
+    session = labeling.LabelSession(str(root), seed=1)
+    for name, label in (("sent-log/a1.jpg", "person"), ("review-log/b2.jpg", "person"),
+                        ("review-log/b1.jpg", "no_person"), ("review-log/c2.jpg", "person"),
+                        ("sent-log/d1.jpg", "no_person"), ("sent-log/y1.jpg", "person")):
+        session.label(f"h/{name}", label, now=1.0)
+    return str(root)
+
+
+def test_incident_stats_missed_false_alarms_and_delay(tmp_path):
+    root = _incident_dataset(tmp_path / "dataset")
+    section = labeling.compute_stats(root)["incidents"]
+    assert section["frames"] == 10
+    block = section["all"]
+    assert block["total"] == 6 and block["labeled"] == 5
+    assert block["counts"] == {"person": 4, "no_person": 1, "unsure": 0, "unlabeled": 1}
+    assert block["person_alerted"] == 2
+    assert block["missed"] == {"count": 2, "person": 4, "rate": 0.5}
+    assert block["false_alarms"] == {"count": 1, "decided": 3, "rate": pytest.approx(1 / 3)}
+    assert block["delay"] == {"n": 2, "from_event_start": 2, "median": 40.0, "p90": 60.0}
+    # B had a held frame and a person in a dropped one; C a person in a held frame.
+    assert block["missed_verdicts"] == {
+        "hold": {"incidents": 2, "frames": 2, "person_incidents": 1},
+        "drop": {"incidents": 1, "frames": 1, "person_incidents": 1}}
+    assert [m["start"] for m in section["missed"]] == [2000.0, 3000.0]
+    assert section["cameras"]["yard"]["missed"]["count"] == 0
+    assert section["cameras"]["front"]["total"] == 5
+    assert "day_night" not in section
+    text = labeling.format_stats(labeling.compute_stats(root))
+    assert "incidents: 6 from 10 frames" in text
+    assert "2/4 (50.0%)" in text and "40 s" in text
+    assert "hold 2 (person labeled in 1), drop 1 (person labeled in 1)" in text
+
+
+def test_incident_stats_by_day_and_night(tmp_path):
+    root = _incident_dataset(tmp_path / "dataset")
+    night = labeling.night_classifier(_night_app(), is_night=_site_night)
+    parts = labeling.compute_stats(root, night=night)["incidents"]["day_night"]
+    assert [parts[name]["total"] for name in ("day", "night", "unknown")] == [4, 2, 0]
+    assert parts["night"]["counts"]["person"] == 1          # yard; E is unlabeled
+    assert parts["night"]["delay"]["median"] == 60.0
+    assert parts["day"]["missed"]["count"] == 2
+
+
+def test_incident_stats_without_labels_say_so(dataset, capsys):
+    assert cli.main(["label-stats", dataset]) == 0
+    assert "no incident has a labeled frame yet" in capsys.readouterr().out
+    assert cli.main(["label-stats", dataset, "--json"]) == 0
+    section = json.loads(capsys.readouterr().out)["incidents"]
+    assert section["all"]["total"] == 2 and section["all"]["labeled"] == 0
+
+
+def test_stats_page_shows_incidents(tmp_path):
+    root = _incident_dataset(tmp_path / "dataset")
+    body = labeling.stats_page(labeling.compute_stats(root))
+    assert "<h2>Incidents</h2>" in body and "person alerted" in body

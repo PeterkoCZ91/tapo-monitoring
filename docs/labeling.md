@@ -187,4 +187,80 @@ Check any threshold taken from here with `tapo-monitor replay --compare` before
 changing the config.
 
 Without `--config` the output is what it always was, apart from the verdict block
-once dropped frames are labeled (and `verdicts` / `supported` as new JSON keys).
+once dropped frames are labeled and the incident section appended at the end (and
+`verdicts` / `supported` / `incidents` as new JSON keys).
+
+### Incidents
+
+Frame rates hide what the person holding the phone cares about: was each visit alerted,
+and how late. So `label-stats` (and `/stats`) end with a section per **incident**, built
+from every indexed frame — labeled or not, since a delivery counts even when nobody
+labeled its frame.
+
+Frames are grouped per host (the directory holding its `sent-log` / `review-log`) and
+camera:
+
+- a record with an `incident` ID (`<camera>-<event start>`) belongs to that incident;
+- a record without one joins the camera's previous incident when it is at most 150 s
+  after that incident's last frame, else it starts a new one. 150 s is above the alert
+  cooldown (120 s) — a subject still in view is photographed again right after it — and
+  above the sampler's `group_gap` (90 s). Two visits closer than that merge, which can
+  hide a miss behind an alerted neighbour but never invents one;
+- in a period where only some paths wrote IDs, an ID frame arriving within the gap of an
+  incident without an ID takes that incident over, so one visit is not counted twice;
+- a record without `camera` (older hosts) takes the host's camera when the host only
+  ever named one, else it is grouped as `unknown`.
+
+Per incident: **person** when any frame is labeled person, **no_person** when every
+labeled frame is no_person, otherwise unsure or unlabeled. **Alerted** when a sent frame
+was delivered (`delivered` missing counts as delivered; `false` — a failed send — does
+not). The start is the camera's event start: a record's `event_start`, else the start in
+the incident ID, else the event time printed in an older sent frame's caption (read in
+this machine's local time and trusted only when it is at most an hour before the frame),
+else the first frame's time. The **delay** runs from there to the first delivered alert.
+
+```
+incidents: 212 from 480 frames (one incident per incident ID, else frames of a camera less than 150 s apart), 95 with a labeled frame:
+group         incidents  labeled  person  person alerted  missed       false alarms  delay median  delay p90
+all           212        95       80      72              8/80 (10.0%) 2/74 (2.7%)   40 s          95 s
+camera front  …
+day           …
+night         …
+missed person incidents by the verdicts of their review frames: hold 6 (person labeled in 5), drop 2 (person labeled in 2)
+```
+
+- **missed**: person incidents without a delivered alert, of person incidents;
+- **false alarms**: alerted incidents labeled no_person, of alerted incidents with a
+  decided label;
+- **delay**: median and p90 (nearest rank) over alerted person incidents; the note
+  under the table says how many were timed from an event start rather than a first
+  frame;
+- the last line splits the missed incidents by the verdicts their review frames had and
+  says in how many a frame of that verdict was labeled person: a person in a held frame
+  means the corroboration hold swallowed the visit, one only in dropped frames the
+  threshold did; `no review frame` means only an undelivered send was archived.
+
+With `--config`, day and night rows follow, judged on the incident start as for frames.
+Without any labeled incident the section says so instead of printing a table of zeros.
+A visit none of whose frames was archived cannot appear at all, so the missed rate is a
+lower bound. The JSON adds a top-level `incidents` key; the other keys are unchanged:
+
+```json
+"incidents": {"gap_seconds": 150.0, "frames": 480,
+  "all": {"total": 212, "labeled": 95,
+          "counts": {"person": 80, "no_person": 12, "unsure": 3, "unlabeled": 117},
+          "alerted": 150, "person_alerted": 72,
+          "missed": {"count": 8, "person": 80, "rate": 0.1},
+          "false_alarms": {"count": 2, "decided": 74, "rate": 0.027},
+          "delay": {"n": 72, "from_event_start": 70, "median": 40.0, "p90": 95.0},
+          "missed_verdicts": {"hold": {"incidents": 6, "frames": 9, "person_incidents": 5},
+                              "drop": {"incidents": 2, "frames": 2, "person_incidents": 2}}},
+  "cameras": {"front": {…same block…}},
+  "day_night": {"day": {…}, "night": {…}, "unknown": {…}},
+  "missed": [{"id": "front-1767301200", "host": "host-a", "camera": "front",
+              "start": 1767301200.0, "frames": 3,
+              "verdicts": {"hold": {"frames": 2, "person": 1}}}]}
+```
+
+`day_night` is there only with `--config`; `missed` lists every missed person incident
+(`id` is null for one grouped by time), oldest first, to look at by hand.

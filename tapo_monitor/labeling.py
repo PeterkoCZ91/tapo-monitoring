@@ -26,14 +26,19 @@ import hashlib
 import html
 import json
 import logging
+import math
 import os
 import random
+import re
+import statistics
 import sys
 import threading
 import time
 import urllib.parse
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from . import incident
 
 log = logging.getLogger(__name__)
 
@@ -519,7 +524,267 @@ def compute_stats(dataset_dir, *, night=None):
         parts["min_support"] = {"decided": MIN_SUPPORT_DECIDED,
                                 "per_class": MIN_SUPPORT_PER_CLASS}
         stats["day_night"] = parts
+    stats["incidents"] = incident_stats(dataset_dir, night=night)
     return stats
+
+
+# ── incidents ────────────────────────────────────────────────────────────────
+
+# Without an incident ID, frames of one camera further apart than this start a new
+# incident. Above the alert cooldown (120 s): a subject still in view when the cooldown
+# ends is photographed again 120-150 s after the last alert, and that is the same visit.
+# Above the sampler's group_gap (90 s), the daemon's own "same event group" rule; inside
+# a visit the sampler grabs a frame every 30 s, so a longer silence means the scene went
+# quiet. Two visits closer than this merge into one: that can hide a miss behind an
+# alerted neighbour, never invent one, so the missed count errs low.
+INCIDENT_GAP = 150.0
+# Older sent records carry no event start, but their caption does: the daemon prints the
+# camera's event start in the host's local time. It is read back in this machine's local
+# time and trusted only up to this long before the frame, so a host in another timezone
+# yields no start rather than a wrong one (real sends follow their event within minutes).
+CAPTION_START_MAX_AGE = 3600.0
+_CAPTION_TIME = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+INCIDENT_STATUSES = ("person", "no_person", "unsure", "unlabeled")
+REVIEW_VERDICTS = ("hold", "drop", "shadow")
+
+
+def _incident_start(value):
+    """The event start encoded in an incident ID (``<camera>-<start>``), or None."""
+    try:
+        return float(incident.parse(value)[1])
+    except ValueError:
+        return None
+
+
+def caption_start(caption, ts):
+    """The event start printed in a sent frame's caption as epoch seconds, or None.
+
+    Pure apart from the local timezone.
+    """
+    found = _CAPTION_TIME.findall(caption) if isinstance(caption, str) else []
+    if not found or ts is None:
+        return None
+    try:
+        start = time.mktime(time.strptime(found[-1], "%Y-%m-%d %H:%M:%S"))
+    except (ValueError, OverflowError):
+        return None
+    return start if 0 <= ts - start <= CAPTION_START_MAX_AGE else None
+
+
+def incident_frames(dataset_dir, labels=None):
+    """Every indexed frame as a dict for :func:`group_incidents`, labeled or not. Read-only.
+
+    ``host`` is the directory holding the host's logs (``<host>/sent-log/index.jsonl``).
+    A record without ``camera`` (older hosts) takes the host's camera when every other
+    record of that host names the same one, else None. ``labels`` is ``{path: label}``;
+    no hashing, so it stays cheap enough for every ``/stats`` request. A sent record
+    without ``delivered`` counts as delivered: the sent log writes False only when
+    delivery failed.
+    """
+    labels = labels or {}
+    frames = []
+    for rel, _, record in _index_records(os.path.realpath(dataset_dir)):
+        camera = record.get("camera")
+        ident = record.get("incident")
+        ts = _number(record.get("ts"))
+        frames.append({
+            "path": rel, "host": "/".join(rel.split("/")[:-2]),
+            "camera": str(camera) if camera else None,
+            "ts": ts,
+            "incident": str(ident) if ident else None,
+            "event_start": _number(record.get("event_start")),
+            "caption_start": caption_start(record.get("caption"), ts),
+            "source": "review" if "verdict" in record else "sent",
+            "verdict": _verdict(record),
+            "delivered": "verdict" not in record and record.get("delivered", True) is not False,
+            "label": labels.get(rel),
+        })
+    named = {}
+    for frame in frames:
+        if frame["camera"]:
+            named.setdefault(frame["host"], set()).add(frame["camera"])
+    for frame in frames:
+        if frame["camera"] is None and len(named.get(frame["host"], ())) == 1:
+            frame["camera"] = next(iter(named[frame["host"]]))
+    return frames
+
+
+def group_incidents(frames, gap=INCIDENT_GAP):
+    """Frames grouped into incidents per host and camera. Pure.
+
+    A frame with an ``incident`` ID joins that incident. A frame without one joins the
+    camera's previous incident (with or without an ID) when it is at most ``gap`` seconds
+    after that incident's last frame, else starts a new one. An ID frame arriving within
+    ``gap`` of an incident that has no ID yet adopts it: in a period where only some
+    paths wrote IDs, the same visit is not counted once per path. Frames with neither a
+    time nor an ID cannot be placed and are left out. Returns ``[{"id", "host",
+    "camera", "frames"}]``.
+    """
+    cameras = {}
+    for frame in frames:
+        if frame["ts"] is None and not frame["incident"]:
+            continue
+        cameras.setdefault((frame["host"], frame["camera"] or ""), []).append(frame)
+    out = []
+    for (host, camera), items in sorted(cameras.items()):
+        items.sort(key=lambda f: (f["ts"] is None, f["ts"] or 0.0))
+
+        def new(ident, host=host, camera=camera):
+            out.append({"id": ident, "host": host, "camera": camera or None,
+                        "frames": [], "last": None})
+            return out[-1]
+
+        by_id = {}
+        current = None
+        for frame in items:
+            ts, ident = frame["ts"], frame["incident"]
+            near = (current is not None and ts is not None and current["last"] is not None
+                    and ts - current["last"] <= gap)
+            if ident:
+                inc = by_id.get(ident)
+                if inc is None and near and current["id"] is None:
+                    inc = current
+                    inc["id"] = ident
+                elif inc is None:
+                    inc = new(ident)
+                by_id[ident] = inc
+            else:
+                inc = current if near else new(None)
+            inc["frames"].append(frame)
+            if ts is not None:
+                inc["last"] = ts if inc["last"] is None else max(inc["last"], ts)
+            current = inc
+    for inc in out:
+        del inc["last"]
+    return out
+
+
+def summarize_incident(inc):
+    """Status, alert and timing of one incident from :func:`group_incidents`. Pure.
+
+    ``status``: ``person`` when any frame is labeled person, ``no_person`` when every
+    labeled frame is no_person, ``unsure`` when labeled otherwise, else ``unlabeled``.
+    ``alerted``: a delivered sent frame. ``start``: the camera's event start (a frame's
+    ``event_start``, else the one in the incident ID, else the earliest caption time),
+    else the first frame's time; ``start_source`` says which. ``delay`` runs from there
+    to the first delivered sent frame.
+    """
+    frames = inc["frames"]
+    labels = [f["label"] for f in frames if f["label"]]
+    if "person" in labels:
+        status = "person"
+    elif labels and all(label == "no_person" for label in labels):
+        status = "no_person"
+    else:
+        status = "unsure" if labels else "unlabeled"
+    event = [f["event_start"] for f in frames if f["event_start"] is not None]
+    captions = [f["caption_start"] for f in frames if f.get("caption_start") is not None]
+    times = [f["ts"] for f in frames if f["ts"] is not None]
+    start, source = None, None
+    for candidate, name in ((min(event) if event else None, "event"),
+                            (_incident_start(inc["id"]) if inc["id"] else None, "incident_id"),
+                            (min(captions) if captions else None, "caption"),
+                            (min(times) if times else None, "first_frame")):
+        if candidate is not None:
+            start, source = candidate, name
+            break
+    alerts = [f for f in frames if f["source"] == "sent" and f["delivered"]]
+    alert_times = [f["ts"] for f in alerts if f["ts"] is not None]
+    delay = min(alert_times) - start if alert_times and start is not None else None
+    verdicts = {}
+    for frame in frames:
+        if frame["source"] == "review":
+            entry = verdicts.setdefault(frame["verdict"] or "unknown",
+                                        {"frames": 0, "person": 0})
+            entry["frames"] += 1
+            entry["person"] += frame["label"] == "person"
+    return {"id": inc["id"], "host": inc["host"], "camera": inc["camera"],
+            "start": start, "start_source": source, "status": status,
+            "frames": len(frames), "labeled": len(labels), "alerted": bool(alerts),
+            "delay": delay, "verdicts": verdicts}
+
+
+def _percentile(values, fraction):
+    """Nearest-rank percentile of sorted ``values``, or None when empty."""
+    if not values:
+        return None
+    return values[max(0, math.ceil(fraction * len(values)) - 1)]
+
+
+def _incident_block(incidents):
+    """Counts, miss and false-alarm rates and alert delay over some incidents. Pure."""
+    counts = {name: 0 for name in INCIDENT_STATUSES}
+    for inc in incidents:
+        counts[inc["status"]] += 1
+    person = [i for i in incidents if i["status"] == "person"]
+    missed = [i for i in person if not i["alerted"]]
+    alerted = [i for i in incidents if i["alerted"]]
+    decided = [i for i in alerted if i["status"] in ("person", "no_person")]
+    false_alarms = sum(1 for i in decided if i["status"] == "no_person")
+    delays = sorted(i["delay"] for i in person if i["alerted"] and i["delay"] is not None)
+    from_event = sum(1 for i in person if i["alerted"] and i["delay"] is not None
+                     and i["start_source"] != "first_frame")
+    # Which review verdicts the frames of missed incidents had: a person in a held frame
+    # means the hold swallowed the visit, one only in dropped frames the threshold did.
+    verdicts = {}
+    for inc in missed:
+        names = inc["verdicts"] or {"none": {"frames": 0, "person": 0}}
+        for name, entry in names.items():
+            block = verdicts.setdefault(name, {"incidents": 0, "frames": 0,
+                                               "person_incidents": 0})
+            block["incidents"] += 1
+            block["frames"] += entry["frames"]
+            block["person_incidents"] += entry["person"] > 0
+    order = {name: i for i, name in enumerate(REVIEW_VERDICTS)}
+    return {
+        "total": len(incidents), "counts": counts,
+        "labeled": len(incidents) - counts["unlabeled"],
+        "alerted": len(alerted),
+        "person_alerted": len(person) - len(missed),
+        "missed": {"count": len(missed), "person": len(person),
+                   "rate": _rate(len(missed), len(person))},
+        "false_alarms": {"count": false_alarms, "decided": len(decided),
+                         "rate": _rate(false_alarms, len(decided))},
+        "delay": {"n": len(delays), "from_event_start": from_event,
+                  "median": statistics.median(delays) if delays else None,
+                  "p90": _percentile(delays, 0.9)},
+        "missed_verdicts": {name: verdicts[name] for name in
+                            sorted(verdicts, key=lambda v: (order.get(v, len(order)), v))},
+    }
+
+
+def _daypart(night, inc):
+    if inc["start"] is None:
+        return "unknown"
+    return "night" if night(inc["camera"], inc["start"]) else "day"
+
+
+def incident_stats(dataset_dir, *, night=None, gap=INCIDENT_GAP):
+    """Quality per incident rather than per frame: the ``incidents`` stats section.
+
+    Every indexed frame counts, labeled or not (a delivery matters even when nobody
+    labeled its frame). Overall, per camera and, with ``night`` (see
+    :func:`night_classifier`, applied to the incident start), per day and night; plus
+    the missed person incidents themselves.
+    """
+    labels = {rec.get("path"): rec["label"] for rec in latest_labels(dataset_dir).values()}
+    frames = incident_frames(dataset_dir, labels)
+    incidents = [summarize_incident(inc) for inc in group_incidents(frames, gap)]
+    result = {"gap_seconds": gap, "frames": len(frames), "all": _incident_block(incidents)}
+    cameras = sorted({_camera(i) for i in incidents})
+    result["cameras"] = {cam: _incident_block([i for i in incidents if _camera(i) == cam])
+                         for cam in cameras}
+    if night is not None:
+        for inc in incidents:
+            inc["daypart"] = _daypart(night, inc)
+        result["day_night"] = {name: _incident_block([i for i in incidents
+                                                      if i["daypart"] == name])
+                               for name in DAY_NIGHT}
+    result["missed"] = [
+        {key: inc[key] for key in ("id", "host", "camera", "start", "frames", "verdicts")}
+        for inc in sorted(incidents, key=lambda i: (i["start"] or 0.0, _camera(i)))
+        if inc["status"] == "person" and not inc["alerted"]]
+    return result
 
 
 def _pct(value):
@@ -617,6 +882,75 @@ def _table(headers, rows):
     return [line(headers), line(tuple("-" * w for w in widths))] + [line(r) for r in rows]
 
 
+INCIDENT_HEADERS = ("group", "incidents", "labeled", "person", "person alerted",
+                    "missed", "false alarms", "delay median", "delay p90")
+
+
+def _seconds(value):
+    return "-" if value is None else f"{value:.0f} s"
+
+
+def _incident_row(name, block):
+    miss, fa, delay = block["missed"], block["false_alarms"], block["delay"]
+    return (name, str(block["total"]), str(block["labeled"]), str(block["counts"]["person"]),
+            str(block["person_alerted"]),
+            f"{miss['count']}/{miss['person']} ({_pct(miss['rate'])})",
+            f"{fa['count']}/{fa['decided']} ({_pct(fa['rate'])})",
+            _seconds(delay["median"]), _seconds(delay["p90"]))
+
+
+def _incident_rows(section):
+    rows = [_incident_row("all", section["all"])]
+    rows += [_incident_row(f"camera {cam}", block)
+             for cam, block in section["cameras"].items()]
+    parts = section.get("day_night") or {}
+    rows += [_incident_row(name, parts[name]) for name in DAY_NIGHT
+             if name in parts and (name != "unknown" or parts[name]["total"])]
+    return rows
+
+
+def _incident_summary(section):
+    block = section["all"]
+    return (f"incidents: {block['total']} from {section['frames']} frames (one incident "
+            f"per incident ID, else frames of a camera less than {section['gap_seconds']:.0f}"
+            f" s apart), {block['labeled']} with a labeled frame")
+
+
+def _incident_notes(section):
+    """Explanations and the verdicts of missed incidents, one line each."""
+    block = section["all"]
+    delay = block["delay"]
+    out = ["person = any frame labeled person; missed = person incident without a "
+           "delivered alert; false alarms = alerted incidents whose labeled frames are all "
+           "no_person, of alerted incidents with a decided label",
+           f"delay = event start to the first delivered alert, over {delay['n']} alerted "
+           f"person incidents ({delay['from_event_start']} timed from the camera's event "
+           "start or its time in the caption, the rest from their first archived frame)"]
+    verdicts = block["missed_verdicts"]
+    if verdicts:
+        parts = []
+        for name, entry in verdicts.items():
+            if name == "none":
+                parts.append(f"no review frame {entry['incidents']}")
+            else:
+                parts.append(f"{name} {entry['incidents']} (person labeled in "
+                             f"{entry['person_incidents']})")
+        out.append("missed person incidents by the verdicts of their review frames: "
+                   + ", ".join(parts))
+    return out
+
+
+def format_incidents(section):
+    out = [_incident_summary(section) + ":"]
+    if not section["all"]["labeled"]:
+        out.append("no incident has a labeled frame yet: label frames to measure missed "
+                   "people per incident")
+        return out
+    out += _table(INCIDENT_HEADERS, _incident_rows(section))
+    out += _incident_notes(section)
+    return out
+
+
 def format_stats(stats):
     out = _table(STATS_HEADERS, _stats_rows(stats))
     by = stats.get("by") or {}
@@ -630,6 +964,8 @@ def format_stats(stats):
         out += ["", _day_night_summary(stats) + ":"]
         out += _table(DAY_NIGHT_HEADERS, _day_night_rows(stats))
         out.append(_day_night_note())
+    if "incidents" in stats:
+        out += [""] + format_incidents(stats["incidents"])
     return "\n".join(out)
 
 
@@ -743,6 +1079,15 @@ def stats_page(stats):
         extra += (f"<h2>Day and night</h2><p>{html.escape(_day_night_summary(stats))}</p>"
                   f"{_html_table(DAY_NIGHT_HEADERS, _day_night_rows(stats))}"
                   f"<p>{html.escape(_day_night_note())}</p>")
+    section = stats.get("incidents")
+    if section:
+        extra += f"<h2>Incidents</h2><p>{html.escape(_incident_summary(section))}</p>"
+        if section["all"]["labeled"]:
+            extra += (_html_table(INCIDENT_HEADERS, _incident_rows(section)) + "<p>"
+                      + "<br>".join(html.escape(n) for n in _incident_notes(section))
+                      + "</p>")
+        else:
+            extra += "<p>No incident has a labeled frame yet.</p>"
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -922,7 +1267,8 @@ def label_main(argv):
 def stats_main(argv):
     parser = argparse.ArgumentParser(
         prog="tapo-monitor label-stats",
-        description="Summarize labels.jsonl: false alarms, misses, best threshold")
+        description="Summarize labels.jsonl: false alarms, misses, best threshold, "
+                    "missed incidents")
     parser.add_argument("dataset_dir")
     parser.add_argument("--json", action="store_true", dest="json_output")
     parser.add_argument("--config", help=CONFIG_HELP)

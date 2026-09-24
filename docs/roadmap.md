@@ -517,7 +517,7 @@ whether a change to it helps.
 - [x] Every archived frame (sent log and review log, every delivery path) carries the
   incident ID and the camera event start, so frames of one visit can be grouped without
   guessing from timestamps.
-- [ ] `label-stats` groups labelled frames into incidents (by incident ID; older records
+- [x] `label-stats` groups labelled frames into incidents (by incident ID; older records
   without one by camera and a time gap) and reports incidents with a person, how many of
   them were alerted, missed incidents, and the delay from event start to the first
   delivered alert (median and p90), by day and night with `--config`.
