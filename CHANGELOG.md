@@ -149,6 +149,10 @@ All notable changes to this project are documented here.
 - The daily digest's fleet block reports motor moves the arbiter held back and what the
   last restart carried over from `runtime.json`.
 
+- The review log also keeps a random sample of below-threshold frames (live, sampler and
+  SD/recording drops; `TAPO_REVIEW_DROP_SAMPLE`, default 5 %, at most
+  `TAPO_REVIEW_DROP_MAX_PER_HOUR` per camera and hour, default 6), so possible misses keep
+  reaching the labelling queue. Records carry `sample_rate`; the digest counts them apart.
 - `tapo-monitor autolabel`: a larger teacher model labels the frames it and the
   production scorer agree on, so the labeling page only shows disagreements, biggest
   first.

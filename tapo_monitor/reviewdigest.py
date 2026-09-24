@@ -139,22 +139,38 @@ def _camera_lines(cameras):
     return lines
 
 
+def is_drop_sample(entry):
+    """True for a randomly sampled below-threshold frame (it carries ``sample_rate``). Pure.
+
+    The hub poll's drops share the ``drop`` verdict but are archived in full and carry no
+    rate, so they stay with the suppressed frames exactly as before.
+    """
+    return entry.get("verdict") == "drop" and "sample_rate" in entry
+
+
 def build_summary(entries):
     """One-message digest text: total plus per-camera counts with the max score.
 
     Entries with ``verdict == "shadow"`` (the shadow scan's own miss candidates) are
-    broken out into a separate section below the regular hold counts; everything else
-    (including entries with no verdict at all) keeps today's rendering unchanged. Pure.
+    broken out into a separate section below the regular hold counts, and the random
+    drop sample into a single count line: it is labelling material, and a random share of
+    the day's empty frames must not read as suppressed alerts. Everything else (including
+    entries with no verdict at all) keeps today's rendering unchanged. Pure.
     """
+    sampled = [e for e in entries if is_drop_sample(e)]
+    entries = [e for e in entries if not is_drop_sample(e)]
     if not entries:
-        return "\U0001f4cb Review digest: no suppressed frames in the last 24h"
-    holds = [e for e in entries if e.get("verdict") != "shadow"]
-    shadow = [e for e in entries if e.get("verdict") == "shadow"]
-    lines = [f"\U0001f4cb Review digest: {len(holds)} suppressed frame(s) in the last 24h"]
-    lines.extend(_camera_lines(_camera_stats(holds)))
-    if shadow:
-        lines.append(f"shadow: {len(shadow)} miss candidate(s)")
-        lines.extend(_camera_lines(_camera_stats(shadow)))
+        lines = ["\U0001f4cb Review digest: no suppressed frames in the last 24h"]
+    else:
+        holds = [e for e in entries if e.get("verdict") != "shadow"]
+        shadow = [e for e in entries if e.get("verdict") == "shadow"]
+        lines = [f"\U0001f4cb Review digest: {len(holds)} suppressed frame(s) in the last 24h"]
+        lines.extend(_camera_lines(_camera_stats(holds)))
+        if shadow:
+            lines.append(f"shadow: {len(shadow)} miss candidate(s)")
+            lines.extend(_camera_lines(_camera_stats(shadow)))
+    if sampled:
+        lines.append(f"drop sample: {len(sampled)} below-threshold frame(s) kept for labelling")
     return "\n".join(lines)
 
 
@@ -367,14 +383,18 @@ def scan_context_line(review_dir, now):
 
 
 def pick_photos(entries, review_dir, limit):
-    """The ``limit`` highest-scoring entries whose frame still exists on disk. Pure-ish."""
+    """The ``limit`` highest-scoring entries whose frame still exists on disk. Pure-ish.
+
+    The random drop sample is never picked: on a quiet day it would fill the digest with
+    empty low-score frames that belong on the labelling page, not on the phone.
+    """
     def score(e):
         try:
             return float(e.get("person", 0.0))
         except (TypeError, ValueError):
             return 0.0
 
-    ranked = sorted(entries, key=score, reverse=True)
+    ranked = sorted((e for e in entries if not is_drop_sample(e)), key=score, reverse=True)
     picked = []
     for e in ranked:
         if len(picked) >= limit:
@@ -486,7 +506,7 @@ def run_if_due(*, env=None, now=None, send_text, send_photo, health=None):
         # indistinguishable in the journal from one that had quietly stopped running, and
         # the only evidence either way was the state file.
         log.info("review digest sent: %d suppressed frame(s), %d photo(s)",
-                 len(entries), photos)
+                 sum(not is_drop_sample(e) for e in entries), photos)
         return True
     except Exception:  # noqa: BLE001 - telemetry must never break the daemon loop
         log.warning("review digest failed", exc_info=True)

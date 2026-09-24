@@ -1,7 +1,8 @@
 # Labeling alert frames
 
 The sent log (`TAPO_SENT_LOG_DIR`) keeps every photo that went out and the review log
-(`TAPO_REVIEW_LOG_DIR`) every frame corroboration held back — see
+(`TAPO_REVIEW_LOG_DIR`) every frame corroboration held back plus a random sample of the
+frames dropped below the threshold — see
 [Operations](operations.md#inspecting-alert-frames). Neither says whether a person was
 actually in the frame. `tapo-monitor label` adds that: a local page that shows the
 collected frames one at a time and records a human verdict, and `tapo-monitor
@@ -22,6 +23,25 @@ It never deletes: frames stay after the host prunes them, and each host's
 host has already forgotten are kept. Raise `TAPO_SENT_LOG_RETENTION_DAYS` /
 `TAPO_REVIEW_LOG_RETENTION_DAYS` on the hosts if the collector cannot run daily. Any
 other layout works too — a plain `rsync -a host:…/sent-log dataset/host/` is enough.
+
+Held frames only cover the band just under the send line. A person the scorer rated
+p0.05 is dropped outright, and without a copy of that frame no label can ever count it as
+a miss. So the review log also keeps a random sample of the frames dropped below
+`scorer.threshold` — on the live pass, by the sampler and in SD/recording frame
+selection (the best frame of a dropped sequence, not every frame):
+
+```bash
+export TAPO_REVIEW_DROP_SAMPLE=0.05       # share of dropped frames kept; 0 turns it off
+export TAPO_REVIEW_DROP_MAX_PER_HOUR=6    # per camera and clock hour
+```
+
+The rate is flat across scores on purpose: the labelling queue already stratifies by
+score, and a flat rate keeps the weighting trivial. Each sampled record has
+`"verdict": "drop"`, a `path` (`live`, `sampler`, `sd`) and `"sample_rate"`, so one
+labelled sampled frame stands for `1 / sample_rate` dropped ones. The hourly cap bounds
+the disk use on a rainy night; when it bites, the real rate that hour was lower than
+`sample_rate`, so a weighted estimate is a lower bound. Hub-clip drops are archived in
+full and carry no `sample_rate` — read that as a rate of 1.
 
 Every `index.jsonl` under the directory is read, recursively. A record with a `verdict`
 field is a review frame; any other record is a sent frame. Records whose JPEG was pruned

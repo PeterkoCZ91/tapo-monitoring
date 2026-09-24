@@ -140,6 +140,45 @@ def test_pick_photos_highest_scores_capped_existing_only(tmp_path):
     assert [e["file"] for e in picked] == ["top.jpg", "mid.jpg"]
 
 
+def _sampled_drop(name, camera, person):
+    return {"ts": 4.0, "file": name, "camera": camera, "person": person,
+            "verdict": "drop", "etype": "motion", "path": "sampler", "sample_rate": 0.05}
+
+
+def test_summary_counts_the_drop_sample_apart_from_suppressed_frames():
+    # A random share of empty frames is labelling material, not suppressed alerts: it
+    # must neither inflate the suppressed count nor take over a camera's max score.
+    entries = [
+        {"ts": 1.0, "file": "a.jpg", "camera": "front", "person": 0.64, "verdict": "hold"},
+        {"ts": 2.0, "file": "hub.jpg", "camera": "front", "person": 0.12, "verdict": "drop"},
+        _sampled_drop("s1.jpg", "front", 0.03),
+        _sampled_drop("s2.jpg", "yard", 0.29),
+    ]
+    text = reviewdigest.build_summary(entries)
+    assert "2 suppressed frame(s)" in text            # the hold and the hub drop, as before
+    assert "front: 2 (max p0.64)" in text
+    assert "yard" not in text
+    assert text.endswith("drop sample: 2 below-threshold frame(s) kept for labelling")
+
+
+def test_summary_with_only_the_drop_sample_still_says_nothing_was_suppressed():
+    text = reviewdigest.build_summary([_sampled_drop("s1.jpg", "front", 0.03)])
+    assert text.splitlines() == [
+        "\U0001f4cb Review digest: no suppressed frames in the last 24h",
+        "drop sample: 1 below-threshold frame(s) kept for labelling"]
+
+
+def test_pick_photos_never_sends_the_drop_sample(tmp_path):
+    review_dir = str(tmp_path)
+    for name in ("s1.jpg", "hold.jpg"):
+        (tmp_path / name).write_bytes(b"\xff\xd8JPG")
+    entries = [_sampled_drop("s1.jpg", "front", 0.29),
+               {"ts": 1.0, "file": "hold.jpg", "camera": "front", "person": 0.2,
+                "verdict": "hold"}]
+    picked = reviewdigest.pick_photos(entries, review_dir, limit=4)
+    assert [e["file"] for e in picked] == ["hold.jpg"]
+
+
 # ── photo captions ───────────────────────────────────────────────────────────
 
 def test_photo_caption_shadow_prefers_event_ts_over_scan_ts():

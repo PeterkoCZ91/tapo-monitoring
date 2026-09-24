@@ -1904,6 +1904,11 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
     if not above:
         if keep_below and below:
             return max(below, key=lambda fs: fs[1])
+        if below:
+            # The whole sequence missed the threshold: offer its best frame, the one most
+            # likely to hold a person the scorer underrated, to the drop sample.
+            frame, s = max(below, key=lambda fs: fs[1])
+            monitor.sample_drop(cfg, frame, etype, s, path)
         return None, None
     above.sort(key=lambda fs: fs[1], reverse=True)
     boxes = getattr(score, "boxes", None) or {}
@@ -2140,7 +2145,8 @@ def _suppress_sampler_frame(cfg, group, etype, s, scfg, image, verdict, *, now):
     """Log/audit one sampler frame that will not be sent and fold it into the group.
 
     ``verdict`` is "drop" (below threshold) or "hold" (marginal, awaiting corroboration);
-    a held frame is archived for review. Either way the score updates the low-score
+    a held frame is archived for review, a dropped one offered to the random drop sample
+    (possible misses for labelling). Either way the score updates the low-score
     streak, so a marginal frame keeps a motion-only group alive exactly like a good one.
     """
     if verdict == "hold":
@@ -2159,6 +2165,7 @@ def _suppress_sampler_frame(cfg, group, etype, s, scfg, image, verdict, *, now):
                  cfg.name, group["frames"], scfg.max_frames, s, cfg.scorer.threshold)
         monitor.audit_event(cfg, group["event"], etype, "sampler", "drop", score=s,
                             threshold=cfg.scorer.threshold, reason="below_threshold")
+        monitor.sample_drop(cfg, image, etype, s, "sampler")
     if sampler.note_score(group, s, scfg):
         log.info("sampler %s: early exit after %d consecutive low frames",
                  cfg.name, group["low_streak"])

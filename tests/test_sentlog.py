@@ -238,3 +238,136 @@ def test_archive_panlimit_frame_prunes_older_than_two_days(tmp_path):
 def test_archive_panlimit_frame_best_effort_on_missing_source(tmp_path):
     assert sentlog.archive_panlimit_frame(str(tmp_path), "/no/such/frame.jpg",
                                           "yard", "pan", 0.63, now=1.0) is None
+
+
+# ── drop sample: a random share of below-threshold frames ────────────────────
+
+class _Rng:
+    """A fixed draw: ``random()`` always returns ``value``."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def random(self):
+        return self.value
+
+
+_HOUR = 1785200400.0   # the top of a clock hour
+
+
+def _drop_env(tmp_path, **extra):
+    return {sentlog.ENV_REVIEW_DIR: str(tmp_path / "review"), **extra}
+
+
+def _drop_frame(tmp_path):
+    src = tmp_path / "f.jpg"
+    src.write_bytes(b"\xff\xd8IMG")
+    return str(src)
+
+
+def _drop_meta(camera="yard", score=0.05):
+    return sentlog.review_meta(camera, "drop", "motion", score)
+
+
+def test_drop_sample_rate_env_parsing():
+    assert sentlog.drop_sample_rate_from_env({}) == 0.05
+    assert sentlog.drop_sample_rate_from_env({sentlog.ENV_DROP_SAMPLE: "0.2"}) == 0.2
+    assert sentlog.drop_sample_rate_from_env({sentlog.ENV_DROP_SAMPLE: "0"}) == 0.0
+    assert sentlog.drop_sample_rate_from_env({sentlog.ENV_DROP_SAMPLE: "1"}) == 1.0
+    for garbage in ("", "lots", "-0.1", "1.5"):
+        assert sentlog.drop_sample_rate_from_env({sentlog.ENV_DROP_SAMPLE: garbage}) == 0.05
+
+
+def test_drop_max_per_hour_env_parsing():
+    assert sentlog.drop_max_per_hour_from_env({}) == 6
+    assert sentlog.drop_max_per_hour_from_env({sentlog.ENV_DROP_MAX_PER_HOUR: "2"}) == 2
+    assert sentlog.drop_max_per_hour_from_env({sentlog.ENV_DROP_MAX_PER_HOUR: "0"}) == 0
+    for garbage in ("", "1.5", "many", "-3"):
+        assert sentlog.drop_max_per_hour_from_env(
+            {sentlog.ENV_DROP_MAX_PER_HOUR: garbage}) == 6
+
+
+def test_drop_sample_noop_when_review_log_unset(tmp_path):
+    assert sentlog.archive_drop_sample_if_configured(
+        _drop_frame(tmp_path), _drop_meta(), env={}, rng=_Rng(0.0)) is None
+
+
+def test_drop_sample_archives_a_drawn_frame_with_its_rate(tmp_path):
+    env = _drop_env(tmp_path, **{sentlog.ENV_DROP_SAMPLE: "0.1"})
+    path = sentlog.archive_drop_sample_if_configured(
+        _drop_frame(tmp_path), {**_drop_meta(), "path": "sampler"}, now=_HOUR, env=env,
+        rng=_Rng(0.09), cap=sentlog.DropSampleCap())
+    assert path is not None and "_drop_p0.05_" in os.path.basename(path)
+    rec = json.loads((tmp_path / "review" / "index.jsonl").read_text().strip())
+    assert rec["verdict"] == "drop" and rec["sample_rate"] == 0.1
+    assert rec["path"] == "sampler" and rec["camera"] == "yard"
+
+
+def test_drop_sample_skips_a_frame_the_draw_rejects(tmp_path):
+    env = _drop_env(tmp_path, **{sentlog.ENV_DROP_SAMPLE: "0.1"})
+    assert sentlog.archive_drop_sample_if_configured(
+        _drop_frame(tmp_path), _drop_meta(), now=_HOUR, env=env, rng=_Rng(0.1),
+        cap=sentlog.DropSampleCap()) is None
+    assert not (tmp_path / "review").exists()
+
+
+def test_drop_sample_rate_zero_disables_even_a_zero_draw(tmp_path):
+    env = _drop_env(tmp_path, **{sentlog.ENV_DROP_SAMPLE: "0"})
+    assert sentlog.archive_drop_sample_if_configured(
+        _drop_frame(tmp_path), _drop_meta(), now=_HOUR, env=env, rng=_Rng(0.0)) is None
+
+
+def test_drop_sample_default_rate_applies_when_env_unset(tmp_path):
+    env = _drop_env(tmp_path)
+    cap = sentlog.DropSampleCap()
+    frame = _drop_frame(tmp_path)
+    assert sentlog.archive_drop_sample_if_configured(
+        frame, _drop_meta(), now=_HOUR, env=env, rng=_Rng(0.049), cap=cap) is not None
+    assert sentlog.archive_drop_sample_if_configured(
+        frame, _drop_meta(), now=_HOUR + 1, env=env, rng=_Rng(0.05), cap=cap) is None
+
+
+def test_drop_sample_caps_each_camera_per_clock_hour(tmp_path):
+    env = _drop_env(tmp_path, **{sentlog.ENV_DROP_SAMPLE: "1",
+                                 sentlog.ENV_DROP_MAX_PER_HOUR: "2"})
+    cap = sentlog.DropSampleCap()
+    frame = _drop_frame(tmp_path)
+
+    def offer(camera, now):
+        return sentlog.archive_drop_sample_if_configured(
+            frame, _drop_meta(camera), now=now, env=env, rng=_Rng(0.0), cap=cap)
+
+    assert offer("yard", _HOUR + 1) and offer("yard", _HOUR + 2)
+    assert offer("yard", _HOUR + 3) is None          # a flapping camera stops here
+    assert offer("gate", _HOUR + 4) is not None      # another camera has its own budget
+    assert offer("yard", _HOUR + 3600) is not None   # the next hour starts afresh
+    lines = (tmp_path / "review" / "index.jsonl").read_text().splitlines()
+    assert len(lines) == 4
+
+
+def test_drop_sample_failed_write_does_not_use_up_the_cap(tmp_path):
+    env = _drop_env(tmp_path, **{sentlog.ENV_DROP_SAMPLE: "1",
+                                 sentlog.ENV_DROP_MAX_PER_HOUR: "1"})
+    cap = sentlog.DropSampleCap()
+    assert sentlog.archive_drop_sample_if_configured(
+        "/no/such/frame.jpg", _drop_meta(), now=_HOUR, env=env, rng=_Rng(0.0), cap=cap) is None
+    assert cap.allows("yard", _HOUR, 1)
+
+
+def test_drop_sample_never_raises(tmp_path):
+    class Broken:
+        def random(self):
+            raise RuntimeError("rng down")
+
+    assert sentlog.archive_drop_sample_if_configured(
+        _drop_frame(tmp_path), _drop_meta(), env=_drop_env(tmp_path), rng=Broken()) is None
+
+
+def test_drop_sample_uses_the_module_cap_by_default(tmp_path):
+    env = _drop_env(tmp_path, **{sentlog.ENV_DROP_SAMPLE: "1",
+                                 sentlog.ENV_DROP_MAX_PER_HOUR: "1"})
+    frame = _drop_frame(tmp_path)
+    assert sentlog.archive_drop_sample_if_configured(
+        frame, _drop_meta(), now=_HOUR, env=env, rng=_Rng(0.0)) is not None
+    assert sentlog.archive_drop_sample_if_configured(
+        frame, _drop_meta(), now=_HOUR + 1, env=env, rng=_Rng(0.0)) is None

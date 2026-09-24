@@ -14,6 +14,7 @@ the send path: archiving is best-effort telemetry, never a reason to lose an ale
 import json
 import logging
 import os
+import random
 import time
 
 log = logging.getLogger(__name__)
@@ -29,6 +30,15 @@ INDEX_NAME = "index.jsonl"
 ENV_REVIEW_DIR = "TAPO_REVIEW_LOG_DIR"
 ENV_REVIEW_RETENTION = "TAPO_REVIEW_LOG_RETENTION_DAYS"
 DEFAULT_REVIEW_RETENTION_DAYS = 7.0
+
+# Drop sample: a random fraction of the frames scored below `scorer.threshold`, archived to
+# the same review log. Holds only show the band just under the send line; a person the
+# scorer rated p0.05 never reaches the labelling queue without this. The hourly cap per
+# camera keeps a rainy night or a flapping camera from filling the disk.
+ENV_DROP_SAMPLE = "TAPO_REVIEW_DROP_SAMPLE"
+ENV_DROP_MAX_PER_HOUR = "TAPO_REVIEW_DROP_MAX_PER_HOUR"
+DEFAULT_DROP_SAMPLE = 0.05
+DEFAULT_DROP_MAX_PER_HOUR = 6
 
 # Pan-limit log: one frame per guard intervention — the out-of-bounds view, grabbed just
 # before the recall erases it. Deliberately its own directory: the review digest reads
@@ -232,3 +242,78 @@ def archive_review_if_configured(image_path, meta, *, now=None, env=None):
         retention_days = DEFAULT_REVIEW_RETENTION_DAYS
     return archive_review_frame(archive_dir, image_bytes, meta, now=now,
                                 retention_days=retention_days)
+
+
+def drop_sample_rate_from_env(env=None):
+    """Fraction of below-threshold frames to archive, 0..1; garbage falls back to default."""
+    env = os.environ if env is None else env
+    try:
+        rate = float(env[ENV_DROP_SAMPLE])
+    except (KeyError, TypeError, ValueError):
+        return DEFAULT_DROP_SAMPLE
+    return rate if 0.0 <= rate <= 1.0 else DEFAULT_DROP_SAMPLE
+
+
+def drop_max_per_hour_from_env(env=None):
+    """Sampled drops archived per camera and clock hour; garbage falls back to default."""
+    env = os.environ if env is None else env
+    try:
+        cap = int(env[ENV_DROP_MAX_PER_HOUR])
+    except (KeyError, TypeError, ValueError):
+        return DEFAULT_DROP_MAX_PER_HOUR
+    return cap if cap >= 0 else DEFAULT_DROP_MAX_PER_HOUR
+
+
+class DropSampleCap:
+    """Per-camera count of sampled drops in the current clock hour.
+
+    In memory only: a restart forgets the hour's count, which at worst admits one more
+    hour's worth of frames. Past hours are forgotten on the next count, so it stays tiny.
+    """
+
+    def __init__(self):
+        self._counts = {}
+
+    def allows(self, camera, now, cap):
+        return self._counts.get((camera, int(now // 3600)), 0) < cap
+
+    def count(self, camera, now):
+        hour = int(now // 3600)
+        self._counts = {k: v for k, v in self._counts.items() if k[1] == hour}
+        self._counts[(camera, hour)] = self._counts.get((camera, hour), 0) + 1
+
+
+_drop_cap = DropSampleCap()
+
+
+def archive_drop_sample_if_configured(image_path, meta, *, now=None, env=None, rng=None,
+                                      cap=None):
+    """Archive a random sample of below-threshold frames to the review log.
+
+    No-op unless ``TAPO_REVIEW_LOG_DIR`` is set. Each frame is kept with probability
+    ``TAPO_REVIEW_DROP_SAMPLE`` (default 5 %), at most ``TAPO_REVIEW_DROP_MAX_PER_HOUR``
+    per camera and clock hour. The index record carries ``sample_rate`` so statistics can
+    weight the sample; a ``drop`` record without it (the hub poll's) was archived in full.
+    Returns the saved path or None, and never raises: it runs on the alert path, and a
+    sampling failure must not change a single decision.
+    """
+    try:
+        env = os.environ if env is None else env
+        if not (env.get(ENV_REVIEW_DIR) or "").strip():
+            return None
+        rate = drop_sample_rate_from_env(env)
+        if rate <= 0.0 or (rng or random).random() >= rate:
+            return None
+        now = time.time() if now is None else now
+        cap = _drop_cap if cap is None else cap
+        camera = str(meta.get("camera", "cam"))
+        if not cap.allows(camera, now, drop_max_per_hour_from_env(env)):
+            return None
+        path = archive_review_if_configured(image_path, {**meta, "sample_rate": rate},
+                                            now=now, env=env)
+        if path:
+            cap.count(camera, now)
+        return path
+    except Exception:  # noqa: BLE001 - sampling is telemetry, never a reason to fail a pass
+        log.debug("sentlog: drop sampling failed", exc_info=True)
+        return None

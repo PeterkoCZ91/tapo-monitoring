@@ -1,4 +1,6 @@
+import json
 import os
+import re
 import sys
 
 import pytest
@@ -983,6 +985,53 @@ def test_run_monitor_hold_uses_injected_hold_archive(monkeypatch):
         score=lambda img: 0.4, corroborate=lambda ev, s: "hold",
         hold_archive=lambda image, etype, s: archived.append((image, etype, s)))
     assert archived == [("/tmp/live.jpg", "motion", 0.4)]
+
+
+def _run_live_drop(monkeypatch, tmp_path, caplog, *, rate, corroborate):
+    """One below-threshold live motion frame (p0.10 against 0.3), review log on."""
+    monkeypatch.setattr(monitor.notify, "send_photo",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("sent")))
+    monkeypatch.setenv("TAPO_REVIEW_LOG_DIR", str(tmp_path / "review"))
+    monkeypatch.setenv("TAPO_REVIEW_DROP_SAMPLE", rate)
+    frame = tmp_path / "live.jpg"
+    frame.write_bytes(b"\xff\xd8LIVE")
+    observed = []
+
+    class Cam:
+        def getEvents(self):
+            return [_motion_event(100)]
+
+    caplog.clear()
+    with caplog.at_level("INFO", logger="tapo_monitor.monitor"):
+        watermark = monitor.run_monitor(
+            Cam(), _cfg_with_scorer(threshold=0.3), 0, now=1000, groq_key="k",
+            telegram_token="t", telegram_chat="c",
+            snapshot=lambda cam, ev: str(frame), time_str=lambda ev: "T",
+            score=lambda img: 0.1, corroborate=corroborate,
+            observe=lambda ev, et, s: observed.append((et, s)))
+    # event_age_s is measured against the wall clock, so it differs between two runs.
+    audit = [re.sub(r" event_age_s=\S+", "", r.getMessage())
+             for r in caplog.records if r.getMessage().startswith("audit ")]
+    index = tmp_path / "review" / "index.jsonl"
+    records = ([json.loads(line) for line in index.read_text().splitlines()]
+               if index.exists() else [])
+    assert not frame.exists()                 # the pass still owns and unlinks its frame
+    return watermark, observed, audit, records
+
+
+@pytest.mark.parametrize("corroborate", [None, lambda ev, s: "drop"],
+                         ids=["plain_drop", "corroboration_drop"])
+def test_run_monitor_live_drop_is_sampled_without_changing_the_decision(
+        monkeypatch, tmp_path, caplog, corroborate):
+    off = _run_live_drop(monkeypatch, tmp_path, caplog, rate="0", corroborate=corroborate)
+    on = _run_live_drop(monkeypatch, tmp_path, caplog, rate="1", corroborate=corroborate)
+    assert off[:3] == on[:3]                  # watermark, observe calls, audit lines
+    assert off[3] == []
+    assert len(on[3]) == 1
+    rec = on[3][0]
+    assert rec["verdict"] == "drop" and rec["path"] == "live" and rec["sample_rate"] == 1.0
+    assert rec["camera"] == "a" and rec["person"] == 0.1
+    assert (tmp_path / "review" / rec["file"]).read_bytes() == b"\xff\xd8LIVE"
 
 
 def test_run_monitor_motion_sends_on_corroborate_send(monkeypatch):

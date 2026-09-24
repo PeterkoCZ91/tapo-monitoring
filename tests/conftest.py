@@ -31,3 +31,15 @@ def _fresh_lamp_spans(monkeypatch):
     """Give every test its own record of when a lamp was seen lit (module-level state)."""
     from tapo_monitor import camera
     monkeypatch.setattr(camera, "_lamp_spans", {})
+
+
+@pytest.fixture(autouse=True)
+def _no_random_drop_sample(monkeypatch):
+    """Keep the review log deterministic: the random drop sample is off unless a test asks.
+
+    Tests that exercise it set ``TAPO_REVIEW_DROP_SAMPLE`` (or pass ``env``) and an rng;
+    the hourly cap starts empty for every test.
+    """
+    from tapo_monitor import sentlog
+    monkeypatch.setenv(sentlog.ENV_DROP_SAMPLE, "0")
+    monkeypatch.setattr(sentlog, "_drop_cap", sentlog.DropSampleCap())

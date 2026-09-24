@@ -494,6 +494,42 @@ def test_select_recording_frame_none_when_all_below():
     assert image is None and s is None
 
 
+def _recording_selection(monkeypatch, scores, **kw):
+    samples = []
+    monkeypatch.setattr(daemon.sentlog, "archive_drop_sample_if_configured",
+                        lambda path, meta, **k: samples.append((path, meta)))
+    cam = _cam(sd_snapshot=True, snapshot_source="recording",
+               scorer={"url": "http://x/score", "threshold": 0.4})
+    result = daemon._select_recording_frame(
+        cam, event={"start_time": 1}, etype="person", frames=list(scores),
+        score=lambda f: scores[f], blur_score=lambda f: 1.0, **kw)
+    return result, samples
+
+
+def test_select_recording_frame_samples_only_the_best_of_a_dropped_sequence(monkeypatch):
+    # Nine frames under the threshold are one decision: one audit line, one sample offer.
+    result, samples = _recording_selection(
+        monkeypatch, {"a.jpg": 0.05, "b.jpg": 0.21, "c.jpg": 0.12})
+    assert result == (None, None)             # the drop itself is unchanged
+    assert [(p, m["person"], m["verdict"], m["path"]) for p, m in samples] == [
+        ("b.jpg", 0.21, "drop", "sd")]
+
+
+def test_select_recording_frame_does_not_sample_a_sequence_that_sends(monkeypatch):
+    result, samples = _recording_selection(monkeypatch, {"a.jpg": 0.05, "b.jpg": 0.8})
+    assert result == ("b.jpg", 0.8)
+    assert samples == []
+
+
+def test_select_recording_frame_leaves_the_hub_drop_to_its_own_archive(monkeypatch):
+    # keep_below hands the best rejected frame back; the hub poll archives every such
+    # drop in full, so sampling it here would archive it twice.
+    result, samples = _recording_selection(
+        monkeypatch, {"a.jpg": 0.05, "b.jpg": 0.21}, path="hubpoll", keep_below=True)
+    assert result == ("b.jpg", 0.21)
+    assert samples == []
+
+
 def test_select_recording_frame_passes_through_when_scorer_down():
     cam = _cam(sd_snapshot=True, snapshot_source="recording",
                scorer={"url": "http://x/score", "threshold": 0.4})
@@ -3807,6 +3843,50 @@ def test_process_sampler_hold_archives_review_frame(monkeypatch):
     _run_sampler(app, state, 1035, sent, monkeypatch, score=0.4)
     assert sent == []
     assert len(reviews) == 1 and reviews[0]["verdict"] == "hold"
+
+
+_real_audit_event = daemon.monitor.audit_event
+
+
+def _sampler_drop_run(monkeypatch, *, sample):
+    """One below-threshold sampler frame; returns (group, audits, drop samples)."""
+    audits, samples = [], []
+    real_audit = _real_audit_event
+    monkeypatch.setattr(daemon.monitor, "audit_event",
+                        lambda *a, **k: audits.append((a[3:], k)) or real_audit(*a, **k))
+    monkeypatch.setattr(daemon.sentlog, "archive_drop_sample_if_configured",
+                        lambda path, meta, **k: samples.append((path, meta)) if sample else None)
+    sent = []
+    app = _sampler_app(threshold=0.4)
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    _run_sampler(app, state, 1035, sent, monkeypatch, score=0.1)
+    assert sent == []
+    return state.groups["a"], audits, samples
+
+
+def test_process_sampler_drop_is_offered_to_the_drop_sample(monkeypatch):
+    group, audits, samples = _sampler_drop_run(monkeypatch, sample=True)
+    assert samples == [("/tmp/f.jpg", {"camera": "a", "verdict": "drop", "etype": "motion",
+                                       "person": 0.1, "animal": 0.0, "path": "sampler"})]
+    bare_group, bare_audits, _ = _sampler_drop_run(monkeypatch, sample=False)
+    assert group == bare_group                # the drop sample decides nothing
+    assert audits == bare_audits
+    assert (("sampler", "drop"), {"score": 0.1, "threshold": 0.4,
+                                  "reason": "below_threshold"}) in [
+        ((a[0], a[1]), k) for a, k in audits]
+
+
+def test_process_sampler_hold_is_not_offered_to_the_drop_sample(monkeypatch):
+    monkeypatch.setattr(daemon.sentlog, "archive_review_if_configured", lambda *a, **k: None)
+    monkeypatch.setattr(daemon.sentlog, "archive_drop_sample_if_configured",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("sampled")))
+    sent = []
+    app = _sampler_app(threshold=0.3, motion_send=0.6)
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    _run_sampler(app, state, 1035, sent, monkeypatch, score=0.4)
+    assert sent == []
 
 
 def test_sampler_hold_remembers_archived_frame(monkeypatch):

@@ -60,6 +60,17 @@ def _on_alert(on_alert, etype, event):
         on_alert(etype)
 
 
+def sample_drop(cfg, image, etype, score, path):
+    """Offer one below-threshold frame to the review log's random drop sample.
+
+    ``image`` is a path the caller still owns. A no-op unless ``TAPO_REVIEW_LOG_DIR`` is
+    set; it never raises and never changes the drop it follows (see
+    :func:`sentlog.archive_drop_sample_if_configured`).
+    """
+    return sentlog.archive_drop_sample_if_configured(
+        image, {**sentlog.review_meta(cfg.name, "drop", etype, score), "path": path})
+
+
 def _fmt_score(score):
     return "none" if score is None else f"{float(score):.4f}"
 
@@ -392,6 +403,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                              etype, s, cfg.scorer.threshold)
                     audit_event(cfg, event, etype, "live", "drop", score=s,
                                 threshold=cfg.scorer.threshold, reason="below_threshold")
+                    sample_drop(cfg, image, etype, s, "live")
                     _observe(observe, event, etype, False)
                     continue
                 empty = False   # verdict == "send": fall through to the send block
@@ -404,6 +416,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                                  etype, s, cfg.scorer.threshold)
                         audit_event(cfg, event, etype, "live", "drop", score=s,
                                     threshold=cfg.scorer.threshold, reason="below_threshold")
+                        sample_drop(cfg, image, etype, s, "live")
                     else:
                         log.info("drop %s: Groq reports empty scene", etype)
                         audit_event(cfg, event, etype, "live", "drop", reason="empty")

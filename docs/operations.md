@@ -524,6 +524,20 @@ export TAPO_REVIEW_LOG_DIR=~/tapo-monitor/review-log
 export TAPO_REVIEW_LOG_RETENTION_DAYS=7   # optional, default 7
 ```
 
+The same directory also receives a random sample of frames dropped below
+`scorer.threshold` (live pass, sampler, SD/recording selection; hub-clip drops are kept in
+full), so a person the scorer rated far too low can still reach the
+[labelling](labeling.md#collecting-a-dataset) queue. `TAPO_REVIEW_DROP_SAMPLE` sets the
+share (default `0.05`, `0` turns it off, anything outside 0–1 falls back to the default)
+and `TAPO_REVIEW_DROP_MAX_PER_HOUR` caps it per camera and clock hour (default 6), so a
+rainy night cannot flood the log. Sampled records carry `sample_rate`; the daily digest
+counts them on one line of their own and never sends their photos.
+
+```bash
+export TAPO_REVIEW_DROP_SAMPLE=0.05       # optional, default 0.05
+export TAPO_REVIEW_DROP_MAX_PER_HOUR=6    # optional, default 6
+```
+
 **Archive what the pan guard saw.** Each `pan_limit` intervention saves one frame — the
 out-of-bounds view, grabbed just before the recall erases it — into a `panlimit-log`
 directory beside the review log (or the sent log, whichever is configured; with neither
