@@ -262,7 +262,7 @@ so the canonical unit edit becomes cosmetic rather than blocking.
 
 ## Phase 7 — Runtime correctness and deterministic behaviour
 
-Status: **in progress** (7.1–7.3, 7.5, 7.6 done; 7.4 replay open)
+Status: **complete** (not yet deployed)
 
 A gap review against a generic "autonomous PTZ platform" wish list found that most of
 it already exists here (digital twin, drift, self-healing, clock offsets, host watch,
@@ -333,9 +333,12 @@ multi-tick scenarios are written once rather than rebuilt by hand in each test.
   change during tracking, restart during a pending delivery, RTSP down while the API is
   alive, capability missing on the camera, restart inside a cooldown
   (`tests/test_scenarios.py`).
-- [ ] `tapo-monitor replay`: feed a recorded audit log/ledger window through the same
+- [x] `tapo-monitor replay`: feed a recorded audit log/ledger window through the same
   production decision logic with media and delivery stubbed, and print the decisions it
   would take — so a policy change can be checked against a real night before it ships.
+  (`tapo_monitor/replay.py`: ledger window through mute, cooldown and scene-group gates,
+  `--compare` a second config, `--json`; see
+  [observability](observability.md#replaying-a-night).)
 
 ### 7.5 — Incident identity
 

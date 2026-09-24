@@ -578,6 +578,44 @@ class EventLedger:
         return self.delete_before(max(0.0, now - retention_seconds))
 
 
+def read_camera_window(path, *, start: float, end: float, cameras=None):
+    """Read camera observations and their live-path decisions without writing anything.
+
+    Opens the SQLite file read-only (``mode=ro``): unlike :class:`EventLedger` it never
+    creates the file, runs the schema script or touches its permissions, so it is safe
+    against a production ledger the daemon is writing. Returns ``(observations,
+    decisions)`` — camera-source observations in event-time order, and the ``live``
+    decision rows (camera, event_type, event_at, action, id) for the same window.
+    """
+    start = _finite_timestamp(start, "start")
+    end = _finite_timestamp(end, "end")
+    if end < start:
+        raise ValueError("end must not precede start")
+    resolved = Path(os.fspath(path)).expanduser()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"event ledger not found: {resolved}")
+    clauses = ["event_at >= ?", "event_at <= ?"]
+    params: list = [start, end]
+    if cameras:
+        names = [_safe_identifier(name, "camera") for name in cameras]
+        clauses.append("camera IN (" + ",".join("?" * len(names)) + ")")
+        params.extend(names)
+    where = " AND ".join(clauses)
+    connection = sqlite3.connect(f"{resolved.resolve().as_uri()}?mode=ro", uri=True,
+                                 timeout=10.0)
+    try:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            "SELECT * FROM observations WHERE source = 'camera' AND " + where
+            + " ORDER BY event_at, id", params).fetchall()
+        decisions = connection.execute(
+            "SELECT id, camera, event_type, event_at, action FROM decisions "
+            "WHERE path = 'live' AND " + where + " ORDER BY id", params).fetchall()
+    finally:
+        connection.close()
+    return [_row_to_observation(row) for row in rows], [dict(row) for row in decisions]
+
+
 def match_observations(
     camera_events: Iterable[Observation],
     shadow_events: Iterable[Observation],

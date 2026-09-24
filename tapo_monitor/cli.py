@@ -9,6 +9,7 @@ Usage:
   tapo-monitor shadow-record ...        # ingest an independent local observation
   tapo-monitor shadow-report ...        # compare camera and shadow observations
   tapo-monitor shadow-scan ...          # nightly recorder audit batch
+  tapo-monitor replay [cameras.yaml] .. # replay ledger events through the alert gates
   tapo-monitor learn-face <name>        # capture face ID from camera events and output FACE_ID_NAMES
   tapo-monitor audit-log [logfile|-]    # summarize scorer/Telegram audit lines
   tapo-monitor incident <id>            # everything recorded for one incident ID
@@ -580,6 +581,9 @@ def main(argv=None):
     if cmd == "shadow-scan":
         from .shadowscan import main as shadow_scan_main
         return shadow_scan_main(argv[1:])
+    if cmd == "replay":
+        from .replay import main as replay_main
+        return replay_main(argv[1:])
     if cmd == "learn-face":
         return _learn_face(argv[1:])
     print(__doc__)

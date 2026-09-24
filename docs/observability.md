@@ -189,6 +189,42 @@ event of the same passage outside a group has its own ID. The Telegram caption i
 unchanged. The chain is only as complete as the ledger (`observability.ledger`) and the
 sent log (`TAPO_SENT_LOG_DIR`) that are switched on.
 
+## Replaying a night
+
+`tapo-monitor replay` checks a gate-policy change against a real recorded night before it
+ships. It reads the camera detections for a window from the ledger and pushes them, in the
+order the daemon handled them, through the same production functions the live getEvents
+path uses: `daemon.camera_muted` (`night_only` / `quiet_hours`), `daemon.alert_gate`
+(per-type cooldown) and the scene coordinator's group gate. An event that clears all of
+them counts as delivered, so it arms the cooldown and the group exactly as a sent alert
+would.
+
+```bash
+tapo-monitor replay cameras.yaml --start 2026-09-20T18:00 --end 2026-09-21T07:00
+tapo-monitor replay cameras.yaml --hours 12 --camera front --json
+tapo-monitor replay cameras.yaml --start 2026-09-20T18:00 --end 2026-09-21T07:00 \
+  --compare cameras.candidate.yaml
+```
+
+Each line shows `would_alert` or `suppressed(<reason>)` (`cooldown`, `scene_duplicate`,
+`night_only`, `quiet_hours`, `source_disabled`, `unknown_camera`) next to the live action
+production actually recorded, followed by a per-camera summary. `--compare` replays the
+same events under a second config and lists only the events whose outcome changes.
+Times are Unix timestamps or ISO local times; `--ledger` overrides the default path.
+
+It is read-only: the ledger is opened with SQLite `mode=ro` (a missing file is an error,
+never a new database), and no camera, scorer or Telegram call is made. Limits to keep in
+mind:
+
+- Media and the scorer are out of scope, so `would_alert` is an upper bound: a frame the
+  scorer would have dropped still counts, and a known-face cooldown override is not seen.
+- The ledger only holds events the daemon did not mute, so loosening `night_only` or
+  `quiet_hours` cannot resurrect events that were muted when recorded.
+- Only the getEvents path is replayed; hub, sampler and SD follow-up sends are not.
+- Night comes from `scheduling.is_night` with the config's `location` (or the `NIGHT_*`
+  environment), and `quiet_hours` from the host's local time, so run it with the site's
+  environment and timezone.
+
 ## JSON status endpoint
 
 The daemon can serve the state it already holds as one machine-readable page, so a

@@ -160,6 +160,7 @@ available frame contains the subject.
 | `tapo-monitor shadow-record ...` | Ingest one independent media-free observation. |
 | `tapo-monitor shadow-report ...` | Correlate camera and shadow observations. |
 | `tapo-monitor shadow-scan ...` | Nightly recorder audit: re-score yesterday's segments for miss candidates. |
+| `tapo-monitor replay cameras.yaml ...` | Replay a recorded ledger window through the alert gates (read-only); `--compare` a candidate config. |
 
 ## Optional local scorer
 
