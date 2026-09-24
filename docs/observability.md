@@ -179,7 +179,8 @@ observability:
 `GET /status` answers with a single JSON object: the running package version and
 fingerprint, the process start time, the current time, the last tick's outcome, and a
 per-camera summary reduced from the redacted Digital Twin state — layered health, the
-open drift count and the latest reachability observation:
+open drift count, the latest reachability observation and the motor moves the motion
+arbiter refused (`<requester>:<reason>`, e.g. the pan-limit guard waiting out a hold):
 
 ```json
 {
@@ -193,13 +194,17 @@ open drift count and the latest reachability observation:
       "health": {"status": "ok", "layers": {"network": "ok", "api": "ok",
                  "events": "ok", "rtsp": "ok", "storage": "ok"}},
       "drift_count": 0,
-      "probed_at": 1710003300.0
+      "probed_at": 1710003300.0,
+      "motion_refusals": {"pan_limit:hold": 3}
     }
   }
 }
 ```
 
-A camera the twin has not probed yet reports `null` for the twin-derived fields. Every
+A camera the twin has not probed yet reports `null` for the twin-derived fields. The
+server never reads the loop's live state: the main thread publishes a detached copy after
+every tick and requests are served from that, so the view is at most one tick old and
+never half-updated; before the first tick it reports `null` everywhere. Every
 other path is 404 and only GET is answered. The payload is assembled from state the
 daemon already maintains: a request triggers no camera probe, and no secret, token,
 URL or camera address is ever included.

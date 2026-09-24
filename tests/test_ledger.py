@@ -2,6 +2,8 @@ import json
 import logging
 import sqlite3
 import stat
+import threading
+import time
 
 import pytest
 
@@ -328,3 +330,28 @@ def test_retention_cleanup_deletes_expired_scene_events(tmp_path):
 
     assert events.cleanup(5, now=30) == 1
     assert [event["event_at"] for event in events.scene_events(start=0, end=100)] == [30.0]
+
+
+def test_audit_handler_flush_gives_up_after_its_timeout(tmp_path):
+    # logging.shutdown() flushes every handler at exit; an unbounded join on a stuck
+    # SQLite write would hold the stop until systemd's SIGKILL skips the rest of cleanup.
+    release = threading.Event()
+
+    class StuckLedger:
+        def record_audit(self, parsed, observed_at):
+            release.wait(5)
+
+    handler = ledger.AuditLedgerHandler(StuckLedger())
+    record = logging.LogRecord(
+        "tapo_monitor.monitor", logging.INFO, __file__, 1,
+        "audit camera=front path=getevents action=detect etype=person start=100",
+        (), None,
+    )
+    handler.handle(record)
+    started = time.monotonic()
+    assert handler.flush(timeout=0.2) is False
+    assert time.monotonic() - started < 2
+    assert handler.pending() == 1
+    release.set()
+    assert handler.flush(timeout=5) is True
+    assert handler.pending() == 0

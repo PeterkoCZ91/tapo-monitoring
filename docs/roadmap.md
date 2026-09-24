@@ -262,7 +262,7 @@ so the canonical unit edit becomes cosmetic rather than blocking.
 
 ## Phase 7 — Runtime correctness and deterministic behaviour
 
-Status: **in progress** (7.1–7.2 done)
+Status: **in progress** (7.1–7.3 done)
 
 A gap review against a generic "autonomous PTZ platform" wish list found that most of
 it already exists here (digital twin, drift, self-healing, clock offsets, host watch,
@@ -308,13 +308,18 @@ means a restart mid-incident can re-send an alert that was already delivered.
 
 ### 7.3 — Clean shutdown and thread-safe status reads
 
-- [ ] On SIGTERM/SIGINT drain the audit-ledger queue with a bounded timeout, so the last
+- [x] On SIGTERM/SIGINT drain the audit-ledger queue with a bounded timeout, so the last
   decisions before a restart reach SQLite.
-- [ ] Persist the 7.2 state on exit as well as on change.
-- [ ] `statusd` reads `MonitorState` from its own thread while the main loop mutates
+- [x] Persist the 7.2 state on exit as well as on change.
+- [x] `statusd` reads `MonitorState` from its own thread while the main loop mutates
   dicts; serve it from a snapshot published by the main loop instead of reading live
   state, so a status request can never see a half-updated dict or fail with a 500.
-- [ ] Guard the incident-preservation worker's attempt counter the same way.
+- [x] Check the incident-preservation worker's attempt counter. No change needed:
+  `submit` returns early while the worker is alive and only touches the counter before
+  starting it or after it has finished; the invariant is now written down in the code.
+- [x] Defer a stop signal to the tick boundary (a second one exits at once), so a stop
+  never cuts a preset recall or a Telegram send in half; bound the ledger flush that
+  `logging.shutdown()` performs at exit.
 
 ### 7.4 — Scenario harness and replay
 

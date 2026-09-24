@@ -135,7 +135,57 @@ def test_snapshot_covers_cameras_the_twin_has_not_probed():
                                    started_at=1000.0, now=2050.0)
     assert snap["cameras"]["yard"] == {
         "reachable": False, "health": None, "drift_count": None, "probed_at": None,
+        "motion_refusals": {},
     }
+
+
+def test_snapshot_reports_refused_motor_moves():
+    state = _probed_state()
+    state.motion_refusals = {"front": {"pan_limit:hold": 3}}
+    snap = statusd.status_snapshot(_app(), state, started_at=1000.0, now=2050.0)
+    assert snap["cameras"]["front"]["motion_refusals"] == {"pan_limit:hold": 3}
+
+
+# ── publish: the served view is built on the main thread ─────────────────────
+
+def test_served_status_comes_from_the_published_view_not_live_state():
+    # The endpoint thread used to read MonitorState while the loop mutated its dicts; a
+    # request mid-update could see a half-built dict or die of "changed size".
+    app = _app()
+    state = _probed_state()
+    statusd.publish(app, state)
+    state.network_reachable["front"] = False       # loop moves on after publishing
+    state.last_tick_at = 9999.0
+    served = statusd.served_snapshot(app, state, started_at=1000.0, now=2050.0)
+    assert served["cameras"]["front"]["reachable"] is True
+    assert served["tick"]["at"] == 2000.0
+
+
+def test_published_view_is_detached_from_live_dicts():
+    app = _app()
+    state = _probed_state()
+    statusd.publish(app, state)
+    state.twin_fleet["front"]["health"]["layers"]["rtsp"] = "ok"
+    served = statusd.served_snapshot(app, state, started_at=1000.0, now=2050.0)
+    assert served["cameras"]["front"]["health"]["layers"]["rtsp"] == "down"
+
+
+def test_served_status_before_the_first_publish_reads_no_state():
+    app = _app()
+    state = _probed_state()
+    served = statusd.served_snapshot(app, state, started_at=1000.0, now=2050.0)
+    assert served["tick"] == {"ok": None, "at": None}
+    assert served["cameras"]["front"]["reachable"] is None
+
+
+def test_tick_publishes_the_status_view(monkeypatch):
+    app = _app()
+    state = daemon.MonitorState()
+    monkeypatch.setattr(daemon, "loop_step", lambda *a, **k: 3000.0)
+    monkeypatch.setattr(daemon, "stall_watchdog", lambda *a, **k: None)
+    daemon.tick(app, {}, state, now=3000.0, secrets={}, last_control=None,
+                control_interval=60)
+    assert state.status_view["tick"] == {"ok": True, "at": 3000.0}
 
 
 def test_snapshot_is_json_safe_and_free_of_camera_addresses():

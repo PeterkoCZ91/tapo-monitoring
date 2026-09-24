@@ -12,11 +12,14 @@ the operator's explicit decision, never something the package does on its own.
 
 The server runs on a daemon thread and must never cost the monitor loop anything: a
 failed bind is a warning instead of a crash, and a handler exception becomes a logged
-500 instead of a dead server.
+500 instead of a dead server. Nor does it read the loop's state: the main thread
+publishes a detached view (:func:`publish`) after every tick, and requests are served from that,
+so a request can never see a dict the loop is halfway through changing.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import threading
@@ -27,22 +30,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 log = logging.getLogger(__name__)
 
 
-def status_snapshot(app, state, *, started_at, now=None):
-    """Assemble the JSON payload ``/status`` serves. Reads state, contacts nothing.
+def state_view(app, state):
+    """The state-derived half of the payload: tick outcome and per-camera block. Pure read.
 
     The per-camera block is a summary of the redacted twin entry the daemon already
     maintains (aggregate health with its layers, the open drift count, when it was
-    captured) plus the latest reachability observation. A camera the twin has not
-    probed yet reports ``None`` for the twin-derived fields rather than guessing.
+    captured), the latest reachability observation and the refused motor moves. A camera
+    the twin has not probed yet reports ``None`` for the twin-derived fields rather than
+    guessing. The result shares no mutable object with ``state``.
     """
-    now = time.time() if now is None else now
-    try:
-        from .cli import package_fingerprint
-        fingerprint = package_fingerprint()
-    except OSError:
-        fingerprint = None
-    from . import __version__
-
     cameras = {}
     for cfg in app.cameras:
         entry = state.twin_fleet.get(cfg.name)
@@ -60,15 +56,59 @@ def status_snapshot(app, state, *, started_at, now=None):
             "health": health,
             "drift_count": drift_count,
             "probed_at": probed_at,
+            "motion_refusals": dict(state.motion_refusals.get(cfg.name, {})),
         }
+    return copy.deepcopy({"tick": {"ok": state.last_tick_ok, "at": state.last_tick_at},
+                          "cameras": cameras})
 
+
+def _unpublished_view(app):
+    """What is known before the first tick: the configured names and nothing else."""
+    return {"tick": {"ok": None, "at": None},
+            "cameras": {cfg.name: {"reachable": None, "health": None, "drift_count": None,
+                                   "probed_at": None, "motion_refusals": {}}
+                        for cfg in app.cameras}}
+
+
+def publish(app, state):
+    """Build the view on the calling (main) thread and hand it over. Never raises.
+
+    The hand-over is one attribute assignment, which is atomic: a request sees either
+    the previous view or this one, never a mixture.
+    """
+    try:
+        state.status_view = state_view(app, state)
+    except Exception as exc:  # noqa: BLE001 - the status view must never break a tick
+        log.warning("status view not published: %s", type(exc).__name__)
+
+
+def status_snapshot(app, state, *, started_at, now=None, view=None):
+    """Assemble the JSON payload ``/status`` serves. Contacts nothing.
+
+    ``view`` is a published :func:`state_view`; without one the view is built from
+    ``state`` directly, which is only safe on the thread that owns it (tests, the CLI).
+    """
+    now = time.time() if now is None else now
+    try:
+        from .cli import package_fingerprint
+        fingerprint = package_fingerprint()
+    except OSError:
+        fingerprint = None
+    from . import __version__
+
+    view = state_view(app, state) if view is None else view
     return {
         "package": {"version": __version__, "fingerprint": fingerprint},
         "started_at": float(started_at),
         "now": float(now),
-        "tick": {"ok": state.last_tick_ok, "at": state.last_tick_at},
-        "cameras": cameras,
+        **view,
     }
+
+
+def served_snapshot(app, state, *, started_at, now=None):
+    """The payload as the endpoint thread serves it: from the published view only."""
+    view = getattr(state, "status_view", None) or _unpublished_view(app)
+    return status_snapshot(app, state, started_at=started_at, now=now, view=view)
 
 
 def make_server(snapshot_fn, port=0, bind="127.0.0.1"):
@@ -127,7 +167,7 @@ def start(app, state, *, started_at=None):
     started_at = time.time() if started_at is None else started_at
 
     def snapshot_fn():
-        return status_snapshot(app, state, started_at=started_at)
+        return served_snapshot(app, state, started_at=started_at)
 
     try:
         server = make_server(snapshot_fn, port=port, bind=bind)

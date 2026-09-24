@@ -15,7 +15,12 @@ log = logging.getLogger(__name__)
 
 
 class OutagePreserver:
-    """One background copy at a time; bounded retries independent of alert delivery."""
+    """One background copy at a time; bounded retries independent of alert delivery.
+
+    ``_attempts`` is shared with the worker thread without a lock, safely: ``submit``
+    returns before touching it while a worker is alive, and otherwise writes it only
+    before starting the next one. Keep that order if this class grows.
+    """
 
     def __init__(self):
         self._worker = None

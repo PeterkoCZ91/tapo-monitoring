@@ -639,9 +639,25 @@ class AuditLedgerHandler(logging.Handler):
             finally:
                 self._queue.task_done()
 
-    def flush(self):
-        """Wait for queued writes; intended for tests and orderly maintenance only."""
-        self._queue.join()
+    def pending(self):
+        """Audit lines accepted but not yet written (or given up on)."""
+        return self._queue.unfinished_tasks
+
+    def flush(self, timeout=5.0):
+        """Wait up to ``timeout`` seconds for queued writes; True when all were written.
+
+        Bounded on purpose: ``logging.shutdown()`` flushes every handler at exit, and an
+        unbounded wait on a stuck SQLite write would hold the daemon's stop until
+        systemd's SIGKILL, which skips the rest of the cleanup as well.
+        """
+        deadline = time.monotonic() + timeout
+        with self._queue.all_tasks_done:
+            while self._queue.unfinished_tasks:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._queue.all_tasks_done.wait(remaining)
+        return True
 
 
 def _optional_confidence(value, name):

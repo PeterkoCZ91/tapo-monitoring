@@ -73,6 +73,13 @@ twice. A queued hub retry whose frame file has meanwhile disappeared is dropped 
 warning, and a file older than an hour is discarded whole — its entries' own ten-minute
 TTLs have long expired.
 
+A stop signal (`SIGTERM` from `systemctl stop/restart`, or Ctrl-C) no longer interrupts a
+camera call halfway: inside a tick it only asks the loop to exit once the tick is done;
+between ticks it exits at once, and a second signal always exits at once. On the way out
+the daemon closes held hub sessions, writes `runtime.json` one final time and gives the
+audit-ledger queue up to 5 s to reach SQLite — lines still queued after that are counted
+in a warning rather than silently lost.
+
 Telegram delivery is part of the alert transition, not a fire-and-forget side effect.
 Failed outage and recovery messages remain pending until Telegram confirms delivery; a
 failed SD follow-up stays queued, and a failed sampler send leaves its group open. A failed

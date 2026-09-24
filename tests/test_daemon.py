@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import sys
 from unittest.mock import sentinel
@@ -6065,3 +6066,80 @@ def test_hub_drop_below_threshold_goes_to_review_log(monkeypatch, tmp_path):
                             hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
                             clip_frame_for=_clip_frames(tmp_path), score_for=_scores(0.2))
     assert len(list(review.glob("gate_drop*.jpg"))) == 1
+
+
+# ── graceful stop ─────────────────────────────────────────────────────────────
+
+def test_stop_signal_between_ticks_exits_at_once():
+    stop = daemon.GracefulStop()
+    with pytest.raises(SystemExit):
+        stop.handle(15, None)
+
+
+def test_stop_signal_mid_tick_lets_the_tick_finish():
+    # A SIGTERM used to raise inside whatever camera call was running, cutting a preset
+    # recall or a Telegram send in half. The first one now waits for the tick boundary.
+    stop = daemon.GracefulStop()
+    with stop.tick():
+        stop.handle(15, None)                    # no raise: the tick runs to its end
+    assert stop.requested
+
+
+def test_second_stop_signal_mid_tick_exits_at_once():
+    stop = daemon.GracefulStop()
+    with stop.tick():
+        stop.handle(15, None)
+        with pytest.raises(SystemExit):
+            stop.handle(15, None)
+
+
+def test_shutdown_saves_runtime_state_flushes_the_ledger_and_closes_hubs(tmp_path):
+    closed, flushed = [], []
+
+    class Hub:
+        def close(self):
+            closed.append(1)
+
+    class Handler:
+        def flush(self, timeout):
+            flushed.append(timeout)
+            return True
+
+        def pending(self):
+            return 0
+
+    state = daemon.MonitorState()
+    state.hub_clients["hub"] = Hub()
+    state.ledger_handler = Handler()
+    state.runtime_path = str(tmp_path / "runtime.json")
+    state.pending_sd.append({"camera": "a", "etype": "person", "event": {"start_time": 1}})
+    daemon.shutdown(state, now=1000)
+    assert closed == [1] and state.hub_clients == {}
+    assert flushed == [daemon.SHUTDOWN_LEDGER_TIMEOUT]
+    assert json.loads((tmp_path / "runtime.json").read_text())["pending_sd"]
+
+
+def test_shutdown_reports_audit_lines_it_could_not_write(caplog):
+    class Handler:
+        def flush(self, timeout):
+            return False
+
+        def pending(self):
+            return 7
+
+    state = daemon.MonitorState()
+    state.ledger_handler = Handler()
+    with caplog.at_level(logging.WARNING, logger="tapo_monitor.daemon"):
+        daemon.shutdown(state, now=1000)
+    assert "7 audit line(s)" in caplog.text
+
+
+def test_shutdown_survives_a_failing_hub_close():
+    class Hub:
+        def close(self):
+            raise OSError("gone")
+
+    state = daemon.MonitorState()
+    state.hub_clients["hub"] = Hub()
+    daemon.shutdown(state, now=1000)
+    assert state.hub_clients == {}

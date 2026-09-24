@@ -27,6 +27,7 @@ import subprocess
 import tempfile
 import time as _time
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -597,6 +598,9 @@ class MonitorState:
     # the file path, and the snapshot last written so an unchanged tick skips the write.
     runtime_path: str | None = None
     runtime_saved: dict | None = None
+    # Detached view the status endpoint serves, republished by the main thread every tick
+    # (see statusd.publish); the endpoint thread never reads the live dicts above.
+    status_view: dict | None = None
     # Per camera, the recent intervals in which the lens is known to have been off its
     # allowed span. The SD follow-up arrives ~2 minutes after the event and re-scores what
     # the camera *recorded*, so the guard having fixed the aim by then does not help: the
@@ -2771,22 +2775,73 @@ def main(argv=None):  # pragma: no cover - thin entry point
     cam_clients = {}
     last_control = None
 
-    # A hub tolerates one session; leaving it dangling makes the next start be accepted and
-    # immediately dropped. SIGTERM (what a restart sends) would skip the cleanup, so it is
-    # turned into a normal exit first.
-    def _stop(signum, _frame):
+    # SIGTERM (what a restart sends) would skip the cleanup in shutdown(), so it is turned
+    # into a normal exit — at the tick boundary, see GracefulStop.
+    stop = GracefulStop()
+    signal.signal(signal.SIGTERM, stop.handle)
+    signal.signal(signal.SIGINT, stop.handle)
+    try:
+        while not stop.requested:
+            with stop.tick():
+                last_control = tick(app, cam_clients, state, now=_time.time(),
+                                    secrets=secrets, last_control=last_control,
+                                    control_interval=control_interval)
+            if stop.requested:
+                break
+            _time.sleep(poll_interval)
+    finally:
+        shutdown(state, now=_time.time())
+
+
+class GracefulStop:
+    """Turn a stop signal into an exit at the tick boundary, not mid camera call.
+
+    Raising from the signal handler used to unwind whatever was running — half a preset
+    recall, a Telegram send whose delivery then went unrecorded. A signal that arrives
+    inside a tick now only sets ``requested`` and the loop exits after the tick; one
+    between ticks (the loop is asleep) exits at once. A second signal during the same
+    tick exits at once too, so a hung tick can still be stopped by hand.
+    """
+
+    def __init__(self):
+        self.requested = False
+        self._in_tick = False
+
+    def handle(self, signum, _frame):
+        if self._in_tick and not self.requested:
+            self.requested = True
+            log.info("signal %s received; stopping after the current tick", signum)
+            return
         log.info("signal %s received; releasing sessions and exiting", signum)
         raise SystemExit(0)
 
-    signal.signal(signal.SIGTERM, _stop)
-    signal.signal(signal.SIGINT, _stop)
-    try:
-        while True:
-            last_control = tick(app, cam_clients, state, now=_time.time(), secrets=secrets,
-                                last_control=last_control, control_interval=control_interval)
-            _time.sleep(poll_interval)
-    finally:
-        close_hub_clients(state)
+    @contextmanager
+    def tick(self):
+        self._in_tick = True
+        try:
+            yield
+        finally:
+            self._in_tick = False
+
+
+# Bounded so the whole stop fits comfortably inside systemd's default 90 s stop timeout.
+SHUTDOWN_LEDGER_TIMEOUT = 5.0
+
+
+def shutdown(state: MonitorState, *, now):
+    """Leave nothing behind a stop that the next start would pay for. Never raises.
+
+    A hub tolerates one session, and a dangling one makes the next start be accepted and
+    immediately dropped. Queued alerts and cooldowns are written once more, in case the
+    last tick changed them after its save. The audit ledger gets a bounded wait so the
+    decisions just before a restart reach SQLite rather than dying in the queue.
+    """
+    close_hub_clients(state)
+    runtime_state.save_if_changed(state, now, logger=log)
+    handler = state.ledger_handler
+    if handler is not None and not handler.flush(timeout=SHUTDOWN_LEDGER_TIMEOUT):
+        log.warning("audit ledger: %d audit line(s) not written before exit",
+                    handler.pending())
 
 
 def tick(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
@@ -2809,6 +2864,7 @@ def tick(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     state.last_tick_ok = tick_ok
     state.last_tick_at = now
     stall_watchdog(app, state, secrets, ok=tick_ok, now=now)
+    statusd.publish(app, state)
     return last_control
 
 
