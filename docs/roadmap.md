@@ -434,7 +434,8 @@ scenarios in `tests/test_scenarios.py`.
 
 ## Phase 9 — Detection quality from our own labelled frames
 
-Status: **in progress** (9.1 shipped; collecting and labelling)
+Status: **in progress** (9.1 and 9.3's CPU teacher shipped; 9.2 tooling shipped — night
+thresholds wait for the drop sample to collect night frames; 9.4 not started)
 
 A month of ledger data from one site (20k camera events, 145k scored frames) shows the
 scorer separates sharply: 77 % of events score below 0.30, 17 % above 0.65, and only
@@ -499,6 +500,43 @@ shadows. The generic detector has never seen this fleet's IR night scenes.
   Rollback is switching the scorer back; the model file is versioned beside it.
 - [ ] Only if the verifier plateaus: box-level labelling and fine-tuning the detector
   itself.
+
+## Phase 10 — Incidents, not frames
+
+Status: **in progress**
+
+Frame statistics hide what matters to the person holding the phone: was each visit
+alerted, and how late. A first join of labels with deliveries showed that of 31 held
+frames labelled `person`, 17 had no alert from the same host within three minutes, while
+false alarms stay near 2–3 % of sent frames. The corroboration hold, not the scorer, is
+the largest source of missed people, and only an incident-level measure can show
+whether a change to it helps.
+
+### 10.1 — Quality per incident
+
+- [ ] Every archived frame (sent log and review log, every delivery path) carries the
+  incident ID and the camera event start, so frames of one visit can be grouped without
+  guessing from timestamps.
+- [ ] `label-stats` groups labelled frames into incidents (by incident ID; older records
+  without one by camera and a time gap) and reports incidents with a person, how many of
+  them were alerted, missed incidents, and the delay from event start to the first
+  delivered alert (median and p90), by day and night with `--config`.
+
+### 10.2 — Do not let a held person expire
+
+- [ ] A held marginal frame whose corroboration never came is dropped as `hold_expired`
+  unless a pan-limit recall broke the corroboration. Add an expiry policy for the sampler:
+  send the best held frame when the hold expires and its score reaches a configured
+  floor, with an `observe` mode that only audits what it would have sent.
+- [ ] Replay the policy from recorded `hold`/`hold_expired` ledger rows so
+  `replay --compare` estimates the added alerts before a camera switches it on; trial it
+  in `observe` mode on one camera, then promote from incident-level numbers (10.1).
+
+### 10.3 — Telemetry that fills disks
+
+- [ ] Report the size and file count of the sent, review and pan-limit logs in the daily
+  digest's fleet block, and warn once when free space on that filesystem falls below a
+  floor: 14-day retention plus the drop sample must never be what fills a host's disk.
 
 ## Research tracks
 
