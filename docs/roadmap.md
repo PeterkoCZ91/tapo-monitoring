@@ -369,6 +369,55 @@ multi-tick scenarios are written once rather than rebuilt by hand in each test.
 - **Generic multi-camera abstraction.** Runtime state is already keyed per camera; live
   PTZ handoff (`handoff.py`) waits for a measured overlapping pair (Phase 5).
 
+## Phase 8 — Prove phase 7 in production, close what it exposed
+
+Status: **planned**
+
+Phase 7 was built and tested against fakes; the scenario harness and a replay of a real
+recorded day then surfaced a handful of smaller gaps. This phase ships phase 7 the way
+the delivery sequence prescribes — observe first, promote later — and fixes those gaps.
+
+### 8.1 — Observe-only trial of the motion arbiter
+
+- [ ] Deploy to the one camera that runs `track_hold` with `pan_limit` first. Compare a
+  week of `hold_rescue_recall` sends, pan-limit frames and `motion_refusals` before and
+  after; the arbiter is worth keeping only if the rescue stops firing in the ordinary
+  case without the lens lingering out of bounds.
+- [ ] Carry `motion_refusals` and a "runtime state restored" count in the daily digest's
+  fleet block, so the trial is read from Telegram rather than from logs.
+
+### 8.2 — Privacy mode seen on the pass it changes
+
+- [ ] The control pass runs before the twin probe, so the first pass after privacy goes
+  on still sends a refused recall (plus its retry), and the aim is restored one twin
+  probe after privacy goes off — up to `probe_interval` (default 900 s) late. Read the
+  privacy switch cheaply on the control pass itself and let the twin keep reporting it.
+- [ ] A refused guard `GotoPreset` in that window is treated as an ONVIF failure and
+  rebuilds the client every poll; count it as a refusal instead.
+
+### 8.3 — One outage, one notice
+
+- [ ] A camera that is simply offline likely also trips the event-API watchdog once
+  `event_failure_threshold` passes, because `events_reachable` stays false without a
+  client. Pin the behaviour with a scenario, then suppress the event-API notice while
+  the network layer already reports the outage.
+
+### 8.4 — Replay beyond the live path
+
+- [ ] Replay SD follow-up and sampler decisions too; today a cooldown armed by an SD
+  delivery is invisible to replay, so it over-reports `would_alert`.
+- [ ] Use the recorded scorer confidence in the ledger to answer threshold what-ifs
+  (`--compare` with a different `scorer.threshold`), still without media.
+- [ ] Re-measure the scene gate's reach with replay whenever a delivery path is added
+  (the open Phase 5 item), instead of by hand.
+
+### 8.5 — Dual-camera handoff on the arbiter
+
+- [ ] When the second overlapping camera is deployed, wire `HandoffManager` in as a
+  motion requester (below hold, above the scheduled recall) so a handoff lease cannot
+  fight tracking, the guard or privacy. Keep it observe-only until the pair's clock
+  offset and camera order are measured.
+
 ## Research tracks
 
 These stay separate from production until repeatable evidence exists:
