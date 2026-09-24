@@ -156,3 +156,29 @@ STUB
         return 1
     }
 }
+
+@test "--user: the env file comes from the user unit and the restart from the user manager" {
+    printf 'TAPO_EXPECTED_FINGERPRINT=feed0000face\n' >"$TEST_TMP/monitor.env"
+    stub_command systemctl <<'STUB'
+echo "$*" >>"$TEST_TMP/systemctl.log"
+[[ " $* " == *" --user "* ]] || exit 0   # the system manager has no such unit
+case "$*" in
+    *EnvironmentFiles*) echo "-$TEST_TMP/monitor.env" ;;
+esac
+STUB
+
+    run "$SCRIPT" "$HOST" "$OLD" --python "$STUB_BIN/venv-python" --user </dev/null
+
+    assert_status 0
+    assert_output_contains "restarting via: systemctl --user restart tapo-monitor.service"
+    assert_output_contains "TAPO_EXPECTED_FINGERPRINT -> abc123def456"
+    assert_output_contains "check_monitor_rollout.sh --user abc123def456"
+    grep -qx -- '--user restart tapo-monitor.service' "$TEST_TMP/systemctl.log" || {
+        echo "the restart did not go to the user manager"
+        return 1
+    }
+    if grep -v -- '--user' "$TEST_TMP/systemctl.log"; then
+        echo "a call above went to the system manager"
+        return 1
+    fi
+}

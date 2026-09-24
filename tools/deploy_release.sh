@@ -21,9 +21,14 @@
 #   --unit NAME          systemd unit to restart and read the EnvironmentFile from
 #                        (default tapo-monitor.service)
 #   --python PATH        venv interpreter on the host (default ~/tapo-env/bin/python)
-#   --restart-cmd CMD    how to restart on the host (default: sudo systemctl restart <unit>).
-#                        Must be non-interactive. A host whose operator has no sudo passes
-#                        e.g. --restart-cmd 'systemctl --user restart tapo-monitor'.
+#   --user               the unit is a systemd USER unit (`systemctl --user`, lingering):
+#                        every systemctl call on the host — EnvironmentFile lookup,
+#                        NRestarts, is-active — goes to the user manager, and the default
+#                        restart becomes `systemctl --user restart <unit>`. Without it a
+#                        user unit reads as inactive and a healthy release is rolled back.
+#   --restart-cmd CMD    how to restart on the host (default: sudo systemctl restart <unit>,
+#                        or systemctl --user restart <unit> with --user). Must be
+#                        non-interactive.
 #   --env-file PATH      env file on the host to snapshot and source for the selfcheck
 #                        (default: discovered from the unit's EnvironmentFile=)
 #   --health-wait SECS   after the restart, wait this long and require the unit to be
@@ -44,7 +49,7 @@ die() { echo "deploy_release: $*" >&2; exit 1; }
 # shellcheck disable=SC2088  # the tilde is deliberately literal here: the remote side
 # expands it against the host's $HOME, not the workstation's.
 host="" ref="" unit="tapo-monitor.service" python_bin="~/tapo-env/bin/python"
-restart_cmd="" env_file="" health_wait=30
+restart_cmd="" env_file="" health_wait=30 sd_scope=""
 while (($#)); do
     case "$1" in
         --unit)        unit="${2:?--unit needs a value}"; shift 2 ;;
@@ -52,6 +57,7 @@ while (($#)); do
         --restart-cmd) restart_cmd="${2:?--restart-cmd needs a value}"; shift 2 ;;
         --env-file)    env_file="${2:?--env-file needs a value}"; shift 2 ;;
         --health-wait) health_wait="${2:?--health-wait needs a value}"; shift 2 ;;
+        --user)        sd_scope="--user"; shift ;;
         -*)            die "unknown option $1" ;;
         # "$ref is still empty" is the test for "no ref given yet": using the default
         # value as the sentinel meant an explicit HEAD reopened the slot, so a third
@@ -64,7 +70,13 @@ while (($#)); do
 done
 [[ -n "$host" ]] || die "usage: deploy_release.sh <ssh-host> [git-ref] [options]"
 ref="${ref:-HEAD}"
-restart_cmd="${restart_cmd:-sudo systemctl restart $unit}"
+# The systemctl every host-side query uses: "systemctl" or "systemctl --user".
+systemctl_cmd="systemctl${sd_scope:+ $sd_scope}"
+if [[ -n "$sd_scope" ]]; then
+    restart_cmd="${restart_cmd:-$systemctl_cmd restart $unit}"
+else
+    restart_cmd="${restart_cmd:-sudo systemctl restart $unit}"
+fi
 [[ "$health_wait" =~ ^[0-9]+$ ]] || die "--health-wait needs a whole number of seconds"
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -91,12 +103,12 @@ tar -C "$stage" -cf - . | ssh "$host" "set -e
     mkdir -p \"\$dir\" && tar -C \"\$dir\" -xf -"
 
 # ── on the host: snapshot config+env, selfcheck inside the release, atomic switch ─────
-remote_args="$(printf ' %q' "$release" "$unit" "$python_bin" "$env_file")"
+remote_args="$(printf ' %q' "$release" "$unit" "$python_bin" "$env_file" "$sd_scope")"
 # shellcheck disable=SC2029  # client-side expansion is the point: the arguments are
 # %q-quoted (or a literal command) composed here and executed on the host.
 ssh "$host" "bash -s --$remote_args" <<'REMOTE'
 set -euo pipefail
-release="$1" unit="$2" python_bin="$3" env_file="$4"
+release="$1" unit="$2" python_bin="$3" env_file="$4" sd_scope="$5"
 root="$HOME/tapo-monitor"
 release_dir="$root/releases/$release"
 python_bin="${python_bin/#~\//$HOME/}"
@@ -110,7 +122,9 @@ if [[ -e "$root/current" && ! -L "$root/current" ]]; then
 fi
 
 if [[ -z "$env_file" ]]; then
-    env_file="$(systemctl show -p EnvironmentFiles --value "$unit" 2>/dev/null \
+    # $sd_scope is "" or "--user"; unquoted so the empty case adds no argument.
+    # shellcheck disable=SC2086
+    env_file="$(systemctl $sd_scope show -p EnvironmentFiles --value "$unit" 2>/dev/null \
         | tr ' ' '\n' | sed 's/^-//' | grep -m1 '^/' || true)"
 fi
 
@@ -171,7 +185,7 @@ echo "deploy_release: restarting via: $restart_cmd"
 # shellcheck disable=SC2029  # unit is composed here on purpose, it is a plain unit name.
 prev_release="$(ssh "$host" 'cat "$HOME/tapo-monitor/.previous_release" 2>/dev/null' || true)"
 # shellcheck disable=SC2029
-restarts_before="$(ssh "$host" "systemctl show -p NRestarts --value $unit 2>/dev/null" || true)"
+restarts_before="$(ssh "$host" "$systemctl_cmd show -p NRestarts --value $unit 2>/dev/null" || true)"
 # shellcheck disable=SC2029  # client-side expansion is the point: the arguments are
 # %q-quoted (or a literal command) composed here and executed on the host.
 ssh "$host" "$restart_cmd"
@@ -187,9 +201,9 @@ if ((health_wait > 0)) && [[ "$restart_cmd" != "true" ]]; then
         echo "deploy_release: waiting ${health_wait}s to see the unit stay up"
         sleep "$health_wait"
         # shellcheck disable=SC2029
-        state="$(ssh "$host" "systemctl is-active $unit" || true)"
+        state="$(ssh "$host" "$systemctl_cmd is-active $unit" || true)"
         # shellcheck disable=SC2029
-        restarts_after="$(ssh "$host" "systemctl show -p NRestarts --value $unit" || true)"
+        restarts_after="$(ssh "$host" "$systemctl_cmd show -p NRestarts --value $unit" || true)"
         [[ "$restarts_after" =~ ^[0-9]+$ ]] || restarts_after="$restarts_before"
         if [[ "$state" != "active" ]] || ((restarts_after - restarts_before >= 2)); then
             echo "deploy_release: HEALTH CHECK FAILED — $unit is '$state', $((restarts_after - restarts_before)) automatic restarts in ${health_wait}s" >&2
@@ -241,4 +255,4 @@ fi
 REMOTE
 
 echo "deploy_release: done — follow up on the host with:"
-echo "  ~/tapo-monitor/current/tools/check_monitor_rollout.sh $fingerprint"
+echo "  ~/tapo-monitor/current/tools/check_monitor_rollout.sh${sd_scope:+ $sd_scope} $fingerprint"

@@ -167,6 +167,12 @@ All notable changes to this project are documented here.
   before the model loads.
 
 ### Fixed
+- A deploy to a host running tapo-monitor as a systemd user unit no longer rolls back a
+  release that started fine: `deploy_release.sh`, `rollback_release.sh` and
+  `check_monitor_rollout.sh` take `--user`, which sends every systemctl/journalctl query on
+  the host to the user manager (health check, env-file lookup, unit state, journal) and
+  makes the default restart `systemctl --user restart <unit>`. Without it the system
+  manager reported the unit `inactive` and the rollout check a false `unit: FAILED`.
 - One network outage no longer produces a pile of notices: the event-API watchdog stands
   down while the camera is off the network, so an offline camera gets its 🔴/🟢 pair and
   nothing else — no "event API unavailable" before the outage alert, no event-API reboot

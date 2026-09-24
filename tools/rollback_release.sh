@@ -10,9 +10,12 @@
 #                        Omit it to list the releases the host has, newest last.
 #   --unit NAME          systemd unit to restart (default tapo-monitor.service)
 #   --python PATH        venv interpreter on the host (default ~/tapo-env/bin/python)
-#   --restart-cmd CMD    how to restart on the host (default: sudo systemctl restart <unit>).
-#                        Must be non-interactive. A host whose operator has no sudo passes
-#                        e.g. --restart-cmd 'systemctl --user restart tapo-monitor'.
+#   --user               the unit is a systemd USER unit (`systemctl --user`, lingering):
+#                        the EnvironmentFile lookup goes to the user manager and the
+#                        default restart becomes `systemctl --user restart <unit>`.
+#   --restart-cmd CMD    how to restart on the host (default: sudo systemctl restart <unit>,
+#                        or systemctl --user restart <unit> with --user). Must be
+#                        non-interactive.
 #
 # Manual dry run: same recipe as deploy_release.sh — an expendable ~/tapo-monitor on any
 # ssh-reachable account, --restart-cmd true; deploy twice, roll back to the first.
@@ -22,12 +25,13 @@ die() { echo "rollback_release: $*" >&2; exit 1; }
 
 # shellcheck disable=SC2088  # the tilde is deliberately literal here: the remote side
 # expands it against the host's $HOME, not the workstation's.
-host="" release="" unit="tapo-monitor.service" python_bin="~/tapo-env/bin/python" restart_cmd=""
+host="" release="" unit="tapo-monitor.service" python_bin="~/tapo-env/bin/python" restart_cmd="" sd_scope=""
 while (($#)); do
     case "$1" in
         --unit)        unit="${2:?--unit needs a value}"; shift 2 ;;
         --python)      python_bin="${2:?--python needs a value}"; shift 2 ;;
         --restart-cmd) restart_cmd="${2:?--restart-cmd needs a value}"; shift 2 ;;
+        --user)        sd_scope="--user"; shift ;;
         -*)            die "unknown option $1" ;;
         *)             if [[ -z "$host" ]]; then host="$1"
                        elif [[ -z "$release" ]]; then release="$1"
@@ -35,7 +39,11 @@ while (($#)); do
     esac
 done
 [[ -n "$host" ]] || die "usage: rollback_release.sh <ssh-host> [release-name] [options]"
-restart_cmd="${restart_cmd:-sudo systemctl restart $unit}"
+if [[ -n "$sd_scope" ]]; then
+    restart_cmd="${restart_cmd:-systemctl --user restart $unit}"
+else
+    restart_cmd="${restart_cmd:-sudo systemctl restart $unit}"
+fi
 
 # ── no release named: show what the host has to offer ─────────────────────────────────
 if [[ -z "$release" ]]; then
@@ -63,12 +71,12 @@ REMOTE
 fi
 
 # ── re-point, restart, verify ──────────────────────────────────────────────────────────
-remote_args="$(printf ' %q' "$release" "$unit")"
+remote_args="$(printf ' %q' "$release" "$unit" "$sd_scope")"
 # shellcheck disable=SC2029  # client-side expansion is the point: the arguments are
 # %q-quoted (or a literal command) composed here and executed on the host.
 ssh "$host" "bash -s --$remote_args" <<'REMOTE'
 set -euo pipefail
-release="$1" unit="$2"
+release="$1" unit="$2" sd_scope="$3"
 root="$HOME/tapo-monitor"
 [[ -d "$root/releases/$release" ]] || { echo "rollback_release: no $root/releases/$release on this host — run without a release name to list them" >&2; exit 1; }
 if [[ -e "$root/current" && ! -L "$root/current" ]]; then
@@ -84,7 +92,9 @@ echo "rollback_release: current -> releases/$release"
 
 # A rollback is the new intent: without this, the next digest would report the release
 # the operator deliberately returned to as drift. Update-only, same as the deploy.
-env_file="$(systemctl show -p EnvironmentFiles --value "$unit" 2>/dev/null \
+# $sd_scope is "" or "--user"; unquoted so the empty case adds no argument.
+# shellcheck disable=SC2086
+env_file="$(systemctl $sd_scope show -p EnvironmentFiles --value "$unit" 2>/dev/null \
     | tr ' ' '\n' | sed 's/^-//' | grep -m1 '^/' || true)"
 if [[ -n "$env_file" && -w "$env_file" ]] \
         && grep -q '^TAPO_EXPECTED_FINGERPRINT=' "$env_file"; then
@@ -123,4 +133,4 @@ fi
 REMOTE
 
 echo "rollback_release: done — follow up on the host with:"
-echo "  ~/tapo-monitor/current/tools/check_monitor_rollout.sh ${release#*-}"
+echo "  ~/tapo-monitor/current/tools/check_monitor_rollout.sh${sd_scope:+ $sd_scope} ${release#*-}"

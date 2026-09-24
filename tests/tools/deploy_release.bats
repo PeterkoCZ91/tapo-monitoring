@@ -143,3 +143,29 @@ STUB
     assert_output_contains "restarting via: systemctl --user restart tapo-monitor"
     assert_output_not_contains "restarting via: sudo"
 }
+
+@test "--user makes the default restart go through the user manager" {
+    stub_staged_fingerprint abc123def456
+    stub_command ssh <<'STUB'
+cat >/dev/null   # the transfer pipes a tar into ssh; an unread pipe is SIGPIPE upstream
+exit 0
+STUB
+
+    run "$SCRIPT" "$HOST" HEAD --user --health-wait 0 </dev/null
+
+    assert_output_contains "restarting via: systemctl --user restart tapo-monitor.service"
+    assert_output_not_contains "restarting via: sudo"
+    assert_output_contains "check_monitor_rollout.sh --user abc123def456"
+}
+
+@test "--user keeps an explicit --restart-cmd" {
+    stub_staged_fingerprint abc123def456
+    stub_command ssh <<'STUB'
+cat >/dev/null
+exit 0
+STUB
+
+    run "$SCRIPT" "$HOST" HEAD --user --restart-cmd "true" </dev/null
+
+    assert_output_contains "restarting via: true"
+}

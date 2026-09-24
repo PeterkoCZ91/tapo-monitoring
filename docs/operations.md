@@ -254,7 +254,7 @@ From the workstation, inside the repo checkout:
 ```bash
 tools/deploy_release.sh <ssh-host>                       # ship HEAD
 tools/deploy_release.sh <ssh-host> v0.4.0                # or any committed ref
-tools/deploy_release.sh <ssh-host> --restart-cmd 'systemctl --user restart tapo-monitor'
+tools/deploy_release.sh <ssh-host> --user                # host runs a systemd user unit
 ```
 
 The script stages the ref with `git archive`, fingerprints the staged tree with its own
@@ -281,21 +281,30 @@ env file carrying the credential vars it names, and pass `--restart-cmd true
 ### Hosts with a user unit or a different venv
 
 `deploy_release.sh` assumes a system unit and `~/tapo-env`. For a host that runs a systemd
-*user* unit from another venv, pass both explicitly:
+*user* unit (`systemctl --user`, with lingering enabled) from another venv, pass `--user`
+and the interpreter:
 
 ```bash
-tools/deploy_release.sh <ssh-host> --python ~/other-venv/bin/python \
-  --restart-cmd 'systemctl --user restart tapo-monitor.service'
+tools/deploy_release.sh <ssh-host> --user --python ~/other-venv/bin/python
+tools/rollback_release.sh <ssh-host> <release-name> --user --python ~/other-venv/bin/python
+# then, on the host:
+~/tapo-monitor/current/tools/check_monitor_rollout.sh --user <FINGERPRINT>
 ```
 
-Things that differ there:
+`--user` sends **every** systemctl/journalctl call on the host to the user manager: the
+`EnvironmentFile` lookup (so the snapshot and the `TAPO_EXPECTED_FINGERPRINT` update find
+the user unit's env file), the `NRestarts` and `is-active` reads of the post-restart health
+check, and in `check_monitor_rollout.sh` the unit state and the journal. It also makes the
+default restart `systemctl --user restart <unit>`; an explicit `--restart-cmd` still wins.
 
-- The script looks up the unit's `EnvironmentFile` at system level, so it does **not** update
-  `TAPO_EXPECTED_FINGERPRINT` in a user unit's env file. Set it by hand after a deploy, or
-  `fleet_status.sh` reports fingerprint drift.
-- `check_monitor_rollout.sh` queries the system manager, so it reports a false
-  `unit: FAILED` for a user unit. Confirm with `systemctl --user is-active` and the user
-  journal (`journalctl --user -u tapo-monitor`).
+Without `--user` the scripts query the system manager, which reports a unit it does not
+have as `inactive`: the deploy's health check then rolls back a release that started fine,
+and `check_monitor_rollout.sh` reports a false `unit: FAILED`. The ssh session must reach
+the user manager (lingering on, `XDG_RUNTIME_DIR` set by the login session) — check once
+with `ssh <ssh-host> systemctl --user is-active tapo-monitor`.
+
+Things that still differ there:
+
 - `selfcheck` runs over a non-interactive ssh whose `PATH` may not contain `ffmpeg`; the
   check fails and `current` is not switched. Install ffmpeg system-wide (a binary under
   `~/.local/bin` is not visible to that shell) or make the env file the script sources set

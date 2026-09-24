@@ -286,3 +286,84 @@ STUB
         return 1
     }
 }
+
+# ── the health check after the restart, on a host that runs a user unit ───────────────
+
+# The unit exists only in the user manager. The system manager answers the way a real one
+# does for a unit it does not have: inactive, NRestarts=0. Every call is logged.
+stub_user_unit_host() {
+    stub_command systemctl <<'STUB'
+echo "$*" >>"$TEST_TMP/systemctl.log"
+if [[ " $* " != *" --user "* ]]; then
+    case "$*" in
+        *is-active*) echo inactive; exit 3 ;;
+        *NRestarts*) echo 0 ;;
+        *restart*)   echo "no such system unit" >&2; exit 5 ;;
+    esac
+    exit 0
+fi
+case "$*" in
+    *is-active*)        echo active ;;
+    *NRestarts*)        echo 0 ;;
+    *EnvironmentFiles*) echo "-$TEST_TMP/monitor.env" ;;
+    *restart*)          echo restarted >>"$TEST_TMP/user-restarts" ;;
+esac
+STUB
+    stub_command sleep <<'STUB'
+exit 0
+STUB
+}
+
+# A first release that is live, so a failed health check has something to roll back to.
+seed_previous_release() {
+    deploy --env-file "$TEST_TMP/monitor.env"
+    assert_status 0
+    PREVIOUS="$(current_release)"
+    stub_command python3 <<'STUB'
+echo "package feed0000face"
+STUB
+    export STUB_HOST_FINGERPRINT="feed0000face"
+}
+
+@test "--user: the health check asks the user manager and keeps a running release" {
+    seed_previous_release
+    stub_user_unit_host
+
+    run "$SCRIPT" "$HOST" HEAD --python "$STUB_BIN/venv-python" --user --health-wait 1 </dev/null
+
+    assert_status 0
+    assert_output_contains "restarting via: systemctl --user restart tapo-monitor.service"
+    assert_output_contains "stayed active"
+    assert_output_not_contains "HEALTH CHECK FAILED"
+    [[ "$(current_release)" == *"-feed0000face" ]] || {
+        printf 'current points at %s — the healthy release was rolled back\n' "$(current_release)"
+        return 1
+    }
+    assert_file_contains "$TEST_TMP/user-restarts" "restarted"
+    # The env file came from the user unit too.
+    assert_file_contains "$ROOT/current/config-snapshot/monitor.env" "TAPO_TEST_CREDENTIAL"
+    if grep -v -- '--user' "$TEST_TMP/systemctl.log"; then
+        echo "a call above went to the system manager"
+        return 1
+    fi
+}
+
+@test "without --user the health check still asks the system manager" {
+    seed_previous_release
+    stub_user_unit_host
+
+    # The pre-flag way of deploying to a user-unit host: only the restart knew about it.
+    run "$SCRIPT" "$HOST" HEAD --python "$STUB_BIN/venv-python" --env-file "$TEST_TMP/monitor.env" \
+        --restart-cmd "systemctl --user restart tapo-monitor.service" --health-wait 1 </dev/null
+
+    [[ "$status" -ne 0 ]] || {
+        printf 'expected a non-zero exit\n--- output ---\n%s\n' "$output"
+        return 1
+    }
+    assert_output_contains "HEALTH CHECK FAILED"
+    assert_output_contains "rolling back to releases/$PREVIOUS"
+    grep -qx 'is-active tapo-monitor.service' "$TEST_TMP/systemctl.log" || {
+        echo "the default health check did not query the system manager"
+        return 1
+    }
+}

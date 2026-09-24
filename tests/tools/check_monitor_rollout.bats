@@ -249,3 +249,90 @@ STUB
     assert_status 0
     assert_file_contains "$TEST_TMP/credential-seen" "from-env-file"
 }
+
+# ── user units ────────────────────────────────────────────────────────────────────────
+
+# A host whose unit exists only in the user manager: the system manager knows nothing of
+# it and reports it inactive, exactly as a real `systemctl show` on a missing unit does.
+stub_user_unit_host() {
+    stub_command systemctl <<'STUB'
+echo "$*" >>"$TEST_TMP/systemctl.log"
+if [[ " $* " != *" --user "* ]]; then
+    case "$*" in
+        *ActiveState*) echo inactive ;;
+        *SubState*)    echo dead ;;
+        *NRestarts*)   echo 0 ;;
+    esac
+    exit 0
+fi
+case "$*" in
+    *ActiveState*)            echo active ;;
+    *SubState*)               echo running ;;
+    *NRestarts*)              echo 0 ;;
+    *EnvironmentFiles*)       echo "${STUB_ENV_FILES:-}" ;;
+    *ActiveEnterTimestamp*)   echo "Thu 2026-01-01 00:00:00 UTC" ;;
+esac
+STUB
+    stub_command journalctl <<'STUB'
+echo "$*" >>"$TEST_TMP/journalctl.log"
+[[ " $* " == *" --user "* ]] && echo "tapo-monitor: loaded 2 camera(s)"
+exit 0
+STUB
+}
+
+@test "--user: a running user unit passes and every query goes to the user manager" {
+    make_release_layout
+    stub_user_unit_host
+
+    run "$ROOT/current/tools/check_monitor_rollout.sh" --user "abc123def456"
+
+    assert_status 0
+    assert_output_contains "unit: ok"
+    assert_output_contains "startup: ok"
+    assert_output_contains "fingerprint: ok"
+    if grep -v -- '--user' "$TEST_TMP/systemctl.log" "$TEST_TMP/journalctl.log"; then
+        echo "a query above went to the system manager"
+        return 1
+    fi
+}
+
+@test "without --user the check still asks the system manager" {
+    make_release_layout
+    stub_user_unit_host
+
+    run "$ROOT/current/tools/check_monitor_rollout.sh" "abc123def456"
+
+    assert_status 1
+    assert_output_contains "unit: FAILED"
+    if grep -q -- '--user' "$TEST_TMP/systemctl.log"; then
+        echo "the default queried the user manager"
+        return 1
+    fi
+}
+
+@test "--user: the env file is read from the user unit" {
+    make_release_layout
+    stub_user_unit_host
+    printf 'TAPO_TEST_CREDENTIAL=from-user-env\n' >"$TEST_TMP/monitor.env"
+    export STUB_ENV_FILES="-$TEST_TMP/monitor.env"
+    stub_command venv-python <<'STUB'
+case "${3:-}" in
+    version)   echo "package abc123def456" ;;
+    selfcheck) printf '%s\n' "${TAPO_TEST_CREDENTIAL:-<unset>}" >"$TEST_TMP/credential-seen" ;;
+esac
+STUB
+
+    run "$ROOT/current/tools/check_monitor_rollout.sh" --user
+
+    assert_status 0
+    assert_file_contains "$TEST_TMP/credential-seen" "from-user-env"
+}
+
+@test "an unknown option is refused" {
+    make_release_layout
+
+    run "$ROOT/current/tools/check_monitor_rollout.sh" --usr
+
+    assert_status 2
+    assert_output_contains "unknown option --usr"
+}

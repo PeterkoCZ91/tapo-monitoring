@@ -6,14 +6,33 @@
 # silently before: a crash-looping unit, a half-copied package, a config the new code
 # rejects, and an exception on the first tick.
 #
-# usage: check_monitor_rollout.sh [EXPECTED_FINGERPRINT]
+# usage: check_monitor_rollout.sh [--user] [EXPECTED_FINGERPRINT]
+#   --user               the unit is a systemd USER unit: every systemctl and journalctl
+#                        call goes to the user manager (`--user`). Without it a user unit
+#                        reads as inactive and the check reports a false `unit: FAILED`.
 #   TAPO_MONITOR_UNIT    systemd unit to inspect      (default tapo-monitor.service)
 #   TAPO_MONITOR_PYTHON  interpreter of the venv      (default python3)
 #   TAPO_MONITOR_CONFIG  config for the selfcheck     (default <package root>/cameras.yaml)
 #   TAPO_MONITOR_ENV     env file to source first     (default: the unit's EnvironmentFile)
 set -uo pipefail
 
-expected_fingerprint="${1:-}"
+user_scope=0
+expected_fingerprint=""
+while (($#)); do
+    case "$1" in
+        --user) user_scope=1; shift ;;
+        -*)     echo "check_monitor_rollout: unknown option $1" >&2; exit 2 ;;
+        *)      if [[ -z "$expected_fingerprint" ]]; then expected_fingerprint="$1"
+                else echo "check_monitor_rollout: unexpected argument $1" >&2; exit 2; fi
+                shift ;;
+    esac
+done
+systemctl_cmd=(systemctl)
+journalctl_cmd=(journalctl)
+if ((user_scope)); then
+    systemctl_cmd+=(--user)
+    journalctl_cmd+=(--user)
+fi
 unit="${TAPO_MONITOR_UNIT:-tapo-monitor.service}"
 python_bin="${TAPO_MONITOR_PYTHON:-python3}"
 # A deployed host is an rsync copy, not an installed package: tools/ sits beside
@@ -39,7 +58,7 @@ failures=()
 
 # Assert the credentials the service actually gets: read the env file from the unit
 # itself rather than guessing a host-specific path.
-env_file="${TAPO_MONITOR_ENV:-$(systemctl show -p EnvironmentFiles --value "$unit" 2>/dev/null \
+env_file="${TAPO_MONITOR_ENV:-$("${systemctl_cmd[@]}" show -p EnvironmentFiles --value "$unit" 2>/dev/null \
     | tr ' ' '\n' | sed 's/^-//' | grep -m1 '^/' || true)}"
 if [[ -n "$env_file" && -r "$env_file" ]]; then
     set -a
@@ -55,11 +74,13 @@ fail() { echo "  $1: FAILED${2:+ ($2)}"; failures+=("$1"); }
 pass() { echo "  $1: ok${2:+ ($2)}"; }
 warn() { echo "  $1: unknown${2:+ ($2)}"; }
 
-echo "monitor rollout check: $unit (package $root)"
+scope_note=""
+((user_scope)) && scope_note=" [user unit]"
+echo "monitor rollout check: $unit$scope_note (package $root)"
 
-state="$(systemctl show -p ActiveState --value "$unit" 2>/dev/null || true)"
-sub_state="$(systemctl show -p SubState --value "$unit" 2>/dev/null || true)"
-restarts="$(systemctl show -p NRestarts --value "$unit" 2>/dev/null || true)"
+state="$("${systemctl_cmd[@]}" show -p ActiveState --value "$unit" 2>/dev/null || true)"
+sub_state="$("${systemctl_cmd[@]}" show -p SubState --value "$unit" 2>/dev/null || true)"
+restarts="$("${systemctl_cmd[@]}" show -p NRestarts --value "$unit" 2>/dev/null || true)"
 if [[ "$state" == "active" && "$sub_state" == "running" ]]; then
     pass unit "running, NRestarts=${restarts:-?}"
 else
@@ -91,8 +112,8 @@ fi
 sed 's/^/    /' /tmp/monitor-selfcheck.$$
 rm -f /tmp/monitor-selfcheck.$$
 
-since="$(systemctl show -p ActiveEnterTimestamp --value "$unit" 2>/dev/null || true)"
-journal="$(journalctl -u "$unit" ${since:+--since "$since"} --no-pager 2>/dev/null || true)"
+since="$("${systemctl_cmd[@]}" show -p ActiveEnterTimestamp --value "$unit" 2>/dev/null || true)"
+journal="$("${journalctl_cmd[@]}" -u "$unit" ${since:+--since "$since"} --no-pager 2>/dev/null || true)"
 if [[ -z "$journal" ]]; then
     warn journal "no readable journal for this unit"
 else
