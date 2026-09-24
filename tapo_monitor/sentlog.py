@@ -17,6 +17,8 @@ import os
 import random
 import time
 
+from . import incident as incident_mod
+
 log = logging.getLogger(__name__)
 
 ENV_DIR = "TAPO_SENT_LOG_DIR"
@@ -103,7 +105,8 @@ def archive_sent(archive_dir, image_bytes, caption, *, now,
     """Copy one sent frame + index line into ``archive_dir``; prune stale files.
 
     ``camera`` and ``score`` are optional: a host running two cameras cannot otherwise
-    tell from the index which one sent what. Absent values are left out rather than
+    tell from the index which one sent what. ``incident`` adds the incident ID and its
+    ``event_start``, so the frames of one visit group without guessing from timestamps. Absent values are left out rather than
     written as null, so a reader of the old shape sees exactly what it always saw.
 
     Returns the saved JPEG path, or None on any failure — it never raises, so a full
@@ -118,8 +121,7 @@ def archive_sent(archive_dir, image_bytes, caption, *, now,
         record = {"ts": now, "file": name, "caption": caption, "delivered": bool(delivered)}
         if camera:
             record["camera"] = camera
-        if incident:
-            record["incident"] = incident
+        record.update(incident_mod.index_fields(incident))
         if score is not None and hasattr(score, "person"):
             record["person"] = float(score.person)
             record["animal"] = float(score.animal)
@@ -180,15 +182,18 @@ def archive_panlimit_frame(archive_dir, image_path, camera, axis, value, *, now)
         return None
 
 
-def review_meta(camera, verdict, etype, score):
+def review_meta(camera, verdict, etype, score, event=None):
     """Index metadata for one suppressed frame (camera, verdict, event type, scores). Pure.
 
     Shared by the live pass and the sampler so both write the same review-log shape.
     ``score`` may be a plain float or a scorer result exposing ``person``/``animal``.
+    ``event`` is the camera event behind the frame: it adds ``incident`` and
+    ``event_start``, the same fields the sent log carries. Without one they are omitted.
     """
     return {"camera": camera, "verdict": verdict, "etype": etype,
             "person": float(getattr(score, "person", score)),
-            "animal": float(getattr(score, "animal", 0.0))}
+            "animal": float(getattr(score, "animal", 0.0)),
+            **incident_mod.index_fields(incident_mod.incident_id(camera, event))}
 
 
 def _review_score_tag(meta):

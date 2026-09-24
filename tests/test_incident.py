@@ -42,6 +42,29 @@ def test_sent_log_index_records_the_incident(tmp_path):
                          camera="yard", incident="yard-1710003600")
     record = json.loads((tmp_path / sentlog.INDEX_NAME).read_text())
     assert record["incident"] == "yard-1710003600"
+    assert record["event_start"] == 1710003600
+
+
+def test_sent_log_index_omits_the_fields_without_an_event(tmp_path):
+    # Digest photos, test sends: no camera event, so no incident, and never a null.
+    sentlog.archive_sent(str(tmp_path), b"jpeg", "cap", now=1710003610.0, camera="yard")
+    record = json.loads((tmp_path / sentlog.INDEX_NAME).read_text())
+    assert "incident" not in record and "event_start" not in record
+
+
+def test_index_fields_keep_an_unparsable_id_without_a_start():
+    assert incident.index_fields("yard-1710003600") == {"incident": "yard-1710003600",
+                                                        "event_start": 1710003600}
+    assert incident.index_fields(None) == {}
+    assert incident.index_fields("odd") == {"incident": "odd"}
+
+
+def test_review_meta_names_the_incident_of_its_event():
+    meta = sentlog.review_meta("yard", "hold", "motion", 0.4, {"start_time": 1710003600.7})
+    assert meta["incident"] == "yard-1710003600" and meta["event_start"] == 1710003600
+    bare = sentlog.review_meta("yard", "shadow", "person", 0.4)
+    assert "incident" not in bare and "event_start" not in bare
+    assert "incident" not in sentlog.review_meta("yard", "hold", "motion", 0.4, {})
 
 
 def _chain_fixture(tmp_path):

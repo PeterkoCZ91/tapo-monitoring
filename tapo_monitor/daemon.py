@@ -1322,9 +1322,9 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                 window=_cfg.coordinator.scene_window,
             )
 
-        def hold_archive(image, etype, s, _name=name):
+        def hold_archive(image, etype, s, event=None, _name=name):
             path = sentlog.archive_review_if_configured(
-                image, sentlog.review_meta(_name, "hold", etype, s))
+                image, sentlog.review_meta(_name, "hold", etype, s, event))
             g = state.groups.get(_name)
             if path and g is not None:
                 # Remembered so the sampler's expiry can tell "no second frame ever came"
@@ -1830,7 +1830,7 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
                                         reason="below_threshold", extra=clip_extra)
                     # Same review-log the sampler's hold uses (no-op unless TAPO_REVIEW_LOG_DIR).
                     sentlog.archive_review_if_configured(
-                        image, {**sentlog.review_meta(cfg.name, "drop", etype, s),
+                        image, {**sentlog.review_meta(cfg.name, "drop", etype, s, event),
                                 **{k: v for k, v in clip_extra.items() if v is not None}})
                     continue
                 if not can_alert(etype, event):
@@ -1908,7 +1908,7 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
             # The whole sequence missed the threshold: offer its best frame, the one most
             # likely to hold a person the scorer underrated, to the drop sample.
             frame, s = max(below, key=lambda fs: fs[1])
-            monitor.sample_drop(cfg, frame, etype, s, path)
+            monitor.sample_drop(cfg, frame, etype, s, path, event)
         return None, None
     above.sort(key=lambda fs: fs[1], reverse=True)
     boxes = getattr(score, "boxes", None) or {}
@@ -2155,7 +2155,7 @@ def _suppress_sampler_frame(cfg, group, etype, s, scfg, image, verdict, *, now):
         monitor.audit_event(cfg, group["event"], etype, "sampler", "hold", score=s,
                             threshold=cfg.scorer.threshold, reason="awaiting_corroboration")
         path = sentlog.archive_review_if_configured(
-            image, sentlog.review_meta(cfg.name, "hold", etype, s))
+            image, sentlog.review_meta(cfg.name, "hold", etype, s, group["event"]))
         if path:
             # Same stamps the live pass leaves via hold_archive: the expiry rescue reads them.
             group["last_hold_path"] = path
@@ -2165,7 +2165,7 @@ def _suppress_sampler_frame(cfg, group, etype, s, scfg, image, verdict, *, now):
                  cfg.name, group["frames"], scfg.max_frames, s, cfg.scorer.threshold)
         monitor.audit_event(cfg, group["event"], etype, "sampler", "drop", score=s,
                             threshold=cfg.scorer.threshold, reason="below_threshold")
-        monitor.sample_drop(cfg, image, etype, s, "sampler")
+        monitor.sample_drop(cfg, image, etype, s, "sampler", group["event"])
     if sampler.note_score(group, s, scfg):
         log.info("sampler %s: early exit after %d consecutive low frames",
                  cfg.name, group["low_streak"])

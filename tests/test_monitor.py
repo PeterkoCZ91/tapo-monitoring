@@ -963,6 +963,8 @@ def test_run_monitor_hold_archives_review_frame(monkeypatch):
     assert len(reviews) == 1
     assert reviews[0][1]["verdict"] == "hold"
     assert reviews[0][1]["camera"] == "a"
+    assert reviews[0][1]["incident"] == "a-100"      # groups with the visit's other frames
+    assert reviews[0][1]["event_start"] == 100
 
 
 def test_run_monitor_hold_uses_injected_hold_archive(monkeypatch):
@@ -983,8 +985,9 @@ def test_run_monitor_hold_uses_injected_hold_archive(monkeypatch):
         telegram_token="t", telegram_chat="c",
         snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
         score=lambda img: 0.4, corroborate=lambda ev, s: "hold",
-        hold_archive=lambda image, etype, s: archived.append((image, etype, s)))
-    assert archived == [("/tmp/live.jpg", "motion", 0.4)]
+        hold_archive=lambda image, etype, s, event: archived.append((image, etype, s, event)))
+    # The event goes along so the archiver can name the incident.
+    assert archived == [("/tmp/live.jpg", "motion", 0.4, _motion_event(100))]
 
 
 def _run_live_drop(monkeypatch, tmp_path, caplog, *, rate, corroborate):
@@ -1031,6 +1034,7 @@ def test_run_monitor_live_drop_is_sampled_without_changing_the_decision(
     rec = on[3][0]
     assert rec["verdict"] == "drop" and rec["path"] == "live" and rec["sample_rate"] == 1.0
     assert rec["camera"] == "a" and rec["person"] == 0.1
+    assert rec["incident"] == "a-100" and rec["event_start"] == 100
     assert (tmp_path / "review" / rec["file"]).read_bytes() == b"\xff\xd8LIVE"
 
 

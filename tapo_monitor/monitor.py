@@ -60,7 +60,7 @@ def _on_alert(on_alert, etype, event):
         on_alert(etype)
 
 
-def sample_drop(cfg, image, etype, score, path):
+def sample_drop(cfg, image, etype, score, path, event=None):
     """Offer one below-threshold frame to the review log's random drop sample.
 
     ``image`` is a path the caller still owns. A no-op unless ``TAPO_REVIEW_LOG_DIR`` is
@@ -68,7 +68,7 @@ def sample_drop(cfg, image, etype, score, path):
     :func:`sentlog.archive_drop_sample_if_configured`).
     """
     return sentlog.archive_drop_sample_if_configured(
-        image, {**sentlog.review_meta(cfg.name, "drop", etype, score), "path": path})
+        image, {**sentlog.review_meta(cfg.name, "drop", etype, score, event), "path": path})
 
 
 def _fmt_score(score):
@@ -226,7 +226,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         frame as-is, so a caller that does not care keeps the old behaviour.
       scene_alert(etype, event) -> bool — optional cross-camera group gate checked after
         the per-camera cooldown and before snapshot capture.
-      hold_archive(image, etype, score) -> archives one held (corroboration-suppressed)
+      hold_archive(image, etype, score, event) -> archives one held (corroboration-suppressed)
         frame, replacing the inline review-log write. The daemon passes one that also
         remembers the archived path on the sampler group, so an expiring hold broken by
         a pan-limit recall can still send its evidence.
@@ -392,10 +392,10 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                     audit_event(cfg, event, etype, "live", "hold", score=s,
                                 threshold=cfg.scorer.threshold, reason="awaiting_corroboration")
                     if hold_archive is not None:
-                        hold_archive(image, etype, s)
+                        hold_archive(image, etype, s, event)
                     else:
                         sentlog.archive_review_if_configured(
-                            image, sentlog.review_meta(cfg.name, "hold", etype, s))
+                            image, sentlog.review_meta(cfg.name, "hold", etype, s, event))
                     _observe(observe, event, etype, False)
                     continue
                 if verdict == "drop":
@@ -403,7 +403,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                              etype, s, cfg.scorer.threshold)
                     audit_event(cfg, event, etype, "live", "drop", score=s,
                                 threshold=cfg.scorer.threshold, reason="below_threshold")
-                    sample_drop(cfg, image, etype, s, "live")
+                    sample_drop(cfg, image, etype, s, "live", event)
                     _observe(observe, event, etype, False)
                     continue
                 empty = False   # verdict == "send": fall through to the send block
@@ -416,7 +416,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                                  etype, s, cfg.scorer.threshold)
                         audit_event(cfg, event, etype, "live", "drop", score=s,
                                     threshold=cfg.scorer.threshold, reason="below_threshold")
-                        sample_drop(cfg, image, etype, s, "live")
+                        sample_drop(cfg, image, etype, s, "live", event)
                     else:
                         log.info("drop %s: Groq reports empty scene", etype)
                         audit_event(cfg, event, etype, "live", "drop", reason="empty")

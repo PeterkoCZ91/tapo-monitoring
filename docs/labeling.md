@@ -43,6 +43,12 @@ the disk use on a rainy night; when it bites, the real rate that hour was lower 
 `sample_rate`, so a weighted estimate is a lower bound. Hub-clip drops are archived in
 full and carry no `sample_rate` — read that as a rate of 1.
 
+Every record of a frame taken for a camera event — sent, held, sampled or hub-clip drop —
+carries `incident` (`<camera>-<event start>`) and `event_start` (the event's start in
+whole epoch seconds), so the frames of one visit and its delivered alert group by ID.
+Records written before these fields existed, and frames with no camera event behind them
+(shadow-scan finds), have neither.
+
 Every `index.jsonl` under the directory is read, recursively. A record with a `verdict`
 field is a review frame; any other record is a sent frame. Records whose JPEG was pruned
 before the copy are skipped. The same image copied twice is shown once.

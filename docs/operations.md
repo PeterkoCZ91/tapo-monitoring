@@ -499,7 +499,11 @@ capture frames for review without changing alert behaviour.
 also copied there as a timestamped JPEG beside an `index.jsonl` line: timestamp, filename,
 caption and delivery flag, plus the camera name and the scorer's `person`/`animal`
 confidences when they are known. The camera name is what lets a host running two cameras
-tell from the archive which one fired. Files older than `TAPO_SENT_LOG_RETENTION_DAYS`
+tell from the archive which one fired. A frame sent for a camera event (every alert path:
+live, sampler, SD follow-up, hub clip and its retry, hold rescue) also records `incident`
+(`<camera>-<event start>`, see [observability](observability.md#following-one-incident))
+and `event_start`, the event's start in whole epoch seconds, so the frames of one visit
+group without guessing from timestamps; frames with no event behind them omit both. Files older than `TAPO_SENT_LOG_RETENTION_DAYS`
 (default 2) are pruned on each write, and the index is rotated on the same window so it
 cannot outlive the frames it points at. It is inert when the variable is unset and never
 raises into the send path — a full disk degrades to "no archive", never a lost alert.
@@ -515,7 +519,8 @@ export TAPO_SENT_LOG_RETENTION_DAYS=2   # optional, default 2
 **Archive what was suppressed.** With motion corroboration on (`scorer.motion_send_threshold`),
 borderline non-PIR motion is *held* rather than sent. The sent log can't show those, so set
 `TAPO_REVIEW_LOG_DIR` to also archive every held frame (filename carries camera, verdict and
-person score; `index.jsonl` records the rest). This is the ground truth for confirming a hold
+person score; `index.jsonl` records the rest, including the same `incident` and
+`event_start` as the sent log). This is the ground truth for confirming a hold
 suppressed an animal/empty scene rather than a person. Pruned by `TAPO_REVIEW_LOG_RETENTION_DAYS`
 (default 7); inert when unset; never raises into the alert path.
 

@@ -40,6 +40,22 @@ def parse(value):
     return camera, int(start)
 
 
+def index_fields(value):
+    """``incident`` and ``event_start`` for an archive index record. Pure, never raises.
+
+    ``event_start`` is the whole-second start the ID is named after, stored on its own so
+    a reader can group and time frames without parsing IDs. No ID (a frame with no camera
+    event behind it) gives no fields; an ID that does not parse keeps just the ID.
+    """
+    if not value:
+        return {}
+    try:
+        _camera, start = parse(value)
+    except ValueError:
+        return {"incident": value}
+    return {"incident": value, "event_start": start}
+
+
 def _sent_entries(sent_dir, value):
     if not sent_dir:
         return []

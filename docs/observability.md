@@ -166,7 +166,8 @@ ingestion, storage and reporting contract (see
 ## Following one incident
 
 Every audit line about a camera event carries `incident=<camera>-<event start>`, and the
-sent-log index records the same ID next to each delivered frame. The ID is derived from
+sent-log and review-log indexes record the same ID, with the start as `event_start`, next
+to each archived frame. The ID is derived from
 the camera event itself, so the live pass, the SD follow-up, the sampler and a hub retry
 of the same event all name the same incident without sharing any state, and the ID is
 the same after a restart. To see everything recorded for one:

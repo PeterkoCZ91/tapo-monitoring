@@ -514,7 +514,7 @@ whether a change to it helps.
 
 ### 10.1 — Quality per incident
 
-- [ ] Every archived frame (sent log and review log, every delivery path) carries the
+- [x] Every archived frame (sent log and review log, every delivery path) carries the
   incident ID and the camera event start, so frames of one visit can be grouped without
   guessing from timestamps.
 - [ ] `label-stats` groups labelled frames into incidents (by incident ID; older records

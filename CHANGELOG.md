@@ -5,6 +5,9 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Sent-log and review-log index records of a camera event's frame (every delivery path, holds,
+  sampled and hub-clip drops) carry `incident` and `event_start`, so one visit's frames group
+  by ID. Frames with no camera event omit both.
 - `scorer.night_threshold`: per-camera scorer threshold applied while the camera's night is
   on (astral night with its `schedule` applied); unset keeps `threshold` around the clock.
   `tapo-monitor replay` and the shadow scan apply it by the time each event or frame was
