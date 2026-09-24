@@ -145,6 +145,9 @@ All notable changes to this project are documented here.
 - The daily digest's fleet block reports motor moves the arbiter held back and what the
   last restart carried over from `runtime.json`.
 
+- `tools/collect_frames.sh` pulls every host's sent and review logs into one dataset
+  that outlives the hosts' retention, for labelling with `tapo-monitor label`.
+
 ### Changed
 - Privacy mode is read on the control pass itself (one getter on the connected client),
   so a parked lens gets no recall on the very pass it parks and its aim is restored on

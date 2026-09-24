@@ -432,6 +432,56 @@ scenarios in `tests/test_scenarios.py`.
   fight tracking, the guard or privacy. Keep it observe-only until the pair's clock
   offset and camera order are measured.
 
+## Phase 9 — Detection quality from our own labelled frames
+
+Status: **in progress** (9.1 shipped; collecting and labelling)
+
+A month of ledger data from one site (20k camera events, 145k scored frames) shows the
+scorer separates sharply: 77 % of events score below 0.30, 17 % above 0.65, and only
+about 6 % fall in between. Moving `scorer.threshold` by ±0.1 changes a handful of alerts
+a week (checked with `tapo-monitor replay`), so threshold tuning is not the lever. What
+is missing is ground truth: nobody knows how many "clearly nothing" frames held a
+distant or night-time person, or how many sent alerts were netting, scaffolding or
+shadows. The generic detector has never seen this fleet's IR night scenes.
+
+### 9.1 — Collect and label
+
+- [x] `tools/collect_frames.sh`: pull every host's sent and review logs into one local
+  dataset, never deleting and merging indexes, so the dataset outlives the hosts'
+  retention (nightly timer on the operator's machine; host retention raised to 14 days).
+- [x] `tapo-monitor label` / `label-stats`: a localhost labelling page (person / no
+  person / unsure), gray zone first, then a sample of low scores (possible misses), then
+  high scores (possible false alarms); append-only `labels.jsonl` keyed by image hash.
+- [ ] Label the first few hundred frames and publish the first real numbers: false-alarm
+  rate of sent frames and miss rate of held frames, per camera and day/night.
+
+### 9.2 — Calibrate from labels
+
+- [ ] Split `scorer.threshold` by day and night (and per camera where labels justify it)
+  using the threshold `label-stats` reports as best-separating; verify the change with
+  `replay --compare` before shipping.
+- [ ] Keep more of what matters: archive a sample of below-threshold frames (not only held
+  ones) so possible misses keep reaching the labelling queue.
+
+### 9.3 — Teacher model on the GPU host
+
+- [ ] Run a larger detector over the collected dataset on the shared GPU host and queue
+  first the frames where it and the production scorer disagree — the most likely errors,
+  labelled first. Observe-only; nothing on the alert path changes.
+- [ ] Rules for the shared host: announce every write, work in one own directory, check
+  free disk and GPU use first, clean up after each run.
+
+### 9.4 — A site-specific verifier
+
+- [ ] Train a small person/no-person verifier on crops of the scorer's boxes from the
+  labelled frames (image-level labels suffice, unlike retraining the detector), on the
+  GPU host; evaluate on a held-out set per camera and day/night.
+- [ ] Shadow-run it next to the production scorer for a week (scores logged, alerts
+  unchanged), compare on newly labelled frames, and promote only with a measured gain.
+  Rollback is switching the scorer back; the model file is versioned beside it.
+- [ ] Only if the verifier plateaus: box-level labelling and fine-tuning the detector
+  itself.
+
 ## Research tracks
 
 These stay separate from production until repeatable evidence exists:
