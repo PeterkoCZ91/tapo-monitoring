@@ -5,6 +5,9 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Daily digest fleet block: size and file count of the sent, review and pan-limit logs and
+  the free space under them. The daemon warns once on Telegram when free space falls below
+  `TAPO_LOG_DISK_MIN_FREE_MB` (default 1024, 0 off) and re-arms after recovery.
 - Sent-log and review-log index records of a camera event's frame (every delivery path, holds,
   sampled and hub-clip drops) carry `incident` and `event_start`, so one visit's frames group
   by ID. Frames with no camera event omit both.

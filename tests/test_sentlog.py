@@ -371,3 +371,54 @@ def test_drop_sample_uses_the_module_cap_by_default(tmp_path):
         frame, _drop_meta(), now=_HOUR, env=env, rng=_Rng(0.0)) is not None
     assert sentlog.archive_drop_sample_if_configured(
         frame, _drop_meta(), now=_HOUR + 1, env=env, rng=_Rng(0.0)) is None
+
+
+# ── disk telemetry: size of the logs, free space under them ──────────────────
+
+def test_log_dirs_name_sent_review_and_pan_limit(tmp_path):
+    env = {sentlog.ENV_DIR: str(tmp_path / "sent-log"),
+           sentlog.ENV_REVIEW_DIR: str(tmp_path / "review-log")}
+    assert sentlog.log_dirs_from_env(env) == [
+        ("sent", str(tmp_path / "sent-log")), ("review", str(tmp_path / "review-log")),
+        ("pan-limit", str(tmp_path / "panlimit-log"))]
+    assert sentlog.log_dirs_from_env({}) == []
+
+
+def test_log_disk_floor_defaults_and_can_be_disabled():
+    assert sentlog.log_disk_min_free_mb_from_env({}) == 1024
+    assert sentlog.log_disk_min_free_mb_from_env({sentlog.ENV_LOG_DISK_MIN_FREE: "0"}) == 0
+    assert sentlog.log_disk_min_free_mb_from_env({sentlog.ENV_LOG_DISK_MIN_FREE: "512"}) == 512
+    for bad in ("-5", "lots", ""):
+        assert sentlog.log_disk_min_free_mb_from_env(
+            {sentlog.ENV_LOG_DISK_MIN_FREE: bad}) == 1024
+
+
+def test_dir_usage_counts_files_and_stops_at_the_cap(tmp_path):
+    for i in range(5):
+        (tmp_path / f"{i}.jpg").write_bytes(b"x" * 100)
+    (tmp_path / "sub").mkdir()                       # flat: a subdirectory is not a file
+    assert sentlog.dir_usage(str(tmp_path)) == (500, 5, True)
+    size, files, complete = sentlog.dir_usage(str(tmp_path), max_entries=3)
+    assert (size, files, complete) == (300, 3, False)
+    assert sentlog.dir_usage(str(tmp_path / "missing")) is None
+
+
+def test_log_usage_reports_each_existing_dir_and_the_free_space(tmp_path, monkeypatch):
+    sent = tmp_path / "sent-log"
+    sent.mkdir()
+    (sent / "a.jpg").write_bytes(b"x" * 1024 * 1024)
+    (sent / "index.jsonl").write_text("{}\n")
+    monkeypatch.setattr(sentlog.shutil, "disk_usage",
+                        lambda p: type("U", (), {"free": 2048 * 1024 * 1024})())
+    usage = sentlog.log_usage({sentlog.ENV_DIR: str(sent)})
+    # The pan-limit dir was never created: left out, not reported as empty.
+    assert [d["name"] for d in usage["dirs"]] == ["sent"]
+    assert usage["dirs"][0]["files"] == 2 and usage["dirs"][0]["complete"] is True
+    assert 1.0 < usage["dirs"][0]["mb"] < 1.01
+    assert usage["free_mb"] == 2048.0 and usage["floor_mb"] == 1024
+    assert sentlog.log_usage({}) is None
+
+
+def test_log_usage_never_raises(monkeypatch, tmp_path):
+    monkeypatch.setattr(sentlog, "dir_usage", lambda *a, **k: 1 / 0)
+    assert sentlog.log_usage({sentlog.ENV_DIR: str(tmp_path)}) is None

@@ -6452,3 +6452,83 @@ def test_sent_log_record_carries_incident_and_event_start(monkeypatch, tmp_path)
                                    str(frame), "cap", incident="c-1000")
     record = json.loads((tmp_path / "sent" / "index.jsonl").read_text())
     assert record["incident"] == "c-1000" and record["event_start"] == 1000
+
+
+
+# ── log disk floor: one warning per low spell ────────────────────────────────
+
+def _disk_env(tmp_path, floor="1024"):
+    (tmp_path / "review").mkdir(exist_ok=True)
+    return {"TAPO_REVIEW_LOG_DIR": str(tmp_path / "review"),
+            "TAPO_LOG_DISK_MIN_FREE_MB": floor}
+
+
+def _disk_free(monkeypatch, free_mb):
+    monkeypatch.setattr(daemon.sentlog.shutil, "disk_usage",
+                        lambda p: type("U", (), {"free": int(free_mb * 1024 * 1024)})())
+
+
+def _disk_texts(monkeypatch, delivered=True):
+    texts = []
+    monkeypatch.setattr(daemon.notify, "send_text",
+                        lambda tok, chat, text: texts.append(text) or delivered)
+    return texts
+
+
+_DISK_SECRETS = {"telegram_token": "t", "telegram_chat": "c"}
+
+
+def test_log_disk_warns_once_and_rearms_after_recovery(monkeypatch, tmp_path):
+    env = _disk_env(tmp_path)
+    texts = _disk_texts(monkeypatch)
+    state = daemon.MonitorState()
+    step = daemon.LOG_DISK_CHECK_EVERY
+
+    _disk_free(monkeypatch, 500)
+    daemon._log_disk_pass(state, now=1000, secrets=_DISK_SECRETS, env=env)
+    assert texts == ["💾 log disk low: 500 MB free, below the 1024 MB floor "
+                     "(review/pan-limit logs)"]
+    daemon._log_disk_pass(state, now=1000 + step, secrets=_DISK_SECRETS, env=env)
+    assert len(texts) == 1                      # still low: no repeat
+
+    _disk_free(monkeypatch, 1100)               # above the floor, inside the margin
+    daemon._log_disk_pass(state, now=1000 + 2 * step, secrets=_DISK_SECRETS, env=env)
+    assert len(texts) == 1
+
+    _disk_free(monkeypatch, 4096)
+    daemon._log_disk_pass(state, now=1000 + 3 * step, secrets=_DISK_SECRETS, env=env)
+    assert texts[-1] == "✅ log disk recovered: 4096 MB free"
+
+    _disk_free(monkeypatch, 500)                # re-armed: a new low spell warns again
+    daemon._log_disk_pass(state, now=1000 + 4 * step, secrets=_DISK_SECRETS, env=env)
+    assert len(texts) == 3 and texts[-1].startswith("💾 log disk low")
+
+
+def test_log_disk_check_is_throttled(monkeypatch, tmp_path):
+    env = _disk_env(tmp_path)
+    texts = _disk_texts(monkeypatch, delivered=False)
+    state = daemon.MonitorState()
+    _disk_free(monkeypatch, 500)
+    daemon._log_disk_pass(state, now=1000, secrets=_DISK_SECRETS, env=env)
+    daemon._log_disk_pass(state, now=1005, secrets=_DISK_SECRETS, env=env)
+    assert len(texts) == 1                      # not every tick
+    assert state.log_disk_warned is False       # undelivered: retried on the next check
+    daemon._log_disk_pass(state, now=1000 + daemon.LOG_DISK_CHECK_EVERY,
+                          secrets=_DISK_SECRETS, env=env)
+    assert len(texts) == 2
+
+
+def test_log_disk_floor_zero_or_no_logs_stays_silent(monkeypatch, tmp_path):
+    texts = _disk_texts(monkeypatch)
+    _disk_free(monkeypatch, 1)
+    daemon._log_disk_pass(daemon.MonitorState(), now=1000, secrets=_DISK_SECRETS,
+                          env=_disk_env(tmp_path, floor="0"))
+    daemon._log_disk_pass(daemon.MonitorState(), now=1000, secrets=_DISK_SECRETS, env={})
+    assert texts == []
+
+
+def test_log_disk_check_never_raises(monkeypatch, tmp_path):
+    monkeypatch.setattr(daemon.notify, "send_text", lambda *a: 1 / 0)
+    _disk_free(monkeypatch, 1)
+    daemon._log_disk_pass(daemon.MonitorState(), now=1000, secrets=_DISK_SECRETS,
+                          env=_disk_env(tmp_path))

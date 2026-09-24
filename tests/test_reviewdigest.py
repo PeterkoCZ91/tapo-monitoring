@@ -689,3 +689,45 @@ def test_scorer_daily_delta():
     assert (out["requests"], out["failed"], out["window"]) == (100, 2, "24h")
     assert reviewdigest.scorer_daily_delta(s, None) is s
     assert reviewdigest.scorer_daily_delta(s, (5000, 10)) is s  # counters reset
+
+
+def _fleet_with_logs(logs):
+    return reviewdigest.fleet_lines({
+        "cameras": {"front": {"reachable": True, "events": True}},
+        "tick": {"ok": True}, "scorer": None, "recorder": None, "repairs": {},
+        "logs": logs})
+
+
+def test_fleet_lines_report_log_sizes_and_free_space_as_detail():
+    lines = _fleet_with_logs({
+        "dirs": [{"name": "sent", "mb": 12.34, "files": 140, "complete": True},
+                 {"name": "review", "mb": 85.0, "files": 50000, "complete": False}],
+        "free_mb": 20480.4, "floor_mb": 1024})
+    assert lines[0].startswith("\U0001f49a Fleet OK")
+    assert ("   logs sent 12.3 MB / 140 files, review 85.0 MB / 50000+ files, "
+            "20480 MB free") in lines
+
+
+def test_fleet_lines_mark_a_low_disk_without_failing_the_check():
+    lines = _fleet_with_logs({"dirs": [{"name": "review", "mb": 1.0, "files": 3}],
+                              "free_mb": 512.0, "floor_mb": 1024})
+    assert lines[0].startswith("\U0001f49a Fleet OK")   # the daemon's warning pages, not this
+    assert "   logs review 1.0 MB / 3 files, 512 MB free (below the 1024 MB floor)" in lines
+    disabled = _fleet_with_logs({"dirs": [], "free_mb": 512.0, "floor_mb": 0})
+    assert "   logs 512 MB free" in disabled
+    assert not any("logs" in line for line in _fleet_with_logs(None))
+
+
+def test_run_if_due_measures_the_logs_for_the_fleet_block(tmp_path):
+    review_dir = str(tmp_path / "review")
+    os.makedirs(review_dir)
+    now = _local_ts(2026, 8, 13, 21, 0)
+    _write_entry(review_dir, "e0.jpg", now - 60, "front", 0.64)
+    texts = []
+    reviewdigest.run_if_due(
+        env={"TAPO_REVIEW_DIGEST_TIME": "20:45", sentlog.ENV_REVIEW_DIR: review_dir},
+        now=now, send_text=lambda t: texts.append(t) or True, send_photo=lambda p, c: True,
+        health={"cameras": {"front": {"reachable": True, "events": True}},
+                "tick": {"ok": True}, "scorer": None, "recorder": None, "repairs": {}})
+    line = next(x for x in texts[0].splitlines() if x.startswith("   logs review "))
+    assert " MB free" in line

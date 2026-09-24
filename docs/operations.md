@@ -596,7 +596,24 @@ shadow scan 2026-05-04: 192 of 192 segments, 1389 frames, 4 matched, 1 candidate
 💚 Fleet OK — front, yard reachable
    scorer 0 failed / 4180 req, p95 0.73s
    recorder newest file 47s old
+   logs sent 12.3 MB / 140 files, review 85.0 MB / 912 files, pan-limit 1.2 MB / 30 files, 20480 MB free
    alerts 24h: 62 sent (yard 41, front 21), 1 undelivered
+```
+
+**Keep the frame logs from filling the disk.** The `logs` line gives the size and file count
+of the sent, review and pan-limit logs (measured once per digest, flat and capped at 50,000
+files per directory, shown as `50000+` when the cap bites) and the free space on the
+filesystem holding them — the lowest one if they sit on different filesystems. It is a
+detail line and never fails the check; below the floor it reads
+`512 MB free (below the 1024 MB floor)`. The page comes from the daemon itself: it checks
+free space every 10 minutes and, when it drops below `TAPO_LOG_DISK_MIN_FREE_MB`, sends one
+Telegram warning (`💾 log disk low: … MB free, below the … MB floor`). It does not repeat
+while the disk stays low; once free space is back 10 % above the floor it sends
+`✅ log disk recovered` and re-arms. The state lives in memory, so a restart during a low
+spell warns once more. An undelivered message is retried on the next check.
+
+```bash
+export TAPO_LOG_DISK_MIN_FREE_MB=1024     # optional, default 1024; 0 turns the warning off
 ```
 
 Note what this still cannot do: a heartbeat the host sends itself can never report that the

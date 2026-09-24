@@ -134,7 +134,8 @@ Rain makes auto-tracking cameras chase raindrops and IR reflections. Using open-
 - Structured audit logs plus `tapo-monitor audit-log` for threshold calibration.
 - Daily digest heartbeat: the review digest carries a fleet block — camera reachability,
   the daemon's tick, the shared scorer, recorder freshness, alert counts, refused
-  self-heals and the running package fingerprint. It claims OK only for what it actually
+  self-heals, the frame logs' size and free disk, and the running package fingerprint.
+  A one-shot warning fires when the log filesystem falls below `TAPO_LOG_DISK_MIN_FREE_MB`. It claims OK only for what it actually
   checked; any failed check removes the headline.
 - JSON status endpoint (`observability.status_port`): daemon + fleet summary as one GET,
   localhost-first because it has no authentication.

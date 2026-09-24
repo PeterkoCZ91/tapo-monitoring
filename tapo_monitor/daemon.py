@@ -718,6 +718,10 @@ class MonitorState:
     hub_inactive_next_check: dict = field(default_factory=dict)
     hub_inactive_alerted: dict = field(default_factory=dict)
     hub_inactive_path: str | None = None
+    # Log-disk floor (see _log_disk_pass): next check and whether the warning is out. In
+    # memory only, so a restart while the disk is still low repeats the warning once.
+    log_disk_next_check: float = 0.0
+    log_disk_warned: bool = False
 
 
 def backoff_seconds(fails, base=60, cap=1800):
@@ -2787,6 +2791,42 @@ def _review_digest_pass(*, now, secrets, app=None, state=None):
     )
 
 
+LOG_DISK_CHECK_EVERY = 600      # seconds between free-space checks of the log filesystem
+LOG_DISK_REARM = 1.1            # recovered once free space is 10 % above the floor
+
+
+def _log_disk_pass(state, *, now, secrets, env=None):
+    """Warn once when the filesystem holding the frame logs falls below its floor.
+
+    ``TAPO_LOG_DISK_MIN_FREE_MB`` (default 1024, 0 off). One warning per low spell, one
+    recovery note once free space is back above the floor with a margin, so a disk
+    hovering at the line cannot page on every check. An undelivered message leaves the
+    state unchanged and is retried on the next check. Never raises.
+    """
+    if now < state.log_disk_next_check:
+        return
+    state.log_disk_next_check = now + LOG_DISK_CHECK_EVERY
+    try:
+        floor = sentlog.log_disk_min_free_mb_from_env(env)
+        dirs = sentlog.log_dirs_from_env(env)
+        free = sentlog.free_mb([path for _, path in dirs]) if floor and dirs else None
+        if free is None:
+            return
+        token, chat = secrets.get("telegram_token"), secrets.get("telegram_chat")
+        if not state.log_disk_warned and free < floor:
+            names = "/".join(name for name, _ in dirs)
+            if notify.send_text(token, chat, f"💾 log disk low: {free:.0f} MB free, below "
+                                             f"the {floor} MB floor ({names} logs)"):
+                state.log_disk_warned = True
+                log.warning("log disk warning sent: %.0f MB free, floor %d MB", free, floor)
+        elif state.log_disk_warned and free >= floor * LOG_DISK_REARM:
+            if notify.send_text(token, chat, f"✅ log disk recovered: {free:.0f} MB free"):
+                state.log_disk_warned = False
+                log.info("log disk recovery sent: %.0f MB free", free)
+    except Exception:  # noqa: BLE001 - telemetry must never break the daemon loop
+        log.warning("log disk check failed", exc_info=True)
+
+
 def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
               last_control, control_interval,
               run_control=None, watchdog=None, monitor=None, drain=None, sample=None,
@@ -2841,6 +2881,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     drain(scoring, cam_clients, state, now=now, secrets=secrets, night=night)
     guard(app, cam_clients, state, now=now, secrets=secrets, night=night)
     digest(now=now, secrets=secrets, app=app, state=state)
+    _log_disk_pass(state, now=now, secrets=secrets)
     runtime_state.save_if_changed(state, now, logger=log)
     return last_control
 

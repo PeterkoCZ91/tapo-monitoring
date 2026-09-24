@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import random
+import shutil
 import time
 
 from . import incident as incident_mod
@@ -47,6 +48,15 @@ DEFAULT_DROP_MAX_PER_HOUR = 6
 # the review log, and twenty guard recalls a night must not flood it.
 PANLIMIT_DIR_NAME = "panlimit-log"
 PANLIMIT_RETENTION_DAYS = 2.0
+
+# Disk telemetry: 14-day retention plus the drop sample must never be what fills a host's
+# disk. The digest reports each log's size and file count; below the free-space floor the
+# daemon warns once. 0 turns the warning off. The scan is flat and capped per directory,
+# so a runaway log costs a bounded directory walk, never a stalled tick.
+ENV_LOG_DISK_MIN_FREE = "TAPO_LOG_DISK_MIN_FREE_MB"
+DEFAULT_LOG_DISK_MIN_FREE_MB = 1024
+USAGE_MAX_ENTRIES = 50_000
+_MB = 1024 * 1024
 
 
 def archive_dir_from_env(env=None):
@@ -321,4 +331,81 @@ def archive_drop_sample_if_configured(image_path, meta, *, now=None, env=None, r
         return path
     except Exception:  # noqa: BLE001 - sampling is telemetry, never a reason to fail a pass
         log.debug("sentlog: drop sampling failed", exc_info=True)
+        return None
+
+
+def log_dirs_from_env(env=None):
+    """``(name, path)`` for each configured archive: sent, review, pan-limit. Pure."""
+    env = os.environ if env is None else env
+    dirs = [("sent", archive_dir_from_env(env)),
+            ("review", (env.get(ENV_REVIEW_DIR) or "").strip() or None),
+            ("pan-limit", panlimit_dir_from_env(env))]
+    return [(name, path) for name, path in dirs if path]
+
+
+def log_disk_min_free_mb_from_env(env=None):
+    """Free-space floor in MB for the log filesystem; 0 disables, garbage -> default."""
+    env = os.environ if env is None else env
+    try:
+        floor = int(env[ENV_LOG_DISK_MIN_FREE])
+    except (KeyError, TypeError, ValueError):
+        return DEFAULT_LOG_DISK_MIN_FREE_MB
+    return floor if floor >= 0 else DEFAULT_LOG_DISK_MIN_FREE_MB
+
+
+def dir_usage(path, max_entries=USAGE_MAX_ENTRIES):
+    """``(bytes, files, complete)`` of the files directly in ``path``; None if unreadable.
+
+    Flat on purpose: every archive here is one directory. ``complete`` is False when the
+    scan stopped at ``max_entries``, and the numbers are then a lower bound.
+    """
+    total = files = 0
+    try:
+        with os.scandir(path) as entries:
+            for entry in entries:
+                if files >= max_entries:
+                    return total, files, False
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        total += entry.stat(follow_symlinks=False).st_size
+                        files += 1
+                except OSError:
+                    continue
+    except OSError:
+        return None
+    return total, files, True
+
+
+def free_mb(paths):
+    """Least free space in MB across the filesystems holding ``paths``; None if none exist."""
+    free = []
+    for path in paths:
+        try:
+            free.append(shutil.disk_usage(path).free / _MB)
+        except OSError:
+            continue
+    return min(free) if free else None
+
+
+def log_usage(env=None):
+    """Size, file count and free space of the archives, for the daily digest.
+
+    None when no archive is configured. A directory not created yet (no pan-limit recall so
+    far) is left out rather than reported empty. Never raises: it feeds a heartbeat.
+    """
+    try:
+        dirs = log_dirs_from_env(env)
+        if not dirs:
+            return None
+        usage = []
+        for name, path in dirs:
+            found = dir_usage(path)
+            if found is not None:
+                size, files, complete = found
+                usage.append({"name": name, "mb": size / _MB, "files": files,
+                              "complete": complete})
+        return {"dirs": usage, "free_mb": free_mb([path for _, path in dirs]),
+                "floor_mb": log_disk_min_free_mb_from_env(env)}
+    except Exception:  # noqa: BLE001 - telemetry, never a reason to lose the digest
+        log.debug("sentlog: log usage failed", exc_info=True)
         return None

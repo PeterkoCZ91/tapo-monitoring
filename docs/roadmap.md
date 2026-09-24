@@ -534,7 +534,7 @@ whether a change to it helps.
 
 ### 10.3 — Telemetry that fills disks
 
-- [ ] Report the size and file count of the sent, review and pan-limit logs in the daily
+- [x] Report the size and file count of the sent, review and pan-limit logs in the daily
   digest's fleet block, and warn once when free space on that filesystem falls below a
   floor: 14-day retention plus the drop sample must never be what fills a host's disk.
 

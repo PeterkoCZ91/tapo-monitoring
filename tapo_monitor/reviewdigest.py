@@ -301,6 +301,9 @@ def fleet_lines(health):
             f"restart carried {hub} hub retr{'y' if hub == 1 else 'ies'}, "
             f"{int(carried.get('pending_sd', 0))} SD follow-up(s), "
             f"{int(carried.get('cooldowns', 0))} cooldown(s)")
+    logs = log_usage_line(health.get("logs"))
+    if logs:
+        detail.append(logs)
 
     # Which code the host runs. Deploys are rsync copies, so this fingerprint is the only
     # version statement a host can make \u2014 and silent drift has twice been found only by
@@ -321,6 +324,25 @@ def fleet_lines(health):
     else:
         head = "\U0001f49a Fleet OK — " + ", ".join(reachable) + " reachable"
     return [head] + [f"   {line}" for line in detail]
+
+
+def log_usage_line(logs):
+    """One detail line on the archives' disk use, or None. Pure.
+
+    Detail, never a failed check: a filling disk is announced once by the daemon's own
+    warning, and the digest only keeps the numbers in front of the reader every day.
+    """
+    if not isinstance(logs, dict):
+        return None
+    parts = [f"{d['name']} {float(d['mb']):.1f} MB / {int(d['files'])}"
+             f"{'' if d.get('complete', True) else '+'} files"
+             for d in logs.get("dirs") or []]
+    free = logs.get("free_mb")
+    if free is not None:
+        floor = int(logs.get("floor_mb") or 0)
+        low = f" (below the {floor} MB floor)" if floor and free < floor else ""
+        parts.append(f"{float(free):.0f} MB free{low}")
+    return "logs " + ", ".join(parts) if parts else None
 
 
 def scan_context_line(review_dir, now):
@@ -484,8 +506,11 @@ def run_if_due(*, env=None, now=None, send_text, send_photo, health=None):
             text = f"{text}\n{context}"
         raw_scorer = health.get("scorer") if isinstance(health, dict) else None
         if isinstance(health, dict):
+            # Log sizes once per digest, not in the per-tick snapshot: walking the
+            # archives every few seconds would be telemetry eating the loop.
             health = {**health,
-                      "scorer": scorer_daily_delta(raw_scorer, _scorer_baseline(review_dir))}
+                      "scorer": scorer_daily_delta(raw_scorer, _scorer_baseline(review_dir)),
+                      "logs": sentlog.log_usage(env)}
         fleet = fleet_lines(health)
         alerts = alert_lines(sentlog.archive_dir_from_env(env), now)
         # Alerts belong under the fleet header when there is one: the indent is what says
