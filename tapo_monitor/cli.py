@@ -15,7 +15,7 @@ Usage:
   tapo-monitor incident <id>            # everything recorded for one incident ID
   tapo-monitor autolabel <dataset> --model M  # teacher auto-labels frames it agrees on
   tapo-monitor label <dataset_dir>      # label collected alert frames in a local web page
-  tapo-monitor label-stats <dataset_dir> # false alarms, misses and best threshold from labels
+  tapo-monitor label-stats <dataset_dir> [--config cameras.yaml] # ... best threshold, by day/night
   tapo-monitor version                  # release plus a fingerprint of the deployed package
   tapo-monitor selfcheck [cameras.yaml] # is this host able to run? (imports, config, deps)
 

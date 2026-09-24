@@ -115,8 +115,8 @@ Images are only read, never modified or deleted.
 
 ## Stats
 
-`tapo-monitor label-stats dataset/ [--json]` and the `/stats` page report, overall, per
-score band and per camera:
+`tapo-monitor label-stats dataset/ [--json] [--config cameras.yaml]` and the `/stats`
+page report, overall, per score band and per camera:
 
 - label counts;
 - **false alarms**: sent frames labeled `no_person`, out of decided sent frames;
@@ -127,3 +127,58 @@ score band and per camera:
 `unsure` is counted but left out of both rates and the threshold. The numbers are
 estimates over what was labeled — the queue deliberately oversamples the gray zone, so
 treat a band's rate as that band's, not the fleet's.
+
+### Held and dropped frames
+
+A review frame's index `verdict` says why it was not sent, and the two mean different
+things: a person in a **held** frame (`hold`, corroboration waited) is a hold error; a
+person in a **dropped** frame (`drop`, below the threshold — hub clips, and a random
+sample of below-threshold frames when the host archives one) is a real miss. Once
+anything other than held frames has been labeled, the text output adds a *misses by
+review verdict* block, and the JSON carries it always under `verdicts`, in every
+summary block (overall, per band, per camera):
+
+```json
+"verdicts": {"hold": {"person": 30, "decided": 33, "rate": 0.91, "sampled": 0,
+                      "estimated_person": null, "estimated_decided": null},
+             "drop": {"person": 2, "decided": 40, "rate": 0.05, "sampled": 35,
+                      "estimated_person": 20.0, "estimated_decided": 355.0}}
+```
+
+A sampled drop carries its `sample_rate` in the index; each such frame then stands for
+`1 / sample_rate` dropped frames, and `estimated_person` / `estimated_decided` are the
+labeled counts scaled that way (unsampled frames count once). They are estimates, and
+only of the part of the sample that has been labeled; the raw `person` / `decided`
+counts next to them are what was actually seen. A label whose frame has no `verdict`
+(an older dataset) counts as `unknown`.
+
+### Day and night
+
+```bash
+tapo-monitor label-stats dataset/ --config cameras.yaml [--json]
+tapo-monitor label dataset/ --config cameras.yaml          # same split on /stats
+```
+
+With `--config`, every labeled frame with a time (`ts` in its index) is placed in day
+or night the way the daemon would have judged it: the site's night from the config's
+`location` (in its timezone, as `replay` does), then the camera's own `schedule`
+(`always_night` / `always_day`); a camera not in the config gets the site's night, and a
+frame without a time is `unknown`. The output adds a table of the best threshold — with
+its n, person / no_person counts, errors, false alarms and misses — overall, for day,
+night and unknown, and per camera for day and night. The JSON adds `day_night`:
+
+```json
+"day_night": {"day": {…summary…, "threshold": {…}}, "night": {…}, "unknown": {…},
+              "cameras": {"front": {"day": {…}, "night": {…}}},
+              "min_support": {"decided": 20, "per_class": 5}}
+```
+
+Every best threshold (including the overall one) also carries `person`, `no_person` and
+`supported`. A slice with fewer than 20 decided frames with a score, or fewer than 5 of
+either class, is marked **too few labels**: the minimum-error cut on a handful of frames
+sits wherever one odd frame happens to be, which is noise, not a threshold to ship.
+Check any threshold taken from here with `tapo-monitor replay --compare` before
+changing the config.
+
+Without `--config` the output is what it always was, apart from the verdict block
+once dropped frames are labeled (and `verdicts` / `supported` as new JSON keys).

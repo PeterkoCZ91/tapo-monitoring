@@ -58,6 +58,8 @@ class Frame:
     camera: str | None
     ts: float | None
     score: float | None  # person score, when the record carried one
+    verdict: str | None = None       # review frames: "hold", "drop", ...; None when sent
+    sample_rate: float | None = None  # sampled drops: the fraction that was archived
 
 
 def band(score):
@@ -107,16 +109,18 @@ def _read_jsonl(path):
     return records
 
 
-def load_frames(dataset_dir):
-    """Every indexed JPEG under ``dataset_dir``, one per image hash. Read-only.
+def _sample_rate(value):
+    rate = _number(value)
+    return rate if rate is not None and 0 < rate <= 1 else None
 
-    Records whose file is missing, unreadable, not a JPEG name or resolving outside
-    the dataset (``..``, absolute names, symlinks) are skipped silently: a collected
-    dataset is expected to have gaps where retention pruned a frame.
+
+def _index_records(root_real):
+    """``(rel path, full path, record)`` for every JPEG record of every index, in order.
+
+    ``rel`` is the name the labels use: relative to the dataset, symlinks resolved. The
+    file itself need not exist any more; records resolving outside the dataset are
+    dropped.
     """
-    root_real = os.path.realpath(dataset_dir)
-    frames = []
-    seen = set()
     for dirpath, dirnames, filenames in os.walk(root_real):
         dirnames.sort()
         if INDEX_NAME not in filenames:
@@ -126,25 +130,59 @@ def load_frames(dataset_dir):
             if not isinstance(name, str) or not name.lower().endswith((".jpg", ".jpeg")):
                 continue
             full = os.path.join(dirpath, name)
-            if not _inside(root_real, full) or not os.path.isfile(full):
+            if not _inside(root_real, full):
                 continue
-            try:
-                sha = _sha256(full)
-            except OSError:
-                continue
-            if sha in seen:
-                continue
-            seen.add(sha)
             rel = os.path.relpath(os.path.realpath(full), root_real).replace(os.sep, "/")
-            camera = record.get("camera")
-            frames.append(Frame(
-                path=rel, sha256=sha,
-                source="review" if "verdict" in record else "sent",
-                camera=str(camera) if camera else None,
-                ts=_number(record.get("ts")),
-                score=_number(record.get("person")),
-            ))
+            yield rel, full, record
+
+
+def _verdict(record):
+    return str(record["verdict"]) if "verdict" in record else None
+
+
+def load_frames(dataset_dir):
+    """Every indexed JPEG under ``dataset_dir``, one per image hash. Read-only.
+
+    Records whose file is missing, unreadable, not a JPEG name or resolving outside
+    the dataset (``..``, absolute names, symlinks) are skipped silently: a collected
+    dataset is expected to have gaps where retention pruned a frame.
+    """
+    frames = []
+    seen = set()
+    for rel, full, record in _index_records(os.path.realpath(dataset_dir)):
+        if not os.path.isfile(full):
+            continue
+        try:
+            sha = _sha256(full)
+        except OSError:
+            continue
+        if sha in seen:
+            continue
+        seen.add(sha)
+        camera = record.get("camera")
+        frames.append(Frame(
+            path=rel, sha256=sha,
+            source="review" if "verdict" in record else "sent",
+            camera=str(camera) if camera else None,
+            ts=_number(record.get("ts")),
+            score=_number(record.get("person")),
+            verdict=_verdict(record),
+            sample_rate=_sample_rate(record.get("sample_rate")),
+        ))
     return frames
+
+
+def index_meta(dataset_dir):
+    """``{rel path: {"ts", "verdict", "sample_rate"}}`` from the indexes, no hashing.
+
+    What the stats need beyond a label line (which carries only path, score, camera and
+    source): cheap enough to reread on every ``/stats`` request.
+    """
+    meta = {}
+    for rel, _, record in _index_records(os.path.realpath(dataset_dir)):
+        meta[rel] = {"ts": _number(record.get("ts")), "verdict": _verdict(record),
+                     "sample_rate": _sample_rate(record.get("sample_rate"))}
+    return meta
 
 
 def latest_labels(dataset_dir):
@@ -206,8 +244,9 @@ class LabelSession:
     Thread-safe: the HTTP server is threaded and every mutation holds one lock.
     """
 
-    def __init__(self, dataset_dir, *, seed=None, low_sample=None):
+    def __init__(self, dataset_dir, *, seed=None, low_sample=None, night=None):
         self.dataset_dir = dataset_dir
+        self.night = night   # (camera, ts) -> bool for the /stats day/night split, or None
         self.root_real = os.path.realpath(dataset_dir)
         self.frames = {f.path: f for f in load_frames(dataset_dir)}
         self._labeled = latest_labels(dataset_dir)
@@ -310,18 +349,43 @@ def _frame_view(frame):
         return None
     when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(frame.ts)) if frame.ts else None
     return {"path": frame.path, "camera": frame.camera, "ts": frame.ts, "time": when,
-            "source": frame.source, "score": frame.score, "band": band(frame.score)}
+            "source": frame.source, "verdict": frame.verdict, "score": frame.score,
+            "band": band(frame.score)}
 
 
 # ── stats ────────────────────────────────────────────────────────────────────
+
+# A slice's best threshold needs this many decided frames with a score, and this many of
+# each class, before it reads as a recommendation. Below that it is marked "too few
+# labels": on a handful of frames the minimum-error cut sits wherever one odd frame is.
+MIN_SUPPORT_DECIDED = 20
+MIN_SUPPORT_PER_CLASS = 5
+DAY_NIGHT = ("day", "night", "unknown")
+
 
 def _rate(part, whole):
     return part / whole if whole else None
 
 
+def _verdict_block(records):
+    """Decided review frames of one verdict: persons among them, sampled ones scaled."""
+    person = sum(1 for r in records if r["label"] == "person")
+    block = {"person": person, "decided": len(records), "rate": _rate(person, len(records)),
+             "sampled": sum(1 for r in records if r["sample_rate"]),
+             "estimated_person": None, "estimated_decided": None}
+    if block["sampled"]:
+        # A sampled frame stands for 1/sample_rate dropped frames. An estimate, and one
+        # that only covers the part of the sample that has been labeled.
+        weights = [(r, 1 / r["sample_rate"] if r["sample_rate"] else 1.0) for r in records]
+        block["estimated_person"] = sum(w for r, w in weights if r["label"] == "person")
+        block["estimated_decided"] = sum(w for _, w in weights)
+    return block
+
+
 def _summarize(records):
     counts = {name: 0 for name in LABELS}
     fa_no = fa_decided = miss_yes = miss_decided = 0
+    review = {}
     for rec in records:
         label = rec["label"]
         counts[label] += 1
@@ -330,6 +394,7 @@ def _summarize(records):
         if rec.get("source") == "review":
             miss_decided += 1
             miss_yes += label == "person"
+            review.setdefault(rec.get("verdict") or "unknown", []).append(rec)
         else:
             fa_decided += 1
             fa_no += label == "no_person"
@@ -340,6 +405,10 @@ def _summarize(records):
                          "rate": _rate(fa_no, fa_decided)},
         "misses": {"person": miss_yes, "decided": miss_decided,
                    "rate": _rate(miss_yes, miss_decided)},
+        # A person in a held frame is a hold error (corroboration waited on a real
+        # subject); a person in a dropped frame is a real miss.
+        "verdicts": {name: _verdict_block(review[name])
+                     for name in sorted(review, key=lambda v: (v != "hold", v != "drop", v))},
     }
 
 
@@ -348,10 +417,15 @@ def best_threshold(pairs):
 
     Candidates are the labeled scores themselves. Ties go to the lower threshold, i.e.
     fewer misses: a missed person costs more than one more photo to glance at.
+    ``supported`` says whether there were enough labels of both classes to trust it.
     """
     pairs = [(float(s), bool(p)) for s, p in pairs]
+    persons = sum(1 for _, p in pairs if p)
     result = {"threshold": None, "errors": None, "false_alarms": None, "misses": None,
-              "accuracy": None, "n": len(pairs)}
+              "accuracy": None, "n": len(pairs), "person": persons,
+              "no_person": len(pairs) - persons,
+              "supported": (len(pairs) >= MIN_SUPPORT_DECIDED
+                            and min(persons, len(pairs) - persons) >= MIN_SUPPORT_PER_CLASS)}
     if not pairs:
         return result
     best = None
@@ -367,23 +441,84 @@ def best_threshold(pairs):
     return result
 
 
-def compute_stats(dataset_dir):
-    """Label counts, false-alarm and miss estimates, per band/camera, best threshold."""
+def _best(records):
+    return best_threshold((r["score"], r["label"] == "person") for r in records
+                          if r["score"] is not None and r["label"] != "unsure")
+
+
+def _slice(records):
+    block = _summarize(records)
+    block["threshold"] = _best(records)
+    return block
+
+
+def _camera(rec):
+    return str(rec.get("camera") or "unknown")
+
+
+def night_classifier(app, *, is_night=None):
+    """``(camera, ts) -> bool``: night as the daemon would have judged it for a frame.
+
+    Site night from :func:`tapo_monitor.replay.default_is_night` (the configured
+    location, in the site's timezone; ``is_night(ts)`` replaces it, e.g. in tests), then
+    the camera's own ``schedule`` via :func:`tapo_monitor.daemon.effective_night`. A
+    camera missing from the config gets the site's night. Imported here, not at the top:
+    only ``--config`` needs the daemon, the labeling page never does.
+    """
+    from . import daemon, replay
+
+    site = is_night if is_night is not None else replay.default_is_night(app)
+    cameras = {cfg.name: cfg for cfg in app.cameras}
+
+    def night(camera, ts):
+        astronomical = bool(site(ts))
+        cfg = cameras.get(camera)
+        return daemon.effective_night(cfg, astronomical) if cfg is not None else astronomical
+
+    return night
+
+
+def compute_stats(dataset_dir, *, night=None):
+    """Label counts, false-alarm and miss estimates, per band/camera, best threshold.
+
+    Review frames are also split by their index ``verdict`` (hold / drop). With
+    ``night(camera, ts) -> bool`` (see :func:`night_classifier`) a ``day_night`` section
+    repeats the summary and best threshold for day, night and frames without a time,
+    and per camera for day and night.
+    """
     records = list(latest_labels(dataset_dir).values())
+    meta = index_meta(dataset_dir)
     for rec in records:
         rec["score"] = _number(rec.get("score"))
+        # A label line carries no time or verdict; its frame's index record does.
+        known = meta.get(rec.get("path"))
+        if known is None:
+            known = {"ts": _number(rec.get("ts")), "verdict": rec.get("verdict"),
+                     "sample_rate": _sample_rate(rec.get("sample_rate"))}
+        rec.update(known)
     stats = _summarize(records)
     stats["bands"] = {name: _summarize([r for r in records if band(r["score"]) == name])
                       for name in BANDS}
-    cameras = sorted({str(r.get("camera") or "unknown") for r in records})
-    stats["cameras"] = {cam: _summarize([r for r in records
-                                         if str(r.get("camera") or "unknown") == cam])
+    cameras = sorted({_camera(r) for r in records})
+    stats["cameras"] = {cam: _summarize([r for r in records if _camera(r) == cam])
                         for cam in cameras}
     auto = sum(1 for r in records if str(r.get("by") or "").startswith("auto"))
     stats["by"] = {"auto": auto, "human": len(records) - auto}
-    stats["threshold"] = best_threshold(
-        (r["score"], r["label"] == "person") for r in records
-        if r["score"] is not None and r["label"] != "unsure")
+    stats["threshold"] = _best(records)
+    if night is not None:
+        for rec in records:
+            rec["daypart"] = ("unknown" if rec["ts"] is None
+                              else "night" if night(rec.get("camera"), rec["ts"]) else "day")
+        parts = {name: _slice([r for r in records if r["daypart"] == name])
+                 for name in DAY_NIGHT}
+        parts["cameras"] = {
+            cam: {name: _slice([r for r in records
+                                if _camera(r) == cam and r["daypart"] == name])
+                  for name in ("day", "night")}
+            for cam in cameras}
+        parts["min_support"] = {"decided": MIN_SUPPORT_DECIDED,
+                                "per_class": MIN_SUPPORT_PER_CLASS}
+        stats["day_night"] = parts
     return stats
 
 
@@ -408,6 +543,9 @@ def _stats_rows(stats):
 
 STATS_HEADERS = ("group", "labeled", "person", "no_person", "unsure",
                  "false alarms (sent)", "misses (review)")
+DAY_NIGHT_HEADERS = ("slice", "n", "person", "no_person", "best threshold", "errors",
+                     "false alarms", "misses", "note")
+TOO_FEW = "too few labels"
 
 
 def _threshold_line(best):
@@ -418,22 +556,80 @@ def _threshold_line(best):
             f"{best['misses']} misses, accuracy {_pct(best['accuracy'])})")
 
 
-def format_stats(stats):
-    rows = _stats_rows(stats)
-    widths = [max(len(STATS_HEADERS[i]), *(len(r[i]) for r in rows))
-              for i in range(len(STATS_HEADERS))]
+def _verdict_lines(stats):
+    """Misses by review verdict; nothing while every labeled review frame was a hold."""
+    verdicts = stats.get("verdicts") or {}
+    if not set(verdicts) - {"hold", "unknown"}:
+        return []
+    out = ["misses by review verdict (person in a held frame = hold error, in a dropped "
+           "frame = real miss):"]
+    for name, block in verdicts.items():
+        text = f"  {name}: {block['person']}/{block['decided']} ({_pct(block['rate'])})"
+        if block["sampled"]:
+            text += (f", {block['sampled']} of them sampled -> estimated "
+                     f"{block['estimated_person']:.0f} person of "
+                     f"{block['estimated_decided']:.0f} frames (count / sample_rate; an "
+                     "estimate)")
+        out.append(text)
+    return out
+
+
+def _day_night_row(name, best):
+    def cell(value):
+        return "-" if value is None else str(value)
+
+    return (name, str(best["n"]), str(best["person"]), str(best["no_person"]),
+            "n/a" if best["threshold"] is None else f"{best['threshold']:.2f}",
+            cell(best["errors"]), cell(best["false_alarms"]), cell(best["misses"]),
+            "" if best["supported"] else TOO_FEW)
+
+
+def _day_night_rows(stats):
+    parts = stats["day_night"]
+    rows = [_day_night_row("all", stats["threshold"])]
+    rows += [_day_night_row(name, parts[name]["threshold"]) for name in DAY_NIGHT
+             if name != "unknown" or parts[name]["counts"]["total"]]
+    for cam, by_part in parts["cameras"].items():
+        rows += [_day_night_row(f"camera {cam} {name}", by_part[name]["threshold"])
+                 for name in ("day", "night") if by_part[name]["counts"]["total"]]
+    return rows
+
+
+def _day_night_summary(stats):
+    parts = stats["day_night"]
+    counts = ", ".join(f"{parts[name]['counts']['total']} {name}" for name in DAY_NIGHT)
+    return (f"day/night of the labeled frames ({counts}; night as the daemon judged it, "
+            "camera schedules applied)")
+
+
+def _day_night_note():
+    return (f"{TOO_FEW} = fewer than {MIN_SUPPORT_DECIDED} decided frames with a score or "
+            f"fewer than {MIN_SUPPORT_PER_CLASS} of either class: noise, not a threshold "
+            "to ship")
+
+
+def _table(headers, rows):
+    widths = [max(len(headers[i]), *(len(r[i]) for r in rows)) for i in range(len(headers))]
 
     def line(values):
         return "  ".join(v.ljust(widths[i]) for i, v in enumerate(values)).rstrip()
 
-    out = [line(STATS_HEADERS), line(tuple("-" * w for w in widths))]
-    out += [line(r) for r in rows]
+    return [line(headers), line(tuple("-" * w for w in widths))] + [line(r) for r in rows]
+
+
+def format_stats(stats):
+    out = _table(STATS_HEADERS, _stats_rows(stats))
     by = stats.get("by") or {}
     out += ["", f"labels: {by.get('human', 0)} by a person, {by.get('auto', 0)} automatic "
                 "(both models agreed)",
             _threshold_line(stats["threshold"]),
             "false alarms = sent frames labeled no_person; misses = review (held) frames "
             "labeled person; unsure excluded"]
+    out += _verdict_lines(stats)
+    if "day_night" in stats:
+        out += ["", _day_night_summary(stats) + ":"]
+        out += _table(DAY_NIGHT_HEADERS, _day_night_rows(stats))
+        out.append(_day_night_note())
     return "\n".join(out)
 
 
@@ -497,7 +693,7 @@ function show(s) {
   $("img").src = "/image/" + current.path.split("/").map(encodeURIComponent).join("/");
   $("camera").textContent = current.camera || "unknown";
   $("time").textContent = current.time || "";
-  $("source").textContent = current.source;
+  $("source").textContent = current.source + (current.verdict ? " (" + current.verdict + ")" : "");
   $("score").textContent = current.score == null ? "n/a" : current.score.toFixed(2);
   $("teacher").textContent = current.teacher == null ? "n/a" : current.teacher.toFixed(2);
   $("band").textContent = "(" + current.band + ")";
@@ -530,11 +726,23 @@ call("/api/next");
 """
 
 
-def stats_page(stats):
-    """The ``/stats`` HTML: the same table and threshold line the CLI prints."""
-    head = "".join(f"<th>{html.escape(h)}</th>" for h in STATS_HEADERS)
+def _html_table(headers, rows):
+    head = "".join(f"<th>{html.escape(h)}</th>" for h in headers)
     body = "".join("<tr>" + "".join(f"<td>{html.escape(v)}</td>" for v in row) + "</tr>"
-                   for row in _stats_rows(stats))
+                   for row in rows)
+    return f'<div class="wrap"><table><tr>{head}</tr>{body}</table></div>'
+
+
+def stats_page(stats):
+    """The ``/stats`` HTML: the same tables and lines the CLI prints."""
+    extra = ""
+    verdicts = _verdict_lines(stats)
+    if verdicts:
+        extra += "<p>" + "<br>".join(html.escape(v.strip()) for v in verdicts) + "</p>"
+    if "day_night" in stats:
+        extra += (f"<h2>Day and night</h2><p>{html.escape(_day_night_summary(stats))}</p>"
+                  f"{_html_table(DAY_NIGHT_HEADERS, _day_night_rows(stats))}"
+                  f"<p>{html.escape(_day_night_note())}</p>")
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -552,10 +760,11 @@ a{{color:inherit}}
 </style></head><body><main>
 <p><a href="/">&larr; back to labeling</a></p>
 <h1>Label stats</h1>
-<div class="wrap"><table><tr>{head}</tr>{body}</table></div>
+{_html_table(STATS_HEADERS, _stats_rows(stats))}
 <p>{html.escape(_threshold_line(stats["threshold"]))}</p>
 <p>False alarms = sent frames labeled no_person. Misses = review (held) frames labeled
 person. Unsure is excluded from both rates.</p>
+{extra}
 </main></body></html>
 """
 
@@ -588,9 +797,10 @@ def make_server(session, port=0, bind=DEFAULT_BIND):
             elif path == "/api/next":
                 self._json(200, session.state())
             elif path == "/stats":
-                self._html(stats_page(compute_stats(session.dataset_dir)))
+                self._html(stats_page(compute_stats(session.dataset_dir,
+                                                    night=session.night)))
             elif path == "/api/stats":
-                self._json(200, compute_stats(session.dataset_dir))
+                self._json(200, compute_stats(session.dataset_dir, night=session.night))
             elif path.startswith("/image/"):
                 self._image(urllib.parse.unquote(path[len("/image/"):]))
             else:
@@ -667,6 +877,22 @@ def _dataset_ok(prog, value):
     return False
 
 
+def _night_from_config(prog, path):
+    """The :func:`night_classifier` for ``--config``, or None after printing why not."""
+    from .config import ConfigError, load_config
+
+    try:
+        app = load_config(path)
+    except (OSError, ConfigError) as exc:
+        print(f"{prog}: config: {exc}", file=sys.stderr)
+        return None
+    return night_classifier(app)
+
+
+CONFIG_HELP = ("cameras.yaml: split the stats by day and night as the daemon judges it "
+               "(location, per-camera schedule)")
+
+
 def label_main(argv):
     parser = argparse.ArgumentParser(
         prog="tapo-monitor label",
@@ -679,10 +905,17 @@ def label_main(argv):
                         help="seed for the low-score sample order")
     parser.add_argument("--low-sample", type=int, default=None,
                         help="queue at most N low-score frames (default: all, shuffled)")
+    parser.add_argument("--config", help=CONFIG_HELP + " on the /stats page")
     args = parser.parse_args(argv)
     if not _dataset_ok(parser.prog, args.dataset_dir):
         return 2
-    session = LabelSession(args.dataset_dir, seed=args.seed, low_sample=args.low_sample)
+    night = None
+    if args.config:
+        night = _night_from_config(parser.prog, args.config)
+        if night is None:
+            return 1
+    session = LabelSession(args.dataset_dir, seed=args.seed, low_sample=args.low_sample,
+                           night=night)
     return serve(session, args.port, args.bind)
 
 
@@ -692,10 +925,16 @@ def stats_main(argv):
         description="Summarize labels.jsonl: false alarms, misses, best threshold")
     parser.add_argument("dataset_dir")
     parser.add_argument("--json", action="store_true", dest="json_output")
+    parser.add_argument("--config", help=CONFIG_HELP)
     args = parser.parse_args(argv)
     if not _dataset_ok(parser.prog, args.dataset_dir):
         return 2
-    stats = compute_stats(args.dataset_dir)
+    night = None
+    if args.config:
+        night = _night_from_config(parser.prog, args.config)
+        if night is None:
+            return 1
+    stats = compute_stats(args.dataset_dir, night=night)
     if args.json_output:
         print(json.dumps(stats, sort_keys=True))
     else:

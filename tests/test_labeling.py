@@ -415,3 +415,274 @@ def test_unknown_path_is_404(served):
     with pytest.raises(urllib.error.HTTPError) as err:
         _get(url + "/metrics")
     assert err.value.code == 404
+
+
+# ── stats: backwards compatibility, hold vs drop, day/night ──────────────────
+
+STATS_FIXTURE = [
+    ("person", 0.90, "front", "sent"),
+    ("no_person", 0.70, "front", "sent"),
+    ("person", 0.50, "front", "sent"),
+    ("no_person", 0.35, "yard", "review"),
+    ("person", 0.20, "yard", "review"),
+    ("no_person", 0.10, "yard", "review"),
+    ("unsure", 0.40, "yard", "review"),
+    ("no_person", None, "yard", "sent"),
+]
+
+# label-stats output for STATS_FIXTURE before day/night and verdicts existed.
+STATS_FIXTURE_TEXT = """\
+group         labeled  person  no_person  unsure  false alarms (sent)  misses (review)
+------------  -------  ------  ---------  ------  -------------------  ---------------
+all           8        3       4          1       2/4 (50.0%)          1/3 (33.3%)
+band gray     3        1       1          1       0/1 (0.0%)           0/1 (0.0%)
+band low      2        1       1          0       0/0 (n/a)            1/2 (50.0%)
+band high     2        1       1          0       1/2 (50.0%)          0/0 (n/a)
+band none     1        0       1          0       1/1 (100.0%)         0/0 (n/a)
+camera front  3        2       1          0       1/3 (33.3%)          0/0 (n/a)
+camera yard   5        1       3          1       1/1 (100.0%)         1/3 (33.3%)
+
+labels: 8 by a person, 0 automatic (both models agreed)
+best threshold: person >= 0.20 -> 2 errors of 6 (2 false alarms, 0 misses, accuracy 66.7%)
+false alarms = sent frames labeled no_person; misses = review (held) frames labeled \
+person; unsure excluded
+"""
+
+
+def _old_block(total, person, no_person, unsure, fa, fa_decided, miss, miss_decided):
+    def rate(part, whole):
+        return part / whole if whole else None
+
+    return {"counts": {"person": person, "no_person": no_person, "unsure": unsure,
+                       "total": total},
+            "false_alarms": {"no_person": fa, "decided": fa_decided,
+                             "rate": rate(fa, fa_decided)},
+            "misses": {"person": miss, "decided": miss_decided,
+                       "rate": rate(miss, miss_decided)}}
+
+
+def _without_new_keys(stats):
+    """The stats as the JSON looked before verdicts and threshold support existed."""
+    def strip(block):
+        return {k: v for k, v in block.items() if k != "verdicts"}
+
+    old = strip(stats)
+    old["bands"] = {k: strip(v) for k, v in stats["bands"].items()}
+    old["cameras"] = {k: strip(v) for k, v in stats["cameras"].items()}
+    old["threshold"] = {k: v for k, v in stats["threshold"].items()
+                        if k not in ("person", "no_person", "supported")}
+    return old
+
+
+def test_stats_without_config_keep_the_previous_text_and_json(tmp_path, capsys):
+    root = str(tmp_path)
+    _label_lines(root, STATS_FIXTURE)
+    assert cli.main(["label-stats", root]) == 0
+    assert capsys.readouterr().out == STATS_FIXTURE_TEXT
+    assert cli.main(["label-stats", root, "--json"]) == 0
+    stats = json.loads(capsys.readouterr().out)
+    assert "day_night" not in stats
+    expected = _old_block(8, 3, 4, 1, 2, 4, 1, 3)
+    expected["bands"] = {"gray": _old_block(3, 1, 1, 1, 0, 1, 0, 1),
+                         "low": _old_block(2, 1, 1, 0, 0, 0, 1, 2),
+                         "high": _old_block(2, 1, 1, 0, 1, 2, 0, 0),
+                         "none": _old_block(1, 0, 1, 0, 1, 1, 0, 0)}
+    expected["cameras"] = {"front": _old_block(3, 2, 1, 0, 1, 3, 0, 0),
+                           "yard": _old_block(5, 1, 3, 1, 1, 1, 1, 3)}
+    expected["by"] = {"auto": 0, "human": 8}
+    expected["threshold"] = {"threshold": 0.2, "errors": 2, "false_alarms": 2, "misses": 0,
+                             "accuracy": pytest.approx(2 / 3), "n": 6}
+    assert _without_new_keys(stats) == expected
+
+
+def test_load_frames_exposes_verdict_and_sample_rate(tmp_path):
+    root = tmp_path / "dataset"
+    _write_log(str(root / "h" / "review-log"), [
+        _review("held.jpg", 0.4),
+        {**_review("hub.jpg", 0.2), "verdict": "drop"},
+        {**_review("sampled.jpg", 0.1), "verdict": "drop", "sample_rate": 0.1},
+        {**_review("bad_rate.jpg", 0.1), "verdict": "drop", "sample_rate": 7},
+    ])
+    _write_log(str(root / "h" / "sent-log"), [_sent("sent.jpg", 0.9)])
+    frames = {f.path.rsplit("/", 1)[1]: f for f in labeling.load_frames(str(root))}
+    assert (frames["held.jpg"].verdict, frames["held.jpg"].sample_rate) == ("hold", None)
+    assert (frames["hub.jpg"].verdict, frames["hub.jpg"].sample_rate) == ("drop", None)
+    assert frames["sampled.jpg"].sample_rate == 0.1
+    assert frames["bad_rate.jpg"].sample_rate is None
+    assert (frames["sent.jpg"].source, frames["sent.jpg"].verdict) == ("sent", None)
+    assert all(f.source == "review" for n, f in frames.items() if n != "sent.jpg")
+
+
+def test_stats_split_misses_by_hold_and_drop(tmp_path):
+    root = tmp_path / "dataset"
+    _write_log(str(root / "h" / "review-log"), [
+        _review("h1.jpg", 0.5), _review("h2.jpg", 0.45), _review("h3.jpg", 0.4),
+        {**_review("hub.jpg", 0.2), "verdict": "drop"},
+        {**_review("s1.jpg", 0.1), "verdict": "drop", "sample_rate": 0.1},
+        {**_review("s2.jpg", 0.05), "verdict": "drop", "sample_rate": 0.1},
+    ])
+    session = labeling.LabelSession(str(root), seed=1)
+    for name, label in [("h1", "person"), ("h2", "person"), ("h3", "no_person"),
+                        ("hub", "no_person"), ("s1", "person"), ("s2", "no_person")]:
+        session.label(f"h/review-log/{name}.jpg", label, now=1.0)
+    stats = labeling.compute_stats(str(root))
+    assert (stats["misses"]["person"], stats["misses"]["decided"]) == (3, 6)
+    hold, drop = stats["verdicts"]["hold"], stats["verdicts"]["drop"]
+    assert (hold["person"], hold["decided"], hold["sampled"]) == (2, 3, 0)
+    assert hold["estimated_person"] is None
+    assert (drop["person"], drop["decided"], drop["sampled"]) == (1, 3, 2)
+    # One sampled person at 10 % stands for ten; the hub drop was kept whole.
+    assert drop["estimated_person"] == pytest.approx(10.0)
+    assert drop["estimated_decided"] == pytest.approx(21.0)
+    assert stats["cameras"]["yard"]["verdicts"]["drop"]["person"] == 1
+    text = labeling.format_stats(stats)
+    assert "misses by review verdict" in text
+    assert "hold: 2/3 (66.7%)" in text
+    assert "drop: 1/3 (33.3%), 2 of them sampled -> estimated 10 person of 21" in text
+    assert text.index("hold: ") < text.index("drop: ")
+
+
+def test_stats_hide_the_verdict_split_while_only_holds_were_labeled(dataset):
+    session = labeling.LabelSession(dataset, seed=1)
+    session.label("host-b/review-log/r_low1.jpg", "person", now=1.0)
+    stats = labeling.compute_stats(dataset)
+    assert stats["verdicts"]["hold"]["person"] == 1
+    assert "misses by review verdict" not in labeling.format_stats(stats)
+
+
+def test_best_threshold_minimum_support():
+    def pairs(persons, others):
+        return [(0.9, True)] * persons + [(0.1, False)] * others
+
+    assert labeling.MIN_SUPPORT_DECIDED == 20 and labeling.MIN_SUPPORT_PER_CLASS == 5
+    assert labeling.best_threshold(pairs(5, 15))["supported"] is True
+    assert labeling.best_threshold(pairs(5, 14))["supported"] is False    # 19 decided
+    assert labeling.best_threshold(pairs(4, 30))["supported"] is False    # 4 persons
+    assert labeling.best_threshold(pairs(30, 4))["supported"] is False    # 4 no_person
+    best = labeling.best_threshold(pairs(8, 0))
+    assert (best["person"], best["no_person"], best["supported"]) == (8, 0, False)
+    assert labeling.best_threshold([])["supported"] is False
+
+
+# Site night from ts 5000 on; "porch" is always night whatever the sun does.
+DAY_TS, NIGHT_TS = 1000.0, 6000.0
+
+
+def _site_night(ts):
+    return ts >= 5000
+
+
+def _night_app():
+    from tapo_monitor import config
+    return config.load_config_from_dict({"cameras": [
+        {"name": "front", "host": "192.0.2.10"},
+        {"name": "porch", "host": "192.0.2.11", "schedule": "always_night"},
+    ]})
+
+
+@pytest.fixture
+def day_night_dataset(tmp_path):
+    root = tmp_path / "dataset"
+    sent = [_sent("front_day.jpg", 0.9, "front", DAY_TS),
+            _sent("front_night.jpg", 0.8, "front", NIGHT_TS),
+            _sent("porch_day.jpg", 0.7, "porch", DAY_TS),
+            _sent("yard_night.jpg", 0.6, "yard", NIGHT_TS),
+            _sent("yard_day.jpg", 0.5, "yard", DAY_TS)]
+    untimed = _sent("untimed.jpg", 0.4, "front")
+    del untimed["ts"]
+    _write_log(str(root / "h" / "sent-log"), sent + [untimed])
+    session = labeling.LabelSession(str(root), seed=1)
+    for frame in session.pending():
+        session.label(frame.path, "person", now=1.0)
+    return str(root)
+
+
+def test_night_classifier_applies_site_night_and_camera_schedule():
+    night = labeling.night_classifier(_night_app(), is_night=_site_night)
+    assert night("front", DAY_TS) is False and night("front", NIGHT_TS) is True
+    assert night("porch", DAY_TS) is True                  # always_night
+    assert night("unknown-cam", NIGHT_TS) is True          # not in the config: site night
+    assert night(None, DAY_TS) is False
+
+
+def test_stats_split_by_day_and_night(day_night_dataset):
+    night = labeling.night_classifier(_night_app(), is_night=_site_night)
+    stats = labeling.compute_stats(day_night_dataset, night=night)
+    parts = stats["day_night"]
+    assert parts["day"]["counts"]["total"] == 2        # front_day, yard_day
+    assert parts["night"]["counts"]["total"] == 3      # front_night, porch (always), yard
+    assert parts["unknown"]["counts"]["total"] == 1    # no timestamp
+    assert parts["cameras"]["porch"]["night"]["counts"]["total"] == 1
+    assert parts["cameras"]["porch"]["day"]["counts"]["total"] == 0
+    assert parts["cameras"]["front"]["day"]["threshold"]["n"] == 1
+    assert parts["night"]["threshold"]["n"] == 3
+    assert parts["night"]["threshold"]["supported"] is False
+    assert parts["min_support"] == {"decided": 20, "per_class": 5}
+    text = labeling.format_stats(stats)
+    assert "day/night of the labeled frames (2 day, 3 night, 1 unknown" in text
+    assert "camera porch night" in text and "too few labels" in text
+    assert "camera porch day" not in text              # no labels in that slice
+    # The part before the day/night section is what label-stats printed without it.
+    assert text.startswith(labeling.format_stats(labeling.compute_stats(day_night_dataset)))
+
+
+def test_day_night_threshold_per_slice(tmp_path):
+    root = str(tmp_path)
+    rows = []
+    for i in range(10):          # day: persons score high, clean cut at 0.60
+        rows.append({"label": "person", "score": 0.6 + i / 100, "ts": DAY_TS})
+        rows.append({"label": "no_person", "score": 0.2 + i / 100, "ts": DAY_TS})
+    for i in range(10):          # night: persons score lower, clean cut at 0.40
+        rows.append({"label": "person", "score": 0.4 + i / 100, "ts": NIGHT_TS})
+        rows.append({"label": "no_person", "score": 0.1 + i / 100, "ts": NIGHT_TS})
+    with open(os.path.join(root, "labels.jsonl"), "w", encoding="utf-8") as f:
+        for i, row in enumerate(rows):
+            # Label lines whose frame is not indexed fall back to their own fields.
+            f.write(json.dumps({"path": f"x/{i}.jpg", "sha256": str(i), "camera": "front",
+                                "source": "sent", **row}) + "\n")
+    night = labeling.night_classifier(_night_app(), is_night=_site_night)
+    parts = labeling.compute_stats(root, night=night)["day_night"]
+    day, dark = parts["day"]["threshold"], parts["night"]["threshold"]
+    assert (day["threshold"], day["errors"], day["supported"]) == (0.6, 0, True)
+    assert (dark["threshold"], dark["errors"], dark["supported"]) == (0.4, 0, True)
+    assert (day["n"], day["person"], day["no_person"]) == (20, 10, 10)
+
+
+def test_label_stats_cli_config(day_night_dataset, tmp_path, monkeypatch, capsys):
+    from tapo_monitor import replay
+    config_path = tmp_path / "cameras.yaml"
+    config_path.write_text("cameras:\n  - name: porch\n    host: 192.0.2.11\n"
+                           "    schedule: always_night\n", encoding="utf-8")
+    monkeypatch.setattr(replay, "default_is_night", lambda app: _site_night)
+    assert cli.main(["label-stats", day_night_dataset, "--config", str(config_path),
+                     "--json"]) == 0
+    parts = json.loads(capsys.readouterr().out)["day_night"]
+    assert [parts[name]["counts"]["total"] for name in ("day", "night", "unknown")] \
+        == [2, 3, 1]
+    assert cli.main(["label-stats", day_night_dataset, "--config", str(config_path)]) == 0
+    assert "day/night of the labeled frames" in capsys.readouterr().out
+    missing = str(tmp_path / "nope.yaml")
+    assert cli.main(["label-stats", day_night_dataset, "--config", missing]) == 1
+    assert "config" in capsys.readouterr().err
+
+
+def test_stats_page_shows_day_and_night(day_night_dataset):
+    night = labeling.night_classifier(_night_app(), is_night=_site_night)
+    session = labeling.LabelSession(day_night_dataset, seed=1, night=night)
+    srv, url = _serve(session)
+    try:
+        _, _, body = _get(url + "/stats")
+        assert "Day and night" in body.decode() and "too few labels" in body.decode()
+        _, _, body = _get(url + "/api/stats")
+        assert json.loads(body)["day_night"]["unknown"]["counts"]["total"] == 1
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    plain = labeling.LabelSession(day_night_dataset, seed=1)
+    srv, url = _serve(plain)
+    try:
+        _, _, body = _get(url + "/stats")
+        assert "Day and night" not in body.decode()
+    finally:
+        srv.shutdown()
+        srv.server_close()

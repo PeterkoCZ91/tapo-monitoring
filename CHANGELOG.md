@@ -12,6 +12,9 @@ All notable changes to this project are documented here.
 - `tapo-monitor label` / `label-stats`: local frame-labeling page over collected sent/review-log
   frames (append-only `labels.jsonl` keyed by image SHA-256) and false-alarm/miss/threshold stats.
   Binds `127.0.0.1` by default. See `docs/labeling.md`.
+  With `--config cameras.yaml` both report the best threshold by day and night (overall and per
+  camera, marked "too few labels" below 20 decided frames or 5 of either class), and misses
+  are split into held frames and sampled drops.
 - `ldc` (Lens Distortion Correction): per-camera boolean option asserting on-sensor barrel distortion
   correction for wide-angle 4K sensors (e.g. C560WS, C260). Straightens vertical and horizontal
   perspective lines across the scene, boosting YOLO person detection confidence near frame edges.
