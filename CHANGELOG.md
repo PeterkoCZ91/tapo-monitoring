@@ -21,7 +21,8 @@ All notable changes to this project are documented here.
 - `tapo-monitor learn-face <name>`: CLI helper listening for live on-device face detection events to
   capture stable `face_id`s and output matching `FACE_ID_NAMES` entries.
 - `faces.ignore_known`: suppresses alerts when all detected faces belong to enrolled household members,
-  logging the recognized name in the audit trail while keeping unconfirmed or unknown faces alertable.
+  audited as `reason=known_face` (the name stays in the journal, never in the ledger) while keeping
+  unconfirmed or unknown faces alertable.
 - Hub clip delivery is retried: a failed Telegram send goes to a bounded queue (4 attempts,
   600 s TTL) instead of being lost after the cursor moved on, and the hub cursor is kept in
   `hub_cursor.json` so a restart no longer skips clips from the downtime (capped at 4 h).
@@ -115,8 +116,33 @@ All notable changes to this project are documented here.
   `OnFailure=` hands the reason to the fleet's notifier. Credentials live in
   `/etc/tapo-monitor/notify.env`; the script never takes a token as an argument, because
   argv is world-readable in `/proc`.
+- One arbiter for the motor (`tapo_monitor/motion.py`): the scheduled preset recall and the
+  ONVIF pan-limit guard both ask it before moving. Privacy mode blocks every move; a
+  `track_hold` blocks the scheduled recall; the guard overrides a hold after
+  `pan_limit.hold_grace` seconds out of bounds (default 20, `0` = the old immediate recall).
+  Refused moves are logged once per stretch and counted per camera (`motion_refusals`, also
+  in `/status`).
+- Alert work in flight survives a restart: hub delivery retries, pending SD follow-ups and
+  alert cooldowns are kept in `runtime.json` beside the health state and restored on start,
+  so a deploy neither drops a queued alert nor re-sends the same passage.
+- Incident IDs: every audit line and sent-log entry carries `incident=<camera>-<start>`,
+  derived from the camera event, and `tapo-monitor incident <id>` prints the chain from the
+  ledger and the sent log.
+- `tapo-monitor replay`: runs a recorded ledger window through the production mute,
+  cooldown and scene-group gates, read-only; `--compare` shows events whose outcome a
+  candidate config would change.
+- A scenario test harness (`tests/scenario.py`) that drives the real `loop_step` through
+  multi-tick stories with a fake clock, camera, ONVIF and notifier.
+- Configuration: `coordinator.camera_order` must name cameras of its own group, and a
+  renamed key can be accepted with a warning for one release (`RENAMED_KEYS`).
 
 ### Changed
+- A stop signal inside a tick now waits for the tick to finish (a second signal, or one
+  between ticks, still exits at once), so a restart never cuts a preset recall or a
+  Telegram send in half. On exit the audit-ledger queue gets a bounded 5 s to drain, and
+  the flush `logging.shutdown()` performs is bounded too.
+- The status endpoint serves a view the main loop publishes after every tick instead of
+  reading live daemon state from its own thread.
 - Frame sharpness is judged on the scorer's subject box when every candidate frame has one
   (Laplacian variance of the crop); without boxes it falls back to full-frame blur as before.
   Below-threshold frames of one sequence share a single audit line.
@@ -131,6 +157,11 @@ All notable changes to this project are documented here.
   before the model loads.
 
 ### Fixed
+- `faces.ignore_known` never took effect on the live path (it was read from the resolved
+  secrets, which never carry it), and both the live and SD skips would have raised
+  `TypeError` on the first known face.
+- The pan guard's hold grace restarts after an ONVIF read failure instead of recalling the
+  lens with no grace on return.
 - Hub clip downloads now enforce stream completion integrity (`download_clip`). If a
   download stream terminates early, stalls, or receives an error, the incomplete video
   file is unlinked and rejected rather than treated as a valid clip.

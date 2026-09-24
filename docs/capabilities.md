@@ -30,7 +30,9 @@ documented below as *available* but intentionally **not implemented** — see "A
   preset when it drifts past the leftmost/rightmost preset (e.g. auto-track swinging into a
   wall). The presets define the allowed range; ONVIF errors never stall the loop.
   `pan_limit.tilt` extends the same guard to the tilt axis, with `tilt_min`/`tilt_max`
-  keeping an outlier preset (one aimed at the sky) from stretching the bound.
+  keeping an outlier preset (one aimed at the sky) from stretching the bound. While a
+  `track_hold` keeps the lens on a subject the guard waits `pan_limit.hold_grace`
+  seconds (default 20) before recalling, and it never moves a lens parked by privacy mode.
 - **Day/night scheduling** — astral sunset/sunrise (coordinates from config) with a
   fixed HH:MM fallback. One source of truth shared by all components.
 - **Night vision mode** (optional, per camera) — `night_vision: ir` forces IR/B&W night

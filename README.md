@@ -73,6 +73,12 @@ recorder and scorer can complement the daemon, but neither is required for the b
   layered health without a second login loop.
 - **Shadow Detection Auditor** — a private, media-free SQLite ledger correlates camera
   events with independent scorer/recorder observations.
+- **One owner for the motor** — preset recalls and the pan-limit guard ask one arbiter
+  before moving, so the guard never fights a tracked subject or a lens parked by privacy
+  mode.
+- **Restart-safe, traceable alerts** — queued alerts and cooldowns survive a deploy;
+  every alert carries an incident ID you can follow with `tapo-monitor incident`, and
+  `tapo-monitor replay` checks a config change against a recorded night before it ships.
 
 See the complete [capability catalog](docs/capabilities.md) and
 [architecture](docs/architecture.md).
@@ -160,6 +166,7 @@ available frame contains the subject.
 | `tapo-monitor shadow-record ...` | Ingest one independent media-free observation. |
 | `tapo-monitor shadow-report ...` | Correlate camera and shadow observations. |
 | `tapo-monitor shadow-scan ...` | Nightly recorder audit: re-score yesterday's segments for miss candidates. |
+| `tapo-monitor incident <camera>-<start>` | Everything recorded for one incident: ledger rows and sent-log frames (read-only). |
 | `tapo-monitor replay cameras.yaml ...` | Replay a recorded ledger window through the alert gates (read-only); `--compare` a candidate config. |
 
 ## Optional local scorer
