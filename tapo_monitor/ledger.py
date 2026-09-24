@@ -578,14 +578,17 @@ class EventLedger:
         return self.delete_before(max(0.0, now - retention_seconds))
 
 
-def read_camera_window(path, *, start: float, end: float, cameras=None):
-    """Read camera observations and their live-path decisions without writing anything.
+def read_camera_window(path, *, start: float, end: float, cameras=None,
+                       decision_paths=("live",)):
+    """Read camera observations and their pipeline decisions without writing anything.
 
     Opens the SQLite file read-only (``mode=ro``): unlike :class:`EventLedger` it never
     creates the file, runs the schema script or touches its permissions, so it is safe
     against a production ledger the daemon is writing. Returns ``(observations,
-    decisions)`` — camera-source observations in event-time order, and the ``live``
-    decision rows (camera, event_type, event_at, action, id) for the same window.
+    decisions)`` — camera-source observations in event-time order, and the decision rows
+    (id, camera, event_type, event_at, path, action, observed_at, score, threshold,
+    telegram, reason) for the same window, in id order. ``decision_paths`` limits the
+    decision rows to those delivery paths (default: ``live`` only); ``None`` reads all.
     """
     start = _finite_timestamp(start, "start")
     end = _finite_timestamp(end, "end")
@@ -608,12 +611,20 @@ def read_camera_window(path, *, start: float, end: float, cameras=None):
         rows = connection.execute(
             "SELECT * FROM observations WHERE source = 'camera' AND " + where
             + " ORDER BY event_at, id", params).fetchall()
+        decision_where, decision_params = where, list(params)
+        if decision_paths is not None:
+            paths = [_safe_identifier(str(p).lower(), "path") for p in decision_paths] or [""]
+            decision_where = "path IN (" + ",".join("?" * len(paths)) + ") AND " + where
+            decision_params = paths + decision_params
         decisions = connection.execute(
-            "SELECT id, camera, event_type, event_at, action FROM decisions "
-            "WHERE path = 'live' AND " + where + " ORDER BY id", params).fetchall()
+            "SELECT id, camera, event_type, event_at, path, action, observed_at, score,"
+            " threshold, telegram, reason FROM decisions WHERE " + decision_where
+            + " ORDER BY id", decision_params).fetchall()
     finally:
         connection.close()
-    return [_row_to_observation(row) for row in rows], [dict(row) for row in decisions]
+    return [_row_to_observation(row) for row in rows], [
+        {**dict(row), "telegram": None if row["telegram"] is None else bool(row["telegram"])}
+        for row in decisions]
 
 
 def match_observations(

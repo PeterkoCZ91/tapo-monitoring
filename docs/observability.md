@@ -207,20 +207,66 @@ tapo-monitor replay cameras.yaml --start 2026-09-20T18:00 --end 2026-09-21T07:00
 ```
 
 Each line shows `would_alert` or `suppressed(<reason>)` (`cooldown`, `scene_duplicate`,
-`night_only`, `quiet_hours`, `source_disabled`, `unknown_camera`) next to the live action
-production actually recorded, followed by a per-camera summary. `--compare` replays the
-same events under a second config and lists only the events whose outcome changes.
-Times are Unix timestamps or ISO local times; `--ledger` overrides the default path.
+`threshold`, `threshold_defer`, `night_only`, `quiet_hours`, `source_disabled`,
+`unknown_camera`) next to the live action production actually recorded and its scorer
+confidence, followed by a per-camera summary. `--compare` replays the same events under a
+second config and lists only the events whose outcome changes. Times are Unix timestamps
+or ISO local times; `--ledger` overrides the default path.
+
+**Deliveries from the other paths.** An SD follow-up, sampler or hub-clip send that
+reached Telegram (a `send` decision with `telegram=1` on path `sd`, `sampler` or
+`hubpoll`) is replayed at the time it was recorded and shown as `delivered[sd]` (or
+`[sampler]`, `[hubpoll]`). It arms the gates the way that path does in production — the
+cooldown for its type, keyed by the camera event start for SD and hub clips, and a scene
+delivery for the sampler — so a live event that production suppressed because an SD
+rescue had just gone out is suppressed in the replay too. These are recorded facts, not
+re-decisions: only the mute gate is re-applied to them. The summary counts them apart from
+live events (`recorded non-live deliveries: sd=1`); a muted one is counted as
+`sd:night_only` and arms nothing.
+
+**Threshold what-ifs.** Where the live decision for an event carries a recorded score, the
+replayed config's `scorer.threshold` is applied to it after the gates, as the live path
+scores after them. A recorded send, or a `below_threshold` drop or defer, whose score
+clears the threshold is `would_alert`; bare motion under it is `suppressed(threshold)`
+and arms nothing; a confirmed type (person, pet) under it with `sd_snapshot` on is
+`suppressed(threshold_defer)` and still arms the cooldown, because the live path defers it
+to the SD follow-up; without an SD path the live safety net sends it anyway. Compare two
+configs that differ only in `scorer.threshold` to see which recorded events move:
+
+```bash
+tapo-monitor replay cameras.yaml --hours 12 --compare cameras.threshold-0.55.yaml
+```
+
+**The scene gate's reach.** `--scene-reach` replays the window a second time with the
+group gate switched off and reports, per camera, live `would_alert` without and with the
+gate and how many alerts it removed — including its knock-on effect on cooldowns, which
+the raw `scene_duplicate` count does not show. `--summary-only` drops the per-event lines
+(and, with `--json`, the `decisions` and per-event differences), which is the form to
+keep when this is re-measured. Do it whenever a delivery path is added or changes how
+often it fires, on a night from each overlapping pair:
+
+```bash
+tapo-monitor replay cameras.yaml --start 2026-09-20T18:00 --end 2026-09-21T07:00 \
+  --summary-only --scene-reach
+```
 
 It is read-only: the ledger is opened with SQLite `mode=ro` (a missing file is an error,
 never a new database), and no camera, scorer or Telegram call is made. Limits to keep in
 mind:
 
-- Media and the scorer are out of scope, so `would_alert` is an upper bound: a frame the
-  scorer would have dropped still counts, and a known-face cooldown override is not seen.
+- Media and the scorer are out of scope. A frame that was never scored — a snapshot
+  failure, a scorer outage, a camera without a scorer, a frame the daemon never grabbed —
+  cannot be re-thresholded and keeps the gates-only answer, so for those `would_alert`
+  stays an upper bound. The score is the one the live frame got: `motion_send_threshold`
+  corroboration (`hold`), the burst check and a known-face cooldown override are not
+  re-modelled.
+- Non-live deliveries are only what production recorded. A replay under another config
+  does not add the SD or sampler send that config might have produced, nor remove one it
+  would have gated; the SD look a lowered threshold would skip still arms the cooldown.
+- The window selects by camera event time, so a follow-up for an event that started just
+  before `--start` is not seen even if it was delivered inside the window.
 - The ledger only holds events the daemon did not mute, so loosening `night_only` or
   `quiet_hours` cannot resurrect events that were muted when recorded.
-- Only the getEvents path is replayed; hub, sampler and SD follow-up sends are not.
 - Night comes from `scheduling.is_night` with the config's `location` (or the `NIGHT_*`
   environment), and `quiet_hours` from the host's local time, so run it with the site's
   environment and timezone.

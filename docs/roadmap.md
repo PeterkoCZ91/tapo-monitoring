@@ -412,12 +412,17 @@ scenarios in `tests/test_scenarios.py`.
 
 ### 8.4 — Replay beyond the live path
 
-- [ ] Replay SD follow-up and sampler decisions too; today a cooldown armed by an SD
-  delivery is invisible to replay, so it over-reports `would_alert`.
-- [ ] Use the recorded scorer confidence in the ledger to answer threshold what-ifs
-  (`--compare` with a different `scorer.threshold`), still without media.
-- [ ] Re-measure the scene gate's reach with replay whenever a delivery path is added
-  (the open Phase 5 item), instead of by hand.
+- [x] Replay SD follow-up and sampler decisions too; today a cooldown armed by an SD
+  delivery is invisible to replay, so it over-reports `would_alert`. Recorded SD, sampler
+  and hub-clip sends that reached Telegram now arm the gates in the replay timeline as
+  `delivered[<path>]`; they are replayed as recorded facts, not re-decided.
+- [x] Use the recorded scorer confidence in the ledger to answer threshold what-ifs
+  (`--compare` with a different `scorer.threshold`), still without media. Frames that
+  were never scored keep the gates-only answer.
+- [x] Re-measure the scene gate's reach with replay whenever a delivery path is added
+  (the open Phase 5 item), instead of by hand: `replay --summary-only --scene-reach`
+  reports the alerts the gate removed per camera (see observability, "Replaying a
+  night").
 
 ### 8.5 — Dual-camera handoff on the arbiter
 

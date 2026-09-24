@@ -12,8 +12,22 @@ through the same gate functions the live getEvents path uses:
 An event that clears all four is reported ``would_alert`` and committed to the gates as
 a delivery, exactly as a successful Telegram send would. Media, the scorer and Telegram
 are out of scope: nothing here grabs a frame, contacts a camera or opens a socket, and
-the ledger is opened read-only. That makes the result an upper bound on alerts for the
-gate policy under test — a frame the scorer would have dropped still counts.
+the ledger is opened read-only.
+
+Two things from the ledger's ``decisions`` table narrow that upper bound:
+
+* **Recorded non-live deliveries.** An SD follow-up, sampler or hub-clip ``send`` that
+  reached Telegram (``telegram=1``) is replayed at its ``observed_at`` as a
+  ``delivered[<path>]`` line and commits to the gates the way that path's production code
+  does (``on_alert``; the sampler also records its scene delivery), so later live events
+  see the cooldown it armed. These are recorded facts, not re-decisions: replay does not
+  ask whether the delivery would still happen under another config (only the mute gate
+  is re-applied).
+* **Threshold what-if.** Where the live decision for an event carries a recorded scorer
+  confidence, the replayed config's ``scorer.threshold`` is applied to it (see
+  :func:`_threshold_outcome`). Frames that were never scored — a snapshot failure, a
+  scorer outage, a camera without a scorer, frames the daemon never grabbed — cannot be
+  re-thresholded and keep the gates-only answer.
 """
 
 from __future__ import annotations
@@ -33,24 +47,37 @@ from . import daemon, ledger, scheduling
 
 WOULD_ALERT = "would_alert"
 SUPPRESSED = "suppressed"
+DELIVERED = "delivered"       # a recorded non-live delivery, replayed as a fact
+
+# Paths whose recorded Telegram sends arm the alert gate in production (``on_alert``).
+DELIVERY_PATHS = ("sd", "sampler", "hubpoll")
+# Live actions whose recorded score was compared against ``scorer.threshold``.
+_THRESHOLD_ACTIONS = ("send", "drop", "defer")
 
 
 @dataclass(frozen=True)
 class ReplayEvent:
-    """One recorded camera detection: what the daemon saw and when it processed it."""
+    """One recorded camera detection: what the daemon saw and when it processed it.
+
+    With ``path`` other than ``live`` it is instead a recorded non-live delivery (an SD
+    follow-up, sampler or hub-clip send that reached Telegram) for that camera event.
+    """
 
     camera: str
     event_type: str
     event_at: float
     observed_at: float
-    recorded: str | None = None   # the live-path action production actually logged
+    recorded: str | None = None   # the action production actually logged for this path
+    path: str = "live"            # "live" camera event, or one of DELIVERY_PATHS
+    score: float | None = None    # recorded scorer confidence of that decision, if any
+    recorded_reason: str | None = None
 
 
 @dataclass(frozen=True)
 class Decision:
     event: ReplayEvent
-    outcome: str                  # WOULD_ALERT or SUPPRESSED
-    reason: str | None            # why it was suppressed; None when it would alert
+    outcome: str                  # WOULD_ALERT, SUPPRESSED or DELIVERED
+    reason: str | None            # why it was suppressed; None otherwise
     night: bool | None = None     # the night flag the mute gate was given
 
     def as_dict(self) -> dict:
@@ -63,27 +90,44 @@ class Decision:
             "reason": self.reason,
             "night": self.night,
             "recorded": self.event.recorded,
+            "path": self.event.path,
+            "score": self.event.score,
         }
 
 
 def load_events(path, start, end, cameras=None) -> list[ReplayEvent]:
-    """Camera detections in ``[start, end]`` from the ledger at ``path``, read-only.
+    """Camera detections and recorded non-live deliveries in ``[start, end]``, read-only.
 
-    Each event carries the action the live path recorded for it (``send``,
-    ``cooldown``, ``scene_duplicate``, ``drop`` ...), when there is one, so a replay under
-    the unchanged config can be checked against what production really did.
+    Each camera event carries the action the live path recorded for it (``send``,
+    ``cooldown``, ``scene_duplicate``, ``drop`` ...) and that decision's scorer
+    confidence, when there is one, so a replay under the unchanged config can be checked
+    against what production really did and a threshold change can be asked about.
+
+    Every SD follow-up, sampler or hub-clip ``send`` that reached Telegram is returned as
+    well, as a ``ReplayEvent`` whose ``path`` names that delivery path. The window selects
+    by camera event time, like the camera events themselves.
     """
     observations, decisions = ledger.read_camera_window(path, start=start, end=end,
-                                                        cameras=cameras)
+                                                        cameras=cameras, decision_paths=None)
     recorded = {}
+    deliveries = []
     for row in decisions:  # ordered by id: the last live action for an event wins
-        recorded[(row["camera"], row["event_type"], row["event_at"])] = row["action"]
-    return [
-        ReplayEvent(camera=obs.camera, event_type=obs.event_type, event_at=obs.event_at,
-                    observed_at=obs.observed_at,
-                    recorded=recorded.get((obs.camera, obs.event_type, obs.event_at)))
-        for obs in observations
-    ]
+        key = (row["camera"], row["event_type"], row["event_at"])
+        if row["path"] == "live":
+            recorded[key] = row
+        elif row["path"] in DELIVERY_PATHS and row["action"] == "send" and row["telegram"]:
+            deliveries.append(ReplayEvent(
+                camera=row["camera"], event_type=row["event_type"], event_at=row["event_at"],
+                observed_at=row["observed_at"], recorded="send", path=row["path"],
+                score=row["score"], recorded_reason=row["reason"]))
+    events = []
+    for obs in observations:
+        row = recorded.get((obs.camera, obs.event_type, obs.event_at)) or {}
+        events.append(ReplayEvent(
+            camera=obs.camera, event_type=obs.event_type, event_at=obs.event_at,
+            observed_at=obs.observed_at, recorded=row.get("action"),
+            score=row.get("score"), recorded_reason=row.get("reason")))
+    return events + deliveries
 
 
 def default_is_night(app):
@@ -124,20 +168,77 @@ def _mute_reason(cfg):
     return "night_only" if cfg.night_only else "quiet_hours"
 
 
-def replay(app, events, *, is_night=None) -> list[Decision]:
+def _threshold_outcome(cfg, ev):
+    """What the replayed ``scorer.threshold`` makes of a live event's recorded score.
+
+    Returns ``None`` when the threshold has no say (no recorded score, no scorer in the
+    replayed config, a tamper event, or a recorded action the threshold did not decide —
+    ``hold``, ``cooldown``, a ``drop`` for another reason ...), so the event keeps the
+    gates-only answer. Otherwise one of:
+
+    * ``"send"`` — the score clears the threshold: a live send (``would_alert``);
+    * ``"drop"`` — bare motion under the threshold: no live send and nothing armed, as the
+      live path's drop or recorder-look defer;
+    * ``"defer"`` — a confirmed type under the threshold with ``sd_snapshot`` on: the live
+      path hands it to the SD follow-up and arms the cooldown without sending.
+
+    A confirmed type under the threshold without an SD path is still sent by the live
+    path's always-send safety net, so it is ``"send"`` too.
+    """
+    if ev.score is None or not cfg.scorer.url or ev.event_type == "tamper":
+        return None
+    if ev.recorded not in _THRESHOLD_ACTIONS:
+        return None
+    if ev.recorded != "send" and ev.recorded_reason != "below_threshold":
+        return None
+    if ev.score >= cfg.scorer.threshold:
+        return "send"
+    if ev.event_type == "motion":
+        return "drop"
+    return "defer" if cfg.sd_snapshot else "send"
+
+
+def _replay_delivery(app, cfg, state, ev, night):
+    """Commit a recorded non-live delivery to the gates the way its path does."""
+    now = ev.observed_at
+    event = {"start_time": ev.event_at}
+    _, on_alert = daemon.alert_gate(state, cfg.name, app.alerts.cooldown, now)
+    if ev.path == "sampler":
+        # process_sampler arms the gate without the event and records its scene delivery.
+        on_alert(ev.event_type)
+        state.scene_coordinator.record_delivery(
+            cfg.coordinator.group, cfg.name, ev.event_type, event, now,
+            window=cfg.coordinator.scene_window)
+    else:
+        on_alert(ev.event_type, event)   # SD follow-up and hub clip
+    return Decision(ev, DELIVERED, None, night)
+
+
+def replay(app, events, *, is_night=None, scene_gate=True) -> list[Decision]:
     """Run ``events`` through the production gates under ``app``; one Decision each.
 
     Events are processed by ``observed_at`` (when the daemon actually handled them), which
-    is also the ``now`` every gate is asked with, as in the live pass.
+    is also the ``now`` every gate is asked with, as in the live pass. Recorded non-live
+    deliveries (``path`` other than ``live``) are replayed in the same timeline and only
+    arm the gates. ``scene_gate=False`` skips the overlapping-camera group check, which is
+    how :func:`scene_reach` measures what that gate removes.
     """
     is_night = is_night or default_is_night(app)
     cameras = {cam.name: cam for cam in app.cameras}
     state = daemon.MonitorState()
     decisions = []
-    for ev in sorted(events, key=lambda e: (e.observed_at, e.event_at)):
+    # At one timestamp the live event goes first: its record precedes any follow-up.
+    for ev in sorted(events, key=lambda e: (e.observed_at, e.path != "live", e.event_at)):
         cfg = cameras.get(ev.camera)
         if cfg is None:
             decisions.append(Decision(ev, SUPPRESSED, "unknown_camera"))
+            continue
+        if ev.path != "live":
+            night = is_night(ev.observed_at)
+            if daemon.camera_muted(cfg, night, ev.observed_at):
+                decisions.append(Decision(ev, SUPPRESSED, _mute_reason(cfg), night))
+            else:
+                decisions.append(_replay_delivery(app, cfg, state, ev, night))
             continue
         if "getevents" not in cfg.detection.sources:
             decisions.append(Decision(ev, SUPPRESSED, "source_disabled"))
@@ -153,9 +254,18 @@ def replay(app, events, *, is_night=None) -> list[Decision]:
             decisions.append(Decision(ev, SUPPRESSED, "cooldown", night))
             continue
         group, window = cfg.coordinator.group, cfg.coordinator.scene_window
-        if not state.scene_coordinator.allows(group, cfg.name, ev.event_type, event, now,
-                                              window=window):
+        if scene_gate and not state.scene_coordinator.allows(group, cfg.name, ev.event_type,
+                                                             event, now, window=window):
             decisions.append(Decision(ev, SUPPRESSED, "scene_duplicate", night))
+            continue
+        # The live path scores after both gates, so the threshold comes last here too.
+        verdict = _threshold_outcome(cfg, ev)
+        if verdict == "drop":
+            decisions.append(Decision(ev, SUPPRESSED, "threshold", night))
+            continue
+        if verdict == "defer":
+            on_alert(ev.event_type, event)   # the live defer arms the cooldown, sends nothing
+            decisions.append(Decision(ev, SUPPRESSED, "threshold_defer", night))
             continue
         # Treated as delivered: the same two commits a successful live send makes.
         on_alert(ev.event_type, event)
@@ -166,11 +276,20 @@ def replay(app, events, *, is_night=None) -> list[Decision]:
 
 
 def summarize(decisions) -> dict:
-    """Per camera: event count, would-alert count and suppressions by reason."""
+    """Per camera: live event count, would-alert count, suppressions by reason, and the
+    recorded non-live deliveries replayed, by path. A muted delivery is not a live event;
+    it counts as a suppression keyed ``<path>:<reason>``."""
     summary: dict[str, dict] = {}
     for d in decisions:
         entry = summary.setdefault(d.event.camera,
-                                   {"events": 0, "would_alert": 0, "suppressed": Counter()})
+                                   {"events": 0, "would_alert": 0, "suppressed": Counter(),
+                                    "delivered": Counter()})
+        if d.event.path != "live":
+            if d.outcome == DELIVERED:
+                entry["delivered"][d.event.path] += 1
+            else:
+                entry["suppressed"][f"{d.event.path}:{d.reason}"] += 1
+            continue
         entry["events"] += 1
         if d.outcome == WOULD_ALERT:
             entry["would_alert"] += 1
@@ -178,7 +297,28 @@ def summarize(decisions) -> dict:
             entry["suppressed"][d.reason] += 1
     for entry in summary.values():
         entry["suppressed"] = dict(sorted(entry["suppressed"].items()))
+        entry["delivered"] = dict(sorted(entry["delivered"].items()))
     return summary
+
+
+def scene_reach(app, events, *, is_night=None, decisions=None) -> dict:
+    """Per camera: live ``would_alert`` without and with the scene gate, and the gap.
+
+    This is the gate's reach on the recorded window — how many alerts it removed once its
+    knock-on effect on cooldowns is included — rather than the raw ``scene_duplicate``
+    count. ``decisions`` may pass an already computed gated replay of the same input.
+    """
+    is_night = is_night or default_is_night(app)
+    gated = summarize(decisions if decisions is not None
+                      else replay(app, events, is_night=is_night))
+    ungated = summarize(replay(app, events, is_night=is_night, scene_gate=False))
+    reach = {}
+    for camera in sorted(set(gated) | set(ungated)):
+        without = ungated.get(camera, {}).get("would_alert", 0)
+        with_gate = gated.get(camera, {}).get("would_alert", 0)
+        reach[camera] = {"without_gate": without, "with_gate": with_gate,
+                         "removed": without - with_gate}
+    return reach
 
 
 def compare(base, other) -> list[tuple[Decision, Decision]]:
@@ -208,25 +348,55 @@ def _fmt_time(ts):
 
 
 def _fmt_outcome(d):
-    return d.outcome if d.reason is None else f"{d.outcome}({d.reason})"
+    text = d.outcome if d.reason is None else f"{d.outcome}({d.reason})"
+    return text if d.event.path == "live" else f"{text}[{d.event.path}]"
 
 
-def _print_text(decisions, summary, differences, compare_path):
+def _fmt_score(d):
+    return f"  score={d.event.score:.2f}" if d.event.score is not None else ""
+
+
+def _print_text(decisions, summary, differences, compare_path, *, summary_only=False,
+                reach=None):
     width = max([len(d.event.camera) for d in decisions] + [6])
-    for d in decisions:
-        recorded = f"  [recorded: {d.event.recorded}]" if d.event.recorded else ""
-        print(f"{_fmt_time(d.event.event_at)}  {d.event.camera:<{width}}  "
-              f"{d.event.event_type:<7} {_fmt_outcome(d)}{recorded}")
+    if not summary_only:
+        for d in decisions:
+            recorded = f"  [recorded: {d.event.recorded}]" if d.event.recorded else ""
+            print(f"{_fmt_time(d.event.event_at)}  {d.event.camera:<{width}}  "
+                  f"{d.event.event_type:<7} {_fmt_outcome(d)}{recorded}{_fmt_score(d)}")
     if not decisions:
         print("no camera events in this window")
-    print()
+    if not summary_only:
+        print()
+    totals = Counter()
     for camera, entry in sorted(summary.items()):
         suppressed = ", ".join(f"{k}={v}" for k, v in entry["suppressed"].items()) or "none"
-        print(f"{camera}: {entry['events']} events, {entry['would_alert']} would alert; "
-              f"suppressed: {suppressed}")
+        delivered = ", ".join(f"{k}={v}" for k, v in entry["delivered"].items())
+        line = (f"{camera}: {entry['events']} events, {entry['would_alert']} would alert; "
+                f"suppressed: {suppressed}")
+        if delivered:
+            line += f"; recorded non-live deliveries: {delivered}"
+        print(line)
+        totals["events"] += entry["events"]
+        totals["would_alert"] += entry["would_alert"]
+        totals["delivered"] += sum(entry["delivered"].values())
+        totals["scene_duplicate"] += entry["suppressed"].get("scene_duplicate", 0)
+    if len(summary) > 1:
+        print(f"total: {totals['events']} events, {totals['would_alert']} would alert, "
+              f"{totals['delivered']} recorded non-live deliveries, "
+              f"{totals['scene_duplicate']} scene_duplicate")
+    if reach is not None:
+        print()
+        print("scene gate reach (live would_alert without -> with the gate):")
+        for camera, entry in reach.items():
+            print(f"  {camera}: {entry['without_gate']} -> {entry['with_gate']} "
+                  f"(removed {entry['removed']})")
+        print(f"  total removed: {sum(e['removed'] for e in reach.values())}")
     if differences is not None:
         print()
         print(f"differences vs {compare_path}: {len(differences)}")
+        if summary_only:
+            return
         for base, other in differences:
             print(f"  {_fmt_time(base.event.event_at)}  {base.event.camera:<{width}}  "
                   f"{base.event.event_type:<7} {_fmt_outcome(base)} -> {_fmt_outcome(other)}")
@@ -238,7 +408,9 @@ def main(argv=None, *, now=None) -> int:
     parser = argparse.ArgumentParser(
         prog="tapo-monitor replay",
         description="Replay recorded camera events from the ledger through the alert "
-                    "gates (mute, cooldown, scene group) under a config. Read-only.",
+                    "gates (mute, cooldown, scene group, recorded scorer threshold) under "
+                    "a config, with recorded SD/sampler/hub deliveries arming the "
+                    "cooldown. Read-only.",
     )
     parser.add_argument("config", nargs="?", default="cameras.yaml")
     parser.add_argument("--ledger", dest="ledger_path",
@@ -253,6 +425,11 @@ def main(argv=None, *, now=None) -> int:
                         help="only this camera (repeatable)")
     parser.add_argument("--compare", metavar="OTHER_YAML",
                         help="also replay under this config and list events that differ")
+    parser.add_argument("--summary-only", action="store_true",
+                        help="print only the per-camera summary (and difference count)")
+    parser.add_argument("--scene-reach", action="store_true",
+                        help="also replay without the scene gate and report how many "
+                             "alerts the gate removed per camera")
     parser.add_argument("--json", action="store_true", dest="json_output")
     args = parser.parse_args(argv)
     end = args.end if args.end is not None else (time.time() if now is None else now)
@@ -275,30 +452,36 @@ def main(argv=None, *, now=None) -> int:
         print(f"replay: ledger: {exc}", file=sys.stderr)
         return 1
 
-    decisions = replay(app, events)
+    is_night = default_is_night(app)
+    decisions = replay(app, events, is_night=is_night)
     summary = summarize(decisions)
     differences = compare(decisions, replay(other, events)) if other is not None else None
+    reach = (scene_reach(app, events, is_night=is_night, decisions=decisions)
+             if args.scene_reach else None)
 
     if args.json_output:
         report = {
             "config": args.config,
             "start": start,
             "end": end,
-            "decisions": [d.as_dict() for d in decisions],
             "summary": summary,
         }
+        if not args.summary_only:
+            report["decisions"] = [d.as_dict() for d in decisions]
+        if reach is not None:
+            report["scene_reach"] = reach
         if differences is not None:
-            report["compare"] = {
-                "config": args.compare,
-                "differences": [
+            report["compare"] = {"config": args.compare, "count": len(differences)}
+            if not args.summary_only:
+                report["compare"]["differences"] = [
                     {"camera": b.event.camera, "event_type": b.event.event_type,
-                     "event_at": b.event.event_at,
+                     "event_at": b.event.event_at, "path": b.event.path,
                      "base": {"outcome": b.outcome, "reason": b.reason},
                      "other": {"outcome": o.outcome, "reason": o.reason}}
                     for b, o in differences
-                ],
-            }
+                ]
         print(json.dumps(report, sort_keys=True, separators=(",", ":")))
         return 0
-    _print_text(decisions, summary, differences, args.compare)
+    _print_text(decisions, summary, differences, args.compare,
+                summary_only=args.summary_only, reach=reach)
     return 0
