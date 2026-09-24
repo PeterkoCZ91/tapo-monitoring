@@ -2441,6 +2441,23 @@ def test_pan_guard_grace_restarts_when_the_lens_comes_back(monkeypatch):
     assert gotos == []                           # out since 114 only: 7 s < 20 s
 
 
+def test_pan_guard_grace_restarts_after_an_onvif_failure(monkeypatch):
+    positions = iter([0.63, OSError("onvif timeout"), 0.63, 0.63])
+
+    def read(ptz, tok):
+        value = next(positions)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    gotos = []
+    app, state = _held_guard(monkeypatch, 0.63, gotos)
+    monkeypatch.setattr(daemon.panlimit, "read_pan_x", read)
+    for now in (100, 107, 114, 121):
+        daemon._pan_guard_pass(app, {}, state, now=now, secrets={}, night=True)
+    assert gotos == []                           # out since 114 again: 7 s < 20 s
+
+
 def test_pan_guard_ignores_a_hold_when_the_plan_does_not_track(monkeypatch):
     gotos = []
     app, state = _held_guard(monkeypatch, 0.63, gotos, autotrack_on=False)

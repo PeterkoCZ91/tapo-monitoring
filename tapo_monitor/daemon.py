@@ -2541,6 +2541,9 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
         except Exception as e:  # noqa: BLE001 - an ONVIF hiccup must not kill the loop
             log.warning("pan_limit %s: %s", cfg.name, e)
             g.pop("ptz", None)          # force a clean rebuild on the next poll
+            # An unread position breaks the "continuously out of bounds" the hold grace
+            # measures; a stale start would recall the lens with no grace on return.
+            g.pop("out_since", None)
 
 
 def _fetch_scorer_metrics(url, timeout=5.0):  # pragma: no cover - network I/O
