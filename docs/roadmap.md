@@ -506,7 +506,8 @@ shadows. The generic detector has never seen this fleet's IR night scenes.
 
 ## Phase 10 — Incidents, not frames
 
-Status: **in progress**
+Status: **in progress** (10.1 and 10.3 done; 10.2 in an observe-only trial on one camera;
+10.4: the recording follow-up is shortened, the camera-card path is next)
 
 Frame statistics hide what matters to the person holding the phone: was each visit
 alerted, and how late. A first join of labels with deliveries showed that of 31 held
@@ -537,9 +538,16 @@ busiest site.
   unless a pan-limit recall broke the corroboration. Add an expiry policy for the sampler:
   send the best held frame when the hold expires and its score reaches a configured
   floor, with an `observe` mode that only audits what it would have sent.
-- [ ] Replay the policy from recorded `hold`/`hold_expired` ledger rows so
-  `replay --compare` estimates the added alerts before a camera switches it on; trial it
-  in `observe` mode on one camera, then promote from incident-level numbers (10.1).
+- [x] Replay the policy from recorded `hold`/`hold_expired` ledger rows so
+  `replay --compare` estimates the added alerts before a camera switches it on.
+- [ ] Trial it in `observe` mode on one camera (running since 2026-09-24), label the frames
+  it would have sent, and promote to `send` from incident-level numbers (10.1).
+
+### 10.3 — Telemetry that fills disks
+
+- [x] Report the size and file count of the sent, review and pan-limit logs in the daily
+  digest's fleet block, and warn once when free space on that filesystem falls below a
+  floor: 14-day retention plus the drop sample must never be what fills a host's disk.
 
 ### 10.4 — Alert latency
 
@@ -548,14 +556,20 @@ busiest site.
   90–150 s peak is attributed to a path before anything is changed. Sent records carry
   `path`; the per-path table needs a few days of new records before it says anything,
   since older frames count as `unknown`.
-- [ ] Shorten the slowest path that carries most first alerts, verified by the same
-  per-incident delay report before and after.
-
-### 10.3 — Telemetry that fills disks
-
-- [x] Report the size and file count of the sent, review and pan-limit logs in the daily
-  digest's fleet block, and warn once when free space on that filesystem falls below a
-  floor: 14-day retention plus the drop sample must never be what fills a host's disk.
+- [x] Attribute the delay. Seven days of audit lines on the busiest site: the SD/recording
+  follow-up sent the first alert of 306 of 507 alerted incidents, a median 119 s after the
+  event (live 24 s, sampler 79 s). On a recording-source camera the window was read only
+  after its whole span plus a 60 s margin, while the recorder trails the clock by 2-3 s.
+- [x] Shorten the recording follow-up: a 15 s margin, and an early look at the event's first
+  24 s that sends as soon as a subject is there. First sends after the change left 56-58 s
+  after the event.
+- [ ] Confirm on a few days of first alerts per path (median and p90 before and after).
+- [ ] The early look still takes ~15 s to extract and score six frames, and the main loop
+  waits for it; measure extraction against scoring, then batch the extraction or move the
+  follow-up off the main loop.
+- [ ] Camera-card follow-ups (a median 175-200 s on the sites that use them) stay behind
+  pytapo's 60 s freshness guard plus a slow download; try a smaller first window there only
+  once the recording change is confirmed.
 
 ## Research tracks
 
