@@ -40,6 +40,7 @@ from . import (
     enrich,
     health,
     hubclient,
+    incident,
     incident_archive,
     ledger,
     monitor,
@@ -1039,7 +1040,8 @@ def _reduced(src, out_dir, run=None, width=None):
     return out_path if os.path.exists(out_path) and os.path.getsize(out_path) > 0 else None
 
 
-def send_alert_photo(cfg, secrets, image, caption, downscale=None, score=None):
+def send_alert_photo(cfg, secrets, image, caption, downscale=None, score=None,
+                     incident=None):
     """Send one alert frame: the zoom goes to Telegram, the whole scene to the sent log.
 
     ``crop_to_subject`` cameras push a close-up, which is what the user wants to look at
@@ -1063,9 +1065,9 @@ def send_alert_photo(cfg, secrets, image, caption, downscale=None, score=None):
     try:
         if to_send == image:        # nothing replaced the frame, nothing extra to archive
             return notify.send_photo(token, chat, to_send, caption,
-                                     camera=cfg.name, score=score)
+                                     camera=cfg.name, score=score, incident=incident)
         return notify.send_photo(token, chat, to_send, caption, archive_path=image,
-                                 camera=cfg.name, score=score)
+                                 camera=cfg.name, score=score, incident=incident)
     finally:
         for temp in (small_crop, crop_temp):
             _safe_unlink(temp)
@@ -1265,7 +1267,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
         def media_observe(ok, error=None, *, _name=name):
             state.rtsp_reachable[_name] = bool(ok)
 
-        def send_alert(image, caption, score, _cfg=cfg):
+        def send_alert(image, caption, score, incident=None, _cfg=cfg):
             # The live pass takes the same crop+archive route as the sampler and the SD
             # follow-up: a zoom to Telegram, the whole scene to the sent log.
             started = _time.monotonic()
@@ -1276,7 +1278,8 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                         _cfg.coordinator.group, _cfg.name, image, score, captured_at=now,
                         window=_cfg.coordinator.scene_window,
                     )
-                return send_alert_photo(_cfg, secrets, image, caption, score=score)
+                return send_alert_photo(_cfg, secrets, image, caption, score=score,
+                                        incident=incident)
             finally:
                 observe_latency("telegram", _time.monotonic() - started)
 
@@ -1496,7 +1499,8 @@ def process_pending_hub(app, state, *, now, secrets):
             continue
         entry["attempts"] += 1
         ok = send_alert_photo(cfg, secrets, entry["image"], entry["caption"],
-                              score=entry["score"])
+                              score=entry["score"],
+                              incident=incident.incident_id(cfg.name, event))
         monitor.audit_event(cfg, event, "motion", "hubpoll", "send", score=entry["score"],
                             threshold=cfg.scorer.threshold if entry["score"] is not None else None,
                             telegram=ok, reason="retry", extra=entry.get("audit_extra"))
@@ -1744,7 +1748,8 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
                     monitor.TYPE_EMOJI.get(etype, "👁"), time_str(clip),
                     description=description or None, score=s,
                 )
-                ok = send_alert_photo(cfg, secrets, image, caption, score=s)
+                ok = send_alert_photo(cfg, secrets, image, caption, score=s,
+                                      incident=incident.incident_id(cfg.name, event))
                 monitor.audit_event(cfg, event, etype, "hubpoll", "send", score=s,
                                     threshold=cfg.scorer.threshold if score is not None else None,
                                     telegram=ok, extra=clip_extra)
@@ -2006,7 +2011,8 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
                 description=description or None, detail=label or None,
                 score=selected_score, light=light,
             )
-            ok = send_alert_photo(cfg, secrets, image, caption, score=selected_score)
+            ok = send_alert_photo(cfg, secrets, image, caption, score=selected_score,
+                                  incident=incident.incident_id(cfg.name, event))
             # SD follow-up is a real user-visible alert. Record it in the same gate as
             # live sends, otherwise a person rescued from SD can be followed minutes
             # later by a duplicate motion SD alert from the same passage.
@@ -2094,7 +2100,8 @@ def _rescue_expired_hold(app, cfg, state, group, *, now, secrets, time_str):
     caption = notify.build_caption(
         monitor.TYPE_EMOJI.get("motion", "👁"), time_str(group["event"]),
         description=description or None, score=s)
-    ok = send_alert_photo(cfg, secrets, path, caption, score=s)
+    ok = send_alert_photo(cfg, secrets, path, caption, score=s,
+                          incident=incident.incident_id(cfg.name, group["event"]))
     monitor.audit_event(cfg, group["event"], "motion", "sampler", "send", score=s,
                         threshold=cfg.scorer.threshold, telegram=ok,
                         reason="hold_rescue_recall")
@@ -2202,7 +2209,8 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                 description=description or None, detail=label or None, score=s,
                 light=light,
             )
-            ok = send_alert_photo(cfg, secrets, image, caption, score=s)
+            ok = send_alert_photo(cfg, secrets, image, caption, score=s,
+                                  incident=incident.incident_id(cfg.name, group["event"]))
             monitor.audit_event(cfg, group["event"], etype, "sampler", "send", score=s,
                                 threshold=cfg.scorer.threshold if score is not None else None,
                                 telegram=ok)

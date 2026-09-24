@@ -89,7 +89,7 @@ def prune_old(archive_dir, now, retention_days):
 
 def archive_sent(archive_dir, image_bytes, caption, *, now,
                  retention_days=DEFAULT_RETENTION_DAYS, delivered=True,
-                 camera=None, score=None):
+                 camera=None, score=None, incident=None):
     """Copy one sent frame + index line into ``archive_dir``; prune stale files.
 
     ``camera`` and ``score`` are optional: a host running two cameras cannot otherwise
@@ -108,6 +108,8 @@ def archive_sent(archive_dir, image_bytes, caption, *, now,
         record = {"ts": now, "file": name, "caption": caption, "delivered": bool(delivered)}
         if camera:
             record["camera"] = camera
+        if incident:
+            record["incident"] = incident
         if score is not None and hasattr(score, "person"):
             record["person"] = float(score.person)
             record["animal"] = float(score.animal)
@@ -121,7 +123,7 @@ def archive_sent(archive_dir, image_bytes, caption, *, now,
 
 
 def archive_if_configured(image_bytes, caption, *, delivered=True, now=None, env=None,
-                          camera=None, score=None):
+                          camera=None, score=None, incident=None):
     """Archive a sent frame when ``TAPO_SENT_LOG_DIR`` is set; otherwise a no-op."""
     archive_dir = archive_dir_from_env(env)
     if archive_dir is None:
@@ -129,7 +131,7 @@ def archive_if_configured(image_bytes, caption, *, delivered=True, now=None, env
     now = time.time() if now is None else now
     return archive_sent(archive_dir, image_bytes, caption, now=now,
                         retention_days=retention_days_from_env(env), delivered=delivered,
-                        camera=camera, score=score)
+                        camera=camera, score=score, incident=incident)
 
 
 def panlimit_dir_from_env(env=None):

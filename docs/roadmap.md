@@ -262,7 +262,7 @@ so the canonical unit edit becomes cosmetic rather than blocking.
 
 ## Phase 7 — Runtime correctness and deterministic behaviour
 
-Status: **in progress** (7.1–7.3 done)
+Status: **in progress** (7.1–7.3, 7.5, 7.6 done; 7.4 replay open)
 
 A gap review against a generic "autonomous PTZ platform" wish list found that most of
 it already exists here (digital twin, drift, self-healing, clock offsets, host watch,
@@ -331,18 +331,20 @@ multi-tick scenarios are written once rather than rebuilt by hand in each test.
   not just the final state. (`tests/scenario.py`, driving the real `loop_step`.)
 - [x] Scenarios: event during hold, camera disconnect mid-alert, duplicate events, rain
   change during tracking, restart during a pending delivery, RTSP down while the API is
-  alive, capability missing on the camera (`tests/test_scenarios.py`; restart inside a
-  cooldown is a strict xfail until 7.2 persists it).
+  alive, capability missing on the camera, restart inside a cooldown
+  (`tests/test_scenarios.py`).
 - [ ] `tapo-monitor replay`: feed a recorded audit log/ledger window through the same
   production decision logic with media and delivery stubbed, and print the decisions it
   would take — so a policy change can be checked against a real night before it ships.
 
 ### 7.5 — Incident identity
 
-- [ ] Assign an incident ID when an alert candidate is first seen and carry it through
-  audit lines, ledger decisions, the sent-frame index and the Telegram caption metadata,
-  so detect → frame → score → delivery can be followed without matching timestamps.
-- [ ] `tapo-monitor audit --incident <id>` prints that chain.
+- [x] Derive an incident ID from the camera event (`<camera>-<start>`) and carry it
+  through audit lines and the sent-frame index; ledger rows are found by the same
+  camera and start, so detect → frame → score → delivery can be followed without
+  matching timestamps. Derived rather than issued, so it needs no state and survives a
+  restart. The Telegram caption is deliberately left unchanged.
+- [x] `tapo-monitor incident <id>` prints that chain (`--json` for machines).
 
 ### 7.6 — Cheap configuration checks
 

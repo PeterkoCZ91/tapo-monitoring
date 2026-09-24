@@ -91,7 +91,7 @@ def test_run_monitor_skips_scene_duplicate_before_snapshot():
         snapshot=lambda *a: snapshots.append(a) or "/tmp/frame.jpg",
         time_str=lambda e: "t",
         scene_alert=lambda etype, event: False,
-        send_alert=lambda *a: sent.append(a) or True,
+        send_alert=lambda *a, **_: sent.append(a) or True,
     )
 
     assert watermark == 100
@@ -337,7 +337,7 @@ def test_run_monitor_continues_after_cooldown_event():
         snapshot=lambda _cam, event: grabbed.append(event["start_time"]) or "/tmp/x.jpg",
         time_str=lambda _event: "T",
         can_alert=lambda _etype, event: event["start_time"] == 1300,
-        send_alert=lambda image, caption, score: sent.append((image, caption, score)) or True,
+        send_alert=lambda image, caption, score, **_: sent.append((image, caption, score)) or True,
     )
 
     assert grabbed == [1300]
@@ -361,7 +361,7 @@ def test_run_monitor_notes_the_light_in_the_caption_when_enabled():
     monitor.run_monitor(
         Cam(), cfg, 0, now=100, groq_key="", telegram_token="", telegram_chat="",
         snapshot=lambda cam, event: "/tmp/x.jpg", time_str=lambda event: "T",
-        send_alert=lambda image, caption, score: sent.append(caption) or True,
+        send_alert=lambda image, caption, score, **_: sent.append(caption) or True,
     )
     assert len(sent) == 1
     assert "🔦" in sent[0]
@@ -384,7 +384,7 @@ def test_run_monitor_skips_the_light_check_when_disabled():
     monitor.run_monitor(
         Cam(), cfg, 0, now=100, groq_key="", telegram_token="", telegram_chat="",
         snapshot=lambda cam, event: "/tmp/x.jpg", time_str=lambda event: "T",
-        send_alert=lambda image, caption, score: sent.append(caption) or True,
+        send_alert=lambda image, caption, score, **_: sent.append(caption) or True,
     )
     assert calls == []                   # light_status off: never even asked
     assert "🔦" not in sent[0]
@@ -1145,11 +1145,13 @@ def test_live_pass_sends_through_the_injected_alert_sender(monkeypatch):
     monitor.run_monitor(
         Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
         snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
-        send_alert=lambda image, caption, score: calls.append((image, caption, score)) or True)
+        send_alert=lambda image, caption, score, **kw: calls.append(
+            (image, caption, score, kw.get("incident"))) or True)
 
     assert len(calls) == 1, "live alert did not go through send_alert"
     assert calls[0][0] == "/tmp/live.jpg"
     assert calls[0][1].startswith("👤")
+    assert calls[0][3] == "a-100"                # the sent log can name the incident
 
 
 def test_live_pass_without_sender_still_posts_directly(monkeypatch):

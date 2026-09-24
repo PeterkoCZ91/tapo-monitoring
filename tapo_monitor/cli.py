@@ -11,6 +11,7 @@ Usage:
   tapo-monitor shadow-scan ...          # nightly recorder audit batch
   tapo-monitor learn-face <name>        # capture face ID from camera events and output FACE_ID_NAMES
   tapo-monitor audit-log [logfile|-]    # summarize scorer/Telegram audit lines
+  tapo-monitor incident <id>            # everything recorded for one incident ID
   tapo-monitor version                  # release plus a fingerprint of the deployed package
   tapo-monitor selfcheck [cameras.yaml] # is this host able to run? (imports, config, deps)
 
@@ -557,6 +558,9 @@ def main(argv=None):
     if cmd == "audit-log":
         from .audit import main as audit_main
         return audit_main(argv[1:])
+    if cmd == "incident":
+        from .incident import main as incident_main
+        return incident_main(argv[1:])
     if cmd == "status":
         return _status(argv[1] if len(argv) > 1 else None)
     if cmd == "twin-status":

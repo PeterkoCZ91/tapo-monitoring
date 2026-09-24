@@ -12,6 +12,7 @@ import time as _time
 from datetime import datetime
 
 from . import camera, detection, enrich, notify, scheduling, sentlog, snapshot
+from .incident import incident_id
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +84,9 @@ def audit_event(cfg, event, etype, path, action, *, score=None, threshold=None,
         f"etype={_fmt_audit_value(etype)}",
         f"start={_fmt_audit_value(event.get('start_time', 0))}",
     ]
+    incident = incident_id(cfg.name, event)
+    if incident:
+        parts.append(f"incident={_fmt_audit_value(incident)}")
     try:
         event_age_s = max(0.0, _time.time() - float(event.get("start_time")))
     except (TypeError, ValueError):
@@ -447,8 +451,10 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 description=description or None, detail=label or None, score=s,
                 light=light,
             )
-            ok = (send_alert(image, caption, s) if send_alert is not None
-                  else notify.send_photo(telegram_token, telegram_chat, image, caption))
+            incident = incident_id(cfg.name, event)
+            ok = (send_alert(image, caption, s, incident=incident) if send_alert is not None
+                  else notify.send_photo(telegram_token, telegram_chat, image, caption,
+                                         incident=incident))
             audit_event(cfg, event, etype, "live", "send", score=s,
                         threshold=cfg.scorer.threshold if score is not None else None,
                         telegram=ok)

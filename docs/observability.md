@@ -163,6 +163,32 @@ candidates through the same scoring service, and feeds the ledger through exactl
 ingestion, storage and reporting contract (see
 [operations](operations.md#inspecting-alert-frames)).
 
+## Following one incident
+
+Every audit line about a camera event carries `incident=<camera>-<event start>`, and the
+sent-log index records the same ID next to each delivered frame. The ID is derived from
+the camera event itself, so the live pass, the SD follow-up, the sampler and a hub retry
+of the same event all name the same incident without sharing any state, and the ID is
+the same after a restart. To see everything recorded for one:
+
+```bash
+tapo-monitor incident front-1710003600            # ledger + TAPO_SENT_LOG_DIR
+tapo-monitor incident front-1710003600 --json
+tapo-monitor incident front-1710003600 --ledger /path/events.sqlite3 --sent-log /path/sent-log
+```
+
+```text
+incident front-1710003600: camera front, event at 2024-03-09 17:00:00
+      +4.0s  observed camera person (getevents)
+      +6.0s  live send person score=0.71 telegram=yes
+      +6.0s  sent log 20240309-170006.jpg (delivered): 👤 17:00:00 …
+```
+
+A sampler group is one incident, named after the event that opened it; a second camera
+event of the same passage outside a group has its own ID. The Telegram caption is left
+unchanged. The chain is only as complete as the ledger (`observability.ledger`) and the
+sent log (`TAPO_SENT_LOG_DIR`) that are switched on.
+
 ## JSON status endpoint
 
 The daemon can serve the state it already holds as one machine-readable page, so a

@@ -488,6 +488,24 @@ class EventLedger:
             rows = connection.execute(query, params).fetchall()
         return [_row_to_observation(row) for row in rows]
 
+    def decisions(self, *, camera: str, start: float, end: float) -> list[dict]:
+        """Pipeline decisions for one camera's events in ``[start, end]``, in time order."""
+        camera = _safe_identifier(camera, "camera")
+        start = _finite_timestamp(start, "start")
+        end = _finite_timestamp(end, "end")
+        if end < start:
+            raise ValueError("end must not precede start")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT event_type, event_at, path, action, observed_at, score, threshold,"
+                " telegram, reason FROM decisions"
+                " WHERE camera = ? AND event_at >= ? AND event_at <= ?"
+                " ORDER BY observed_at, id",
+                (camera, start, end),
+            ).fetchall()
+        return [{**dict(row), "telegram": None if row["telegram"] is None
+                 else bool(row["telegram"])} for row in rows]
+
     def camera_events_between(self, camera: str, start: float, end: float) -> list[float]:
         """Ascending event_at timestamps of camera-source observations for one camera."""
         events = self.observations(camera=camera, start=start, end=end, source="camera")
