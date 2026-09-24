@@ -462,11 +462,21 @@ shadows. The generic detector has never seen this fleet's IR night scenes.
   (`motion_send_threshold`) was withholding mostly real people, so it was lowered, and
   one site's `scorer.threshold` moved down after a replay estimated the added volume.
   Re-check false alarms in the newly admitted score band once it has been labelled.
-- [ ] Split `scorer.threshold` by day and night (and per camera where labels justify it)
+- [x] Split `scorer.threshold` by day and night (and per camera where labels justify it)
   using the threshold `label-stats` reports as best-separating; verify the change with
+  `replay --compare` before shipping. The mechanism is in place: `scorer.night_threshold`
+  per camera (applied on the camera's night, `schedule` included, by the daemon, replay and
+  the shadow scan), and `label-stats --config` reports the best threshold by day and night,
+  overall and per camera, flagging slices with too few labels. No site sets a night value
+  yet: the first night slice has 51 labelled frames and a single empty one.
+- [x] Keep more of what matters: archive a sample of below-threshold frames (not only held
+  ones) so possible misses keep reaching the labelling queue. Live, sampler and SD drops
+  go to the review log at `TAPO_REVIEW_DROP_SAMPLE` (5 %), at most
+  `TAPO_REVIEW_DROP_MAX_PER_HOUR` (6) per camera; `label-stats` reports held frames and
+  dropped frames as separate miss estimates, weighting the sample by its rate.
+- [ ] Once the drop sample has collected a few weeks of night frames, choose
+  `night_threshold` per camera from `label-stats --config` and check it with
   `replay --compare` before shipping.
-- [ ] Keep more of what matters: archive a sample of below-threshold frames (not only held
-  ones) so possible misses keep reaching the labelling queue.
 
 ### 9.3 — Teacher model
 
