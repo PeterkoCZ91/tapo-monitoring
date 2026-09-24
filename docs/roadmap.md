@@ -345,8 +345,8 @@ multi-tick scenarios are written once rather than rebuilt by hand in each test.
 
 ### 7.6 — Cheap configuration checks
 
-- [ ] `coordinator.camera_order` must name cameras of its own group.
-- [ ] A soft deprecation path: a renamed key is accepted with a warning for one release
+- [x] `coordinator.camera_order` must name cameras of its own group.
+- [x] A soft deprecation path: a renamed key is accepted with a warning for one release
   instead of becoming a hard error immediately.
 
 ### Considered and declined

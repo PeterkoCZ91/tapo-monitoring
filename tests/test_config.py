@@ -55,6 +55,53 @@ def test_coordinator_scene_window_rejects_non_positive_value():
         cfg.load_config_from_dict(data)
 
 
+def _grouped(*cams):
+    return {"cameras": [
+        {"name": name, "host": f"192.0.2.{50 + i}",
+         "coordinator": {"group": group, **({"camera_order": order} if order else {})}}
+        for i, (name, group, order) in enumerate(cams)
+    ]}
+
+
+def test_coordinator_camera_order_naming_its_own_group_loads():
+    data = _grouped(("gate", "yard", ["gate", "porch"]), ("porch", "yard", None))
+
+    coordinator = cfg.load_config_from_dict(data).cameras[0].coordinator
+
+    assert coordinator.camera_order == ("gate", "porch")
+
+
+def test_coordinator_camera_order_rejects_a_camera_of_another_group():
+    # A name from another group never meets this camera in the scene window, so
+    # direction would stay unknown forever without anything saying why.
+    data = _grouped(("gate", "yard", ["gate", "garage"]), ("porch", "yard", None),
+                    ("garage", "street", None))
+
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load_config_from_dict(data)
+
+    message = str(exc.value)
+    assert "camera 'gate'" in message
+    assert "'yard'" in message
+    assert "'garage'" in message
+    assert "'porch'" not in message.split("members")[0]
+
+
+def test_coordinator_camera_order_rejects_an_unknown_camera_name():
+    data = _grouped(("gate", "yard", ["gate", "porh", "shed"]), ("porch", "yard", None))
+
+    with pytest.raises(cfg.ConfigError, match=r"camera 'gate'.*'porh', 'shed'.*'yard'"):
+        cfg.load_config_from_dict(data)
+
+
+def test_coordinator_camera_order_requires_a_group():
+    data = {"cameras": [{"name": "gate", "host": "192.0.2.50",
+                         "coordinator": {"camera_order": ["gate"]}}]}
+
+    with pytest.raises(cfg.ConfigError, match=r"camera 'gate'.*camera_order.*group"):
+        cfg.load_config_from_dict(data)
+
+
 def test_night_vision_defaults_none_and_parses():
     assert cfg.load_config_from_dict(_minimal()).cameras[0].night_vision is None
     data = {"cameras": [{"name": "f", "host": "192.0.2.50", "night_vision": "ir"}]}
@@ -1151,3 +1198,76 @@ def test_camera_whitelamp_intensity_rejects_out_of_range():
         cfg.load_config_from_dict({
             "cameras": [{"name": "front", "host": "192.0.2.50", "whitelamp_intensity": 150}]
         })
+
+
+# ── renamed keys: soft deprecation instead of an instant hard fail ────────────
+
+@pytest.fixture
+def renamed(monkeypatch):
+    # RENAMED_KEYS ships empty; a made-up rename exercises the mechanism without
+    # inventing a real one.
+    table = {
+        "cameras[].scorer.tresh_legacy": "cameras[].scorer.threshold",
+        "cameras[].night_mode_legacy": "cameras[].night_vision",
+        "alerts.cooldown_legacy": "alerts.cooldown",
+    }
+    monkeypatch.setattr(cfg, "RENAMED_KEYS", table)
+    return table
+
+
+def test_renamed_nested_camera_key_maps_to_the_new_key_and_warns_once(caplog, renamed):
+    data = {"cameras": [{"name": "front", "host": "192.0.2.50",
+                         "scorer": {"url": "http://scorer/score", "tresh_legacy": 0.7}}]}
+
+    app = _load_capturing(caplog, data)
+
+    assert app.cameras[0].scorer.threshold == 0.7
+    assert _unknown_key_warnings(caplog) == [
+        "cameras[0].scorer.tresh_legacy: renamed to 'threshold'; "
+        "accepted for now, update the config"]
+
+
+def test_renamed_camera_and_top_level_keys_map_too(caplog, renamed):
+    data = {"alerts": {"cooldown_legacy": 45},
+            "cameras": [{"name": "front", "host": "192.0.2.50"},
+                        {"name": "yard", "host": "192.0.2.51", "night_mode_legacy": "ir"}]}
+
+    app = _load_capturing(caplog, data)
+
+    assert app.alerts.cooldown == 45
+    assert app.cameras[1].night_vision == "ir"
+    assert app.cameras[0].night_vision is None
+    assert len(_unknown_key_warnings(caplog)) == 2
+
+
+def test_renamed_key_does_not_mutate_the_callers_mapping(renamed):
+    data = {"cameras": [{"name": "front", "host": "192.0.2.50",
+                         "scorer": {"tresh_legacy": 0.7}}]}
+
+    cfg.load_config_from_dict(data)
+
+    assert data["cameras"][0]["scorer"] == {"tresh_legacy": 0.7}
+
+
+def test_old_and_new_key_together_is_an_error(renamed):
+    data = {"cameras": [{"name": "front", "host": "192.0.2.50",
+                         "scorer": {"tresh_legacy": 0.7, "threshold": 0.5}}]}
+
+    with pytest.raises(cfg.ConfigError,
+                       match=r"cameras\[0\]\.scorer\.tresh_legacy.*'threshold'"):
+        cfg.load_config_from_dict(data)
+
+
+def test_unrelated_typo_still_fails_with_a_rename_table(caplog, renamed):
+    data = _minimal()
+    data["cameras"][0]["rotat"] = 90
+
+    assert _load_capturing(caplog, data) == "cameras[0].rotat: unknown key (did you mean 'rotate'?)"
+
+
+def test_shipped_renames_stay_within_their_own_section():
+    # The mechanism only moves a key inside the mapping it sits in; a rename across
+    # sections would need the value carried between parsers, which nothing does yet.
+    for old, new in cfg.RENAMED_KEYS.items():
+        assert old.rpartition(".")[0] == new.rpartition(".")[0], (old, new)
+        assert old != new

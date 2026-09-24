@@ -647,6 +647,7 @@ a preset restores both axes at once.
 coordinator:
   group: overlap-group
   scene_window: 15
+  camera_order: []
   handoff_preset:
 ```
 
@@ -655,6 +656,11 @@ coordinator:
 the group only after its Telegram delivery succeeds; failed or deferred deliveries do not
 block another camera. The live, sampler and SD paths share the same gate. Cameras without
 a group keep the existing per-camera behavior.
+
+`camera_order` is the operator-measured sequence (first view to next view) used only to
+label a scene's direction; empty leaves direction unknown. It requires a `group` and may
+only name cameras of that same group — any other name could never meet this camera in a
+scene, so the load fails with the camera, the group and the stray names.
 
 `handoff_preset` remains reserved for the bounded lease state machine. The current
 runtime still does not move a camera or select a better frame; live activation waits for
@@ -750,12 +756,16 @@ Run after every edit:
 tapo-monitor check cameras.yaml
 ```
 
-Unknown keys are warned about, not rejected: every load logs the full key path plus the
-closest known key (`cameras[0].scorer.treshold: unknown key (did you mean 'threshold'?)`),
-derived from the config dataclasses so the check cannot rot. A mistyped key silently takes
-its default — a dropped `rotate` costs roughly a third of the person score — so treat any
-such warning as a typo until proven otherwise. The hard fail deliberately waits until the
-warnings have soaked in production.
+Unknown keys are rejected: the load fails naming the full key path plus the closest known
+key (`cameras[0].scorer.treshold: unknown key (did you mean 'threshold'?)`), derived from
+the config dataclasses so the check cannot rot. A mistyped key would otherwise silently
+take its default — a dropped `rotate` costs roughly a third of the person score.
+
+Renamed keys are the exception. When a release renames a key, the old name keeps loading
+for that release: it is mapped to the new name and logs
+`<path>: renamed to '<new>'; accepted for now, update the config`. Setting both the old
+and the new key is an error. After that release the old name is an ordinary unknown key.
+The table lives in `RENAMED_KEYS` in `tapo_monitor/config.py` and is currently empty.
 
 Change one capability at a time. Observe logs and status before enabling the next, because
 model/firmware support and camera resource limits differ. The full annotated schema remains

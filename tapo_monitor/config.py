@@ -14,6 +14,7 @@ from __future__ import annotations
 import difflib
 import logging
 import os
+import re
 from dataclasses import dataclass, field, fields, is_dataclass
 
 from . import reliability, scheduling
@@ -389,6 +390,65 @@ def _field_names(cls):
     return frozenset(f.name for f in fields(cls))
 
 
+# Renamed keys, ``{old_path: new_path}``. Paths use ``cameras[]`` for any camera index
+# (``cameras[].scorer.old_name``) and both sides must share a parent section: the key is
+# only renamed in place, never carried between parsers. An entry lives for one release —
+# a deployed cameras.yaml keeps loading with a warning instead of the unknown-key check
+# refusing the daemon start on upgrade day — and is then deleted, after which the old
+# name is an ordinary unknown key again.
+RENAMED_KEYS: dict[str, str] = {}
+
+
+def _migrate_renamed_keys(mapping, where):
+    """Return ``mapping`` with deprecated keys moved to their new names.
+
+    Each rename warns once per occurrence with its full path. Setting both the old and
+    the new key is an error rather than a silent pick, because the two values may
+    differ and neither choice is safe to guess. The caller's dict is never mutated; a
+    copy is returned only when something was renamed.
+    """
+    if not isinstance(mapping, dict) or not RENAMED_KEYS:
+        return mapping
+    section = re.sub(r"\[\d+\]", "[]", where)
+    migrated = mapping
+    for key in mapping:
+        new_path = RENAMED_KEYS.get(f"{section}.{key}" if section else str(key))
+        if new_path is None:
+            continue
+        new_key = new_path.rpartition(".")[2]
+        path = f"{where}.{key}" if where else str(key)
+        if new_key in mapping:
+            raise ConfigError(f"{path}: renamed to {new_key!r}, which is also set; "
+                              "remove the old key")
+        log.warning("%s: renamed to %r; accepted for now, update the config", path, new_key)
+        if migrated is mapping:
+            migrated = dict(mapping)
+        migrated[new_key] = migrated.pop(key)
+    return migrated
+
+
+def _check_keys(data, cls, where):
+    """Migrate renamed keys, then reject unknown ones, in ``data`` and its sections.
+
+    Every dataclass-typed field of ``cls`` is a nested section (a camera's scorer,
+    sampler, coordinator, ...; the top level's location, alerts, loop, ...); walking the
+    fields keeps this in lockstep with the schema instead of a second list of section
+    names. Returns the (possibly copied) mapping the parsers must read from, so a
+    renamed key reaches them under its new name.
+    """
+    data = _migrate_renamed_keys(data, where)
+    _warn_unknown_keys(data, _field_names(cls), where)
+    for f in fields(cls):
+        if not is_dataclass(f.default_factory):
+            continue
+        path = f"{where}.{f.name}" if where else f.name
+        section = _migrate_renamed_keys(data.get(f.name), path)
+        if section is not data.get(f.name):
+            data = {**data, f.name: section}
+        _warn_unknown_keys(section, _field_names(f.default_factory), path)
+    return data
+
+
 def _warn_unknown_keys(mapping, known, where):
     """Reject keys in ``mapping`` that no parser reads.
 
@@ -629,15 +689,7 @@ def _reliability(data, where):
 def _camera(data, index):
     if not isinstance(data, dict):
         raise ConfigError(f"cameras[{index}]: must be a mapping")
-    path = f"cameras[{index}]"
-    _warn_unknown_keys(data, _field_names(CameraConfig), path)
-    # Each dataclass-typed field is a nested section (scorer, sampler, coordinator,
-    # pan_limit, weather, detection, tracking, enrich); walking the fields keeps this
-    # in lockstep with the schema instead of a second list of section names.
-    for f in fields(CameraConfig):
-        if is_dataclass(f.default_factory):
-            _warn_unknown_keys(data.get(f.name), _field_names(f.default_factory),
-                               f"{path}.{f.name}")
+    data = _check_keys(data, CameraConfig, f"cameras[{index}]")
     name = _require(data, "name", f"cameras[{index}]")
     where = f"camera {name!r}"
     host = _require(data, "host", where)
@@ -836,17 +888,42 @@ def load_camera_config(data, index=0) -> CameraConfig:
     return _camera(data, index)
 
 
+def _check_camera_order(cameras):
+    """Reject a ``coordinator.camera_order`` naming cameras outside its own group.
+
+    The scene coordinator only ever sees deliveries from one group, so a name from
+    another group (or a typo) can never match and scene direction stays unknown
+    forever with nothing saying why. Only the whole camera list can tell, hence here
+    rather than in _camera.
+    """
+    members: dict[str, list[str]] = {}
+    for cam in cameras:
+        if cam.coordinator.group:
+            members.setdefault(cam.coordinator.group, []).append(cam.name)
+    for cam in cameras:
+        order = cam.coordinator.camera_order
+        if not order:
+            continue
+        group = cam.coordinator.group
+        if not group:
+            raise ConfigError(f"camera {cam.name!r}: 'coordinator.camera_order' requires "
+                              "'coordinator.group'")
+        stray = [name for name in order if name not in members[group]]
+        if stray:
+            raise ConfigError(
+                f"camera {cam.name!r}: 'coordinator.camera_order' names "
+                f"{', '.join(map(repr, stray))} outside coordinator group {group!r} "
+                f"(members: {', '.join(map(repr, members[group]))})")
+
+
 def load_config_from_dict(data) -> AppConfig:
     """Validate a parsed config mapping and return an AppConfig. Pure (no I/O)."""
     if not isinstance(data, dict):
         raise ConfigError("config root must be a mapping")
-    _warn_unknown_keys(data, _field_names(AppConfig), "")
     # Dataclass-typed top-level fields are the checked sections (location, alerts, loop,
     # observability, reliability); telegram/groq/faces are plain dicts and stay opaque,
     # and the cameras list is checked entry by entry in _camera.
-    for f in fields(AppConfig):
-        if is_dataclass(f.default_factory):
-            _warn_unknown_keys(data.get(f.name), _field_names(f.default_factory), f.name)
+    data = _check_keys(data, AppConfig, "")
     raw_cameras = data.get("cameras")
     if not raw_cameras or not isinstance(raw_cameras, list):
         raise ConfigError("config must define a non-empty 'cameras' list")
@@ -858,6 +935,7 @@ def load_config_from_dict(data) -> AppConfig:
         if cam.name in seen:
             raise ConfigError(f"duplicate camera name {cam.name!r}")
         seen.add(cam.name)
+    _check_camera_order(cameras)
 
     loc = data.get("location") or {}
     location = Location(lat=loc.get("lat"), lon=loc.get("lon"), tz=loc.get("tz"))
