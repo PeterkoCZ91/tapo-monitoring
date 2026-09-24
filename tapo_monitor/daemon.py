@@ -579,7 +579,7 @@ class MonitorState:
     # None until the first tick has run.
     last_tick_at: float | None = None
     last_tick_ok: bool | None = None
-    ledger_handler: object | None = None
+    ledger_handler: ledger.AuditLedgerHandler | None = None
     pending_sd: list = field(default_factory=list)
     groups: dict = field(default_factory=dict)
     scene_coordinator: scene.SceneCoordinator = field(default_factory=scene.SceneCoordinator)
