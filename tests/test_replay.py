@@ -408,6 +408,43 @@ def test_threshold_leaves_unscored_unrelated_and_scorerless_events_alone():
                          is_night=_night(True))[0].outcome == "would_alert"
 
 
+def _night_cam(threshold=0.5, night_threshold=0.3, **extra):
+    return _cam("front", scorer={"url": "http://192.0.2.50:8766/score",
+                                 "threshold": threshold, "night_threshold": night_threshold},
+                **extra)
+
+
+def test_night_threshold_applies_to_events_handled_during_the_cameras_night():
+    events = [_scored("front", "motion", T0, "drop", 0.4, reason="below_threshold")]
+    night = replay.replay(_app(_night_cam()), events, is_night=_night(True))
+    day = replay.replay(_app(_night_cam()), events, is_night=_night(False))
+    assert (night[0].outcome, night[0].reason, night[0].night) == ("would_alert", None, True)
+    assert (day[0].outcome, day[0].reason, day[0].night) == ("suppressed", "threshold", False)
+    # The camera's schedule decides, as for its IR plan: always_night by day too.
+    always = replay.replay(_app(_night_cam(schedule="always_night")), events,
+                           is_night=_night(False))
+    assert always[0].outcome == "would_alert"
+
+
+def test_night_threshold_follows_the_time_the_daemon_handled_the_event():
+    # Started in daylight, handled after dusk: the live tick that scored it was a night
+    # tick, so replay asks about observed_at, never event_at.
+    events = [_scored("front", "motion", T0, "send", 0.4, observed=T0 + 60)]
+    dusk = replay.replay(_app(_night_cam()), events, is_night=lambda ts: ts >= T0 + 30)
+    assert (dusk[0].outcome, dusk[0].night) == ("would_alert", True)
+
+
+def test_compare_moves_only_night_events_for_a_night_threshold_change():
+    events = [_scored("front", "motion", T0, "drop", 0.4, reason="below_threshold"),
+              _scored("front", "motion", T0 + 600, "drop", 0.4, reason="below_threshold")]
+    is_night = lambda ts: ts >= T0 + 300  # noqa: E731 - day, then night
+    base = replay.replay(_app(_scorer_cam(threshold=0.5)), events, is_night=is_night)
+    other = replay.replay(_app(_night_cam()), events, is_night=is_night)
+    differences = replay.compare(base, other)
+    assert [(b.event.event_at, b.reason, o.outcome) for b, o in differences] == [
+        (T0 + 600, "threshold", "would_alert")]
+
+
 def test_scene_reach_counts_alerts_the_gate_removed():
     group = {"group": "yard", "scene_window": 15}
     app = _app(_cam("front", coordinator=group),
@@ -485,6 +522,20 @@ def test_cli_labels_deliveries_and_compares_a_threshold(tmp_path, capsys, always
     assert "suppressed(cooldown)" in out   # the person after the SD delivery
     assert "recorded non-live deliveries: sd=1" in out
     assert "differences vs" in out and "suppressed(threshold) -> would_alert" in out
+
+
+def test_cli_compares_a_night_threshold(tmp_path, capsys, always_night):
+    other = tmp_path / "night.yaml"
+    other.write_text(_scorer_config(tmp_path, "day.yaml", 0.5).read_text()
+                     + "      night_threshold: 0.4\n")
+    rc = cli.main(["replay", str(tmp_path / "day.yaml"),
+                   "--ledger", str(_ledger_with_paths(tmp_path)), "--start", str(T0 - 1),
+                   "--end", str(T0 + 200), "--json", "--compare", str(other)])
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    [difference] = report["compare"]["differences"]
+    assert (difference["base"]["reason"], difference["other"]["outcome"]) == (
+        "threshold", "would_alert")
 
 
 def test_cli_summary_only_and_scene_reach(tmp_path, capsys, always_night):

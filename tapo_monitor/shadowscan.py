@@ -176,6 +176,7 @@ def score_candidates(candidates, url, threshold, *, rate=DEFAULT_RATE, budget,
     The gap between requests keeps a batch from starving the live pipeline and other
     scorer consumers; the budget bounds the night's total work; three consecutive
     failures mean the scorer is down and the batch should stop pretending otherwise.
+    ``threshold`` is a number or a ``ts -> number`` callable (see :func:`threshold_at`).
     """
     score = score or scorer.score_image
     sleep = sleep or time.sleep
@@ -197,7 +198,8 @@ def score_candidates(candidates, url, threshold, *, rate=DEFAULT_RATE, budget,
             continue
         failures = 0
         scored += 1
-        if float(subject) >= threshold:
+        limit = threshold(ts) if callable(threshold) else threshold
+        if float(subject) >= limit:
             hits.append({"ts": ts, "path": path, "person": float(subject),
                          "box": scorer.subject_box(result)})
     return {"hits": hits, "scored": scored, "aborted": aborted, "trimmed": trimmed}
@@ -235,10 +237,27 @@ def write_summary(review_dir, summary):
         return None
 
 
+def threshold_at(app, cfg, is_night=None):
+    """The hit threshold for ``cfg``'s frames: a number, or ``ts -> number`` by night.
+
+    A frame counts as a hit on the threshold the live path would have applied at its
+    time, so a camera with ``scorer.night_threshold`` gets a callable that asks the site's
+    night per frame timestamp (``is_night``, default the replay's per-minute cached
+    ``scheduling.is_night`` in the site's timezone). Without one it is the plain number.
+    """
+    if cfg.scorer.night_threshold is None:
+        return cfg.scorer.threshold
+    # Only a site with a night value pays for these imports.
+    from . import daemon, replay
+
+    is_night = is_night or replay.default_is_night(app)
+    return lambda ts: daemon.scorer_threshold(cfg, is_night(ts))
+
+
 def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
              rate=DEFAULT_RATE, match_window=DEFAULT_MATCH_WINDOW,
              ledger_factory=None, score=None, runner=None, now=None,
-             extract_budget=DEFAULT_EXTRACT_BUDGET, clock=None):
+             extract_budget=DEFAULT_EXTRACT_BUDGET, clock=None, is_night=None):
     """One observation-only pass over a date's recorder segments. Never raises.
 
     ``extract_budget`` caps the ffmpeg decode phase and ``budget`` the frames scored.
@@ -315,7 +334,7 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
                 for key in ("extraction_errors", "extraction_timeouts"):
                     per_cam[key] += diagnostics.get(key, 0)
             scored = score_candidates(
-                candidates, cfg.scorer.url, cfg.scorer.threshold,
+                candidates, cfg.scorer.url, threshold_at(app, cfg, is_night),
                 rate=rate, budget=camera_frames, score=score,
                 source_id=scorer.source_id_for_camera(cfg.name),
             )

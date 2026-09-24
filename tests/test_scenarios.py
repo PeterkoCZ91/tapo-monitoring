@@ -13,6 +13,7 @@ from tests.scenario import (
     Scenario,
     camera_dict,
     collapse,
+    motion,
     pan_limit,
     person,
 )
@@ -320,6 +321,36 @@ def test_restart_inside_the_cooldown_does_not_resend(monkeypatch, tmp_path):
     sc.run(30)
 
     assert sc.when(("send", "a")) == [at(10)]
+
+
+def test_a_score_between_the_night_and_day_thresholds_alerts_only_at_night(
+        monkeypatch, tmp_path):
+    # scorer.night_threshold: an IR scene scoring 0.4 is a person at night (night value
+    # 0.3) but not by day (0.5). The same bare-motion frame is dropped by day and sent
+    # once the night starts; the ledger-facing audit records the threshold applied.
+    scorer = {"url": "http://scorer.invalid/score", "threshold": 0.5,
+              "night_threshold": 0.3}
+    sc = Scenario(monkeypatch, tmp_path, [camera_dict("a", HOST_A, scorer=scorer)],
+                  alerts={"cooldown": 60})
+    monkeypatch.setattr("tapo_monitor.daemon.scorer.score_image",
+                        lambda *a, **k: {"person": 0.4, "animal": 0.0})
+    thresholds = []
+    monkeypatch.setattr("tapo_monitor.monitor.audit_event",
+                        lambda cfg, event, etype, path, action, threshold=None, **k:
+                        thresholds.append((path, action, threshold)))
+    cam = sc.cams["a"]
+    sc.night = False
+    sc.run(10)
+    cam.push(motion(at(10)))
+    sc.run(90)                                   # 10: day, dropped
+    assert sc.actions("send") == []
+    sc.night = True
+    cam.push(motion(at(100)))
+    sc.run(30)                                   # 100: night, sent
+
+    assert sc.when(("send", "a")) == [at(100)]
+    assert [t for t in thresholds if t[0] == "live"] == [("live", "drop", 0.5),
+                                                          ("live", "send", 0.3)]
 
 
 # ── weather ──────────────────────────────────────────────────────────────────

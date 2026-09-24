@@ -101,6 +101,74 @@ def test_effective_night_honours_per_camera_schedule():
     assert daemon.effective_night(_cam(schedule="astral"), True) is True
 
 
+# ── day/night scorer threshold (pure) ────────────────────────────────────────
+
+def _app(*cameras):
+    return cfg.load_config_from_dict({"cameras": [
+        {"host": f"203.0.113.{10 + i}", **camera} for i, camera in enumerate(cameras)]})
+
+
+def test_scorer_threshold_is_the_night_value_only_during_the_cameras_night():
+    scorer = {"url": "http://x/score", "threshold": 0.5, "night_threshold": 0.3}
+    astral = _app({"name": "a", "scorer": scorer}).cameras[0]
+    assert daemon.scorer_threshold(astral, True) == 0.3
+    assert daemon.scorer_threshold(astral, False) == 0.5
+    always_night = _app({"name": "a", "schedule": "always_night", "scorer": scorer}).cameras[0]
+    assert daemon.scorer_threshold(always_night, False) == 0.3
+    always_day = _app({"name": "a", "schedule": "always_day", "scorer": scorer}).cameras[0]
+    assert daemon.scorer_threshold(always_day, True) == 0.5
+    unset = _app({"name": "a", "scorer": {"threshold": 0.5}}).cameras[0]
+    assert daemon.scorer_threshold(unset, True) == 0.5
+
+
+def test_thresholds_for_tick_returns_the_same_app_when_nothing_changes():
+    app = _app({"name": "a", "scorer": {"threshold": 0.5}},
+               {"name": "b", "scorer": {"threshold": 0.5, "night_threshold": 0.3}})
+    assert daemon.thresholds_for_tick(app, False) is app          # day: nobody changes
+    app_without = _app({"name": "a", "scorer": {"threshold": 0.5}})
+    assert daemon.thresholds_for_tick(app_without, True) is app_without
+    # A night value equal to the day value changes nothing either.
+    same = _app({"name": "a", "scorer": {"threshold": 0.5, "night_threshold": 0.5}})
+    assert daemon.thresholds_for_tick(same, True) is same
+
+
+def test_thresholds_for_tick_copies_only_the_cameras_whose_night_is_on():
+    app = _app({"name": "a", "scorer": {"threshold": 0.5}},
+               {"name": "b", "scorer": {"threshold": 0.5, "night_threshold": 0.3}},
+               {"name": "c", "schedule": "always_night",
+                "scorer": {"threshold": 0.6, "night_threshold": 0.4}})
+    night = daemon.thresholds_for_tick(app, True)
+    assert [c.scorer.threshold for c in night.cameras] == [0.5, 0.3, 0.4]
+    assert night.cameras[0] is app.cameras[0]                     # untouched: shared
+    assert night.cameras[1].sampler is app.cameras[1].sampler     # only scorer is copied
+    assert night.alerts is app.alerts
+    # The loaded config itself is never modified.
+    assert [c.scorer.threshold for c in app.cameras] == [0.5, 0.5, 0.6]
+    day = daemon.thresholds_for_tick(app, False)
+    assert [c.scorer.threshold for c in day.cameras] == [0.5, 0.5, 0.4]   # always_night
+
+
+def test_loop_step_hands_the_night_thresholds_to_every_scoring_pass_only():
+    app = _app({"name": "a", "scorer": {"threshold": 0.5, "night_threshold": 0.3}})
+    seen = {}
+
+    def record(name):
+        def run(app_, *a, **k):
+            seen[name] = app_.cameras[0].scorer.threshold
+        return run
+
+    daemon.loop_step(app, {}, daemon.MonitorState(), now=1000, secrets={},
+                     last_control=None, control_interval=60,
+                     run_control=record("control"), watchdog=record("watchdog"),
+                     inspect=record("inspect"), monitor=record("monitor"),
+                     hubpoll=record("hubpoll"), sample=record("sample"),
+                     drain=record("drain"), guard=record("guard"),
+                     digest=lambda **k: None, connect_factory=lambda *a: None,
+                     is_night=lambda: True)
+    assert seen == {"control": 0.5, "watchdog": 0.5, "inspect": 0.5, "monitor": 0.3,
+                    "hubpoll": 0.3, "sample": 0.3, "drain": 0.3, "guard": 0.5}
+
+
 # ── run_once (injected deps) ─────────────────────────────────────────────────
 
 def test_run_once_plans_each_camera():

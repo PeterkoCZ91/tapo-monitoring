@@ -234,6 +234,10 @@ cameras:
                              # held until a second frame in the band corroborates it within
                              # the sampler window (needs sampler.enabled). Confirmed people
                              # and PIR-backed motion always keep the immediate path.
+      # night_threshold: 0.3   # optional; replaces threshold while this camera's night is
+                             # on (its schedule applied to the astral night). Unset =
+                             # threshold around the clock. Must stay below
+                             # motion_send_threshold when that is set.
     # crop_to_subject: true   # optional padded zoom around the scorer's best person box,
                              # widened just enough that a standing figure is not a sliver;
                              # keeps the full frame if no usable box is available

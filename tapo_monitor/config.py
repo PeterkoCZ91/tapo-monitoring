@@ -110,6 +110,9 @@ class ScorerConfig:
     # sends immediately, a frame in [threshold, motion_send_threshold) needs a second
     # corroborating frame within the sampler window. None = feature off (legacy behaviour).
     motion_send_threshold: float | None = None
+    # Threshold while the camera's night is on (its schedule applied to the astral night):
+    # IR scenes score differently from daylight ones. None = ``threshold`` around the clock.
+    night_threshold: float | None = None
 
 
 @dataclass
@@ -585,8 +588,21 @@ def _scorer(data, where):
         if not threshold < motion_send_threshold <= 1.0:
             raise ConfigError(
                 f"{where}: scorer motion_send_threshold must be > threshold and <= 1.0")
+    night_threshold = d.get("night_threshold")
+    if night_threshold is not None:
+        try:
+            night_threshold = float(night_threshold)
+        except (TypeError, ValueError):
+            raise ConfigError(f"{where}: scorer night_threshold must be a number") from None
+        if not 0.0 <= night_threshold <= 1.0:
+            raise ConfigError(f"{where}: scorer night_threshold must be between 0 and 1")
+        # At night the corroboration band is [night_threshold, motion_send_threshold).
+        if motion_send_threshold is not None and not night_threshold < motion_send_threshold:
+            raise ConfigError(
+                f"{where}: scorer motion_send_threshold must be > night_threshold")
     return ScorerConfig(url=d.get("url"), threshold=threshold, timeout=timeout, tiles=tiles,
-                        motion_send_threshold=motion_send_threshold)
+                        motion_send_threshold=motion_send_threshold,
+                        night_threshold=night_threshold)
 
 
 def _pan_limit(data, where):

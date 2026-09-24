@@ -2,6 +2,7 @@ import json
 import logging
 
 from tapo_monitor import daemon, runtime_state
+from tapo_monitor.config import AppConfig
 
 
 def _state_with_work(tmp_path):
@@ -127,7 +128,7 @@ def test_default_path_sits_beside_the_health_state(tmp_path):
 
 
 def test_loop_step_persists_runtime_state_when_it_changes(tmp_path):
-    app = None                                 # every pass below is stubbed
+    app = AppConfig()                          # every pass below is stubbed
     state = daemon.MonitorState()
     state.runtime_path = str(tmp_path / "runtime.json")
 

@@ -849,6 +849,48 @@ def test_scorer_motion_send_threshold_must_exceed_threshold():
         cfg.load_config_from_dict(data)
 
 
+def _scorer_config(**scorer):
+    return {"cameras": [{"name": "a", "host": "203.0.113.10", "scorer": scorer}]}
+
+
+def test_scorer_night_threshold_defaults_none():
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    assert app.cameras[0].scorer.night_threshold is None
+
+
+def test_scorer_night_threshold_parsed_and_may_sit_either_side_of_threshold():
+    for night in (0.25, 0.7):
+        data = _scorer_config(url="http://x/score", threshold=0.5, night_threshold=night)
+        assert cfg.load_config_from_dict(data).cameras[0].scorer.night_threshold == night
+
+
+@pytest.mark.parametrize("value, message", [
+    ("high", "scorer night_threshold must be a number"),
+    (1.5, "scorer night_threshold must be between 0 and 1"),
+    (-0.1, "scorer night_threshold must be between 0 and 1"),
+])
+def test_scorer_night_threshold_rejects_bad_values(value, message):
+    with pytest.raises(cfg.ConfigError, match=message):
+        cfg.load_config_from_dict(_scorer_config(threshold=0.4, night_threshold=value))
+
+
+def test_scorer_motion_send_threshold_must_exceed_night_threshold():
+    # At night the corroboration band is [night_threshold, motion_send_threshold).
+    data = _scorer_config(threshold=0.3, night_threshold=0.6, motion_send_threshold=0.6)
+    with pytest.raises(cfg.ConfigError, match="must be > night_threshold"):
+        cfg.load_config_from_dict(data)
+    data = _scorer_config(threshold=0.3, night_threshold=0.25, motion_send_threshold=0.6)
+    assert cfg.load_config_from_dict(data).cameras[0].scorer.night_threshold == 0.25
+
+
+def test_scorer_night_threshold_is_a_known_key_and_its_typo_is_not(caplog):
+    assert _load_capturing(caplog, _scorer_config(night_threshold=0.3)).cameras[0] \
+        .scorer.night_threshold == 0.3
+    assert (_load_capturing(caplog, _scorer_config(night_treshold=0.3))
+            == "cameras[0].scorer.night_treshold: unknown key "
+               "(did you mean 'night_threshold'?)")
+
+
 def test_camera_rotate_defaults_zero_and_parses():
     assert cfg.load_config_from_dict(
         {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0].rotate == 0

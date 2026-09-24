@@ -5,6 +5,10 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `scorer.night_threshold`: per-camera scorer threshold applied while the camera's night is
+  on (astral night with its `schedule` applied); unset keeps `threshold` around the clock.
+  `tapo-monitor replay` and the shadow scan apply it by the time each event or frame was
+  handled, so `replay --compare` can evaluate a night-only change.
 - `tapo-monitor label` / `label-stats`: local frame-labeling page over collected sent/review-log
   frames (append-only `labels.jsonl` keyed by image SHA-256) and false-alarm/miss/threshold stats.
   Binds `127.0.0.1` by default. See `docs/labeling.md`.

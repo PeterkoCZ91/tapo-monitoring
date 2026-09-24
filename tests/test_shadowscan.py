@@ -241,6 +241,32 @@ def test_score_candidates_aborts_after_consecutive_failures():
     assert len(out["hits"]) == 0
 
 
+def test_score_candidates_takes_a_per_timestamp_threshold():
+    def fake_score(url, path, timeout=10, tiles=1, **kw):
+        return {"person": 0.4, "animal": 0.0}
+
+    out = shadowscan.score_candidates(
+        [("day.jpg", 10.0), ("night.jpg", 20.0)], "http://x/score",
+        lambda ts: 0.3 if ts >= 15 else 0.5,
+        budget=10, score=fake_score, sleep=lambda _s: None)
+    assert [h["ts"] for h in out["hits"]] == [20.0]
+
+
+def test_threshold_at_follows_the_live_night_threshold_per_frame():
+    from tapo_monitor import config as cfg
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "a", "host": "192.0.2.10", "scorer": {"threshold": 0.5}},
+        {"name": "b", "host": "192.0.2.11",
+         "scorer": {"threshold": 0.5, "night_threshold": 0.3}},
+        {"name": "c", "host": "192.0.2.12", "schedule": "always_night",
+         "scorer": {"threshold": 0.5, "night_threshold": 0.3}}]})
+    is_night = lambda ts: ts >= 100  # noqa: E731
+    plain, astral, always = (shadowscan.threshold_at(app, c, is_night) for c in app.cameras)
+    assert plain == 0.5                                  # no night value: a plain number
+    assert (astral(50), astral(150)) == (0.5, 0.3)
+    assert (always(50), always(150)) == (0.3, 0.3)
+
+
 def test_cluster_hits_merges_within_gap_and_keeps_peak_frame():
     hits = [
         {"ts": 100.0, "path": "a.jpg", "person": 0.6, "box": None},

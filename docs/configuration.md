@@ -470,6 +470,18 @@ while a real subject persists across frames. So, for non-PIR motion:
 
 Unset (the default) keeps the legacy behaviour: any motion frame `>= threshold` sends.
 
+`night_threshold` replaces `threshold` while the camera's night is on — the shared astral
+night with the camera's `schedule` applied, so an `always_night` camera uses it around the
+clock and an `always_day` one never does. IR night scenes score differently from daylight
+ones, so the best-separating value from `tapo-monitor label-stats` can differ by day and
+night. Everything that reads `threshold` uses it at night: the live path, the sampler, the
+SD follow-up, hub clips and the corroboration band, which becomes
+`[night_threshold, motion_send_threshold)` (so `motion_send_threshold` must stay above
+it). The night is decided when the daemon processes a frame, not when the event started: a
+hub clip or SD follow-up handled a few minutes after dusk is judged by the night value.
+Unset (the default) uses `threshold` around the clock. Check a change against recorded
+events with `tapo-monitor replay --compare` first (see [observability](observability.md)).
+
 - `threshold` is the minimum **person** confidence from 0 to 1; animal confidence never
   triggers an alert.
 - `tiles: 1` scores only the whole frame; larger values also score a grid.

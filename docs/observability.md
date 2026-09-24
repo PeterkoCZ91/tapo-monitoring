@@ -237,6 +237,12 @@ configs that differ only in `scorer.threshold` to see which recorded events move
 tapo-monitor replay cameras.yaml --hours 12 --compare cameras.threshold-0.55.yaml
 ```
 
+A `scorer.night_threshold` is honoured the same way: an event the daemon handled while
+the camera's night was on (the astral night at its `observed_at`, with the camera's
+`schedule` applied) is held against `night_threshold`, any other against `threshold`. A
+config that differs only in `night_threshold` therefore moves night events alone; the
+`night` field of each JSON decision is the astral night the mute gate was given.
+
 **The scene gate's reach.** `--scene-reach` replays the window a second time with the
 group gate switched off and reports, per camera, live `would_alert` without and with the
 gate and how many alerts it removed — including its knock-on effect on cooldowns, which

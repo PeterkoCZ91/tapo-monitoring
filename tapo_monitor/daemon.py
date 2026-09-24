@@ -28,7 +28,7 @@ import tempfile
 import time as _time
 from collections.abc import Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 from . import (
@@ -196,6 +196,45 @@ def effective_night(cfg: CameraConfig, astronomical_night: bool) -> bool:
     if cfg.schedule == "always_night":
         return True
     return astronomical_night
+
+
+def scorer_threshold(cfg: CameraConfig, astronomical_night: bool) -> float:
+    """The scorer threshold this camera applies now: ``night_threshold`` during its night.
+
+    The camera's night is :func:`effective_night` — the astral night with its ``schedule``
+    applied, the same night that picks its IR plan — so an ``always_night`` camera uses
+    ``night_threshold`` around the clock. Unset, ``threshold`` holds day and night.
+    """
+    night_threshold = cfg.scorer.night_threshold
+    if night_threshold is not None and effective_night(cfg, astronomical_night):
+        return night_threshold
+    return cfg.scorer.threshold
+
+
+def thresholds_for_tick(app: AppConfig, night: bool) -> AppConfig:
+    """``app`` as the scoring passes of one tick see it: night thresholds applied.
+
+    Every camera whose :func:`scorer_threshold` differs from ``scorer.threshold`` gets a
+    copy with that value in ``scorer.threshold``, so the many readers of that field need
+    not know about the night. Nothing else changes and everything else is shared; the
+    very same ``app`` comes back when no camera changes, the common case. Safe because
+    per-camera state is keyed by camera name, never by config identity, and nothing
+    mutates a config.
+
+    The night is the tick's, not the event's: an event handled later (an SD follow-up, a
+    hub clip, a held sampler group) is judged by the threshold of the tick that handles
+    it. Around dusk and dawn that moves a few minutes of events to the other value, the
+    same rule ``tapo-monitor replay`` models with each event's ``observed_at``.
+    """
+    cameras = []
+    changed = False
+    for cfg in app.cameras:
+        threshold = scorer_threshold(cfg, night)
+        if threshold != cfg.scorer.threshold:
+            cfg = replace(cfg, scorer=replace(cfg.scorer, threshold=threshold))
+            changed = True
+        cameras.append(cfg)
+    return replace(app, cameras=cameras) if changed else app
 
 
 def camera_muted(cfg: CameraConfig, night: bool, now) -> bool:
@@ -2784,13 +2823,15 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
         watchdog(app, cam_clients, state, now=now, secrets=secrets, night=night)
         inspect(app, cam_clients, state, now=now, secrets=secrets)
         last_control = now
+    # Everything that scores sees this tick's thresholds (scorer.night_threshold at night).
+    scoring = thresholds_for_tick(app, night)
     previous_watermark = dict(state.last_seen)
-    monitor(app, cam_clients, state, now=now, secrets=secrets, night=night)
+    monitor(scoring, cam_clients, state, now=now, secrets=secrets, night=night)
     if state.health_path and state.last_seen != previous_watermark:
         health.save_state(state.health_path, state, logger=log)
-    hubpoll(app, cam_clients, state, now=now, secrets=secrets, night=night)
-    sample(app, cam_clients, state, now=now, secrets=secrets, night=night)
-    drain(app, cam_clients, state, now=now, secrets=secrets, night=night)
+    hubpoll(scoring, cam_clients, state, now=now, secrets=secrets, night=night)
+    sample(scoring, cam_clients, state, now=now, secrets=secrets, night=night)
+    drain(scoring, cam_clients, state, now=now, secrets=secrets, night=night)
     guard(app, cam_clients, state, now=now, secrets=secrets, night=night)
     digest(now=now, secrets=secrets, app=app, state=state)
     runtime_state.save_if_changed(state, now, logger=log)

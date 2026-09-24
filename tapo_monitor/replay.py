@@ -24,10 +24,11 @@ Two things from the ledger's ``decisions`` table narrow that upper bound:
   ask whether the delivery would still happen under another config (only the mute gate
   is re-applied).
 * **Threshold what-if.** Where the live decision for an event carries a recorded scorer
-  confidence, the replayed config's ``scorer.threshold`` is applied to it (see
-  :func:`_threshold_outcome`). Frames that were never scored — a snapshot failure, a
-  scorer outage, a camera without a scorer, frames the daemon never grabbed — cannot be
-  re-thresholded and keep the gates-only answer.
+  confidence, the replayed config's ``scorer.threshold`` — or its ``night_threshold``
+  when the camera's night was on at ``observed_at``, as the daemon picks it per tick — is
+  applied to it (see :func:`_threshold_outcome`). Frames that were never scored — a
+  snapshot failure, a scorer outage, a camera without a scorer, frames the daemon never
+  grabbed — cannot be re-thresholded and keep the gates-only answer.
 """
 
 from __future__ import annotations
@@ -168,8 +169,12 @@ def _mute_reason(cfg):
     return "night_only" if cfg.night_only else "quiet_hours"
 
 
-def _threshold_outcome(cfg, ev):
+def _threshold_outcome(cfg, ev, night):
     """What the replayed ``scorer.threshold`` makes of a live event's recorded score.
+
+    ``night`` is the astral night at the event's ``observed_at``; the threshold is the one
+    :func:`tapo_monitor.daemon.scorer_threshold` picks from it, ``night_threshold`` during
+    the camera's night, so a replay follows the tick the daemon handled the event in.
 
     Returns ``None`` when the threshold has no say (no recorded score, no scorer in the
     replayed config, a tamper event, or a recorded action the threshold did not decide —
@@ -191,7 +196,7 @@ def _threshold_outcome(cfg, ev):
         return None
     if ev.recorded != "send" and ev.recorded_reason != "below_threshold":
         return None
-    if ev.score >= cfg.scorer.threshold:
+    if ev.score >= daemon.scorer_threshold(cfg, night):
         return "send"
     if ev.event_type == "motion":
         return "drop"
@@ -259,7 +264,7 @@ def replay(app, events, *, is_night=None, scene_gate=True) -> list[Decision]:
             decisions.append(Decision(ev, SUPPRESSED, "scene_duplicate", night))
             continue
         # The live path scores after both gates, so the threshold comes last here too.
-        verdict = _threshold_outcome(cfg, ev)
+        verdict = _threshold_outcome(cfg, ev, night)
         if verdict == "drop":
             decisions.append(Decision(ev, SUPPRESSED, "threshold", night))
             continue
