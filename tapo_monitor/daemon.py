@@ -1330,11 +1330,11 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             path = sentlog.archive_review_if_configured(
                 image, sentlog.review_meta(_name, "hold", etype, s, event))
             g = state.groups.get(_name)
-            if path and g is not None:
+            if g is not None:
                 # Remembered so the sampler's expiry can tell "no second frame ever came"
-                # from "a pan_limit recall yanked the subject out of view mid-wait".
-                g["last_hold_path"] = path
-                g["last_hold_at"] = now
+                # from "a pan_limit recall yanked the subject out of view mid-wait", and
+                # still has a frame to send when the hold expiry policy says so.
+                sampler.remember_held_frame(g, path, s, now)
             return path
 
         def burst_sent(_name=name, _cfg=cfg):
@@ -2160,10 +2160,8 @@ def _suppress_sampler_frame(cfg, group, etype, s, scfg, image, verdict, *, now):
                             threshold=cfg.scorer.threshold, reason="awaiting_corroboration")
         path = sentlog.archive_review_if_configured(
             image, sentlog.review_meta(cfg.name, "hold", etype, s, group["event"]))
-        if path:
-            # Same stamps the live pass leaves via hold_archive: the expiry rescue reads them.
-            group["last_hold_path"] = path
-            group["last_hold_at"] = now
+        # Same stamps the live pass leaves via hold_archive: the hold expiry reads them.
+        sampler.remember_held_frame(group, path, s, now)
     else:
         log.info("sampler %s frame %d/%d: score %.2f below threshold %.2f",
                  cfg.name, group["frames"], scfg.max_frames, s, cfg.scorer.threshold)
@@ -2177,6 +2175,39 @@ def _suppress_sampler_frame(cfg, group, etype, s, scfg, image, verdict, *, now):
                             score=s, threshold=scfg.low_score, reason="low_score_streak")
 
 
+def _send_held_frame(app, cfg, state, group, *, now, secrets, time_str, reason, threshold):
+    """Send the group's archived held frame through the normal alert path; audit it.
+
+    Shared by the pan_limit rescue and the hold expiry policy, whose callers have already
+    cleared the gates. ``reason`` tags the audit ``send`` line and ``threshold`` is what
+    the score was held against there. A delivery arms the motion cooldown and records the
+    scene delivery exactly like a sampler send. Returns the Telegram result.
+    """
+    path = group["hold_path"]
+    s = sampler.held_score(group)
+    _, on_alert = alert_gate(state, cfg.name, app.alerts.cooldown, now)
+    description = _caption_describe(cfg, secrets["groq_key"], path)
+    caption = notify.build_caption(
+        monitor.TYPE_EMOJI.get("motion", "👁"), time_str(group["event"]),
+        description=description or None, score=s)
+    ok = send_alert_photo(cfg, secrets, path, caption, score=s,
+                          incident=incident.incident_id(cfg.name, group["event"]))
+    monitor.audit_event(cfg, group["event"], "motion", "sampler", "send", score=s,
+                        threshold=threshold, telegram=ok, reason=reason)
+    if ok:
+        log.info("%s %s: held frame sent (score=%s)",
+                 reason, cfg.name, f"{s:.2f}" if s is not None else "n/a")
+        on_alert("motion")
+        group["sent"] = True
+        group["delivered"] = True
+        state.scene_coordinator.record_delivery(
+            cfg.coordinator.group, cfg.name, "motion", group["event"], now,
+            window=cfg.coordinator.scene_window)
+    else:
+        log.warning("%s %s: Telegram delivery failed", reason, cfg.name)
+    return ok
+
+
 def _rescue_expired_hold(app, cfg, state, group, *, now, secrets, time_str):
     """Send the archived held frame when a pan_limit recall broke its corroboration.
 
@@ -2186,10 +2217,10 @@ def _rescue_expired_hold(app, cfg, state, group, *, now, secrets, time_str):
     2026-08-31 19:57). When this camera was recalled between the hold and now, the
     archived hold frame is the best remaining evidence — send it through the normal
     alert path. Returns True when a rescue send was attempted (and audited); False
-    hands the expiry back to the plain hold_expired accounting.
+    hands the expiry on to the hold expiry policy.
     """
-    path = group.get("last_hold_path")
-    held_at = group.get("last_hold_at")
+    path = group.get("hold_path")
+    held_at = group.get("hold_at")
     recalled_at = state.pan_limit_recall_at.get(cfg.name)
     if not path or held_at is None or recalled_at is None:
         return False
@@ -2199,31 +2230,96 @@ def _rescue_expired_hold(app, cfg, state, group, *, now, secrets, time_str):
         return False
     if not os.path.exists(path):
         return False                      # review-log retention got there first
-    can_alert, on_alert = alert_gate(state, cfg.name, app.alerts.cooldown, now)
+    can_alert, _ = alert_gate(state, cfg.name, app.alerts.cooldown, now)
     if not can_alert("motion"):
         return False
-    s = group.get("last_hold_score")
-    description = _caption_describe(cfg, secrets["groq_key"], path)
-    caption = notify.build_caption(
-        monitor.TYPE_EMOJI.get("motion", "👁"), time_str(group["event"]),
-        description=description or None, score=s)
-    ok = send_alert_photo(cfg, secrets, path, caption, score=s,
-                          incident=incident.incident_id(cfg.name, group["event"]))
-    monitor.audit_event(cfg, group["event"], "motion", "sampler", "send", score=s,
-                        threshold=cfg.scorer.threshold, telegram=ok,
-                        reason="hold_rescue_recall")
-    if ok:
-        log.info("rescue %s: pan_limit recall broke corroboration, held frame sent (score=%s)",
-                 cfg.name, f"{s:.2f}" if s is not None else "n/a")
-        on_alert("motion")
-        group["sent"] = True
-        group["delivered"] = True
-        state.scene_coordinator.record_delivery(
-            cfg.coordinator.group, cfg.name, "motion", group["event"], now,
-            window=cfg.coordinator.scene_window)
-    else:
-        log.warning("rescue %s: Telegram delivery failed", cfg.name)
+    _send_held_frame(app, cfg, state, group, now=now, secrets=secrets, time_str=time_str,
+                     reason="hold_rescue_recall", threshold=cfg.scorer.threshold)
     return True
+
+
+def _hold_expiry_blocked(app, cfg, state, group, *, now):
+    """Why the expiry policy may not send this group's held frame now; None when it may.
+
+    The gates a sampler send clears, plus two of its own: the score must reach
+    ``sampler.hold_expiry_min_score`` and the review log must have archived the frame
+    (and retention not yet removed it), and neither the motion cooldown nor the scene
+    group may object. Asks without committing anything, so ``observe`` can use it too.
+    """
+    s = sampler.held_score(group)
+    if s is None or s < sampler.hold_expiry_floor(cfg.sampler, cfg.scorer.threshold):
+        return "below_floor"
+    path = group.get("hold_path")
+    if not path:
+        return "no_archive"               # TAPO_REVIEW_LOG_DIR unset, or the write failed
+    if not os.path.exists(path):
+        return "archive_missing"          # review-log retention got there first
+    can_alert, _ = alert_gate(state, cfg.name, app.alerts.cooldown, now)
+    if not can_alert("motion"):
+        return "cooldown"
+    if not state.scene_coordinator.allows(cfg.coordinator.group, cfg.name, "motion",
+                                          group["event"], now,
+                                          window=cfg.coordinator.scene_window):
+        return "scene_duplicate"
+    return None
+
+
+def _expire_hold(app, cfg, state, group, *, now, secrets, time_str):
+    """Settle a held marginal motion whose corroborating frame never came.
+
+    A pan_limit recall that broke the corroboration is rescued first. Otherwise
+    ``sampler.hold_expiry`` decides: ``send`` delivers the archived held frame when
+    :func:`_hold_expiry_blocked` allows (audited ``send``/``hold_expiry_send``);
+    ``observe`` audits that same decision as ``would_send``/``hold_expiry_observe`` and
+    sends nothing. Every hold that is not sent keeps its ``drop``/``hold_expired`` line,
+    so expired holds are counted the same whatever the policy; with a policy on, that
+    line also names what kept the frame back (``expiry=cooldown`` ...).
+    """
+    if _rescue_expired_hold(app, cfg, state, group, now=now, secrets=secrets,
+                            time_str=time_str):
+        return
+    policy = cfg.sampler.hold_expiry
+    extra = None
+    if policy != "off":
+        floor = sampler.hold_expiry_floor(cfg.sampler, cfg.scorer.threshold)
+        blocked = _hold_expiry_blocked(app, cfg, state, group, now=now)
+        if blocked is None and policy == "send":
+            _send_held_frame(app, cfg, state, group, now=now, secrets=secrets,
+                             time_str=time_str, reason="hold_expiry_send", threshold=floor)
+            return
+        if blocked is None:
+            s = sampler.held_score(group)
+            log.info("hold expiry %s: would send the held frame (score=%.2f) [observe]",
+                     cfg.name, s)
+            monitor.audit_event(cfg, group["event"], "motion", "sampler", "would_send",
+                                score=s, threshold=floor, reason="hold_expiry_observe")
+        else:
+            log.info("hold expiry %s: held frame not sent (%s)", cfg.name, blocked)
+            extra = {"expiry": blocked}
+    # A held marginal motion never got its corroborating frame: make the discard visible
+    # so threshold tuning can count expired holds like any other outcome.
+    monitor.audit_event(cfg, group["event"], "motion", "sampler", "drop",
+                        score=sampler.held_score(group),
+                        threshold=cfg.scorer.threshold, reason="hold_expired", extra=extra)
+
+
+def hold_expiry_archive_warning(app: AppConfig, env=None):
+    """The warning for a hold expiry policy with no review log to send from, or None.
+
+    The policy sends the frame the review log archived when it was held; without
+    ``TAPO_REVIEW_LOG_DIR`` there is none, so every expiry ends as ``hold_expired`` with
+    ``expiry=no_archive``. Said once at startup rather than hidden in every expiry.
+    """
+    env = os.environ if env is None else env
+    if (env.get(sentlog.ENV_REVIEW_DIR) or "").strip():
+        return None
+    names = [cfg.name for cfg in app.cameras
+             if cfg.sampler.enabled and cfg.sampler.hold_expiry != "off"]
+    if not names:
+        return None
+    return (f"sampler.hold_expiry set for camera(s) {', '.join(names)} but "
+            f"{sentlog.ENV_REVIEW_DIR} is unset: held frames are not archived, so an "
+            "expiring hold has nothing to send and stays hold_expired")
 
 
 def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
@@ -2250,14 +2346,8 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
         scfg = cfg.sampler
         if sampler.expired(group, now, scfg):
             if group.get("motion_candidates") and not group["sent"]:
-                if not _rescue_expired_hold(app, cfg, state, group, now=now,
-                                            secrets=secrets, time_str=time_str):
-                    # A held marginal motion never got its corroborating frame: make the
-                    # discard visible so threshold tuning can count expired holds like any
-                    # other outcome.
-                    monitor.audit_event(cfg, group["event"], "motion", "sampler", "drop",
-                                        score=group.get("last_hold_score"),
-                                        threshold=cfg.scorer.threshold, reason="hold_expired")
+                _expire_hold(app, cfg, state, group, now=now, secrets=secrets,
+                             time_str=time_str)
             log.info("close group %s: %d follow-up frame(s), sent=%s",
                      cfg.name, group["frames"], group["sent"])
             del state.groups[cfg.name]
@@ -2951,6 +3041,9 @@ def main(argv=None):  # pragma: no cover - thin entry point
     dwell_warning = inert_dwell_warning(app)
     if dwell_warning:
         log.warning("%s", dwell_warning)
+    expiry_warning = hold_expiry_archive_warning(app)
+    if expiry_warning:
+        log.warning("%s", expiry_warning)
     cam_clients = {}
     last_control = None
 

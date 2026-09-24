@@ -123,6 +123,40 @@ def corroborate_motion(group, score, confirm, send_now):
     return "drop"
 
 
+def remember_held_frame(group, path, score, now):
+    """Stamp the archived held frame an expiring hold may still send. Mutates the group.
+
+    ``path`` is where the review log archived the frame (None when it is off or the
+    write failed: nothing to remember). The group keeps the best-scoring archived hold,
+    later ones winning ties, so an expiry sends the strongest evidence it saw rather than
+    whichever marginal frame happened to come last; path, time and score stay one frame.
+    """
+    if not path:
+        return
+    best = group.get("hold_score")
+    if best is not None and score is not None and score < best:
+        return
+    group["hold_path"] = path
+    group["hold_at"] = now
+    group["hold_score"] = score
+
+
+def held_score(group):
+    """The score an expiring hold is judged by: the archived frame's, else the last held."""
+    score = group.get("hold_score")
+    return group.get("last_hold_score") if score is None else score
+
+
+def hold_expiry_floor(scfg, threshold):
+    """Least held score ``scfg.hold_expiry`` acts on. Pure.
+
+    ``threshold`` is the scorer threshold in force (the tick's, so ``night_threshold``
+    during the camera's night): unset, the floor follows it and every held frame, which
+    by construction scored at least that, qualifies.
+    """
+    return threshold if scfg.hold_expiry_min_score is None else scfg.hold_expiry_min_score
+
+
 def record_grab(group, now, scfg):
     """Account one grab attempt and schedule the next. Mutates the group."""
     group["frames"] += 1

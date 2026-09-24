@@ -7,7 +7,9 @@ times in comments are seconds since the scenario started.
 """
 
 
-from tapo_monitor import twin
+import os
+
+from tapo_monitor import daemon, twin
 from tests.scenario import (
     START,
     Scenario,
@@ -473,3 +475,155 @@ def test_event_api_still_broken_after_an_outage_alerts_only_after_its_threshold(
     assert "back online" in texts[1][1]
     assert texts[2][1].startswith("event API unavailable for camera a after 5m")
     assert sc.actions("reboot") == []            # restart clock restarted too
+
+
+# ── corroboration hold expiry ────────────────────────────────────────────────
+
+def _held_camera(policy, pan=None, coordinator=None, **sampler):
+    """Bare motion scoring 0.45 is held (threshold 0.3, send line 0.6); the sampler takes
+    two follow-up frames 10 s apart (20, 30), after which the exhausted group closes
+    group_gap (20 s) past its last event — on the tick at 35."""
+    extra = {} if pan is None else {"pan_limit": pan}
+    if coordinator is not None:
+        extra["coordinator"] = coordinator
+    return camera_dict("a", HOST_A,
+                       scorer={"url": "http://scorer.invalid/score", "threshold": 0.3,
+                               "motion_send_threshold": 0.6},
+                       sampler={"enabled": True, "interval": 10, "max_frames": 2,
+                                "group_gap": 20, "hold_expiry": policy, **sampler},
+                       **extra)
+
+
+def _hold_story(monkeypatch, tmp_path, policy, *, review_log=True, pan=None, swing=False,
+                coordinator=None, **sampler):
+    """The live frame of a motion at 10 scores 0.45 and is held; every follow-up frame
+    scores 0.1, so no corroboration ever comes. ``swing`` puts the lens past its span as
+    the motion arrives. Returns the scenario, run up to 15, and its audit list of
+    ``(path, action, reason, expiry)``."""
+    sc = Scenario(monkeypatch, tmp_path, [_held_camera(policy, pan=pan, coordinator=coordinator, **sampler)],
+                  alerts={"cooldown": 120})
+    if review_log:
+        monkeypatch.setenv("TAPO_REVIEW_LOG_DIR", str(tmp_path / "review"))
+    calls = []
+
+    def score(*_a, **_k):
+        calls.append(1)
+        return {"person": 0.45 if len(calls) == 1 else 0.1, "animal": 0.0}
+
+    monkeypatch.setattr("tapo_monitor.daemon.scorer.score_image", score)
+    audits = []
+    monkeypatch.setattr(
+        "tapo_monitor.monitor.audit_event",
+        lambda cfg, event, etype, path, action, reason=None, extra=None, **k:
+        audits.append((path, action, reason, (extra or {}).get("expiry"))))
+    sc.run(10)                                   # 0..5: quiet
+    sc.cams["a"].push(motion(at(10)))
+    if swing:
+        sc.cams["a"].pan_x = OUT_OF_SPAN
+    sc.tick(advance=5)                           # 10: live frame held
+    return sc, audits
+
+
+def _expiry_audits(audits):
+    """What the expiry did: its sends and would-sends, and the hold_expired drop."""
+    return [a for a in audits
+            if (a[0] == "sampler" and a[1] in ("send", "would_send")) or a[2] == "hold_expired"]
+
+
+def test_an_expired_hold_is_dropped_as_before_with_the_policy_off(monkeypatch, tmp_path):
+    sc, audits = _hold_story(monkeypatch, tmp_path, "off")
+    assert ("live", "hold", "awaiting_corroboration", None) in audits
+    sc.run(60)                                   # 15..70: low frames at 20 and 30, expiry at 35
+
+    assert sc.actions("send") == []
+    assert "a" not in sc.state.groups
+    assert _expiry_audits(audits) == [("sampler", "drop", "hold_expired", None)]
+
+
+def test_observe_audits_the_send_it_would_make_and_sends_nothing(monkeypatch, tmp_path):
+    sc, audits = _hold_story(monkeypatch, tmp_path, "observe")
+    sc.run(60)
+
+    assert sc.actions("send") == []
+    assert _expiry_audits(audits) == [
+        ("sampler", "would_send", "hold_expiry_observe", None),
+        ("sampler", "drop", "hold_expired", None),       # still counted as expired
+    ]
+    assert sc.state.last_alert.get(("a", "motion")) is None   # nothing armed
+
+
+def test_send_delivers_the_held_frame_once_when_the_hold_expires(monkeypatch, tmp_path):
+    sc, audits = _hold_story(monkeypatch, tmp_path, "send")
+    sc.run(120)                                  # 15..130: well past the expiry
+
+    assert sc.when(("send", "a")) == [at(35)]    # exactly once, at the expiry tick
+    assert _expiry_audits(audits) == [("sampler", "send", "hold_expiry_send", None)]
+    assert sc.state.last_alert[("a", "motion")] == at(35)     # arms the motion cooldown
+
+
+def test_send_respects_a_cooldown_armed_by_another_path(monkeypatch, tmp_path):
+    sc, audits = _hold_story(monkeypatch, tmp_path, "send")
+    sc.run(20)                                   # 15..30: both follow-up frames drop
+    # An alert outside this group (an SD follow-up, say) armed the motion cooldown.
+    sc.state.last_alert[("a", "motion")] = sc.clock.now
+    sc.run(40)
+
+    assert sc.actions("send") == []
+    assert _expiry_audits(audits) == [("sampler", "drop", "hold_expired", "cooldown")]
+
+
+def test_send_leaves_the_scene_to_an_overlapping_camera_that_already_alerted(
+        monkeypatch, tmp_path):
+    sc, audits = _hold_story(monkeypatch, tmp_path, "send",
+                             coordinator={"group": "yard", "scene_window": 15})
+    # A second camera of the group delivered this passage while the hold waited.
+    sc.state.scene_coordinator.record_delivery("yard", "b", "motion", {"start_time": at(12)},
+                                               at(15), window=15)
+    sc.run(60)
+
+    assert sc.actions("send") == []
+    assert _expiry_audits(audits) == [("sampler", "drop", "hold_expired", "scene_duplicate")]
+
+
+def test_below_the_floor_the_held_frame_stays_dropped(monkeypatch, tmp_path):
+    sc, audits = _hold_story(monkeypatch, tmp_path, "send", hold_expiry_min_score=0.5)
+    sc.run(60)
+
+    assert sc.actions("send") == []
+    assert _expiry_audits(audits) == [("sampler", "drop", "hold_expired", "below_floor")]
+
+
+def test_an_archived_frame_that_is_gone_is_not_sent(monkeypatch, tmp_path):
+    sc, audits = _hold_story(monkeypatch, tmp_path, "send")
+    held = sc.state.groups["a"]["hold_path"]
+    os.unlink(held)                              # review-log retention got there first
+    sc.run(60)
+
+    assert sc.actions("send") == []
+    assert _expiry_audits(audits) == [("sampler", "drop", "hold_expired", "archive_missing")]
+
+
+def test_without_the_review_log_the_policy_has_nothing_to_send(monkeypatch, tmp_path):
+    sc, audits = _hold_story(monkeypatch, tmp_path, "send", review_log=False)
+    assert "hold_path" not in sc.state.groups["a"]
+    sc.run(60)
+
+    assert sc.actions("send") == []
+    assert _expiry_audits(audits) == [("sampler", "drop", "hold_expired", "no_archive")]
+    # Said once, at startup, rather than per expiry.
+    warning = daemon.hold_expiry_archive_warning(sc.app, env={})
+    assert warning and "TAPO_REVIEW_LOG_DIR" in warning
+    assert daemon.hold_expiry_archive_warning(
+        sc.app, env={"TAPO_REVIEW_LOG_DIR": str(tmp_path)}) is None
+
+
+def test_a_pan_limit_recall_rescue_still_wins_over_the_policy(monkeypatch, tmp_path):
+    # Auto-track swung past the span as the subject appeared; the guard pulls the lens
+    # back in the hold's own tick, so the corroborating frame can never come. The rescue
+    # sends the held frame — once, under its own reason — before the policy is asked.
+    sc, audits = _hold_story(monkeypatch, tmp_path, "send", pan=pan_limit(), swing=True)
+    assert sc.when(("goto", "a", "3")) == [at(10)]
+    sc.run(60)
+
+    assert sc.when(("send", "a")) == [at(35)]
+    assert _expiry_audits(audits) == [("sampler", "send", "hold_rescue_recall", None)]

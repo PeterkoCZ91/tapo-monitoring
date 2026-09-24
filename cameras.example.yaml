@@ -221,6 +221,10 @@ cameras:
                              # below low_score (0 = off); person/PIR-confirmed
                              # groups always run the full window
       low_score: 0.15        # "nothing there" score for the early-exit streak
+      hold_expiry: "off"     # a held motion frame never corroborated: off = drop it,
+                             # observe = audit what send would do, send = deliver it
+                             # (needs scorer.motion_send_threshold + the review log)
+      # hold_expiry_min_score: 0.35  # least held score it acts on; unset = threshold
 
     scorer:
       url:                   # e.g. http://127.0.0.1:8766/score; empty = Groq arbiter

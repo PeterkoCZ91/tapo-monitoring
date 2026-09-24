@@ -29,6 +29,7 @@ SMARTTRACK_KINDS = {"people", "vehicle", "pet", "baby"}
 SNAPSHOT_SOURCES = {"rtsp", "sd"}
 LIGHT_TRIGGER_TYPES = {"person", "motion", "pet", "tamper", "vehicle"}
 LIGHT_TRIGGER_MODES = ("software", "firmware")
+HOLD_EXPIRY_POLICIES = {"off", "observe", "send"}
 
 
 class ConfigError(ValueError):
@@ -95,6 +96,13 @@ class SamplerConfig:
     # low_score (0 = off). Person/PIR-confirmed groups always run the full window.
     low_score_exit: int = 0
     low_score: float = 0.15
+    # What an expiring corroboration hold does when no pan_limit recall explains it:
+    # "off" drops it as hold_expired (legacy), "observe" audits what "send" would have
+    # sent, "send" delivers the archived held frame. Needs scorer.motion_send_threshold.
+    hold_expiry: str = "off"
+    # Least held score the expiry policy acts on; None = the camera's scorer threshold
+    # in force at expiry (night_threshold during its night).
+    hold_expiry_min_score: float | None = None
 
 
 @dataclass
@@ -556,6 +564,19 @@ def _sampler(data, where):
         raise ConfigError(f"{where}: sampler low_score_exit must be >= 0")
     if not 0.0 <= low_score <= 1.0:
         raise ConfigError(f"{where}: sampler low_score must be between 0 and 1")
+    hold_expiry = d.get("hold_expiry", "off")
+    if hold_expiry is False:
+        hold_expiry = "off"          # YAML 1.1 reads a bare `off` as false
+    hold_expiry = _check_enum(hold_expiry, HOLD_EXPIRY_POLICIES, "sampler.hold_expiry", where)
+    hold_expiry_min_score = d.get("hold_expiry_min_score")
+    if hold_expiry_min_score is not None:
+        try:
+            hold_expiry_min_score = float(hold_expiry_min_score)
+        except (TypeError, ValueError):
+            raise ConfigError(
+                f"{where}: sampler hold_expiry_min_score must be a number") from None
+        if not 0.0 <= hold_expiry_min_score <= 1.0:
+            raise ConfigError(f"{where}: sampler hold_expiry_min_score must be between 0 and 1")
     return SamplerConfig(
         enabled=bool(d.get("enabled", False)),
         interval=interval,
@@ -564,7 +585,30 @@ def _sampler(data, where):
         stream=d.get("stream"),
         low_score_exit=low_score_exit,
         low_score=low_score,
+        hold_expiry=hold_expiry,
+        hold_expiry_min_score=hold_expiry_min_score,
     )
+
+
+def _check_hold_expiry(sampler, scorer, where):
+    """Reject a hold expiry policy that can never act.
+
+    Holds only exist in the ``[threshold, motion_send_threshold)`` band, so without
+    ``scorer.motion_send_threshold`` nothing is ever held and ``observe``/``send`` would
+    read as a switched-on policy that silently does nothing; a floor at or above that
+    line can never be reached by a held score either. Both are errors, not warnings, like
+    the other threshold orderings here: the config states an intent the daemon cannot
+    honour. A disabled sampler is not checked — it idles every sampler key alike.
+    """
+    if sampler.hold_expiry == "off":
+        return
+    if scorer.motion_send_threshold is None:
+        raise ConfigError(f"{where}: sampler hold_expiry={sampler.hold_expiry} needs "
+                          "scorer motion_send_threshold (without it nothing is held)")
+    floor = sampler.hold_expiry_min_score
+    if floor is not None and floor >= scorer.motion_send_threshold:
+        raise ConfigError(f"{where}: sampler hold_expiry_min_score must be < scorer "
+                          "motion_send_threshold (a held score never reaches it)")
 
 
 def _scorer(data, where):
@@ -842,6 +886,9 @@ def _camera(data, index):
             raise ConfigError(f"{where}: 'whitelamp_intensity' must be an integer") from None
         if not 1 <= whitelamp_intensity <= 100:
             raise ConfigError(f"{where}: 'whitelamp_intensity' must be between 1 and 100")
+    sampler = _sampler(data.get("sampler"), where)
+    scorer = _scorer(data.get("scorer"), where)
+    _check_hold_expiry(sampler, scorer, where)
     return CameraConfig(
         name=name,
         host=host,
@@ -881,8 +928,8 @@ def _camera(data, index):
         tracking=_tracking(data.get("tracking"), where),
         weather=_weather(data.get("weather"), where),
         enrich=_enrich(data.get("enrich"), where),
-        sampler=_sampler(data.get("sampler"), where),
-        scorer=_scorer(data.get("scorer"), where),
+        sampler=sampler,
+        scorer=scorer,
         pan_limit=_pan_limit(data.get("pan_limit"), where),
         light_trigger=_light_trigger(data.get("light_trigger"), where),
         coordinator=CoordinatorConfig(

@@ -16,7 +16,8 @@ only the edge of the world:
   axis auto-track can push past its span, privacy mode, motor refusals, going offline;
 * ONVIF — ``daemon.panlimit`` is patched to read and move the same :class:`FakeCamera`;
 * the notifier — ``notify.send_photo``/``send_text`` record instead of calling Telegram;
-* the RTSP grab — ``snapshot_for`` writes a small file, or fails while ``rtsp_ok`` is off.
+* the RTSP grab — ``snapshot_for`` writes a small file, or fails while ``rtsp_ok`` is off;
+  the live pass and the sampler's follow-up grabs share it.
 
 The daily review digest is stubbed (it is opt-in via env and asks the shared scorer over
 HTTP); pass ``digest=`` to :class:`Scenario` to run something else.
@@ -302,6 +303,9 @@ class Scenario:
         mp.setattr(notify, "send_photo", self.notifier.send_photo)
         mp.setattr(notify, "send_text", self.notifier.send_text)
         mp.setattr(enrich, "groq_describe", lambda *a, **k: "")
+        # Any grab outside snapshot_for (the guard's evidence frame once a review log is
+        # set) would start a real ffmpeg against the fake host: it finds nothing.
+        mp.setattr(daemon.snapshot, "capture_rtsp", lambda *a, **k: None)
         # ONVIF: the guard reads and moves the same fake lens the control pass recalls.
         bounds_from_presets = daemon.panlimit.bounds_from_presets
         mp.setattr(daemon.panlimit, "build_ptz", self._build_ptz)
@@ -361,8 +365,10 @@ class Scenario:
         control = functools.partial(daemon.run_once, is_night=night, is_raining=raining)
         monitor = functools.partial(daemon.run_monitor_pass, snapshot_for=self._snapshot_for,
                                     time_str=lambda _e: "scenario")
-        kwargs = {"run_control": control, "monitor": monitor, "is_night": night,
-                  **self._collaborators}
+        sample = functools.partial(daemon.process_sampler, snapshot_for=self._snapshot_for,
+                                   time_str=lambda _e: "scenario")
+        kwargs = {"run_control": control, "monitor": monitor, "sample": sample,
+                  "is_night": night, **self._collaborators}
         self.last_control = daemon.loop_step(
             self.app, self.cam_clients, self.state, now=now, secrets=self.secrets,
             last_control=self.last_control, control_interval=self.control_interval,

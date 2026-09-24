@@ -130,8 +130,9 @@ def test_summary_counts_outcomes_per_camera():
                                     _ev("back", "motion", T0 + 9)], is_night=_night(True))
     summary = replay.summarize(decisions)
     assert summary["front"] == {"events": 2, "would_alert": 1, "suppressed": {"cooldown": 1},
-                                "delivered": {}}
-    assert summary["back"] == {"events": 1, "would_alert": 1, "suppressed": {}, "delivered": {}}
+                                "delivered": {}, "hold_expiry": 0}
+    assert summary["back"] == {"events": 1, "would_alert": 1, "suppressed": {}, "delivered": {},
+                               "hold_expiry": 0}
 
 
 def test_compare_lists_only_events_whose_outcome_differs():
@@ -346,7 +347,7 @@ def test_deliveries_are_summarized_by_path_not_as_events():
                               is_night=_night(True))
     assert replay.summarize(decisions)["front"] == {
         "events": 0, "would_alert": 0, "suppressed": {},
-        "delivered": {"sampler": 1, "sd": 1}}
+        "delivered": {"sampler": 1, "sd": 1}, "hold_expiry": 0}
 
 
 # ── threshold what-if ─────────────────────────────────────────────────────────
@@ -395,13 +396,11 @@ def test_a_person_under_the_threshold_defers_to_sd_and_still_arms_the_cooldown()
 
 def test_threshold_leaves_unscored_unrelated_and_scorerless_events_alone():
     events = [_ev("front", "motion", T0),                                   # no score
-              _scored("front", "motion", T0 + 300, "hold", 0.2,
-                      reason="awaiting_corroboration"),                   # not a threshold call
               _scored("front", "tamper", T0 + 310, "send", 0.0),           # never scorer-gated
               _scored("front", "person", T0 + 600, "drop", 0.1,
                       reason="burst_already_sent")]                       # another reason
     decisions = replay.replay(_app(_scorer_cam(threshold=0.9)), events, is_night=_night(True))
-    assert [d.outcome for d in decisions] == ["would_alert"] * 4
+    assert [d.outcome for d in decisions] == ["would_alert"] * 3
     # A config without a scorer does not threshold anything.
     scored = [_scored("front", "motion", T0, "send", 0.1)]
     assert replay.replay(_app(_cam("front")), scored,
@@ -556,3 +555,161 @@ def test_cli_summary_only_and_scene_reach(tmp_path, capsys, always_night):
     assert "decisions" not in report
     assert report["compare"] == {"config": str(other), "count": 1}
     assert report["scene_reach"]["front"] == {"without_gate": 1, "with_gate": 1, "removed": 0}
+
+
+# ── corroboration holds and the hold expiry what-if ──────────────────────────
+
+def _hold_cam(hold_expiry="off", threshold=0.3, motion_send=0.6, sampler=None, **extra):
+    sampler_block = {"enabled": True, "hold_expiry": hold_expiry, **(sampler or {})}
+    return _cam("front", scorer={"url": "http://192.0.2.50:8766/score", "threshold": threshold,
+                                 "motion_send_threshold": motion_send},
+                sampler=sampler_block, **extra)
+
+
+def _held(at, score, observed=None):
+    return _scored("front", "motion", at, "hold", score, reason="awaiting_corroboration",
+                   observed=observed)
+
+
+def _expiry(at, score, observed, action="drop", reason="hold_expired"):
+    return replay.ReplayEvent(camera="front", event_type="motion", event_at=at,
+                              observed_at=observed, recorded=action, path=replay.HOLD_EXPIRY,
+                              score=score, recorded_reason=reason)
+
+
+def test_a_live_hold_alerts_nothing_by_itself_but_is_re_thresholded():
+    events = [_held(T0, 0.45)]
+    held = replay.replay(_app(_hold_cam()), events, is_night=_night(True))
+    assert (held[0].outcome, held[0].reason) == ("suppressed", "hold")
+    raised = replay.replay(_app(_hold_cam(threshold=0.5)), events, is_night=_night(True))
+    assert raised[0].reason == "threshold"
+    lowered = replay.replay(_app(_hold_cam(motion_send=0.45)), events, is_night=_night(True))
+    assert lowered[0].outcome == "would_alert"      # clears the send line: no hold at all
+    plain = replay.replay(_app(_scorer_cam(threshold=0.3)), events, is_night=_night(True))
+    assert plain[0].outcome == "would_alert"        # corroboration off: a plain threshold send
+
+
+def test_hold_expiry_off_keeps_the_expired_hold_suppressed():
+    events = [_held(T0, 0.45), _expiry(T0, 0.45, T0 + 250)]
+    decisions = replay.replay(_app(_hold_cam()), events, is_night=_night(True))
+    assert [(d.outcome, d.reason) for d in decisions] == [
+        ("suppressed", "hold"), ("suppressed", "hold_expired")]
+    summary = replay.summarize(decisions)["front"]
+    assert summary["hold_expiry"] == 0
+    assert summary["suppressed"] == {"hold": 1, "hold_expiry:hold_expired": 1}
+
+
+def test_hold_expiry_send_alerts_and_arms_the_cooldown_like_a_sampler_send():
+    events = [_held(T0, 0.45), _expiry(T0, 0.45, T0 + 250),
+              _ev("front", "motion", T0 + 300, observed=T0 + 302)]
+    decisions = replay.replay(_app(_hold_cam("send")), events, is_night=_night(True))
+    assert [(d.outcome, d.reason) for d in decisions] == [
+        ("suppressed", "hold"), ("would_alert", None), ("suppressed", "cooldown")]
+    summary = replay.summarize(decisions)["front"]
+    assert summary["hold_expiry"] == 1 and summary["would_alert"] == 0
+
+
+def test_hold_expiry_observe_would_send_but_arms_nothing():
+    events = [_expiry(T0, 0.45, T0 + 250), _ev("front", "motion", T0 + 300, observed=T0 + 302)]
+    decisions = replay.replay(_app(_hold_cam("observe")), events, is_night=_night(True))
+    assert [(d.outcome, d.reason) for d in decisions] == [
+        ("suppressed", "hold_expiry_observe"), ("would_alert", None)]
+
+
+def test_hold_expiry_respects_the_floor_the_cooldown_and_the_mute():
+    floor = replay.replay(_app(_hold_cam("send", sampler={"hold_expiry_min_score": 0.5})),
+                          [_expiry(T0, 0.45, T0 + 250)], is_night=_night(True))
+    assert floor[0].reason == "hold_expiry_floor"
+    # A motion alert 100 s before the expiry: the 120 s wall-clock cooldown still runs.
+    cooled = replay.replay(_app(_hold_cam("send")),
+                           [_ev("front", "motion", T0 + 150, observed=T0 + 150),
+                            _expiry(T0, 0.45, T0 + 250)], is_night=_night(True))
+    assert [d.reason for d in cooled] == [None, "cooldown"]
+    muted = replay.replay(_app(_hold_cam("send", night_only=True)),
+                          [_expiry(T0, 0.45, T0 + 250)], is_night=_night(False))
+    assert muted[0].reason == "night_only"
+
+
+def test_hold_expiry_floor_defaults_to_the_threshold_in_force():
+    # No explicit floor: by day the 0.35 hold misses the 0.4 day threshold, by night it
+    # clears the 0.3 night threshold — the value the daemon's tick view would apply.
+    cam = _cam("front", scorer={"url": "http://192.0.2.50:8766/score", "threshold": 0.4,
+                                "night_threshold": 0.3, "motion_send_threshold": 0.6},
+               sampler={"enabled": True, "hold_expiry": "send"})
+    events = [_expiry(T0, 0.35, T0 + 250)]
+    day = replay.replay(_app(cam), events, is_night=_night(False))
+    night = replay.replay(_app(cam), events, is_night=_night(True))
+    assert (day[0].reason, night[0].outcome) == ("hold_expiry_floor", "would_alert")
+
+
+def test_hold_expiry_is_held_back_by_the_scene_group():
+    group = {"group": "yard", "scene_window": 15}
+    back = _cam("back", host="192.0.2.11", coordinator=group)
+    events = [_ev("back", "motion", T0 + 5, observed=T0 + 6), _expiry(T0, 0.45, T0 + 250)]
+    app = _app(_hold_cam("send", coordinator=group), back)
+    decisions = replay.replay(app, events, is_night=_night(True))
+    assert [(d.event.camera, d.outcome, d.reason) for d in decisions] == [
+        ("back", "would_alert", None), ("front", "suppressed", "scene_duplicate")]
+    ungated = replay.replay(app, events, is_night=_night(True), scene_gate=False)
+    assert ungated[1].outcome == "would_alert"
+
+
+def _ledger_with_holds(tmp_path):
+    path = tmp_path / "holds.sqlite3"
+    events = ledger.EventLedger(path)
+    for at in (T0, T0 + 600):
+        events.record_camera_event(camera="front", event_type="motion", event_at=at,
+                                   observed_at=at + 2)
+        events.record_decision(camera="front", event_type="motion", event_at=at,
+                               path="live", action="hold", score=0.45, threshold=0.3,
+                               reason="awaiting_corroboration", observed_at=at + 2)
+    events.record_decision(camera="front", event_type="motion", event_at=T0,
+                           path="sampler", action="drop", score=0.45, threshold=0.3,
+                           reason="hold_expired", observed_at=T0 + 250)
+    # observe mode writes the would-be send and keeps the drop: one expiry, not two.
+    events.record_decision(camera="front", event_type="motion", event_at=T0 + 600,
+                           path="sampler", action="would_send", score=0.45, threshold=0.3,
+                           reason="hold_expiry_observe", observed_at=T0 + 850)
+    events.record_decision(camera="front", event_type="motion", event_at=T0 + 600,
+                           path="sampler", action="drop", score=0.45, threshold=0.3,
+                           reason="hold_expired", observed_at=T0 + 850)
+    return path
+
+
+def test_load_events_reads_one_hold_expiry_per_group(tmp_path):
+    events = replay.load_events(_ledger_with_holds(tmp_path), T0 - 1, T0 + 1000)
+    expiries = [e for e in events if e.path == replay.HOLD_EXPIRY]
+    assert [(e.event_at, e.observed_at, e.recorded, e.score) for e in expiries] == [
+        (T0, T0 + 250, "drop", 0.45), (T0 + 600, T0 + 850, "would_send", 0.45)]
+    assert [e.recorded for e in events if e.path == "live"] == ["hold", "hold"]
+
+
+def _hold_config(tmp_path, name, policy):
+    path = tmp_path / name
+    path.write_text(
+        "alerts:\n  cooldown: 120\n"
+        "cameras:\n"
+        "  - name: front\n    host: 192.0.2.10\n"
+        "    scorer:\n      url: http://192.0.2.50:8766/score\n      threshold: 0.3\n"
+        "      motion_send_threshold: 0.6\n"
+        f"    sampler:\n      enabled: true\n      hold_expiry: {policy}\n"
+    )
+    return path
+
+
+def test_cli_compare_estimates_the_alerts_hold_expiry_adds(tmp_path, capsys, always_night):
+    ledger_path = str(_ledger_with_holds(tmp_path))
+    window = ["--start", str(T0 - 1), "--end", str(T0 + 1000)]
+    rc = cli.main(["replay", str(_hold_config(tmp_path, "off.yaml", "off")),
+                   "--ledger", ledger_path, *window,
+                   "--compare", str(_hold_config(tmp_path, "send.yaml", "send"))])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert ("front: 2 events, 0 would alert; "
+            "suppressed: hold=2, hold_expiry:hold_expired=2") in out
+    assert "differences vs" in out and out.count(
+        "suppressed(hold_expired)[hold_expiry] -> would_alert[hold_expiry]") == 2
+    rc = cli.main(["replay", str(tmp_path / "send.yaml"), "--ledger", ledger_path, *window,
+                   "--summary-only"])
+    assert rc == 0
+    assert "held frames sent on expiry: 2" in capsys.readouterr().out

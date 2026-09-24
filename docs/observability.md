@@ -208,7 +208,8 @@ tapo-monitor replay cameras.yaml --start 2026-09-20T18:00 --end 2026-09-21T07:00
 ```
 
 Each line shows `would_alert` or `suppressed(<reason>)` (`cooldown`, `scene_duplicate`,
-`threshold`, `threshold_defer`, `night_only`, `quiet_hours`, `source_disabled`,
+`threshold`, `threshold_defer`, `hold`, `hold_expired`, `hold_expiry_floor`,
+`hold_expiry_observe`, `night_only`, `quiet_hours`, `source_disabled`,
 `unknown_camera`) next to the live action production actually recorded and its scorer
 confidence, followed by a per-camera summary. `--compare` replays the same events under a
 second config and lists only the events whose outcome changes. Times are Unix timestamps
@@ -244,6 +245,35 @@ the camera's night was on (the astral night at its `observed_at`, with the camer
 config that differs only in `night_threshold` therefore moves night events alone; the
 `night` field of each JSON decision is the astral night the mute gate was given.
 
+**Hold expiry what-ifs.** A live frame recorded as `hold` (bare motion in the
+`motion_send_threshold` corroboration band) is `suppressed(hold)` and arms nothing, as
+live: what became of it is recorded elsewhere — a later send once corroborated, a
+`hold_rescue_recall` delivery, or the sampler's `hold_expired` drop when its group closed.
+Its score is re-thresholded like any other: under the replayed `threshold` it is
+`suppressed(threshold)`, and at or over the replayed `motion_send_threshold` (or with
+corroboration off) it is `would_alert`. Each `hold_expired` drop — and the expiry policy's
+own `hold_expiry_observe`/`hold_expiry_send` lines, one per group — is replayed at the
+time it was recorded as a `[hold_expiry]` line carrying the held score and asks the
+replayed config's `sampler.hold_expiry`: `off` keeps it `suppressed(hold_expired)`;
+otherwise a score under the floor (`hold_expiry_min_score`, else the threshold in force)
+is `suppressed(hold_expiry_floor)`, the motion cooldown and scene group are asked as for a
+sampler send, and `observe` ends as `suppressed(hold_expiry_observe)` while `send` is
+`would_alert` and arms the cooldown. The summary counts these apart from live events
+(`held frames sent on expiry: 3`), so comparing a config with the policy on estimates the
+alerts it adds per camera before a camera switches it on:
+
+```bash
+tapo-monitor replay cameras.yaml --start 2026-09-20T18:00 --end 2026-09-21T07:00 \
+  --compare cameras.hold-expiry.yaml
+```
+
+The estimate assumes the held frame was still in the review log (the ledger does not say);
+it counts alerts, not people — whether a sent held frame is a person is what the labelled
+review log answers. A policy that sends a hold also arms a cooldown the recorded later
+events did not see, and the replay follows that; it cannot add the corroborating frames a
+changed `motion_send_threshold` would have produced, nor remove a hold a lowered one would
+have sent at once from its group's later expiry.
+
 **The scene gate's reach.** `--scene-reach` replays the window a second time with the
 group gate switched off and reports, per camera, live `would_alert` without and with the
 gate and how many alerts it removed — including its knock-on effect on cooldowns, which
@@ -264,9 +294,9 @@ mind:
 - Media and the scorer are out of scope. A frame that was never scored — a snapshot
   failure, a scorer outage, a camera without a scorer, a frame the daemon never grabbed —
   cannot be re-thresholded and keeps the gates-only answer, so for those `would_alert`
-  stays an upper bound. The score is the one the live frame got: `motion_send_threshold`
-  corroboration (`hold`), the burst check and a known-face cooldown override are not
-  re-modelled.
+  stays an upper bound. The score is the one the live frame got: the burst check and a
+  known-face cooldown override are not re-modelled, and `motion_send_threshold`
+  corroboration only as far as described above.
 - Non-live deliveries are only what production recorded. A replay under another config
   does not add the SD or sampler send that config might have produced, nor remove one it
   would have gated; the SD look a lowered threshold would skip still arms the cooldown.

@@ -3905,8 +3905,8 @@ def test_sampler_hold_remembers_archived_frame(monkeypatch):
     _run_sampler(app, state, 1035, sent, monkeypatch, score=0.4)
     assert sent == []
     g = state.groups["a"]
-    assert g["last_hold_path"] == "/rl/a_hold_p0.40_x.jpg"
-    assert g["last_hold_at"] == 1035
+    assert g["hold_path"] == "/rl/a_hold_p0.40_x.jpg"
+    assert g["hold_at"] == 1035
     assert len(reviews) == 1
 
 
@@ -3932,8 +3932,8 @@ def test_live_hold_remembers_archived_frame(monkeypatch):
 
     g = state.groups["a"]
     assert g["motion_candidates"] == 1
-    assert g["last_hold_path"] == "/rl/a_hold_p0.40_x.jpg"
-    assert g["last_hold_at"] == 1005
+    assert g["hold_path"] == "/rl/a_hold_p0.40_x.jpg"
+    assert g["hold_at"] == 1005
     assert len(reviews) == 1                  # archived once, not once per module
 
 
@@ -4035,8 +4035,8 @@ def _rescue_group(tmp_path, held_at=1100, score=0.62):
     g = _group()
     g["motion_candidates"] = 1
     g["last_hold_score"] = score
-    g["last_hold_path"] = str(frame)
-    g["last_hold_at"] = held_at
+    g["hold_path"] = str(frame)
+    g["hold_at"] = held_at
     return g, str(frame)
 
 
@@ -4075,7 +4075,7 @@ def test_expired_hold_without_recall_stays_hold_expired(monkeypatch, tmp_path, c
 
 def test_expired_hold_ignores_recall_before_the_hold(monkeypatch, tmp_path, caplog):
     # A recall that happened before the frame was held cannot have broken its
-    # corroboration — only a recall inside (last_hold_at, now) rescues.
+    # corroboration — only a recall inside (hold_at, now) rescues.
     sent = []
     app = _sampler_app(threshold=0.3, motion_send=0.6)
     state = daemon.MonitorState()
@@ -5750,7 +5750,7 @@ def test_expired_hold_rescued_when_recall_follows_in_same_loop_step(monkeypatch,
 
     def hold(*args, now, **kwargs):
         order.append("hold")
-        group["last_hold_at"] = now
+        group["hold_at"] = now
         state.groups["a"] = group
 
     def recall(*args, now, **kwargs):
@@ -5765,7 +5765,7 @@ def test_expired_hold_rescued_when_recall_follows_in_same_loop_step(monkeypatch,
         control_interval=60, monitor=hold, sample=noop, drain=noop,
         hubpoll=noop, guard=recall, digest=noop, is_night=lambda: True)
     assert order == ["hold", "recall"]
-    assert group["last_hold_at"] == state.pan_limit_recall_at["a"]
+    assert group["hold_at"] == state.pan_limit_recall_at["a"]
     with caplog.at_level("INFO", logger="tapo_monitor.monitor"):
         _run_sampler(app, state, 1271, sent, monkeypatch)
     assert [image for image, _caption in sent] == [frame]

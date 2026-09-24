@@ -891,6 +891,68 @@ def test_scorer_night_threshold_is_a_known_key_and_its_typo_is_not(caplog):
                "(did you mean 'night_threshold'?)")
 
 
+def _hold_expiry_config(scorer=None, **sampler):
+    return {"cameras": [{"name": "a", "host": "203.0.113.10",
+                         "scorer": {"threshold": 0.3, "motion_send_threshold": 0.6,
+                                    **(scorer or {})},
+                         "sampler": {"enabled": True, **sampler}}]}
+
+
+def test_sampler_hold_expiry_defaults_off_with_the_threshold_as_floor():
+    sampler = cfg.load_config_from_dict(_minimal()).cameras[0].sampler
+    assert (sampler.hold_expiry, sampler.hold_expiry_min_score) == ("off", None)
+
+
+@pytest.mark.parametrize("policy", ["off", "observe", "send"])
+def test_sampler_hold_expiry_parses_each_policy(policy):
+    data = _hold_expiry_config(hold_expiry=policy, hold_expiry_min_score=0.35)
+    sampler = cfg.load_config_from_dict(data).cameras[0].sampler
+    assert (sampler.hold_expiry, sampler.hold_expiry_min_score) == (policy, 0.35)
+
+
+def test_sampler_hold_expiry_accepts_a_bare_yaml_off(tmp_path):
+    # YAML 1.1 reads an unquoted `off` as false; it must still mean the policy "off".
+    path = tmp_path / "cameras.yaml"
+    path.write_text("cameras:\n  - name: a\n    host: 203.0.113.10\n"
+                    "    sampler:\n      enabled: true\n      hold_expiry: off\n")
+    assert cfg.load_config(path).cameras[0].sampler.hold_expiry == "off"
+
+
+@pytest.mark.parametrize("sampler, message", [
+    ({"hold_expiry": "always"}, "'sampler.hold_expiry' must be one of"),
+    ({"hold_expiry": True}, "'sampler.hold_expiry' must be one of"),
+    ({"hold_expiry_min_score": "high"}, "hold_expiry_min_score must be a number"),
+    ({"hold_expiry_min_score": 1.5}, "hold_expiry_min_score must be between 0 and 1"),
+    ({"hold_expiry_min_score": -0.1}, "hold_expiry_min_score must be between 0 and 1"),
+    ({"hold_expiry": "send", "hold_expiry_min_score": 0.6},
+     "hold_expiry_min_score must be < scorer motion_send_threshold"),
+])
+def test_sampler_hold_expiry_rejects_bad_values(sampler, message):
+    with pytest.raises(cfg.ConfigError, match=message):
+        cfg.load_config_from_dict(_hold_expiry_config(**sampler))
+
+
+@pytest.mark.parametrize("policy", ["observe", "send"])
+def test_sampler_hold_expiry_needs_motion_send_threshold(policy):
+    data = {"cameras": [{"name": "a", "host": "203.0.113.10",
+                         "scorer": {"threshold": 0.3},
+                         "sampler": {"enabled": True, "hold_expiry": policy}}]}
+    with pytest.raises(cfg.ConfigError, match="needs scorer motion_send_threshold"):
+        cfg.load_config_from_dict(data)
+    # Off needs nothing: it is today's behaviour.
+    data["cameras"][0]["sampler"]["hold_expiry"] = "off"
+    assert cfg.load_config_from_dict(data).cameras[0].sampler.hold_expiry == "off"
+
+
+def test_sampler_hold_expiry_keys_are_known_and_their_typos_are_not(caplog):
+    loaded = _load_capturing(caplog, _hold_expiry_config(hold_expiry="observe",
+                                                         hold_expiry_min_score=0.4))
+    assert loaded.cameras[0].sampler.hold_expiry == "observe"
+    assert (_load_capturing(caplog, _hold_expiry_config(hold_expiry_min_scor=0.4))
+            == "cameras[0].sampler.hold_expiry_min_scor: unknown key "
+               "(did you mean 'hold_expiry_min_score'?)")
+
+
 def test_camera_rotate_defaults_zero_and_parses():
     assert cfg.load_config_from_dict(
         {"cameras": [{"name": "a", "host": "203.0.113.10"}]}).cameras[0].rotate == 0

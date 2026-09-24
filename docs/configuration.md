@@ -426,6 +426,8 @@ sampler:
   stream: stream1
   low_score_exit: 3
   low_score: 0.15
+  hold_expiry: observe
+  hold_expiry_min_score: 0.35
 ```
 
 The sampler takes additional live frames across a long event. Nearby events are grouped;
@@ -436,6 +438,33 @@ consecutive follow-up frames all score below `low_score` — bursts from foliage
 insects stop consuming grabs. Groups with a camera-confirmed person/PIR detection always
 run the full window (the sampler exists to catch a subject appearing mid-event), and a
 confirmed detection arriving later reopens an early-exited group. `0` disables the exit.
+
+`hold_expiry` decides what happens to a frame held for corroboration (see
+`motion_send_threshold` below) whose second frame never came before the group closed.
+Labelled review-log frames show most held frames are real people, and about half of them
+never got an alert:
+
+- `off` (the default) drops it as `hold_expired`, exactly as before;
+- `observe` sends nothing but audits the send it would have made
+  (`action=would_send reason=hold_expiry_observe`) next to the unchanged `hold_expired`
+  drop — the mode to trial a camera in;
+- `send` delivers the held frame through the normal alert path, audited
+  `action=send reason=hold_expiry_send`, and arms the motion cooldown like a sampler send.
+
+Either policy acts only when the held score reaches `hold_expiry_min_score` (unset: the
+camera's `scorer.threshold` in force at expiry, `night_threshold` during its night — so
+every held frame qualifies), the frame is still in the review log, and the motion cooldown
+and the scene group allow it; a held frame that stays behind keeps its `hold_expired` line
+with `expiry=below_floor`, `no_archive`, `archive_missing`, `cooldown` or
+`scene_duplicate`. A pan-limit recall that broke the corroboration is rescued first
+(`hold_rescue_recall`) whatever the policy. The frame sent is the best-scoring one the
+group held. The policy needs `scorer.motion_send_threshold` (without it nothing is held —
+the config is rejected) and `TAPO_REVIEW_LOG_DIR`, where held frames are archived: without
+it the daemon warns once at startup and every expiry stays `hold_expired` with
+`expiry=no_archive`. Estimate what `send` would add on a recorded night with
+`tapo-monitor replay --compare` before switching a camera on (see
+[observability](observability.md#replaying-a-night)). Write `off` bare or quoted; YAML
+reads a bare `off` as false, which is accepted as `off`.
 
 ### Local scorer and crop
 
@@ -464,7 +493,7 @@ while a real subject persists across frames. So, for non-PIR motion:
 - a frame `>= motion_send_threshold` sends immediately (a clear single frame);
 - a frame in `[threshold, motion_send_threshold)` is *held* until a second frame in that
   band corroborates it within the sampler window (needs `sampler.enabled`), otherwise it
-  is dropped when the group closes;
+  is dropped when the group closes (unless `sampler.hold_expiry` sends it);
 - camera-confirmed people and PIR-backed motion are unaffected — they keep the immediate
   path, so a confirmed person is never delayed or dropped.
 

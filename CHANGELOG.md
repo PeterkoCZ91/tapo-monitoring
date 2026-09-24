@@ -11,6 +11,17 @@ All notable changes to this project are documented here.
 - Sent-log and review-log index records of a camera event's frame (every delivery path, holds,
   sampled and hub-clip drops) carry `incident` and `event_start`, so one visit's frames group
   by ID. Frames with no camera event omit both.
+- `sampler.hold_expiry` (`off` | `observe` | `send`, default `off`) and
+  `sampler.hold_expiry_min_score`: a held marginal motion frame whose corroboration never
+  came can now be sent from the review log when its group closes (`hold_expiry_send`), or
+  only audited as `would_send`/`hold_expiry_observe`; the pan-limit rescue still goes first.
+  The floor defaults to the threshold in force; the policy needs
+  `scorer.motion_send_threshold` and warns at startup without `TAPO_REVIEW_LOG_DIR`. The
+  group now keeps its best-scoring archived held frame rather than the last one.
+- `tapo-monitor replay` models corroboration holds: a live `hold` is `suppressed(hold)`
+  (it used to count as `would_alert`), and each recorded `hold_expired` is re-decided under
+  the replayed `sampler.hold_expiry`, so `replay --compare` estimates the alerts the policy
+  adds per camera.
 - `scorer.night_threshold`: per-camera scorer threshold applied while the camera's night is
   on (astral night with its `schedule` applied); unset keeps `threshold` around the clock.
   `tapo-monitor replay` and the shadow scan apply it by the time each event or frame was

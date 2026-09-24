@@ -1,5 +1,6 @@
 import os
 import sys
+from dataclasses import replace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -202,6 +203,28 @@ def test_corroborate_hold_records_score_for_expiry_audit():
     g = {}
     assert sampler.corroborate_motion(g, 0.41, 0.3, 0.6) == "hold"
     assert g["last_hold_score"] == 0.41
+
+
+def test_remember_held_frame_keeps_the_best_scoring_archive():
+    g = {}
+    sampler.remember_held_frame(g, None, 0.5, 1000)       # review log off: nothing to keep
+    assert "hold_path" not in g
+    sampler.remember_held_frame(g, "/rl/a.jpg", 0.45, 1000)
+    sampler.remember_held_frame(g, "/rl/b.jpg", 0.41, 1030)   # weaker: the first stays
+    assert (g["hold_path"], g["hold_at"], g["hold_score"]) == ("/rl/a.jpg", 1000, 0.45)
+    sampler.remember_held_frame(g, "/rl/c.jpg", 0.45, 1060)   # a tie goes to the later
+    assert (g["hold_path"], g["hold_at"]) == ("/rl/c.jpg", 1060)
+
+
+def test_held_score_prefers_the_archived_frame():
+    assert sampler.held_score({"last_hold_score": 0.41}) == 0.41
+    assert sampler.held_score({"last_hold_score": 0.41, "hold_score": 0.52}) == 0.52
+    assert sampler.held_score({}) is None
+
+
+def test_hold_expiry_floor_follows_the_threshold_unless_set():
+    assert sampler.hold_expiry_floor(CFG, 0.3) == 0.3
+    assert sampler.hold_expiry_floor(replace(CFG, hold_expiry_min_score=0.5), 0.3) == 0.5
 
 
 def test_ensure_group_creates_then_returns_same():

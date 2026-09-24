@@ -29,6 +29,11 @@ Two things from the ledger's ``decisions`` table narrow that upper bound:
   applied to it (see :func:`_threshold_outcome`). Frames that were never scored — a
   snapshot failure, a scorer outage, a camera without a scorer, frames the daemon never
   grabbed — cannot be re-thresholded and keep the gates-only answer.
+* **Corroboration holds and their expiry.** A live frame recorded as ``hold`` never
+  alerts by itself (see :func:`_hold_outcome`); the sampler's ``hold_expired`` drop for
+  its group is replayed at the time it was recorded and asks the replayed config's
+  ``sampler.hold_expiry`` whether the held frame would have been sent after all (see
+  :func:`_replay_hold_expiry`), so ``--compare`` estimates what that policy adds.
 """
 
 from __future__ import annotations
@@ -44,7 +49,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 
-from . import daemon, ledger, scheduling
+from . import daemon, ledger, sampler, scheduling
 
 WOULD_ALERT = "would_alert"
 SUPPRESSED = "suppressed"
@@ -52,6 +57,12 @@ DELIVERED = "delivered"       # a recorded non-live delivery, replayed as a fact
 
 # Paths whose recorded Telegram sends arm the alert gate in production (``on_alert``).
 DELIVERY_PATHS = ("sd", "sampler", "hubpoll")
+# Replay-only path of an expired corroboration hold: re-decided, not replayed as a fact.
+HOLD_EXPIRY = "hold_expiry"
+# Sampler decisions that end a hold by expiry, by (action, reason); the policy's own send
+# and observe lines are the same expiry under another config, so they are re-decided too.
+_EXPIRY_ROWS = {("drop", "hold_expired"), ("would_send", "hold_expiry_observe"),
+                ("send", "hold_expiry_send")}
 # Live actions whose recorded score was compared against ``scorer.threshold``.
 _THRESHOLD_ACTIONS = ("send", "drop", "defer")
 
@@ -61,7 +72,9 @@ class ReplayEvent:
     """One recorded camera detection: what the daemon saw and when it processed it.
 
     With ``path`` other than ``live`` it is instead a recorded non-live delivery (an SD
-    follow-up, sampler or hub-clip send that reached Telegram) for that camera event.
+    follow-up, sampler or hub-clip send that reached Telegram) for that camera event, or
+    with ``path`` :data:`HOLD_EXPIRY` the expiry of a held frame of the sampler group that
+    event started, ``score`` then being the held frame's.
     """
 
     camera: str
@@ -105,17 +118,26 @@ def load_events(path, start, end, cameras=None) -> list[ReplayEvent]:
     against what production really did and a threshold change can be asked about.
 
     Every SD follow-up, sampler or hub-clip ``send`` that reached Telegram is returned as
-    well, as a ``ReplayEvent`` whose ``path`` names that delivery path. The window selects
-    by camera event time, like the camera events themselves.
+    well, as a ``ReplayEvent`` whose ``path`` names that delivery path, and every expired
+    sampler hold (``hold_expired``, or the expiry policy's ``hold_expiry_observe`` and
+    ``hold_expiry_send`` lines, one event per group) as a :data:`HOLD_EXPIRY` event. The
+    window selects by camera event time, like the camera events themselves.
     """
     observations, decisions = ledger.read_camera_window(path, start=start, end=end,
                                                         cameras=cameras, decision_paths=None)
     recorded = {}
     deliveries = []
+    expiries: dict = {}
     for row in decisions:  # ordered by id: the last live action for an event wins
         key = (row["camera"], row["event_type"], row["event_at"])
         if row["path"] == "live":
             recorded[key] = row
+        elif row["path"] == "sampler" and (row["action"], row["reason"]) in _EXPIRY_ROWS:
+            # observe writes would_send and then drop for one expiry: keep the first.
+            expiries.setdefault(key, ReplayEvent(
+                camera=row["camera"], event_type=row["event_type"], event_at=row["event_at"],
+                observed_at=row["observed_at"], recorded=row["action"], path=HOLD_EXPIRY,
+                score=row["score"], recorded_reason=row["reason"]))
         elif row["path"] in DELIVERY_PATHS and row["action"] == "send" and row["telegram"]:
             deliveries.append(ReplayEvent(
                 camera=row["camera"], event_type=row["event_type"], event_at=row["event_at"],
@@ -128,7 +150,7 @@ def load_events(path, start, end, cameras=None) -> list[ReplayEvent]:
             camera=obs.camera, event_type=obs.event_type, event_at=obs.event_at,
             observed_at=obs.observed_at, recorded=row.get("action"),
             score=row.get("score"), recorded_reason=row.get("reason")))
-    return events + deliveries
+    return events + deliveries + list(expiries.values())
 
 
 def default_is_night(app):
@@ -203,6 +225,63 @@ def _threshold_outcome(cfg, ev, night):
     return "defer" if cfg.sd_snapshot else "send"
 
 
+def _hold_outcome(cfg, ev, night):
+    """What the replayed config makes of a live frame recorded as a corroboration ``hold``.
+
+    A held frame sends nothing by itself — what became of it is recorded apart, as a later
+    live or sampler send once corroborated, a ``hold_rescue_recall`` delivery, or a
+    ``hold_expired`` expiry — so under a config that still holds it the event is
+    ``"hold"``: suppressed, nothing armed. Its recorded score is re-judged like any other:
+    under the replayed threshold it is ``"drop"``; at or over ``motion_send_threshold``, or
+    with corroboration off (no ``motion_send_threshold``, or the sampler disabled), it is a
+    plain ``"send"``. ``None`` when the event was not recorded as a scored hold.
+    """
+    if ev.recorded != "hold" or ev.score is None or not cfg.scorer.url:
+        return None
+    if ev.score < daemon.scorer_threshold(cfg, night):
+        return "drop"
+    send_now = cfg.scorer.motion_send_threshold
+    if cfg.sampler.enabled and send_now is not None and ev.score < send_now:
+        return "hold"
+    return "send"
+
+
+def _replay_hold_expiry(app, cfg, state, ev, night, *, scene_gate=True):
+    """Re-decide one recorded hold expiry under the replayed ``sampler.hold_expiry``.
+
+    Mirrors ``daemon._expire_hold`` after the pan-limit rescue (a rescued hold never
+    expires, its send is a recorded delivery): with the policy ``off`` — or no
+    corroboration at all — the hold stays ``hold_expired``; otherwise the held score must
+    reach the floor (``hold_expiry_min_score``, else the threshold the daemon would apply
+    at that time) and the motion cooldown and the scene group must allow it, asked the way
+    a sampler send asks them. ``observe`` stops there as ``hold_expiry_observe`` and arms
+    nothing; ``send`` is ``would_alert`` and commits like a sampler delivery. Whether the
+    review log still had the frame is not in the ledger and is assumed.
+    """
+    now = ev.observed_at
+    policy = cfg.sampler.hold_expiry
+    if (not cfg.sampler.enabled or cfg.scorer.motion_send_threshold is None
+            or policy == "off"):
+        return Decision(ev, SUPPRESSED, "hold_expired", night)
+    floor = sampler.hold_expiry_floor(cfg.sampler, daemon.scorer_threshold(cfg, night))
+    if ev.score is None or ev.score < floor:
+        return Decision(ev, SUPPRESSED, "hold_expiry_floor", night)
+    event = {"start_time": ev.event_at}
+    can_alert, on_alert = daemon.alert_gate(state, cfg.name, app.alerts.cooldown, now)
+    if not can_alert("motion"):
+        return Decision(ev, SUPPRESSED, "cooldown", night)
+    group, window = cfg.coordinator.group, cfg.coordinator.scene_window
+    if scene_gate and not state.scene_coordinator.allows(group, cfg.name, "motion", event,
+                                                         now, window=window):
+        return Decision(ev, SUPPRESSED, "scene_duplicate", night)
+    if policy == "observe":
+        return Decision(ev, SUPPRESSED, "hold_expiry_observe", night)
+    on_alert("motion")
+    state.scene_coordinator.record_delivery(group, cfg.name, "motion", event, now,
+                                            window=window)
+    return Decision(ev, WOULD_ALERT, None, night)
+
+
 def _replay_delivery(app, cfg, state, ev, night):
     """Commit a recorded non-live delivery to the gates the way its path does."""
     now = ev.observed_at
@@ -242,6 +321,9 @@ def replay(app, events, *, is_night=None, scene_gate=True) -> list[Decision]:
             night = is_night(ev.observed_at)
             if daemon.camera_muted(cfg, night, ev.observed_at):
                 decisions.append(Decision(ev, SUPPRESSED, _mute_reason(cfg), night))
+            elif ev.path == HOLD_EXPIRY:
+                decisions.append(_replay_hold_expiry(app, cfg, state, ev, night,
+                                                     scene_gate=scene_gate))
             else:
                 decisions.append(_replay_delivery(app, cfg, state, ev, night))
             continue
@@ -264,7 +346,10 @@ def replay(app, events, *, is_night=None, scene_gate=True) -> list[Decision]:
             decisions.append(Decision(ev, SUPPRESSED, "scene_duplicate", night))
             continue
         # The live path scores after both gates, so the threshold comes last here too.
-        verdict = _threshold_outcome(cfg, ev, night)
+        verdict = _threshold_outcome(cfg, ev, night) or _hold_outcome(cfg, ev, night)
+        if verdict == "hold":
+            decisions.append(Decision(ev, SUPPRESSED, "hold", night))
+            continue
         if verdict == "drop":
             decisions.append(Decision(ev, SUPPRESSED, "threshold", night))
             continue
@@ -283,14 +368,18 @@ def replay(app, events, *, is_night=None, scene_gate=True) -> list[Decision]:
 def summarize(decisions) -> dict:
     """Per camera: live event count, would-alert count, suppressions by reason, and the
     recorded non-live deliveries replayed, by path. A muted delivery is not a live event;
-    it counts as a suppression keyed ``<path>:<reason>``."""
+    it counts as a suppression keyed ``<path>:<reason>``. Hold expiries count apart as
+    well: ``hold_expiry`` is how many the replayed policy would send, and the rest are
+    suppressions keyed ``hold_expiry:<reason>``."""
     summary: dict[str, dict] = {}
     for d in decisions:
         entry = summary.setdefault(d.event.camera,
                                    {"events": 0, "would_alert": 0, "suppressed": Counter(),
-                                    "delivered": Counter()})
+                                    "delivered": Counter(), "hold_expiry": 0})
         if d.event.path != "live":
-            if d.outcome == DELIVERED:
+            if d.outcome == WOULD_ALERT:
+                entry["hold_expiry"] += 1
+            elif d.outcome == DELIVERED:
                 entry["delivered"][d.event.path] += 1
             else:
                 entry["suppressed"][f"{d.event.path}:{d.reason}"] += 1
@@ -381,15 +470,20 @@ def _print_text(decisions, summary, differences, compare_path, *, summary_only=F
                 f"suppressed: {suppressed}")
         if delivered:
             line += f"; recorded non-live deliveries: {delivered}"
+        if entry["hold_expiry"]:
+            line += f"; held frames sent on expiry: {entry['hold_expiry']}"
         print(line)
         totals["events"] += entry["events"]
         totals["would_alert"] += entry["would_alert"]
+        totals["hold_expiry"] += entry["hold_expiry"]
         totals["delivered"] += sum(entry["delivered"].values())
         totals["scene_duplicate"] += entry["suppressed"].get("scene_duplicate", 0)
     if len(summary) > 1:
         print(f"total: {totals['events']} events, {totals['would_alert']} would alert, "
               f"{totals['delivered']} recorded non-live deliveries, "
-              f"{totals['scene_duplicate']} scene_duplicate")
+              f"{totals['scene_duplicate']} scene_duplicate"
+              + (f", {totals['hold_expiry']} held frames sent on expiry"
+                 if totals["hold_expiry"] else ""))
     if reach is not None:
         print()
         print("scene gate reach (live would_alert without -> with the gate):")
