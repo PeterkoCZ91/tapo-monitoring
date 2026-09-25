@@ -580,6 +580,22 @@ busiest site.
   pytapo's 60 s freshness guard plus a slow download; try a smaller first window there only
   once the recording change is confirmed.
 
+### 10.5 — The photo worth sending
+
+An alert photo showed a person far away with their back to the camera. The camera's
+clip, checked second by second, never showed the face (the person entered the view
+already walking away), but frames every 6 s had skipped the moment the person was
+closest.
+
+- [x] `sd_frame_pick: largest` (per camera, default `sharpest`): among above-threshold
+  frames prefer the largest person, unless its blur is over 3× the sharpest candidate's
+  or it is less than 1.25× larger; with it, the first 12 s of a clip are sampled every
+  2 s. On 28 recording follow-ups the pick changed in 15, the person a median 1.32×
+  taller, none judged worse by eye. Cost: 9 frames instead of 6 per early look (~1.5 s).
+- [ ] After a week on the recording-source camera, compare delay and photo size per
+  incident; switch camera-card sites only with their own evidence (one clip so far,
+  where the gain was 1.16× with more motion blur).
+
 ## Research tracks
 
 These stay separate from production until repeatable evidence exists:
