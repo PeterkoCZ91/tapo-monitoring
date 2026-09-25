@@ -656,6 +656,19 @@ closest.
   an SD photo when the camera alerted within the cooldown, with a scenario test, and
   count how often it happens in the fleet's audit lines first.
 
+### 10.8 — Tell the owner when a camera stops watching
+
+- [ ] A Telegram message within a minute when a camera enters privacy mode, and one when it
+  leaves it ("🔒 <camera> is in privacy mode — not watching" / "🔓 <camera> is watching
+  again"), from the privacy read the control pass already makes every minute (8.2); one
+  message per change, surviving a restart (persist the last announced state), per-camera
+  opt-out. Today only the twin's drift alert covers it: off by default
+  (`observability.drift_alerts`), up to `probe_interval` (900 s) late, and worded as a
+  configuration drift.
+- [ ] The same for detection switched off in the app (motion or person), and read the app's
+  own notification schedule (`getMsgPushConfig`) so a customer who silences the Tapo app
+  can choose to silence these alerts too.
+
 ### 10.7 — A public reference for the local API
 
 - [x] Publish what the fleet and the dual-lens probe established beyond pytapo as
