@@ -7,9 +7,12 @@ times in comments are seconds since the scenario started.
 """
 
 
+import functools
 import os
+import threading
+import time
 
-from tapo_monitor import daemon, twin
+from tapo_monitor import daemon, sdworker, twin
 from tests.scenario import (
     START,
     Scenario,
@@ -628,3 +631,100 @@ def test_a_pan_limit_recall_rescue_still_wins_over_the_policy(monkeypatch, tmp_p
 
     assert sc.when(("send", "a")) == [at(35)]
     assert _expiry_audits(audits) == [("sampler", "send", "hold_rescue_recall", None)]
+
+
+# ── SD follow-ups off the loop ───────────────────────────────────────────────
+
+HOST_B = "192.0.2.11"
+
+
+def _sd_story(monkeypatch, tmp_path):
+    """Camera "a" reads its card for follow-ups, "b" alerts live only. The live grab of "a"
+    fails, so its person is queued for the card, whose read blocks until the story
+    releases it, like a slow download."""
+    sc = Scenario(monkeypatch, tmp_path,
+                  [camera_dict("a", HOST_A, sd_snapshot=True), camera_dict("b", HOST_B)],
+                  alerts={"cooldown": 120})
+    sc.cams["a"].rtsp_ok = False
+    real_job_dir = sdworker.job_dir     # a read abandoned by the restart stays in tmp_path
+    monkeypatch.setattr(sdworker, "job_dir", lambda tmp=None: real_job_dir(tmp or str(tmp_path)))
+    reading, release = threading.Event(), threading.Event()
+    reads = []
+
+    def fetch(cfg_, start_time, span=None, out_dir=None, **_):
+        reads.append((cfg_.name, start_time, out_dir))
+        reading.set()
+        assert release.wait(10), "the story never released the card read"
+        path = os.path.join(out_dir, "sd.jpg")
+        with open(path, "wb") as f:
+            f.write(b"\xff\xd8card")
+        return [path]
+
+    sc._collaborators["drain"] = functools.partial(
+        daemon.process_pending_sd, snapshot_for=sc._snapshot_for,
+        time_str=lambda _e: "scenario", fetch_frames=fetch)
+    sc._collaborators["sd_worker"] = sdworker.SdWorker()
+    return sc, reading, release, reads
+
+
+def _until_read_is_back(worker):
+    deadline = time.monotonic() + 5
+    while worker._done.empty():
+        assert time.monotonic() < deadline, "the read never came back"
+        time.sleep(0.005)
+
+
+def test_cameras_keep_being_polled_while_a_card_is_read(monkeypatch, tmp_path):
+    # A card read blocks for minutes. The loop hands it to the worker and keeps going: a
+    # person on the other camera during the read is alerted at once, and the follow-up
+    # goes out on the first tick after the read is back.
+    sc, reading, release, reads = _sd_story(monkeypatch, tmp_path)
+    worker = sc._collaborators["sd_worker"]
+    sc.run(10)
+    sc.cams["a"].push(person(at(10)))
+    sc.tick(advance=5)                           # 10: no live frame, follow-up queued
+    due = sc.state.pending_sd[0]["due_at"]
+    while sc.clock.now < due:
+        sc.tick(advance=5)
+    sc.tick(advance=5)                           # the first tick at or past due submits
+    assert reading.wait(5)                       # the read started and is blocking
+    [(camera, start, out_dir)] = reads
+    assert (camera, start) == ("a", at(10))
+    read_started = sc.clock.now
+
+    sc.cams["b"].push(person(read_started))
+    sc.run(20)                                   # four ticks while the card is read
+    assert sc.when(("send", "b")) == [read_started]
+    assert worker.busy("a") and len(sc.state.pending_sd) == 1
+    assert len(reads) == 1                       # never submitted twice
+
+    release.set()
+    _until_read_is_back(worker)
+    sent_at = sc.tick(advance=5)
+    assert sc.actions("send") == [("send", "b"), ("send", "a")]
+    assert sc.when(("send", "a")) == [sent_at]
+    assert sc.notifier.send_paths[-1] == "sd"
+    assert sc.state.pending_sd == [] and not os.path.exists(out_dir)
+    worker.shutdown(wait=True)
+
+
+def test_a_restart_during_a_card_read_reads_the_window_again(monkeypatch, tmp_path):
+    sc, reading, release, reads = _sd_story(monkeypatch, tmp_path)
+    sc.run(10)
+    sc.cams["a"].push(person(at(10)))
+    sc.tick(advance=5)
+    while not reading.wait(0.05):
+        sc.tick(advance=5)
+    sc._collaborators["sd_worker"].shutdown(wait=False)   # a stop does not wait for it
+    sc.restart()                                 # the queue comes back from runtime.json
+    assert len(sc.state.pending_sd) == 1
+    sc._collaborators["sd_worker"] = restarted = sdworker.SdWorker()
+    release.set()                                # the old read ends; nobody collects it
+    sc.tick(advance=5)
+    _until_read_is_back(restarted)
+    sc.tick(advance=5)
+
+    assert [r[1] for r in reads] == [at(10), at(10)]
+    assert sc.actions("send") == [("send", "a")]
+    assert sc.state.pending_sd == []
+    restarted.shutdown(wait=True)

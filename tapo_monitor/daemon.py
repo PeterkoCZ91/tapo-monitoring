@@ -17,6 +17,7 @@ per-camera watermark held in :class:`MonitorState` and fires the enrich/notify s
 :func:`resolve_secrets`.
 """
 
+import functools
 import json
 import logging
 import math
@@ -57,6 +58,7 @@ from . import (
     scheduling,
     scorer,
     sdclip,
+    sdworker,
     sentlog,
     snapshot,
     statusd,
@@ -1999,8 +2001,82 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
     return image, selected
 
 
+@dataclass
+class _SdJob:
+    """What the loop remembers about one follow-up while its job runs."""
+    entry: dict
+    cfg: CameraConfig
+    out_dir: str
+    span: float
+    offset: float
+    full_span: float
+    scored: bool
+
+
+@dataclass
+class _SdPick:
+    """A follow-up job's answer: the frames read and the one chosen (None: nobody)."""
+    frames: list = field(default_factory=list)
+    image: str | None = None
+    description: str = ""
+    score: float | None = None
+    fetch_seconds: float | None = None
+
+
+def _sd_followup_job(cfg, event, etype, fetch, start, span, out_dir, score, *,
+                     prescore, dense_kw, panlimit_windows, groq_key):
+    """Read one follow-up window and pick its frame. Runs on the SD worker's thread.
+
+    Everything it needs arrives as a value (the pan-limit windows as a copy): it must not
+    touch MonitorState. Audit and log lines are its only side effects besides the frames
+    in ``out_dir``, which the loop removes when it collects the result.
+    """
+    prescorer = _Prescorer(score) if prescore else None
+    fetch_started = _time.monotonic()
+    try:
+        # A local recording yields its frames one ffmpeg seek at a time: score each as it
+        # lands instead of after the last one, so decoding and the (uplink-bound) scoring
+        # overlap. The camera card downloads one clip, so there is nothing to overlap.
+        if prescorer is not None:
+            frames = fetch(cfg, start, span=span, out_dir=out_dir,
+                           on_frame=prescorer.submit, **dense_kw)
+            score = prescorer.score
+        else:
+            frames = fetch(cfg, start, span=span, out_dir=out_dir, **dense_kw)
+        pick = _SdPick(frames=list(frames or []),
+                       fetch_seconds=_time.monotonic() - fetch_started)
+        # Both sources carry capture epochs. Filter before either scorer selection;
+        # retain the original frames so an all-filtered batch cannot trigger a blind
+        # live fallback. Unknown timestamps stay eligible, as with older SD names. The
+        # windows were copied at submit: any recorded later opens after this window
+        # was already on disk.
+        eligible_frames = []
+        for frame in pick.frames:
+            taken = sdclip.frame_capture_time(frame)
+            if taken is not None and any(lo <= taken <= hi for lo, hi in panlimit_windows):
+                monitor.audit_event(cfg, event, etype, "sd", "drop",
+                                    reason="panlimit_window")
+            else:
+                eligible_frames.append(frame)
+        if score is not None:
+            pick.image, pick.score = _select_recording_frame(
+                cfg, event, etype, eligible_frames, score, pick=cfg.sd_frame_pick)
+            return pick
+        # Without a local scorer, retain the caption-based/raw selection.
+        for frame in eligible_frames:
+            desc = enrich.groq_describe(groq_key, frame) if cfg.enrich.groq else ""
+            # Raw mode (groq off): no subject arbiter -> first frame wins as-is.
+            if not cfg.enrich.groq or not notify.is_empty_scene(desc):
+                pick.image, pick.description = frame, desc   # subject found in this frame
+                break
+        return pick
+    finally:
+        if prescorer is not None:
+            prescorer.close()
+
+
 def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=None,
-                       time_str=None, fetch_frames=None, night=True):
+                       time_str=None, fetch_frames=None, night=True, worker=None):
     """Send queued confirmed-person SD follow-ups whose segment is now downloadable.
 
     Each entry waits SD_FRESH_DELAY past its event, then we pull candidate frames spanning
@@ -2018,14 +2094,33 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
     There is no cooldown gate here: the follow-up belongs to an already-alerted event (and
     the inline path emits at most one defer per cooldown window). Entries past
     PENDING_MAX_AGE are dropped; entries for a camera not reachable this tick are kept.
+
+    The read and the frame pick run on ``worker`` (:mod:`tapo_monitor.sdworker`): the loop
+    submits a due entry and, on a later tick, collects the result and decides what to
+    send (:func:`_finish_sd_followup`). The entry stays queued, and persisted, while its
+    job runs, so a restart reads it again. The default worker runs the job at submit, so
+    a single call still reads and sends.
     """
     snapshot_for = snapshot_for or (lambda cfg: _default_snapshot(cfg, recorder_fallback=True))
     time_str = time_str or _default_time_str
+    worker = worker if worker is not None else sdworker.InlineSdWorker()
     fetch_override = fetch_frames   # tests inject one fetch for every source
     cfg_by_name = {c.name: c for c in app.cameras}
+    keep = {}                       # id(entry) -> kept, for entries whose job came back
+
+    def collect():
+        for done in worker.poll():
+            keep[id(done.context.entry)] = _finish_sd_followup(
+                app, cam_clients, state, done.context, done.value, done.error, now=now,
+                secrets=secrets, snapshot_for=snapshot_for, time_str=time_str, night=night)
+
+    collect()
     remaining = []
     processed_by_camera = {}
     for entry in state.pending_sd:
+        if id(entry) in keep or worker.pending(id(entry)):
+            remaining.append(entry)   # collected this tick or still being read
+            continue
         cfg = cfg_by_name.get(entry["camera"])
         event = entry["event"]
         etype = entry["etype"]
@@ -2049,33 +2144,18 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
         if cam is None:
             remaining.append(entry)               # camera offline this tick -> keep
             continue
-        if not state.scene_coordinator.allows(
-                cfg.coordinator.group, entry["camera"], etype, event, now,
-                window=cfg.coordinator.scene_window):
-            log.info("skip %s: scene duplicate [sd]", etype)
-            monitor.audit_event(cfg, event, etype, "sd", "scene_duplicate",
-                                reason="same_scene")
+        verdict = _sd_followup_blocked(app, cfg, state, entry, now)
+        if verdict == "wait":
+            remaining.append(entry)
+            continue
+        if verdict:
             continue
 
-        if etype == "motion":
-            # Unconfirmed motion waits for its window while the live sampler keeps working
-            # the same burst, so the sampler may have alerted already. The send below only
-            # *records* itself in the alert gate, so without asking first the same passage
-            # arrives twice, minutes apart. Two different answers matter here: a
-            # same-passage alert (the gate compares camera event starts, which is what
-            # survives the follow-up's own delay) can never become sendable, so the entry
-            # is finished; a plain wall-clock cooldown expires, so that entry still
-            # deserves its turn and goes back on the queue rather than being thrown away.
-            can_alert, _ = alert_gate(state, cfg.name, app.alerts.cooldown, now)
-            if not can_alert(etype, event):
-                if not can_alert(etype):
-                    remaining.append(entry)
-                    continue
-                log.info("drop %s: this passage already alerted [sd]", etype)
-                monitor.audit_event(cfg, event, etype, "sd", "cooldown",
-                                    reason="passage_already_alerted")
-                continue
-
+        # One read per camera at a time: the next waits (and is checked again) until the
+        # worker has handed the previous one back.
+        if worker.busy(entry["camera"]):
+            remaining.append(entry)
+            continue
         limit = cfg.sd_jobs_per_tick
         if limit is not None and processed_by_camera.get(entry["camera"], 0) >= limit:
             remaining.append(entry)               # slow-host backpressure -> next tick
@@ -2085,11 +2165,10 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
         # Pull SD frames in a fresh subprocess; pick the frame Groq sees a subject in.
         # The window is sized from the event's own seconds (see sdclip.event_span),
         # bounded by the camera's hardware budget (sd_span_cap).
-        # Give the job its own temp dir and drop the whole tree in `finally`: a slow host
-        # (Pi Zero) can blow the subprocess timeout, and the killed child never reaches its
-        # own cleanup -> the segment mp4 + partial frames orphan in /tmp until the tmpfs
-        # fills. Owning the dir here means we clean up even when the child returns nothing.
-        job_dir = tempfile.mkdtemp(prefix="sdjob_")
+        # Give the job its own temp dir, dropped when the loop collects the result: a slow
+        # host (Pi Zero) can blow the subprocess timeout, and the killed child never
+        # reaches its own cleanup -> the segment mp4 + partial frames orphan in /tmp until
+        # the tmpfs fills. A dir whose daemon stopped mid-job is cleared at the next start.
         if fetch_override is not None:
             fetch = fetch_override
         elif cfg.snapshot_source == "recording":
@@ -2104,150 +2183,183 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
         # the opening seconds, so the remainder is not scored twice.
         offset = entry.get("offset", 0)
         score = score_for(cfg)
-        # A local recording yields its frames one ffmpeg seek at a time: score each as it
-        # lands instead of after the last one, so decoding and the (uplink-bound) scoring
-        # overlap. The camera card downloads one clip, so there is nothing to overlap.
-        prescore = (_Prescorer(score) if score is not None
-                    and fetch is recclip.fetch_recording_frames else None)
         # Denser frames over the event's opening seconds, only for a window that starts
         # at the event (not the rest after an early look). Passed only when on, so an
         # injected fetch without the keyword keeps working.
         dense_kw = ({"dense": (sdclip.DENSE_START_SECONDS, sdclip.DENSE_START_EVERY)}
                     if cfg.sd_dense_start and offset == 0 else {})
-        fetch_started = _time.monotonic()
-        try:
-            if prescore is not None:
-                frames = fetch(cfg, start_time + offset, span=span, out_dir=job_dir,
-                               on_frame=prescore.submit, **dense_kw)
-                score = prescore.score
-            else:
-                frames = fetch(cfg, start_time + offset, span=span, out_dir=job_dir,
-                               **dense_kw)
-        finally:
-            if app.reliability.enabled and app.reliability.latency_metrics:
-                reliability.observe_latency(
-                    state.latency.setdefault(cfg.name, {}), "sd_fetch",
-                    _time.monotonic() - fetch_started,
-                )
-        image, description, fallback_image = None, "", None
-        selected_score = None
-        try:
-            # Both sources carry capture epochs. Filter before either scorer selection;
-            # retain the original frames so an all-filtered batch cannot trigger a blind
-            # live fallback. Unknown timestamps stay eligible, as with older SD names.
-            eligible_frames = []
-            for frame in frames:
-                taken = sdclip.frame_capture_time(frame)
-                if taken is not None and _in_panlimit_window(state, cfg.name, taken):
-                    monitor.audit_event(cfg, event, etype, "sd", "drop",
-                                        reason="panlimit_window")
-                else:
-                    eligible_frames.append(frame)
-            scored_pick = score is not None
-            if scored_pick:
-                image, selected_score = _select_recording_frame(
-                    cfg, event, etype, eligible_frames, score, pick=cfg.sd_frame_pick)
-            # Without a local scorer, retain the caption-based/raw selection.
-            for frame in (() if scored_pick else eligible_frames):
-                desc = enrich.groq_describe(secrets["groq_key"], frame) if cfg.enrich.groq else ""
-                # Raw mode (groq off): no subject arbiter -> first frame wins as-is.
-                if not cfg.enrich.groq or not notify.is_empty_scene(desc):
-                    image, description = frame, desc          # subject found in this frame
-                    break
-            if image is None and entry.get("rest_span"):
-                # The early look found nobody (or the recording had nothing yet): read the
-                # rest of the window at the time the whole window would have been read.
-                # No live fallback here — the full look below still owns that decision.
-                rest = entry.pop("rest_span")
-                entry["offset"] = offset + span
-                entry["span"] = rest - entry["offset"]
-                entry["due_at"] = start_time + recclip.fresh_delay(rest)
-                remaining.append(entry)
-                monitor.audit_event(cfg, event, etype, "sd", "retry",
-                                    reason=f"early_look={span}->{rest}")
-                log.info("retry %s: no subject in the first %ss of the recording; "
-                         "reading the rest at %ss", etype, span, rest)
-                continue
-            if image is None:
-                if frames:
-                    if (etype == "motion" and offset + span < full_span
-                            and not entry.get("extended_retry")):
-                        entry["span"] = full_span - offset
-                        entry["extended_retry"] = True
-                        entry["due_at"] = now
-                        remaining.append(entry)
-                        monitor.audit_event(
-                            cfg, event, etype, "sd", "retry",
-                            reason=f"extend_span={span}->{full_span}",
-                        )
-                        log.info("retry %s: no subject in %ss SD window; extending to %ss",
-                                 etype, span, full_span)
-                        continue
-                    # Groq saw nobody in any frame spanning the whole event. Live
-                    # 2026-07-02..06 every such case was a false positive (passing car
-                    # at night), so a blank photo helps nobody — drop, keep the trace.
-                    log.info("drop %s: SD found no subject in %d frames%s", etype,
-                             len(frames), ", live already sent" if entry.get("live_sent") else "")
-                    continue
-                if entry.get("live_sent") or etype == "motion":
-                    # The (empty) live frame already went out, or this is unconfirmed
-                    # motion with no subject-bearing evidence. Do not send a blind ping.
-                    log.info("drop %s: SD produced no frames%s", etype,
-                             ", live already sent" if entry.get("live_sent") else "")
-                    continue
-                snap = snapshot_for(cfg)                      # SD download failed -> live RTSP
-                image = fallback_image = snap(cam, event) or snap(cam, event)
-            if not image:
-                log.warning("skip %s: snapshot failed (after retry)", etype)
-                continue                              # drop
-            if not description:
-                # Caption from the whole (thinned) frame sequence when the chosen frame
-                # came from SD; the RTSP fallback has no sequence to offer.
-                images = (enrich.select_frames(frames, keep=image)
-                          if image in frames else image)
-                description = _caption_describe(cfg, secrets["groq_key"], images)
-            label = enrich.face_label(monitor.face_ids(event), secrets.get("face_names"))
-            if (app.faces or {}).get("ignore_known") and etype != "motion" and monitor.has_known_face(event, secrets.get("face_names")):
-                log.info("skip %s: known face present [sd] (ignored: %s)", etype, label)
-                monitor.audit_event(cfg, event, etype, "sd", "ignore_known", reason="known_face")
-                continue
-            light = (camera.whitelamp_seen(cam, cfg.name, event.get("start_time"),
-                                           force_time=cfg.whitelamp_force_time)
-                     if cfg.enrich.light_status else None)
-            caption = notify.build_caption(
-                monitor.TYPE_EMOJI.get(etype, "👤"), time_str(event),
-                description=description or None, detail=label or None,
-                score=selected_score, light=light,
-            )
-            ok = send_alert_photo(cfg, secrets, image, caption, score=selected_score,
-                                  incident=incident.incident_id(cfg.name, event),
-                                  send_path="sd")
-            # SD follow-up is a real user-visible alert. Record it in the same gate as
-            # live sends, otherwise a person rescued from SD can be followed minutes
-            # later by a duplicate motion SD alert from the same passage.
-            _, on_alert = alert_gate(state, cfg.name, app.alerts.cooldown, now)
-            if ok:
-                log.info("alert %s sent (faces=%r, desc=%r) [sd]", etype, label, description)
-                on_alert(etype, event)
-                open_group = state.groups.get(entry["camera"])
-                if open_group is not None:
-                    # This burst has now really been alerted on: a later empty-live frame
-                    # of the same passage may skip its duplicate follow-up.
-                    open_group["delivered"] = True
-            else:
-                log.warning("alert %s Telegram delivery failed [sd]; retry queued", etype)
-                entry["due_at"] = now + 60
-                remaining.append(entry)
-            monitor.audit_event(cfg, event, etype, "sd", "send", score=selected_score,
-                                threshold=cfg.scorer.threshold if score is not None else None,
-                                telegram=ok)
-        finally:
-            if prescore is not None:
-                prescore.close()
-            shutil.rmtree(job_dir, ignore_errors=True)   # frames + any orphaned mp4/partials
-            _safe_unlink(fallback_image)
-    state.pending_sd = remaining
+        job = _SdJob(entry=entry, cfg=cfg, out_dir=sdworker.job_dir(), span=span,
+                     offset=offset, full_span=full_span, scored=score is not None)
+        run = functools.partial(
+            _sd_followup_job, cfg, dict(event), etype, fetch, start_time + offset, span,
+            job.out_dir, score,
+            prescore=score is not None and fetch is recclip.fetch_recording_frames,
+            dense_kw=dense_kw,
+            panlimit_windows=list(state.pan_limit_out_of_bounds.get(cfg.name, ())),
+            groq_key=secrets.get("groq_key"))
+        remaining.append(entry)
+        worker.submit(entry["camera"], id(entry), run, context=job)
+        collect()                     # an inline worker has the answer already
+    state.pending_sd = [entry for entry in remaining if keep.get(id(entry), True)]
     return state.pending_sd
+
+
+def _sd_followup_blocked(app, cfg, state, entry, now):
+    """Whether a follow-up may go out now: None (yes), "wait" (later) or "drop".
+
+    Asked before its window is read and again when the result is back, since the live
+    pass and the sampler keep alerting while the job runs.
+    """
+    event, etype = entry["event"], entry["etype"]
+    if not state.scene_coordinator.allows(
+            cfg.coordinator.group, entry["camera"], etype, event, now,
+            window=cfg.coordinator.scene_window):
+        log.info("skip %s: scene duplicate [sd]", etype)
+        monitor.audit_event(cfg, event, etype, "sd", "scene_duplicate",
+                            reason="same_scene")
+        return "drop"
+    if etype == "motion":
+        # Unconfirmed motion waits for its window while the live sampler keeps working
+        # the same burst, so the sampler may have alerted already. The send below only
+        # *records* itself in the alert gate, so without asking first the same passage
+        # arrives twice, minutes apart. Two different answers matter here: a
+        # same-passage alert (the gate compares camera event starts, which is what
+        # survives the follow-up's own delay) can never become sendable, so the entry
+        # is finished; a plain wall-clock cooldown expires, so that entry still
+        # deserves its turn and goes back on the queue rather than being thrown away.
+        can_alert, _ = alert_gate(state, cfg.name, app.alerts.cooldown, now)
+        if not can_alert(etype, event):
+            if not can_alert(etype):
+                return "wait"
+            log.info("drop %s: this passage already alerted [sd]", etype)
+            monitor.audit_event(cfg, event, etype, "sd", "cooldown",
+                                reason="passage_already_alerted")
+            return "drop"
+    return None
+
+
+def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secrets,
+                        snapshot_for, time_str, night):
+    """Decide and send one follow-up whose job came back. Runs on the loop.
+
+    Returns whether the entry stays queued (a retry, a failed delivery, a cooldown to wait
+    out). The job's dir is removed here whatever the outcome.
+    """
+    entry, cfg = job.entry, job.cfg
+    event, etype = entry["event"], entry["etype"]
+    span, offset = job.span, job.offset
+    start_time = event.get("start_time") or 0
+    fallback_image = None
+    try:
+        if error is not None or pick is None:
+            # The job logged its traceback. Zero checked frames is no evidence of
+            # absence: carry on as a read that produced nothing.
+            log.warning("SD follow-up %s for %s failed: %s", etype, cfg.name, error)
+            pick = _SdPick()
+        if (pick.fetch_seconds is not None and app.reliability.enabled
+                and app.reliability.latency_metrics):
+            reliability.observe_latency(state.latency.setdefault(cfg.name, {}), "sd_fetch",
+                                        pick.fetch_seconds)
+        frames, image = pick.frames, pick.image
+        description, selected_score = pick.description, pick.score
+        if camera_muted(cfg, night, now):
+            return False                      # the window closed while it was read
+        # Asked again: an alert may have gone out for this passage while it was read.
+        verdict = _sd_followup_blocked(app, cfg, state, entry, now)
+        if verdict:
+            return verdict == "wait"
+        if image is None and entry.get("rest_span"):
+            # The early look found nobody (or the recording had nothing yet): read the
+            # rest of the window at the time the whole window would have been read.
+            # No live fallback here — the full look below still owns that decision.
+            rest = entry.pop("rest_span")
+            entry["offset"] = offset + span
+            entry["span"] = rest - entry["offset"]
+            entry["due_at"] = start_time + recclip.fresh_delay(rest)
+            monitor.audit_event(cfg, event, etype, "sd", "retry",
+                                reason=f"early_look={span}->{rest}")
+            log.info("retry %s: no subject in the first %ss of the recording; "
+                     "reading the rest at %ss", etype, span, rest)
+            return True
+        if image is None:
+            if frames:
+                if (etype == "motion" and offset + span < job.full_span
+                        and not entry.get("extended_retry")):
+                    entry["span"] = job.full_span - offset
+                    entry["extended_retry"] = True
+                    entry["due_at"] = now
+                    monitor.audit_event(
+                        cfg, event, etype, "sd", "retry",
+                        reason=f"extend_span={span}->{job.full_span}",
+                    )
+                    log.info("retry %s: no subject in %ss SD window; extending to %ss",
+                             etype, span, job.full_span)
+                    return True
+                # Groq saw nobody in any frame spanning the whole event. Live
+                # 2026-07-02..06 every such case was a false positive (passing car
+                # at night), so a blank photo helps nobody — drop, keep the trace.
+                log.info("drop %s: SD found no subject in %d frames%s", etype,
+                         len(frames), ", live already sent" if entry.get("live_sent") else "")
+                return False
+            if entry.get("live_sent") or etype == "motion":
+                # The (empty) live frame already went out, or this is unconfirmed
+                # motion with no subject-bearing evidence. Do not send a blind ping.
+                log.info("drop %s: SD produced no frames%s", etype,
+                         ", live already sent" if entry.get("live_sent") else "")
+                return False
+            snap = snapshot_for(cfg)                      # SD download failed -> live RTSP
+            cam = cam_clients.get(entry["camera"])
+            image = fallback_image = snap(cam, event) or snap(cam, event)
+        if not image:
+            log.warning("skip %s: snapshot failed (after retry)", etype)
+            return False                              # drop
+        cam = cam_clients.get(entry["camera"])
+        if not description:
+            # Caption from the whole (thinned) frame sequence when the chosen frame
+            # came from SD; the RTSP fallback has no sequence to offer.
+            images = (enrich.select_frames(frames, keep=image)
+                      if image in frames else image)
+            description = _caption_describe(cfg, secrets["groq_key"], images)
+        label = enrich.face_label(monitor.face_ids(event), secrets.get("face_names"))
+        if (app.faces or {}).get("ignore_known") and etype != "motion" and monitor.has_known_face(event, secrets.get("face_names")):
+            log.info("skip %s: known face present [sd] (ignored: %s)", etype, label)
+            monitor.audit_event(cfg, event, etype, "sd", "ignore_known", reason="known_face")
+            return False
+        light = (camera.whitelamp_seen(cam, cfg.name, event.get("start_time"),
+                                       force_time=cfg.whitelamp_force_time)
+                 if cfg.enrich.light_status and cam is not None else None)
+        caption = notify.build_caption(
+            monitor.TYPE_EMOJI.get(etype, "👤"), time_str(event),
+            description=description or None, detail=label or None,
+            score=selected_score, light=light,
+        )
+        ok = send_alert_photo(cfg, secrets, image, caption, score=selected_score,
+                              incident=incident.incident_id(cfg.name, event),
+                              send_path="sd")
+        # SD follow-up is a real user-visible alert. Record it in the same gate as
+        # live sends, otherwise a person rescued from SD can be followed minutes
+        # later by a duplicate motion SD alert from the same passage.
+        _, on_alert = alert_gate(state, cfg.name, app.alerts.cooldown, now)
+        kept = False
+        if ok:
+            log.info("alert %s sent (faces=%r, desc=%r) [sd]", etype, label, description)
+            on_alert(etype, event)
+            open_group = state.groups.get(entry["camera"])
+            if open_group is not None:
+                # This burst has now really been alerted on: a later empty-live frame
+                # of the same passage may skip its duplicate follow-up.
+                open_group["delivered"] = True
+        else:
+            log.warning("alert %s Telegram delivery failed [sd]; retry queued", etype)
+            entry["due_at"] = now + 60
+            kept = True
+        monitor.audit_event(cfg, event, etype, "sd", "send", score=selected_score,
+                            threshold=cfg.scorer.threshold if job.scored else None,
+                            telegram=ok)
+        return kept
+    finally:
+        shutil.rmtree(job.out_dir, ignore_errors=True)   # frames + any orphaned mp4/partials
+        _safe_unlink(fallback_image)
 
 
 
@@ -3033,7 +3145,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
               last_control, control_interval,
               run_control=None, watchdog=None, monitor=None, drain=None, sample=None,
               connect_factory=None, is_night=None, guard=None, inspect=None, digest=None,
-              hubpoll=None):
+              hubpoll=None, sd_worker=None):
     """One loop iteration with control decoupled from event polling.
 
     The slow, rarely-changing work (camera tracking/sensitivity/preset + the per-tick
@@ -3046,6 +3158,10 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     ``cam_clients`` is rebuilt by the control pass and reused (not cleared) on the fast
     polls between control passes. Collaborators are injectable for testing. Returns the
     (possibly advanced) ``last_control``.
+
+    ``sd_worker`` (:class:`sdworker.SdWorker`) reads SD/recording follow-ups in the
+    background, so a slow camera-card download no longer holds up the other passes; it
+    lives as long as the daemon. Without one the drain reads inline, as it always did.
     """
     run_control = run_control or run_once
     watchdog = watchdog or _watchdog_pass
@@ -3080,7 +3196,8 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
         health.save_state(state.health_path, state, logger=log)
     hubpoll(scoring, cam_clients, state, now=now, secrets=secrets, night=night)
     sample(scoring, cam_clients, state, now=now, secrets=secrets, night=night)
-    drain(scoring, cam_clients, state, now=now, secrets=secrets, night=night)
+    drain_kw = {"worker": sd_worker} if sd_worker is not None else {}
+    drain(scoring, cam_clients, state, now=now, secrets=secrets, night=night, **drain_kw)
     guard(app, cam_clients, state, now=now, secrets=secrets, night=night)
     digest(now=now, secrets=secrets, app=app, state=state)
     _log_disk_pass(state, now=now, secrets=secrets)
@@ -3156,6 +3273,8 @@ def main(argv=None):  # pragma: no cover - thin entry point
     expiry_warning = hold_expiry_archive_warning(app)
     if expiry_warning:
         log.warning("%s", expiry_warning)
+    sdworker.clean_orphan_job_dirs(logger=log)
+    sd_worker = sdworker.SdWorker()
     cam_clients = {}
     last_control = None
 
@@ -3169,12 +3288,13 @@ def main(argv=None):  # pragma: no cover - thin entry point
             with stop.tick():
                 last_control = tick(app, cam_clients, state, now=_time.time(),
                                     secrets=secrets, last_control=last_control,
-                                    control_interval=control_interval)
+                                    control_interval=control_interval,
+                                    sd_worker=sd_worker)
             if stop.requested:
                 break
             _time.sleep(poll_interval)
     finally:
-        shutdown(state, now=_time.time())
+        shutdown(state, now=_time.time(), sd_worker=sd_worker)
 
 
 class GracefulStop:
@@ -3212,14 +3332,23 @@ class GracefulStop:
 SHUTDOWN_LEDGER_TIMEOUT = 5.0
 
 
-def shutdown(state: MonitorState, *, now):
+def shutdown(state: MonitorState, *, now, sd_worker=None):
     """Leave nothing behind a stop that the next start would pay for. Never raises.
 
     A hub tolerates one session, and a dangling one makes the next start be accepted and
     immediately dropped. Queued alerts and cooldowns are written once more, in case the
     last tick changed them after its save. The audit ledger gets a bounded wait so the
     decisions just before a restart reach SQLite rather than dying in the queue.
+
+    A follow-up still being read is not waited for (a camera-card download can take
+    longer than the whole stop timeout): its entry is on the saved queue and is read again
+    after the start, and the next start clears the job's temp dir.
     """
+    if sd_worker is not None:
+        if sd_worker.in_flight():
+            log.info("stopping with %d SD follow-up(s) being read; queued for the restart",
+                     sd_worker.in_flight())
+        sd_worker.shutdown(wait=False)
     close_hub_clients(state)
     runtime_state.save_if_changed(state, now, logger=log)
     handler = state.ledger_handler
@@ -3229,7 +3358,7 @@ def shutdown(state: MonitorState, *, now):
 
 
 def tick(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
-         last_control, control_interval):
+         last_control, control_interval, sd_worker=None):
     """Run one loop iteration and report its outcome to the stall watchdog.
 
     Deliberately outside ``loop_step``: when the tick itself is what breaks, this is the
@@ -3240,6 +3369,7 @@ def tick(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
         last_control = loop_step(
             app, cam_clients, state, now=now, secrets=secrets,
             last_control=last_control, control_interval=control_interval,
+            sd_worker=sd_worker,
         )
         tick_ok = True
     except Exception as e:  # noqa: BLE001 - one bad tick must not end the daemon

@@ -75,7 +75,7 @@ The package modules follow these boundaries:
 | Camera transport | `camera.py`, `hubclient.py` | Ping, lockout-aware connect and event watermark helpers; one held, rate-limit-aware session per hub for battery cameras. |
 | Control policy | `scheduling.py`, `weather.py`, `tracking.py`, `panlimit.py`, `motion.py` | Build and safely apply camera plans; one arbiter decides which path may move a lens. |
 | Detection | `detection.py`, `monitor.py`, `daemon.py` | Classify events, gate alerts and coordinate retries. |
-| Media | `snapshot.py`, `sdclip.py`, `recclip.py`, `sampler.py` | Capture live or event-aligned candidate frames. |
+| Media | `snapshot.py`, `sdclip.py`, `recclip.py`, `sampler.py`, `sdworker.py` | Capture live or event-aligned candidate frames; `sdworker` reads SD/recorder follow-ups off the loop. |
 | Enrichment | `scorer.py`, `scorer_service.py`, `enrich.py` | Local subject confidence/boxes and optional captions. |
 | Delivery | `notify.py` | Telegram API and delivery-aware state transitions. |
 | Health | `health.py`, `capabilities.py`, `drift.py`, `twin.py`, `statusd.py` | Uptime, safe capability snapshots, layered health, desired-state drift and the opt-in JSON status endpoint. |
@@ -110,8 +110,21 @@ Runs on `loop.event_interval` (default 4 seconds) using the connected client:
 4. acquire/score media and attempt notification;
 5. advance delivery state only when the event is handed to an owned retry path or
    Telegram confirms success;
-6. process due sampler and SD/local-recorder jobs;
+6. process due sampler jobs, hand due SD/local-recorder follow-ups to the background
+   reader and decide the ones whose read has come back;
 7. run the optional ONVIF soft pan guard.
+
+An SD/local-recorder follow-up is read off the loop: reading a camera card takes a median
+70 s (up to 150 s), a local recording about 15 s, and while the loop waited on it no camera
+on the host was polled, no sampler frame grabbed and no pan guard run. A background thread
+per camera (never two reads of one card at once) downloads or extracts the window, scores
+the frames and picks one. Everything that decides stays on the loop: the scene and alert
+gates are asked before the read and again when it is back (the live pass or the sampler may
+have alerted the passage meanwhile), then the retries, the live RTSP fallback, the caption,
+the send and the queue and cooldown updates. The job gets copies of what it needs and never
+touches the loop's state. The entry stays on the persisted queue while it is read, so a
+restart reads it again; a stop does not wait for a read in progress, and the next start
+removes the temp dirs of jobs whose daemon is gone.
 If `getEvents` raises, the event watermark is left unchanged, the error is written to the
 structured audit stream, and the event-health watchdog can notify Telegram and request one
 lockout-aware API reboot after its configured thresholds. A ping or successful configuration

@@ -84,7 +84,10 @@ camera call halfway: inside a tick it only asks the loop to exit once the tick i
 between ticks it exits at once, and a second signal always exits at once. On the way out
 the daemon closes held hub sessions, writes `runtime.json` one final time and gives the
 audit-ledger queue up to 5 s to reach SQLite — lines still queued after that are counted
-in a warning rather than silently lost.
+in a warning rather than silently lost. An SD or recorder follow-up still being read in the
+background is not waited for (`stopping with N SD follow-up(s) being read`): its entry is in
+`runtime.json` and is read again after the start, and the start removes the `sdjob_<pid>_*`
+temp dirs a stopped daemon's reads left behind.
 
 Telegram delivery is part of the alert transition, not a fire-and-forget side effect.
 Failed outage and recovery messages remain pending until Telegram confirms delivery; a

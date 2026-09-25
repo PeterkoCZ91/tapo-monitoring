@@ -507,8 +507,8 @@ shadows. The generic detector has never seen this fleet's IR night scenes.
 ## Phase 10 — Incidents, not frames
 
 Status: **in progress** (10.1 and 10.3 done; 10.2 in an observe-only trial on one camera;
-10.4: the recording follow-up went from a median 119 s to 56 s, the camera-card path and
-moving follow-ups off the main loop are next; 10.5: closest-person pick on one camera)
+10.4: the recording follow-up went from a median 119 s to 56 s and follow-ups are read off
+the main loop, the camera-card window is next; 10.5: closest-person pick on one camera)
 
 Frame statistics hide what matters to the person holding the phone: was each visit
 alerted, and how late. A first join of labels with deliveries showed that of 31 held
@@ -574,9 +574,16 @@ busiest site.
   by up to 0.45 and would have flipped 5 of 93 labelled decisions at a 0.45 threshold.
 - [x] Overlap extraction with scoring (score each frame as soon as ffmpeg writes it), which
   should bring the early look near the longer of the two, about 3.5 s.
-- [ ] Run SD/recording follow-ups off the main loop: while one is read and scored, every
-  camera's `getEvents` poll and sampler grab on that host waits, and a due follow-up waits
-  for the sampler pass of the same tick.
+- [x] Run SD/recording follow-ups off the main loop. Three days of logs: a camera-card read
+  blocked the loop a median 73 s (p90 108 s, max 157 s) on one host and 68 s on another,
+  a recording read a median 17 s; during it no camera on the host was polled, no sampler
+  frame grabbed and no pan guard run. The read, scoring and frame pick now run on a thread
+  per camera; the loop re-asks the scene and alert gates when the result is back and
+  keeps every decision and send. The entry stays queued (and persisted) while it is read.
+- [ ] Hub clips (`hubpoll`) are still downloaded on the loop: one clip per new hub event,
+  each download bounded by a 10 s stall timeout, plus one retry and a live grab when it
+  yields nothing. No site runs a hub now, so there is nothing measured; move them to the
+  same worker if a hub site shows the loop waiting on them.
 - [ ] Camera-card follow-ups (a median 175-200 s on the sites that use them) stay behind
   pytapo's 60 s freshness guard plus a slow download; try a smaller first window there only
   once the recording change is confirmed.

@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Changed
+- SD and local-recorder follow-ups are read off the main loop. A background thread per
+  camera downloads or extracts the window, scores the frames and picks one; the loop
+  submits a due follow-up and, on a later tick, decides and sends it. A camera-card read
+  used to hold every camera on the host for a median 70 s (up to 150 s): no `getEvents`
+  poll, no sampler grab, no pan guard. Two reads of one camera never overlap. The scene and
+  alert gates are asked again when the read is back, so a passage the live pass or the
+  sampler alerted meanwhile is not sent twice. An entry stays queued (and in
+  `runtime.json`) while it is read; a stop does not wait for the read and the entry is
+  read again after the start. Job temp dirs are now `sdjob_<pid>_*`, and a start removes
+  those of a daemon that is gone.
+
 ### Added
 - Per-camera `sd_frame_pick` (`sharpest` | `largest`, default `sharpest`) and
   `sd_dense_start` for the SD and recorder follow-ups. `largest` sends the
