@@ -467,6 +467,12 @@ turns after a person the wide lens saw (dual-cam linkage). See
 - [ ] An event source for a camera without an SD card: `getLastAlarmInfo` returns the type
   and time of the last alarm without storage.
 - [ ] Say which lens took the photo in the alert caption.
+- [ ] Two people, two lenses: the scorer reports only its most confident person, so when
+  the wide lens holds one person and the pan/tilt lens follows another, the alert shows
+  one of them. Put the person count in the caption, and consider sending both lens frames
+  as an album when their subjects differ. First hour of test data: 21 person events, on
+  8 pan/tilt events the pan/tilt frame was kept 6 times and twice it alone saw the person
+  (wide 0.001 vs 0.40, 0.11 vs 0.95).
 
 ## Phase 9 — Detection quality from our own labelled frames
 
