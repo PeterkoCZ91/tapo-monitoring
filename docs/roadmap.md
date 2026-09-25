@@ -456,7 +456,17 @@ turns after a person the wide lens saw (dual-cam linkage). See
 - [ ] Grow the event sample (night, pets, vehicles) and re-check the 180 s hold against
   how long the firmware actually keeps the lens on a subject.
 - [ ] Compare `lens_pick_stream` photos with the wide-lens-only ones before recommending
-  it.
+  it. First test run: on one pass the wide lens scored 0.001 and the pan/tilt lens 0.40
+  (the camera reports events 16-18 s late, by which time a walker has often left the
+  wide view but the pan/tilt lens still follows); on another both scored ~0.92.
+- [ ] Decide whether a dual-lens camera should take its live frame from the pan/tilt lens
+  first, or use a lower threshold for it, from a day of per-lens scores.
+- [ ] Keep calls that drop the local API off the device: `checkDetectEventState` and
+  `getInfLampCapability` each closed port 443 for ~12 s on a C545D (reproduced against an
+  idle baseline). Add a deny-list in the client so no probe or future getter can send them.
+- [ ] An event source for a camera without an SD card: `getLastAlarmInfo` returns the type
+  and time of the last alarm without storage.
+- [ ] Say which lens took the photo in the alert caption.
 
 ## Phase 9 — Detection quality from our own labelled frames
 
@@ -629,6 +639,24 @@ closest.
 - [ ] After a week on the recording-source camera, compare delay and photo size per
   incident; switch camera-card sites only with their own evidence (one clip so far,
   where the gain was 1.16× with more motion blur).
+
+### 10.6 — One visit, one message
+
+- [ ] A person SD follow-up is not gated by the cooldown (it belongs to an event that was
+  already confirmed), so when its live frame was below the threshold and the next passage
+  alerts live, both arrive within a second: seen on the dual-lens test camera (a live
+  alert, then 0.3 s later the SD photo of the passage two minutes earlier). Skip or merge
+  an SD photo when the camera alerted within the cooldown, with a scenario test, and
+  count how often it happens in the fleet's audit lines first.
+
+### 10.7 — A public reference for the local API
+
+- [ ] Publish what the fleet and the dual-lens probe established beyond pytapo as
+  `docs/tapo-local-api.md`: call shapes, parameter conventions, error codes, SD card
+  (`formatSdCard`, `detect_status` incl. `dilatant_suspect` for counterfeit cards, capacity
+  in the `video_*` fields), event and recording searches (`channel`, `chn_events`,
+  `getEvents` window), face recognition at API level, methods pytapo lacks, and the calls
+  that drop the API. Draft reviewed for identifiers before it moves to `docs/`.
 
 ## Research tracks
 
