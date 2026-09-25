@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+- `privacy_notice` (per camera): a Telegram message within one control pass when a camera
+  enters or leaves privacy mode, persisted across restarts; the privacy switch is now read
+  on static cameras too when it is set.
+- `telegram_alerts: false` (per camera): data-collection mode — alerts are decided,
+  recorded and counted as live, but no photo is sent; system notices still go out.
+
 ## [0.6.0] - 2026-09-25
 
 ### Highlights

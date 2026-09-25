@@ -658,7 +658,7 @@ closest.
 
 ### 10.8 — Tell the owner when a camera stops watching
 
-- [ ] A Telegram message within a minute when a camera enters privacy mode, and one when it
+- [x] A Telegram message within a minute when a camera enters privacy mode, and one when it
   leaves it ("🔒 <camera> is in privacy mode — not watching" / "🔓 <camera> is watching
   again"), from the privacy read the control pass already makes every minute (8.2); one
   message per change, surviving a restart (persist the last announced state), per-camera

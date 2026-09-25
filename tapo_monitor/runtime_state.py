@@ -60,6 +60,9 @@ def snapshot(state, logger=None):
         "pending_sd": _serializable(state.pending_sd, "SD follow-up", logger),
         "last_alert": _cooldowns(state.last_alert),
         "last_event_start": _cooldowns(state.last_event_start),
+        "privacy_announced": {str(k): bool(v)
+                              for k, v in (getattr(state, "privacy_announced", None)
+                                           or {}).items()},
     }
 
 
@@ -164,6 +167,10 @@ def load(path, state, now, logger=None, max_age=MAX_AGE):
     state.pending_sd.extend(kept_sd)
     state.last_alert.update(last_alert)
     state.last_event_start.update(last_event_start)
+    announced = payload.get("privacy_announced") or {}
+    if isinstance(announced, dict) and hasattr(state, "privacy_announced"):
+        state.privacy_announced.update(
+            {str(k): v for k, v in announced.items() if isinstance(v, bool)})
     state.runtime_saved = snapshot(state, logger)
     return {"pending_hub": len(kept_hub), "pending_sd": len(kept_sd),
             "cooldowns": len(last_alert) + len(last_event_start)}

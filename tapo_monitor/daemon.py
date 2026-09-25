@@ -576,7 +576,7 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
             cam, _err = connect(cfg)
             if cam is not None:
                 privacy_on = cfg.name in (privacy or ())
-                if plan.preset or cfg.pan_limit.enabled:
+                if plan.preset or cfg.pan_limit.enabled or cfg.privacy_notice:
                     fresh = read_privacy(cam)
                     if fresh is not None:
                         privacy_on = fresh
@@ -694,6 +694,8 @@ class MonitorState:
     # Per camera, the privacy switch as the last control pass read it (True/False); absent
     # when unread, so the twin's probe applies (see parked_lenses).
     privacy_seen: dict = field(default_factory=dict)
+    # camera -> privacy state last announced on Telegram (privacy_notice); persisted
+    privacy_announced: dict = field(default_factory=dict)
     # Wall time of the last pan_limit recall per camera (the tick's own `now`, so it is
     # directly comparable to the sampler's): lets an expiring hold tell "no second frame
     # ever came" from "the guard yanked the subject out of view mid-corroboration".
@@ -1227,6 +1229,18 @@ def send_alert_photo(cfg, secrets, image, caption, downscale=None, score=None,
     the sent-log index with the frame.
     """
     token, chat = secrets["telegram_token"], secrets["telegram_chat"]
+    if not cfg.telegram_alerts:
+        # Data collection only: keep the record a real send leaves and report success, so
+        # cooldowns, audits and the incident statistics stay what they would be live.
+        try:
+            with open(image, "rb") as fh:
+                frame = fh.read()
+        except OSError:
+            return False
+        sentlog.archive_if_configured(frame, caption, camera=cfg.name, score=score,
+                                      incident=incident, send_path=send_path)
+        log.info("alert recorded, not sent (telegram_alerts off) for %s", cfg.name)
+        return True
     out_dir = os.path.dirname(image)
     cropped = crop_for_subject(cfg, image, out_dir, secrets,
                                source=getattr(image, "native", None),
@@ -2875,6 +2889,35 @@ def inert_dwell_warning(app: AppConfig):
             "hold buys no extra footage")
 
 
+def privacy_notice_pass(app, state, *, secrets, send_text=None):
+    """Tell Telegram once when a ``privacy_notice`` camera enters or leaves privacy mode.
+
+    Reads ``state.privacy_seen``, which the control pass fills from the camera's own
+    switch (no answer this pass, no decision). The first reading after a fresh start is
+    announced only when the lens is parked; ``privacy_announced`` is persisted, so a
+    restart neither repeats nor misses a change. A failed send is retried next pass.
+    """
+    send_text = send_text or (lambda text: notify.send_text(
+        secrets["telegram_token"], secrets["telegram_chat"], text))
+    for cfg in app.cameras:
+        if not cfg.privacy_notice:
+            continue
+        seen = (state.privacy_seen or {}).get(cfg.name)
+        if seen is None:
+            continue
+        announced = state.privacy_announced.get(cfg.name)
+        if announced == seen or (announced is None and seen is False):
+            state.privacy_announced[cfg.name] = seen
+            continue
+        text = (f"🔒 camera '{cfg.name}' is in privacy mode — not watching" if seen
+                else f"🔓 camera '{cfg.name}' left privacy mode — watching again")
+        if send_text(text):
+            state.privacy_announced[cfg.name] = seen
+            log.info("privacy notice sent for %s: %s", cfg.name, "on" if seen else "off")
+        else:
+            log.warning("privacy notice for %s not delivered; retrying next pass", cfg.name)
+
+
 def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
     """Refresh the opt-in Camera Digital Twin using already-connected clients only."""
     if not app.observability.digital_twin and not app.reliability.enabled:
@@ -3323,7 +3366,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
               last_control, control_interval,
               run_control=None, watchdog=None, monitor=None, drain=None, sample=None,
               connect_factory=None, is_night=None, guard=None, inspect=None, digest=None,
-              hubpoll=None, sd_worker=None):
+              hubpoll=None, sd_worker=None, privacy_notice=None):
     """One loop iteration with control decoupled from event polling.
 
     The slow, rarely-changing work (camera tracking/sensitivity/preset + the per-tick
@@ -3349,6 +3392,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     sample = sample or process_sampler
     guard = guard or _pan_guard_pass
     inspect = inspect or process_digital_twin
+    privacy_notice = privacy_notice or privacy_notice_pass
     digest = digest or _review_digest_pass
     connect_factory = connect_factory or _connect_camera
     is_night = is_night or scheduling.is_night
@@ -3369,6 +3413,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
             state.desired_plans.update(plans)
         watchdog(app, cam_clients, state, now=now, secrets=secrets, night=night)
         inspect(app, cam_clients, state, now=now, secrets=secrets)
+        privacy_notice(app, state, secrets=secrets)
         last_control = now
     # Everything that scores sees this tick's thresholds (scorer.night_threshold at night).
     scoring = thresholds_for_tick(app, night)

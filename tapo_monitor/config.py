@@ -208,6 +208,13 @@ class CameraConfig:
     # Extra frames every 2 s over the event's first 12 s of the follow-up window. Unset in
     # the YAML it follows sd_frame_pick: on for "largest", off for "sharpest".
     sd_dense_start: bool = False
+    # False records every alert decision exactly as if it went out (sent log, cooldowns,
+    # audit) but sends no photo to Telegram: a camera that is only collecting data. System
+    # notices (privacy, outage, drift) still go out.
+    telegram_alerts: bool = True
+    # Read the privacy switch on every control pass and tell Telegram once when the camera
+    # enters or leaves privacy mode (it is not watching while the lens is parked).
+    privacy_notice: bool = False
     # Optional AI person-detection sensitivity (0-100) re-asserted every control tick.
     # None leaves the camera's value unchanged; lower = fewer false AI-person detections.
     person_sensitivity: int | None = None
@@ -950,6 +957,8 @@ def _camera(data, index):
         sd_motion=bool(data.get("sd_motion", False)),
         sd_jobs_per_tick=sd_jobs_per_tick,
         sd_frame_pick=sd_frame_pick,
+        telegram_alerts=bool(data.get("telegram_alerts", True)),
+        privacy_notice=bool(data.get("privacy_notice", False)),
         sd_dense_start=sd_dense_start,
         person_sensitivity=int(data["person_sensitivity"]) if data.get("person_sensitivity") is not None else None,
         night_only=bool(data.get("night_only", False)),

@@ -210,7 +210,28 @@ event sources; never configure them as the only source. `strict_people: true` pr
 camera-confirmed people while still allowing bare motion to enter the scorer/follow-up
 funnel where configured.
 
-### Dual-lens cameras (C545D)
+### Data collection and privacy notices
+
+Two per-camera switches:
+
+```yaml
+    telegram_alerts: false   # decide and record every alert as usual, send no photo
+    privacy_notice: true     # one Telegram message when privacy mode goes on / off
+```
+
+- `telegram_alerts: false` keeps a camera in data-collection mode: every decision, the
+  sent log, cooldowns, audits and the incident statistics are exactly what a live camera
+  produces, but no alert photo leaves the host. System notices (privacy, outage, drift,
+  disk) still go to Telegram. Unlike `quiet_hours`, the pipeline keeps working, so the
+  collected data stays representative.
+- `privacy_notice: true` reads the privacy switch on every control pass (every
+  `control_interval`, 60 s by default) — also on a static camera that never moves its lens
+  — and sends "🔒 camera '…' is in privacy mode — not watching" once when the lens is
+  parked and "🔓 … watching again" when it comes back. The last announced state is kept in
+  the runtime state, so a restart neither repeats nor misses a change; a failed send is
+  retried on the next pass.
+
+## Dual-lens cameras (C545D)
 
 ```yaml
 event_profile: c545d       # default: "default"
