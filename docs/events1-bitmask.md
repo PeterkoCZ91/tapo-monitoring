@@ -41,6 +41,30 @@ the odds, it doesn't confirm a person by itself. `strict_people` still gates on 
 alone, so an unconfirmed `alarm_type=6` event (motion+PIR, no person bit) can still only
 alert via a downstream image scorer, same as unconfirmed `alarm_type=2`.
 
+## Model-specific meaning
+
+Everything above was measured on the C560WS (and the C260, which matches it). The bits
+are not universal:
+
+- **Shape.** The dual-lens C545D puts no `events_1` at the top level. Each lens that
+  fired reports its own mask under `chn_events: {"1": {"events_1": N, "event_start_time":
+  T}, "2": {...}}` (1 = fixed wide lens, 2 = pan/tilt lens).
+  [`detection.normalize_event()`](../tapo_monitor/detection.py) turns that into a
+  top-level `events_1` (OR of the lenses; a top-level value wins if a firmware sends
+  both) and a `channels` list, for every camera, before anything else reads the event.
+- **Meaning.** On the C545D a person walking by arrived as `alarm_type=6` with
+  `events_1 = 34` (bits 1 + 5) on both lenses, and bit 19 was **not** set; plain motion
+  was `alarm_type=2`, `events_1 = 2`, wide lens only. Observed, n=10 (8 person walks, 2 plain motion), checked against
+  what the app reported. The C545D has no PIR, so here bit 5 / `alarm_type=6` is the
+  person class, not the PIR it is on the C560WS.
+
+The per-model reading is a small table, `EVENT_PROFILES` in
+[`detection.py`](../tapo_monitor/detection.py), picked per camera with `event_profile`
+(`default` | `c545d`). `default` is the C560WS table above; `c545d` maps bit 5 and
+`alarm_type=6` to `person`. The audit line `event ... alarm_type=... channels=...
+profile=...` shows the raw values next to the verdict, so a row can be amended when more
+samples disagree — a new model gets a new row rather than a change to `default`.
+
 ## Observed but not yet ground-truthed
 
 Reported as `unknown_bits` rather than guessed at:

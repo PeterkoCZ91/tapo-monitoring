@@ -371,7 +371,7 @@ multi-tick scenarios are written once rather than rebuilt by hand in each test.
 
 ## Phase 8 — Prove phase 7 in production, close what it exposed
 
-Status: **in progress** (8.2–8.4 done; 8.1 trial running on one camera; 8.5 waits for a second camera)
+Status: **in progress** (8.2–8.4 done; 8.1 trial running on one camera; 8.5 waits for a second camera; 8.6 code shipped, on-camera checks open)
 
 Phase 7 was built and tested against fakes; the scenario harness and a replay of a real
 recorded day then surfaced a handful of smaller gaps. This phase ships phase 7 the way
@@ -431,6 +431,32 @@ scenarios in `tests/test_scenarios.py`.
   motion requester (below hold, above the scheduled recall) so a handoff lease cannot
   fight tracking, the guard or privacy. Keep it observe-only until the pair's clock
   offset and camera order are measured.
+
+### 8.6 — Dual-lens camera (C545D): the handoff inside one body
+
+A C545D is 8.5 inside one camera: a fixed wide lens and a pan/tilt lens the firmware
+turns after a person the wide lens saw (dual-cam linkage). See
+[capabilities](capabilities.md#7-dual-lens-cameras-tapo-c545d).
+
+- [x] Normalize the per-lens event shape (`chn_events`) into `events_1` + `channels`
+  for every camera, before the watermark, classification and audit.
+- [x] Per-model bit meaning: `event_profile: c545d` reads `alarm_type` 6 / bit 5 as a
+  person (the C560WS PIR pair; the C545D has no PIR). Observed n=10 — amend the
+  `EVENT_PROFILES` row as samples grow.
+- [x] The motion arbiter treats the firmware linkage as an owner of the pan/tilt lens:
+  no scheduled recall and no pan-limit recall until 180 s after an event on channel 2.
+- [x] Per-lens streams: `rtsp_stream` / `sampler.stream` per lens, plus opt-in
+  `lens_pick_stream` that grabs both lenses on a pan/tilt event and keeps the larger
+  subject.
+- [x] Twin: lens layout, linkage state and per-lens detection switches (`chn_id`); SD
+  cards flagged `dilatant_suspect` read as degraded storage on any model.
+- [ ] Verify on the camera which lens the self-heal setters reach without `chn_id`, and
+  whether `role: static` (auto-track off) turns the linkage off; pass `chn_id` where it
+  matters.
+- [ ] Grow the event sample (night, pets, vehicles) and re-check the 180 s hold against
+  how long the firmware actually keeps the lens on a subject.
+- [ ] Compare `lens_pick_stream` photos with the wide-lens-only ones before recommending
+  it.
 
 ## Phase 9 — Detection quality from our own labelled frames
 

@@ -149,6 +149,119 @@ Rain makes auto-tracking cameras chase raindrops and IR reflections. Using open-
 - Deployment, health and calibration runbook ([`operations.md`](operations.md)), including
   setups that share one scorer across several caller services.
 
+## 7. Dual-lens cameras: Tapo C545D
+
+Read-only findings from one C545D (HW 1.0, firmware 1.1.2 auto-upgraded to 1.1.7
+during the probe; rows are from 1.1.7), taken with pytapo 3.4.18, ffprobe and onvif-zeep.
+Configure it with `event_profile: c545d` — see [configuration](configuration.md#dual-lens-cameras-c545d).
+
+The C545D has two sensors in one body: a **fixed wide lens** (channel 1) and a
+**pan/tilt lens** (channel 2). One login, one IP, one device: the lenses are *channels*,
+not child devices (`getChildDeviceList` → -40210).
+
+### Lens addressing
+
+| Layer | How a lens is addressed | Notes |
+|---|---|---|
+| Local API (pytapo) | `chn_id` list on chn-aware getters (`[1]`, `[2]`, `[1, 2]`) | `getAllChnInfo` → channel 1 "Fixed Lens", channel 2 "PT Lens". Without `chn_id` a getter answers for channel 1 only. |
+| RTSP | a path per lens | `stream1` 2304×1296 / `stream2` 1280×720 = wide lens; `stream6` 2304×1296 / `stream7` 1280×720 = pan/tilt lens; `stream8` MJPEG 640×360 (~1 fps) = wide lens. All H.264 High, 15 fps, PCM A-law audio. `stream3`/`stream5` → 404, `stream4` → 406; a query string (`stream1?channel=2`) is ignored. |
+| ONVIF Media (port 2020) | wide lens only | one video source; `profile_1` → `stream1`, `profile_2` → `stream2`, `profile_3` → `stream8`. `GetSnapshotUri` fails. |
+| ONVIF PTZ | on every profile, moves the pan/tilt lens | pan/tilt only (no zoom space), 8 presets max, `HomeSupported: false`; `GetStatus` gives the position `pan_limit` reads. |
+
+The wide lens is strongly barrel-distorted; the pan/tilt lens has roughly half its field
+of view, so a person it follows appears about twice as large.
+
+### Local API getters
+
+Per lens (`chn_id`): `getMotionDetection`, `getPersonDetection`, `getVehicleDetection`,
+`getPetDetection`, `getTamperDetection`, `getLinecrossingDetection`, `getDayNightMode`,
+`getLensDistortionCorrection` (channel 2 → `null`, no LDC on the pan/tilt lens),
+`getNightVisionModeConfig` / `getWhitelampConfig` / `getRotationStatus` (channel 2 returns
+only `night_vision_mode` and `wtl_intensity_level`).
+
+Device-wide: `getBasicInfo` (`device_model: C545D`), `getAllChnInfo`,
+`getDualCamCapability` (`zooms: ["1.0x", "5.0x"]`, likely the app's hybrid zoom),
+`getDualCamLinkage` (`linkage_state {enabled, linkage_type}`), `getLinkageTargetCapability`
+and `getLinkageTargetSetting` (people / pet / vehicle), `getPrivacyMode` (with `chn_id` →
+-40101), `getSDCard`, `getRecordPlan`, `getCircularRecordingConfig`, `getAlertEventType`,
+`getPresets`, `getAutoTrackTarget` (`track_mode: pantilt`), `getSmartTrackConfig`,
+`getPatrolSchedule`, `getVideoQualities` (main stream only; with `chn_id` → -40101),
+`getVideoCapability`, `getAudioConfig`, `getNightVisionCapability` (infrared + white lamp),
+`getWhitelampStatus`, `getOsd`, `getCoverConfig`, `getFirmwareAutoUpgradeConfig`.
+
+Not on this model (-40101 / -40210): siren/alarm config, floodlight, PIR, package,
+baby-cry, bark, meow, glass-break and face detection.
+
+Without an SD card `getEvents` (`searchDetectionList`) and the recordings list return
+-71114 STORAGE_NOT_EXIST: the event index lives on the card, so this camera needs one for
+`sources: [getevents]`. `getLastAlarmInfo` with `{"system": {"name":
+["last_alarm_info"]}}` (not wrapped by pytapo) answers without a card, but only with the
+last alarm's time and a coarse type (a person was reported as `motion`).
+
+**Do not call:** `checkDetectEventState {}` — the HTTPS API refused connections for about
+10 s right after it. Keep calls at least ~1.5 s apart; closer ones return -40109
+`ONE_SECOND_REPEAT_REQUEST`. The raw `performRequest` wrappers stay off-limits as on
+every model.
+
+### Events
+
+`getEvents` entries carry no top-level `events_1`. Each lens that fired reports under
+`chn_events`:
+
+```json
+{"start_time": 1790330876, "end_time": 1790330984, "alarm_type": 6,
+ "chn_events": {"1": {"events_1": 34, "event_start_time": 1790330878},
+                "2": {"events_1": 34, "event_start_time": 1790330876}}}
+```
+
+Observed, n=10 (8 person walks, 2 plain motion), checked against what the app reported:
+
+| What happened | `alarm_type` | channels | `events_1` |
+|---|---:|---|---:|
+| a person walking by | 6 | 1 and 2 | 34 (bits 1 + 5) |
+| plain motion | 2 | 1 only | 2 (bit 1) |
+
+The AI-person bit 19 (524288) was not set for the person, and bit 5 / `alarm_type` 6 —
+the PIR on a C560WS — cannot be a PIR here, the model has none. `event_profile: c545d`
+reads that pair as a person; see [the bitmask notes](events1-bitmask.md#model-specific-meaning).
+A long event is split into consecutive events about every 180 s, and `end_time` grows
+while it is active. A later query returned one event's `start_time` 1 s earlier than the
+first poll did; the watermark treats that as already seen.
+
+### Firmware lens linkage
+
+`dualCamLinkage` (found on, target people) turns the pan/tilt lens after a
+person the wide lens saw. With `event_profile: c545d` an event on channel 2 keeps the
+scheduled preset recall and the pan-limit guard off that lens for 180 s after the
+event (motion arbiter reason `linkage`), whatever the auto-track switch says. The twin
+reports the linkage switching off (`dual_cam.linkage.enabled`, warning).
+
+### What tapo-monitor does with it
+
+- Events are normalized ([`detection.normalize_event`](../tapo_monitor/detection.py)):
+  `events_1` becomes the OR of the lenses, `channels` lists the lenses that fired, and
+  audit lines carry `channels=1,2`.
+- Streams: `rtsp_stream: stream2` for a fast wide-lens live grab, `sampler.stream:
+  stream6` for follow-up grabs from the lens that turns toward the subject, and optionally
+  `lens_pick_stream: stream7` to grab both lenses on a pan/tilt event and keep the frame
+  with the larger subject.
+- Digital twin: with the profile it also reads the lens layout, the linkage state and
+  the detection switches of both lenses (`detection.person.chn2.enabled` is a critical
+  drift path — our self-heal setters without `chn_id` reach channel 1 only).
+- An SD card whose `detect_status` is `dilatant_suspect` (fake capacity; such cards also
+  came up read-only and would not format) marks storage degraded on any model.
+
+### Open questions
+
+- Which lens a setter without `chn_id` changes, and whether turning auto-track off
+  (`role: static`) also turns the linkage off. Until that is known, run it with
+  `role: static` and no presets, or check the twin after the first control passes.
+- More event samples, in the dark and for pets/vehicles; the table above is n=10.
+- ONVIF PullPoint: the first `PullMessages` succeeded, later ones were closed by the
+  camera (`RemoteDisconnected`). Not usable as a source yet.
+- Components not yet probed: `panoramicView`, `markerBox`, `blockZone`,
+  `detectionRegion`, `audioCapability`, `nvmp`, `snapshot`.
+
 ## Actuators (hardware capabilities & safety policy)
 
 The firmware exposes an active-response layer reachable through the local API:

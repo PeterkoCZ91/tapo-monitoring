@@ -210,6 +210,45 @@ event sources; never configure them as the only source. `strict_people: true` pr
 camera-confirmed people while still allowing bare motion to enter the scorer/follow-up
 funnel where configured.
 
+### Dual-lens cameras (C545D)
+
+```yaml
+event_profile: c545d       # default: "default"
+rtsp_stream: stream2       # wide lens, 1280x720: the fast live grab
+lens_pick_stream: stream7  # optional, default unset: also grab the pan/tilt lens
+sampler:
+  enabled: true
+  stream: stream6          # follow-up grabs from the pan/tilt lens
+```
+
+`event_profile` says how a camera model's `getEvents` fields are read (the table is
+`EVENT_PROFILES` in `tapo_monitor/detection.py`). `default` is the C560WS/C260 reading
+every camera had before. `c545d`:
+
+- reads `alarm_type` 6 / `events_1` bit 5 (value 32) as a **confirmed person** — the
+  C545D has no PIR and sends that pair for a person (observed, n=10) — so it alerts on the
+  person path, like the AI-person bit under `strict_people`. On `default` the pair stays
+  PIR-backed bare motion;
+- knows channel 2 is a pan/tilt lens the firmware moves itself (dual-cam linkage): an
+  event on it keeps the scheduled preset recall and the pan-limit guard off the lens for
+  180 s after the event ends, whether auto-track is on or not;
+- makes the digital twin read both lenses (`chn_id`) and the linkage state.
+
+Events of either shape are normalized for every camera: a `chn_events` entry becomes a
+top-level `events_1` (OR of the lenses) plus `channels`, which audit lines show as
+`channels=1,2`.
+
+`lens_pick_stream` is off unless set. When an event fired on the pan/tilt lens, the live
+pass grabs `rtsp_stream` and this stream, scores both and keeps the frame with the larger
+subject (the `sd_frame_pick: largest` rule), or the higher score when a box is missing.
+It requires an `event_profile` with a pan/tilt lens and `scorer.url`, costs a second grab
+and a second scoring on those events only, and must differ from `rtsp_stream`.
+
+The C545D keeps its event index on the SD card, so `sources: [getevents]` needs a card.
+Until it is known which lens the self-heal setters (sent without `chn_id`) reach, start
+with `role: static` and no presets (`day_preset:` / `night_preset:` left empty). See
+[capabilities](capabilities.md#7-dual-lens-cameras-tapo-c545d).
+
 ### Battery cameras on a hub (`hubpoll`)
 
 ```yaml

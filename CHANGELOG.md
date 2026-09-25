@@ -17,6 +17,22 @@ All notable changes to this project are documented here.
   those of a daemon that is gone.
 
 ### Added
+- Dual-lens Tapo C545D support. Its `getEvents` entries carry `events_1` per lens under
+  `chn_events`; every polled event is now normalized to a top-level `events_1` (OR of the
+  lenses) plus `channels` before the watermark and classification, and audit lines show
+  `channels=1,2`. Single-lens events are passed through untouched. A new per-camera
+  `event_profile` (`default` | `c545d`) picks how the bits are read: on a C545D
+  `alarm_type` 6 / bit 5 (value 32) is a person (observed n=4; the model has no PIR),
+  while `default` keeps it as the C560WS PIR. With `c545d`, an event on the pan/tilt lens
+  keeps the scheduled preset recall and the pan-limit guard off that lens for 180 s after
+  the event (new motion-arbiter reason `linkage`), because the firmware turns it after
+  the person itself, and the digital twin reads the lens layout, the linkage state and
+  both lenses' detection switches (`chn_id`). Opt-in `lens_pick_stream` grabs the other
+  lens as well on a pan/tilt event and keeps the frame with the larger subject. See
+  `docs/capabilities.md` §7.
+- The digital twin marks storage degraded, with a "counterfeit or defective SD card"
+  warning in the twin state and the journal, when `getSDCard` reports `detect_status:
+  dilatant_suspect` (fake capacity), on any model.
 - Per-camera `sd_frame_pick` (`sharpest` | `largest`, default `sharpest`) and
   `sd_dense_start` for the SD and recorder follow-ups. `largest` sends the
   above-threshold frame with the biggest person box. It skips a frame more than 3x

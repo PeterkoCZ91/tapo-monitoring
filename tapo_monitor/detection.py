@@ -61,7 +61,7 @@ class EventProfile:
 # log (``event ... alarm_type=... channels=...``) shows a mapping the table lacks.
 EVENT_PROFILES = {
     "default": EventProfile(name="default", bits=EVENTS_1_BITS),
-    # Tapo C545D, dual lens (channel 1 fixed wide, channel 2 pan/tilt). Observed, n=4,
+    # Tapo C545D, dual lens (channel 1 fixed wide, channel 2 pan/tilt). Observed, n=10 (8 person walks, 2 plain motion),
     # owner-confirmed against the app: a person walking by is alarm_type 6 with events_1
     # 34 (bits 1 + 5) on both channels and bit 19 NOT set; plain motion is alarm_type 2
     # with events_1 2 on channel 1 only. The model has no PIR, so bit 5 / alarm_type 6

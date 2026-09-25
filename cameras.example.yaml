@@ -302,3 +302,31 @@ cameras:
   #                                     # indexed no clip for this many days; off by default
   #   # hub_device_mac:                 # pin only when one hub holds several cameras and
   #   # hub_device_id:                  # neither the alias nor the MAC can be matched
+
+  # ── dual-lens Tapo C545D (opt-in) ──
+  # Channel 1 is a fixed wide lens, channel 2 a pan/tilt lens the firmware turns after a
+  # person by itself. event_profile reads its events (a person is alarm_type 6 / bit 32,
+  # PIR on other models) and keeps our motor paths off the pan/tilt lens while the
+  # firmware moves it. Needs an SD card for getEvents. See
+  # docs/configuration.md#dual-lens-cameras-c545d
+  # - name: drive
+  #   host: "<C545D_LAN_IP>"
+  #   role: static                      # until the chn-less self-heal setters are verified
+  #   user_env: DRIVE_USER
+  #   password_env: DRIVE_PASSWORD
+  #   rtsp_user_env: DRIVE_RTSP_USER    # Camera Account
+  #   rtsp_password_env: DRIVE_RTSP_PASSWORD
+  #   event_profile: c545d
+  #   rtsp_stream: stream2              # wide lens, 1280x720: fast live grab
+  #   # lens_pick_stream: stream7       # optional: also grab the pan/tilt lens on its events
+  #   #                                 # and keep the larger subject (needs scorer.url)
+  #   sd_snapshot: true
+  #   detection:
+  #     sources: [getevents]
+  #     strict_people: true
+  #   tracking:
+  #     day_preset:                     # no presets saved on the pan/tilt lens yet
+  #     night_preset:
+  #   sampler:
+  #     enabled: true
+  #     stream: stream6                 # follow-up grabs from the pan/tilt lens
