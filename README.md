@@ -16,6 +16,41 @@ Python daemon.
 > nightly recorder scan measures camera miss candidates. Camera models and firmware differ;
 > unsupported capabilities degrade to `unknown` instead of being guessed.
 
+## Tested cameras
+
+| Camera | How it is used | Notes |
+| --- | --- | --- |
+| C560WS | reference model, runs the whole pipeline | `event_profile: default` |
+| C545D (dual lens) | `getEvents` with an SD card, per-lens RTSP streams | needs `event_profile: c545d`; see [dual-lens cameras](docs/configuration.md#dual-lens-cameras-c545d) |
+| C410 / C460 on an H200 hub | `hubpoll` reads detections off the hub | see [battery cameras on a hub](docs/battery-cameras-on-a-hub.md) |
+
+Other Tapo models with third-party access and `getEvents` may work; what we learned about
+the local API across models is in the [local API reference](docs/tapo-local-api.md).
+
+## What's new in 0.6
+
+- **Quality per visit, not per frame** — `label-stats` groups frames into incidents and
+  reports missed visits and the delay to the first alert by delivery path
+  ([incidents](docs/labeling.md#incidents)).
+- **Labelling workflow** — a frame collector, a teacher model that pre-labels the easy
+  frames and a local labelling page ([labeling](docs/labeling.md)); a small random sample
+  of below-threshold frames keeps possible misses in the queue.
+- **Opt-in alert tuning** — a separate `scorer.night_threshold`, and a
+  `sampler.hold_expiry` policy for held frames whose corroboration never came
+  ([configuration](docs/configuration.md#event-window-sampler)).
+- **Faster follow-ups** — recording follow-ups are read sooner and look at the event's
+  opening seconds first, frames are scored concurrently and while ffmpeg extracts them,
+  and SD/recording reads run off the main loop so one camera's card no longer stalls the
+  others.
+- **The photo worth sending** — `sd_frame_pick: largest` sends the frame where the person
+  is closest, within a blur guard.
+- **Disk and card health** — the daily digest reports the frame logs' disk use and warns
+  when the disk runs low; a counterfeit SD card (`dilatant_suspect`) is flagged by the
+  digital twin.
+- **Dual-lens C545D** support, and a public [local API reference](docs/tapo-local-api.md).
+
+Details and upgrade notes: [CHANGELOG](CHANGELOG.md).
+
 ## Why this project exists
 
 [`pytapo`](https://github.com/JurajNyiri/pytapo) provides camera API operations.
@@ -233,6 +268,7 @@ understand the session and sequential-request limitations.
 | [Labeling](docs/labeling.md) | You want ground truth for collected alert frames. |
 | [Troubleshooting](docs/troubleshooting.md) | You hit authentication, RTSP, SD or firmware-specific problems. |
 | [`events_1` bitmask](docs/events1-bitmask.md) | Your firmware returns incomplete event types. |
+| [Local API reference](docs/tapo-local-api.md) | You call the camera's local API yourself: conventions, error codes, SD card, events, calls to avoid. |
 | [Roadmap](docs/roadmap.md) | You want current gaps and planned product phases. |
 
 ## Development

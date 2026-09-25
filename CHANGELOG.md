@@ -4,17 +4,25 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
-### Changed
-- SD and local-recorder follow-ups are read off the main loop. A background thread per
-  camera downloads or extracts the window, scores the frames and picks one; the loop
-  submits a due follow-up and, on a later tick, decides and sends it. A camera-card read
-  used to hold every camera on the host for a median 70 s (up to 150 s): no `getEvents`
-  poll, no sampler grab, no pan guard. Two reads of one camera never overlap. The scene and
-  alert gates are asked again when the read is back, so a passage the live pass or the
-  sampler alerted meanwhile is not sent twice. An entry stays queued (and in
-  `runtime.json`) while it is read; a stop does not wait for the read and the entry is
-  read again after the start. Job temp dirs are now `sdjob_<pid>_*`, and a start removes
-  those of a daemon that is gone.
+## [0.6.0] - 2026-09-25
+
+### Highlights
+- **Quality per visit, not per frame:** `label-stats` groups frames into incidents and
+  reports missed visits and the first-alert delay per delivery path.
+- **A labelling workflow:** frame collection across hosts, a teacher model that pre-labels
+  the easy frames, a local labelling page, and a small sample of below-threshold frames.
+- **Opt-in alert tuning:** `scorer.night_threshold` and a `sampler.hold_expiry` policy,
+  both replayable with `tapo-monitor replay --compare` before they go live.
+- **Faster follow-ups:** on the busiest site the first recording follow-ups after the
+  change left a median 56 s after the event (119 s before); frames are scored concurrently
+  and while being extracted; SD and recording reads run off the main loop.
+- **Better photos:** `sd_frame_pick: largest` picks the frame where the person is closest.
+- **Operations:** log-disk telemetry and low-space warning, counterfeit SD card warning,
+  automatic rollback of a crash-looping deploy, user-unit deploys.
+- **New hardware:** the dual-lens Tapo C545D (`event_profile: c545d`), and a public
+  [local API reference](docs/tapo-local-api.md).
+- **Upgrade note:** unknown configuration keys now fail at startup; every new behaviour
+  is opt-in and defaults keep 0.5.0 behaviour.
 
 ### Added
 - Dual-lens Tapo C545D support. Its `getEvents` entries carry `events_1` per lens under
@@ -22,7 +30,7 @@ All notable changes to this project are documented here.
   lenses) plus `channels` before the watermark and classification, and audit lines show
   `channels=1,2`. Single-lens events are passed through untouched. A new per-camera
   `event_profile` (`default` | `c545d`) picks how the bits are read: on a C545D
-  `alarm_type` 6 / bit 5 (value 32) is a person (observed n=4; the model has no PIR),
+  `alarm_type` 6 / bit 5 (value 32) is a person (observed on 8 person walks; the model has no PIR),
   while `default` keeps it as the C560WS PIR. With `c545d`, an event on the pan/tilt lens
   keeps the scheduled preset recall and the pan-limit guard off that lens for 180 s after
   the event (new motion-arbiter reason `linkage`), because the firmware turns it after
@@ -49,9 +57,6 @@ All notable changes to this project are documented here.
   `label-stats` / `/stats` report, per path of the first delivered frame, how many alerted
   incidents it delivered first and their delay from event start (n, median, p90), under a
   new `first_alert` key in every incident block. Older records count as `unknown`.
-- Daily digest fleet block: size and file count of the sent, review and pan-limit logs and
-  the free space under them. The daemon warns once on Telegram when free space falls below
-  `TAPO_LOG_DISK_MIN_FREE_MB` (default 1024, 0 off) and re-arms after recovery.
 - Sent-log and review-log index records of a camera event's frame (every delivery path, holds,
   sampled and hub-clip drops) carry `incident` and `event_start`, so one visit's frames group
   by ID. Frames with no camera event omit both.
@@ -62,10 +67,6 @@ All notable changes to this project are documented here.
   The floor defaults to the threshold in force; the policy needs
   `scorer.motion_send_threshold` and warns at startup without `TAPO_REVIEW_LOG_DIR`. The
   group now keeps its best-scoring archived held frame rather than the last one.
-- `tapo-monitor replay` models corroboration holds: a live `hold` is `suppressed(hold)`
-  (it used to count as `would_alert`), and each recorded `hold_expired` is re-decided under
-  the replayed `sampler.hold_expiry`, so `replay --compare` estimates the alerts the policy
-  adds per camera.
 - `scorer.night_threshold`: per-camera scorer threshold applied while the camera's night is
   on (astral night with its `schedule` applied); unset keeps `threshold` around the clock.
   `tapo-monitor replay` and the shadow scan apply it by the time each event or frame was
@@ -75,25 +76,44 @@ All notable changes to this project are documented here.
   Binds `127.0.0.1` by default. See `docs/labeling.md`.
   With `--config cameras.yaml` both report the best threshold by day and night (overall and per
   camera, marked "too few labels" below 20 decided frames or 5 of either class), and misses
-  are split into held frames and sampled drops.
-- `ldc` (Lens Distortion Correction): per-camera boolean option asserting on-sensor barrel distortion
-  correction for wide-angle 4K sensors (e.g. C560WS, C260). Straightens vertical and horizontal
-  perspective lines across the scene, boosting YOLO person detection confidence near frame edges.
-  Monitored continuously for configuration drift via Digital Twin (`video.ldc.enabled`).
-- `tamper_detection` and `tamper_sensitivity` (`low`/`normal`/`high`): per-camera options re-asserting
-  tamper monitoring every control tick so that lens spray, physical covering, or camera redirection
-  cannot remain silently disabled. In the alert funnel, tamper events bypass visual subject confidence
-  gates to alert immediately. Watched as a `critical` drift key in the Digital Twin.
-- `whitelamp_force_time` (5–300 s) and `whitelamp_intensity` (1–100 %): per-camera options overriding
-  the 300 s (5 minute) firmware floodlight default on detection triggers, allowing polite, short night
-  illumination pulses (e.g. 30 s). Watched for drift in the Digital Twin (`light.whitelamp.force_time`).
-- `set_osd_safe`: wraps OSD updates via standard `executeFunction` JSON-RPC rather than pytapo's raw
-  `performRequest`, preventing connection drops and firmware IP lockouts on outdoor models.
-- `tapo-monitor learn-face <name>`: CLI helper listening for live on-device face detection events to
-  capture stable `face_id`s and output matching `FACE_ID_NAMES` entries.
-- `faces.ignore_known`: suppresses alerts when all detected faces belong to enrolled household members,
-  audited as `reason=known_face` (the name stays in the journal, never in the ledger) while keeping
-  unconfirmed or unknown faces alertable.
+  are split into held frames and sampled drops. Frames are also grouped into incidents (by
+  incident ID; older records by camera and a 150 s gap), reporting incidents with a person,
+  how many were alerted, the missed ones, and the delay from event start to the first
+  delivered alert (median, p90).
+- The review log also keeps a random sample of below-threshold frames (live, sampler and
+  SD/recording drops; `TAPO_REVIEW_DROP_SAMPLE`, default 5 %, at most
+  `TAPO_REVIEW_DROP_MAX_PER_HOUR` per camera and hour, default 6), so possible misses keep
+  reaching the labelling queue. Records carry `sample_rate`; the digest counts them apart.
+- `tapo-monitor autolabel`: a larger teacher model labels the frames it and the
+  production scorer agree on, so the labeling page only shows disagreements, biggest
+  first.
+- `tools/collect_frames.sh` pulls every host's sent and review logs into one dataset
+  that outlives the hosts' retention, for labelling with `tapo-monitor label`.
+- Daily digest fleet block: size and file count of the sent, review and pan-limit logs and
+  the free space under them. The daemon warns once on Telegram when free space falls below
+  `TAPO_LOG_DISK_MIN_FREE_MB` (default 1024, 0 off) and re-arms after recovery.
+- Incident IDs: every audit line and sent-log entry carries `incident=<camera>-<start>`,
+  derived from the camera event, and `tapo-monitor incident <id>` prints the chain from the
+  ledger and the sent log.
+- `tapo-monitor replay`: runs a recorded ledger window through the production mute,
+  cooldown and scene-group gates, read-only; `--compare` shows events whose outcome a
+  candidate config would change. It also replays recorded SD, sampler and hub deliveries
+  (so their cooldowns count), re-applies a candidate `scorer.threshold` to recorded scores,
+  measures the scene gate's reach (`--scene-reach`, `--summary-only`), and models
+  corroboration holds: a live `hold` is `suppressed(hold)`, and each recorded
+  `hold_expired` is re-decided under the replayed `sampler.hold_expiry`, so
+  `replay --compare` estimates the alerts the policy adds per camera.
+- Alert work in flight survives a restart: hub delivery retries, pending SD follow-ups and
+  alert cooldowns are kept in `runtime.json` beside the health state and restored on start,
+  so a deploy neither drops a queued alert nor re-sends the same passage.
+- One arbiter for the motor (`tapo_monitor/motion.py`): the scheduled preset recall and the
+  ONVIF pan-limit guard both ask it before moving. Privacy mode blocks every move; a
+  `track_hold` blocks the scheduled recall; the guard overrides a hold after
+  `pan_limit.hold_grace` seconds out of bounds (default 20, `0` = the old immediate recall).
+  Refused moves are logged once per stretch and counted per camera (`motion_refusals`, also
+  in `/status`).
+- The daily digest's fleet block reports motor moves the arbiter held back and what the
+  last restart carried over from `runtime.json`.
 - Hub clip delivery is retried: a failed Telegram send goes to a bounded queue (4 attempts,
   600 s TTL) instead of being lost after the cursor moved on, and the hub cursor is kept in
   `hub_cursor.json` so a restart no longer skips clips from the downtime (capped at 4 h).
@@ -104,15 +124,17 @@ All notable changes to this project are documented here.
   has indexed no clip for that long. Checked at most once a day; state survives restarts.
 - `events_1` bit 8 is decoded as `linecrossing`, so it no longer shows up as an unknown bit.
   It does not change the alert type.
+- `hubpoll` refuses to poll clips from a camera the hub reports as recording 24/7
+  (`plan_24h_record: true`, e.g. a C460 with 24/7 Capture enabled). The whole detection
+  model assumes an indexed clip is a triggered recording; on a continuously-recording
+  camera every stored segment would otherwise be scored and alerted on as plain footage.
+  The daemon logs a warning once and leaves the camera resolved but idle rather than
+  guess from `video_type`, whose values are not yet confirmed against ground truth.
 - `light_trigger`: per-camera option to trigger the camera's white lamp / LED floodlight
   on person or motion detection within an optional clock window (`"HH:MM-HH:MM"`).
-- SD follow-ups now select the sharpest above-threshold subject frame, as recorder
-  follow-ups already do, instead of stopping at the first accepted frame. Hub clips
-  supply up to six candidates from one download with a shared decoding time budget.
-  Missing sharpness measurements fall back to detection score; scorer failure retains
-  a confirmed candidate when available. Selection logs identify the chosen candidate.
-  Live and sampler snapshots are unchanged; full-frame sharpness is not a guarantee
-  that a moving subject is sharp.
+  `light_trigger.mode: firmware` instead switches the camera to smart night vision inside
+  the window (and back to IR outside it), so the firmware lights the lamp itself; the
+  polled toggle lands after the `getEvents` lag, often after the person has left the frame.
 - `enrich.light_status`: query the camera's white lamp (full-color night-vision light) at
   alert time and note it (🔦) in the Telegram caption. Off by default — one extra API call
   per alert, meaningful only on cameras with that hardware/feature; a failed or unsupported
@@ -135,12 +157,31 @@ All notable changes to this project are documented here.
   storm-parked camera or a static one. One unbroken hold is capped at `track_hold`, which
   keeps the preset (the only tilt correction) coming round on a busy night, and `pan_limit`
   is untouched: a dwell never licenses the lens to sit outside its preset span.
-- `hubpoll` refuses to poll clips from a camera the hub reports as recording 24/7
-  (`plan_24h_record: true`, e.g. a C460 with 24/7 Capture enabled). The whole detection
-  model assumes an indexed clip is a triggered recording; on a continuously-recording
-  camera every stored segment would otherwise be scored and alerted on as plain footage.
-  The daemon logs a warning once and leaves the camera resolved but idle rather than
-  guess from `video_type`, whose values are not yet confirmed against ground truth.
+- `ldc` (Lens Distortion Correction): per-camera boolean option asserting on-sensor barrel distortion
+  correction for wide-angle 4K sensors (e.g. C560WS, C260). Straightens vertical and horizontal
+  perspective lines across the scene, boosting YOLO person detection confidence near frame edges.
+  Monitored continuously for configuration drift via Digital Twin (`video.ldc.enabled`).
+- `tamper_detection` and `tamper_sensitivity` (`low`/`normal`/`high`): per-camera options re-asserting
+  tamper monitoring every control tick so that lens spray, physical covering, or camera redirection
+  cannot remain silently disabled. In the alert funnel, tamper events bypass visual subject confidence
+  gates to alert immediately. Watched as a `critical` drift key in the Digital Twin.
+- `whitelamp_force_time` (5–300 s) and `whitelamp_intensity` (1–100 %): per-camera options overriding
+  the 300 s (5 minute) firmware floodlight default on detection triggers, allowing polite, short night
+  illumination pulses (e.g. 30 s). Watched for drift in the Digital Twin (`light.whitelamp.force_time`).
+- `set_osd_safe`: wraps OSD updates via standard `executeFunction` JSON-RPC rather than pytapo's raw
+  `performRequest`, preventing connection drops and firmware IP lockouts on outdoor models.
+- `tapo-monitor learn-face <name>`: CLI helper listening for live on-device face detection events to
+  capture stable `face_id`s and output matching `FACE_ID_NAMES` entries.
+- `faces.ignore_known`: suppresses alerts when all detected faces belong to enrolled household members,
+  audited as `reason=known_face` (the name stays in the journal, never in the ledger) while keeping
+  unconfirmed or unknown faces alertable.
+- SD follow-ups now select the sharpest above-threshold subject frame, as recorder
+  follow-ups already do, instead of stopping at the first accepted frame. Hub clips
+  supply up to six candidates from one download with a shared decoding time budget.
+  Missing sharpness measurements fall back to detection score; scorer failure retains
+  a confirmed candidate when available. Selection logs identify the chosen candidate.
+  Live and sampler snapshots are unchanged; full-frame sharpness is not a guarantee
+  that a moving subject is sharp.
 - Type checking and coverage, both wired into CI. `mypy` runs at the rung an unannotated
   package can hold — assignments a name cannot keep, calls that cannot match a signature —
   which is the fault class that has reached production here (a package copied without one
@@ -187,43 +228,44 @@ All notable changes to this project are documented here.
   `OnFailure=` hands the reason to the fleet's notifier. Credentials live in
   `/etc/tapo-monitor/notify.env`; the script never takes a token as an argument, because
   argv is world-readable in `/proc`.
-- One arbiter for the motor (`tapo_monitor/motion.py`): the scheduled preset recall and the
-  ONVIF pan-limit guard both ask it before moving. Privacy mode blocks every move; a
-  `track_hold` blocks the scheduled recall; the guard overrides a hold after
-  `pan_limit.hold_grace` seconds out of bounds (default 20, `0` = the old immediate recall).
-  Refused moves are logged once per stretch and counted per camera (`motion_refusals`, also
-  in `/status`).
-- Alert work in flight survives a restart: hub delivery retries, pending SD follow-ups and
-  alert cooldowns are kept in `runtime.json` beside the health state and restored on start,
-  so a deploy neither drops a queued alert nor re-sends the same passage.
-- Incident IDs: every audit line and sent-log entry carries `incident=<camera>-<start>`,
-  derived from the camera event, and `tapo-monitor incident <id>` prints the chain from the
-  ledger and the sent log.
-- `tapo-monitor replay`: runs a recorded ledger window through the production mute,
-  cooldown and scene-group gates, read-only; `--compare` shows events whose outcome a
-  candidate config would change.
 - A scenario test harness (`tests/scenario.py`) that drives the real `loop_step` through
   multi-tick stories with a fake clock, camera, ONVIF and notifier.
 - Configuration: `coordinator.camera_order` must name cameras of its own group, and a
   renamed key can be accepted with a warning for one release (`RENAMED_KEYS`).
-
-- `tapo-monitor replay` also replays recorded SD, sampler and hub deliveries (so their
-  cooldowns count), re-applies a candidate `scorer.threshold` to recorded scores, and
-  measures the scene gate's reach (`--scene-reach`, `--summary-only`).
-- The daily digest's fleet block reports motor moves the arbiter held back and what the
-  last restart carried over from `runtime.json`.
-
-- The review log also keeps a random sample of below-threshold frames (live, sampler and
-  SD/recording drops; `TAPO_REVIEW_DROP_SAMPLE`, default 5 %, at most
-  `TAPO_REVIEW_DROP_MAX_PER_HOUR` per camera and hour, default 6), so possible misses keep
-  reaching the labelling queue. Records carry `sample_rate`; the digest counts them apart.
-- `tapo-monitor autolabel`: a larger teacher model labels the frames it and the
-  production scorer agree on, so the labeling page only shows disagreements, biggest
-  first.
-- `tools/collect_frames.sh` pulls every host's sent and review logs into one dataset
-  that outlives the hosts' retention, for labelling with `tapo-monitor label`.
+- `docs/tapo-local-api.md`: a public reference for the camera's local API beyond pytapo —
+  parameter conventions, error codes in plain words, SD card states (including
+  `dilatant_suspect` counterfeit cards and `formatSdCard`), event and recording searches
+  (`channel`, `chn_events`, the `getEvents` window), face recognition at API level, methods
+  pytapo does not wrap, and the calls that take a camera's API down. Every finding names
+  the model and firmware it was seen on.
+- The scorer can run YOLOX on an Intel iGPU through OpenVINO
+  (`TAPO_SCORER_PROVIDER=openvino-gpu`, about 2.6x faster than CPU on the reference host);
+  unset keeps CPU, and a GPU start failure falls back to CPU with a warning. The rendered
+  unit gets `SupplementaryGroups=render`.
+- `deploy_release.sh --health-wait SECS` (default 30): after the restart the unit must stay
+  active without two or more automatic restarts, or the deploy re-points `current` at the
+  release that was live before (recorded in `.previous_release`) and restarts into it.
+- Recorder evidence on camera outage: with `RECORDING_ROOT` set, an outage that reaches
+  `alerts.outage_threshold` preserves the camera's newest two nonempty recorder segments,
+  with a checksummed manifest, under `<RECORDING_ROOT>-incidents/`. See
+  `docs/incident-preservation.md`.
+- Multi-camera scenes: the ledger persists measured scene events (lead/follow pairs with
+  their event-time delta; a direction only when `coordinator.camera_order` gives the
+  measured order), and each camera's clock offset is sampled from the digital twin probe
+  and reported in the digest's fleet block, which flags a skew over 5 s. A bounded
+  handoff-lease state machine exists for `handoff_preset` but is not wired to move cameras.
 
 ### Changed
+- SD and local-recorder follow-ups are read off the main loop. A background thread per
+  camera downloads or extracts the window, scores the frames and picks one; the loop
+  submits a due follow-up and, on a later tick, decides and sends it. A camera-card read
+  used to hold every camera on the host for a median 70 s (up to 150 s): no `getEvents`
+  poll, no sampler grab, no pan guard. Two reads of one camera never overlap. The scene and
+  alert gates are asked again when the read is back, so a passage the live pass or the
+  sampler alerted meanwhile is not sent twice. An entry stays queued (and in
+  `runtime.json`) while it is read; a stop does not wait for the read and the entry is
+  read again after the start. Job temp dirs are now `sdjob_<pid>_*`, and a start removes
+  those of a daemon that is gone.
 - A recording follow-up scores each frame as soon as ffmpeg has written it, so decoding
   and scoring overlap instead of running one after the other.
 - Frames of one SD, recording or hub-clip sequence are scored concurrently (up to 4 at a
@@ -232,6 +274,9 @@ All notable changes to this project are documented here.
   after it ends instead of 60 s (a live recorder trails the clock by 2-3 s), and a window
   over 28 s first reads the event's opening 24 s, sending as soon as a subject is there and
   reading only the remainder otherwise (audited as `sd retry reason=early_look=...`).
+- Frame sharpness is judged on the scorer's subject box when every candidate frame has one
+  (Laplacian variance of the crop); without boxes it falls back to full-frame blur as before.
+  Below-threshold frames of one sequence share a single audit line.
 - Privacy mode is read on the control pass itself (one getter on the connected client),
   so a parked lens gets no recall on the very pass it parks and its aim is restored on
   the first pass after, instead of up to one twin probe (900 s) later. A guard recall the
@@ -242,9 +287,6 @@ All notable changes to this project are documented here.
   the flush `logging.shutdown()` performs is bounded too.
 - The status endpoint serves a view the main loop publishes after every tick instead of
   reading live daemon state from its own thread.
-- Frame sharpness is judged on the scorer's subject box when every candidate frame has one
-  (Laplacian variance of the crop); without boxes it falls back to full-frame blur as before.
-  Below-threshold frames of one sequence share a single audit line.
 - `trigger_whitelamp` retries a transient status read once, never fires the toggle when the
   state is unreadable, and re-reads the state after a failed toggle.
 - Auto-track setup reads `back_time` first and skips the write when it already matches; a
@@ -254,6 +296,21 @@ All notable changes to this project are documented here.
   process reads them itself. The replaced hand-written unit passed them as command-line
   flags, which is the arrangement that turns an undefined `${VAR}` into an argparse exit
   before the model loads.
+- **Unknown configuration keys now fail at startup** (they were a warning in 0.5.0), with
+  the full key path and the closest real key. Run `tapo-monitor check cameras.yaml` before
+  upgrading a host.
+- The daily digest judges scorer failures by their rate over the last day (degraded above
+  1 %) instead of the lifetime count, which a handful of failures out of a few hundred
+  thousand requests used to trip.
+- The SD download timeout scales with the requested window (at least 150 s), and the
+  reachability ping sends three echoes instead of two, to filter out jitter.
+- `tools/fleet_status.sh` falls back to `systemctl --user` when the service is not a system
+  unit and finds a probe venv when the default one is missing.
+- `deploy_release.sh` and `rollback_release.sh` keep `TAPO_EXPECTED_FINGERPRINT` current
+  when the host has opted in: the release they just switched to is by definition the
+  intended one, and a manual update step that must follow every deploy is a step that
+  will eventually be forgotten — turning the drift check into a false alarm the day
+  after it was needed most. Update-only; a host without the line stays unenrolled.
 
 ### Fixed
 - A deploy to a host running tapo-monitor as a systemd user unit no longer rolls back a
@@ -266,16 +323,11 @@ All notable changes to this project are documented here.
   down while the camera is off the network, so an offline camera gets its 🔴/🟢 pair and
   nothing else — no "event API unavailable" before the outage alert, no event-API reboot
   right after the camera returns, and "restored" reports the real duration, not 0 s.
-- `faces.ignore_known` never took effect on the live path (it was read from the resolved
-  secrets, which never carry it), and both the live and SD skips would have raised
-  `TypeError` on the first known face.
 - The pan guard's hold grace restarts after an ONVIF read failure instead of recalling the
   lens with no grace on return.
 - Hub clip downloads now enforce stream completion integrity (`download_clip`). If a
   download stream terminates early, stalls, or receives an error, the incomplete video
   file is unlinked and rejected rather than treated as a valid clip.
-- Corrected `quiet_hours` semantics so detection alerts and outage notices are muted
-  during the configured clock window rather than outside of it.
 - The hub session no longer breaks against H200 firmware (observed on 1.7.5) that
   disconnects a reused HTTP connection on the second request of an otherwise-valid
   session. The authenticated session now opens a fresh TCP connection per HTTP request
@@ -285,7 +337,7 @@ All notable changes to this project are documented here.
 - The SD follow-up no longer scores frames the camera recorded while the pan-limit guard
   had its aim off the allowed span. The guard fixes where the lens points; it cannot
   unrecord what is already on the card, and the follow-up re-scores that recording about
-  two minutes later. On 2026-09-02 at 04:36:59 a frame of IR-lit scaffolding netting
+  two minutes later. In one case a frame of an IR-lit obstacle close to the lens
   scored 0.63 and was delivered as a person — eleven seconds after the recall had already
   corrected the camera, and while the live path's corroboration gate was correctly holding
   the same view at 0.56. Such frames are now skipped before they reach the scorer, audited
@@ -310,11 +362,6 @@ All notable changes to this project are documented here.
 - `systemd/tapo-scorer@.service`. The instance form promised a unit that could be enabled
   per service user, but its paths still had to be hand-edited, and no host ran it —
   `tools/provision_scorer.sh` renders the real unit instead.
-- `deploy_release.sh` and `rollback_release.sh` keep `TAPO_EXPECTED_FINGERPRINT` current
-  when the host has opted in: the release they just switched to is by definition the
-  intended one, and a manual update step that must follow every deploy is a step that
-  will eventually be forgotten — turning the drift check into a false alarm the day
-  after it was needed most. Update-only; a host without the line stays unenrolled.
 
 ## [0.5.0] - 2026-09-01
 
