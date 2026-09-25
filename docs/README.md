@@ -20,12 +20,15 @@ camera names, addresses, credentials, coordinates and observations do not belong
    failure containment.
 2. [Capabilities](capabilities.md) — implemented and deliberately unimplemented features.
 3. [`events_1` bitmask](events1-bitmask.md) — known firmware event signals.
-4. [Battery cameras on a hub](battery-cameras-on-a-hub.md) — how a sleeping camera's events
+4. [Local API reference](tapo-local-api.md) — the camera's local API beyond pytapo:
+   parameter conventions, error codes, SD card states, event shapes and calls that take
+   the API down.
+5. [Battery cameras on a hub](battery-cameras-on-a-hub.md) — how a sleeping camera's events
    are read off the hub it records to, and the hub rules that shape the client.
-5. [Observability](observability.md) — Camera Digital Twin and Shadow Detection Auditor.
-6. [Labeling](labeling.md) — label collected sent/review-log frames and measure false
+6. [Observability](observability.md) — Camera Digital Twin and Shadow Detection Auditor.
+7. [Labeling](labeling.md) — label collected sent/review-log frames and measure false
    alarms, misses and the best threshold.
-7. [Roadmap](roadmap.md) — remaining product phases and research tracks.
+8. [Roadmap](roadmap.md) — remaining product phases and research tracks.
 
 ## Feature maturity
 

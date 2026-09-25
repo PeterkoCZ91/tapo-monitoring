@@ -452,7 +452,8 @@ turns after a person the wide lens saw (dual-cam linkage). See
   cards flagged `dilatant_suspect` read as degraded storage on any model.
 - [ ] Verify on the camera which lens the self-heal setters reach without `chn_id`, and
   whether `role: static` (auto-track off) turns the linkage off; pass `chn_id` where it
-  matters.
+  matters. White lamp done: without `chn_id` a write reaches only the wide lens, with
+  `chn_id` only the named lens — so `whitelamp_intensity` needs `chn_id` on a C545D.
 - [ ] Grow the event sample (night, pets, vehicles) and re-check the 180 s hold against
   how long the firmware actually keeps the lens on a subject.
 - [ ] Compare `lens_pick_stream` photos with the wide-lens-only ones before recommending
@@ -548,7 +549,7 @@ shadows. The generic detector has never seen this fleet's IR night scenes.
 
 ## Phase 10 — Incidents, not frames
 
-Status: **in progress** (10.1 and 10.3 done; 10.2 in an observe-only trial on one camera;
+Status: **in progress** (10.1, 10.3 and 10.7 done; 10.2 in an observe-only trial on one camera;
 10.4: the recording follow-up went from a median 119 s to 56 s and follow-ups are read off
 the main loop, the camera-card window is next; 10.5: closest-person pick on one camera)
 
@@ -657,8 +658,8 @@ closest.
 
 ### 10.7 — A public reference for the local API
 
-- [ ] Publish what the fleet and the dual-lens probe established beyond pytapo as
-  `docs/tapo-local-api.md`: call shapes, parameter conventions, error codes, SD card
+- [x] Publish what the fleet and the dual-lens probe established beyond pytapo as
+  [`docs/tapo-local-api.md`](tapo-local-api.md): call shapes, parameter conventions, error codes, SD card
   (`formatSdCard`, `detect_status` incl. `dilatant_suspect` for counterfeit cards, capacity
   in the `video_*` fields), event and recording searches (`channel`, `chn_events`,
   `getEvents` window), face recognition at API level, methods pytapo lacks, and the calls

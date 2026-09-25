@@ -154,6 +154,8 @@ Rain makes auto-tracking cameras chase raindrops and IR reflections. Using open-
 Read-only findings from one C545D (HW 1.0, firmware 1.1.2 auto-upgraded to 1.1.7
 during the probe; rows are from 1.1.7), taken with pytapo 3.4.18, ffprobe and onvif-zeep.
 Configure it with `event_profile: c545d` — see [configuration](configuration.md#dual-lens-cameras-c545d).
+Request/response examples for these calls, and what other models answered, are in the
+[local API reference](tapo-local-api.md).
 
 The C545D has two sensors in one body: a **fixed wide lens** (channel 1) and a
 **pan/tilt lens** (channel 2). One login, one IP, one device: the lenses are *channels*,
@@ -274,6 +276,9 @@ The firmware exposes an active-response layer reachable through the local API:
   subjects without triggering loud acoustic alarms or blinding neighbors.
 
 ## Beyond pytapo — what this project adds
+
+For the camera API itself — calls pytapo does not wrap, error codes, SD card states and
+calls to avoid — see the [local API reference](tapo-local-api.md).
 
 `pytapo` is a thin API client. On top of it this project adds the operational glue it
 lacks:
