@@ -507,7 +507,8 @@ shadows. The generic detector has never seen this fleet's IR night scenes.
 ## Phase 10 — Incidents, not frames
 
 Status: **in progress** (10.1 and 10.3 done; 10.2 in an observe-only trial on one camera;
-10.4: the recording follow-up is shortened, the camera-card path is next)
+10.4: the recording follow-up went from a median 119 s to 56 s, the camera-card path and
+moving follow-ups off the main loop are next; 10.5: closest-person pick on one camera)
 
 Frame statistics hide what matters to the person holding the phone: was each visit
 alerted, and how late. A first join of labels with deliveries showed that of 31 held

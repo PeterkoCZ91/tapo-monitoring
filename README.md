@@ -175,7 +175,7 @@ available frame contains the subject.
 | `tapo-monitor incident <camera>-<start>` | Everything recorded for one incident: ledger rows and sent-log frames (read-only). |
 | `tapo-monitor replay cameras.yaml ...` | Replay a recorded ledger window through the alert gates and recorded SD/sampler/hub deliveries (read-only); `--compare` a candidate config or threshold, `--scene-reach` to measure the scene gate. |
 | `tapo-monitor label <dataset_dir> [--port 8791] [--bind 127.0.0.1]` | Label collected sent/review-log frames in a local web page; verdicts go to `labels.jsonl`. |
-| `tapo-monitor label-stats <dataset_dir> [--config cameras.yaml] [--json]` | False-alarm rate, misses and the best-separating threshold from the labels; with `--config`, split by day and night. |
+| `tapo-monitor label-stats <dataset_dir> [--config cameras.yaml] [--json]` | False-alarm rate, misses and the best-separating threshold from the labels; per incident: missed visits and the delay to the first alert by delivery path; with `--config`, split by day and night. |
 | `tapo-monitor autolabel <dataset_dir> --model yolox_x.onnx` | A larger teacher model auto-labels frames it and the scorer agree on; the page then shows only disagreements. |
 
 ## Optional local scorer
@@ -204,7 +204,8 @@ truth, `tools/collect_frames.sh` gathers every host's frames into one dataset,
 `tapo-monitor autolabel` pre-labels the easy ones with a larger teacher model and
 `tapo-monitor label` serves the rest on a local page; `label-stats` then reports the
 false-alarm rate, the misses and the best-separating threshold, by day and night with
-`--config` ([Labeling](docs/labeling.md)).
+`--config`, and per incident how many visits with a person got no alert and how late the
+first alert came on each delivery path ([Labeling](docs/labeling.md)).
 
 ## Safety and privacy
 
