@@ -27,16 +27,18 @@ import signal
 import subprocess
 import tempfile
 import time as _time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from typing import Any
 
 from . import (
     camera,
     capabilities,
     cli,
+    detection,
     dnsfix,
     drift,
     enrich,
@@ -379,7 +381,7 @@ def _apply_night_vision_mode(cam, mode, camera=None, failures=None):
 
 def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
                repair_failures=None, camera=None, privacy_on=False, hold=False,
-               motion_refusals=None):
+               motion_refusals=None, linkage=False):
     """Apply a CameraPlan to a connected camera in firmware-safe order.
 
     SmartTrack / motion sensitivity / preset first; auto-track asserted LAST and verified.
@@ -392,6 +394,8 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
     leaking into the day would rebuild the two-day asphalt incident silently.
     Both exceptions are decided by :func:`tapo_monitor.motion.decide`, the same arbiter
     the pan-limit guard asks; refusals are counted into ``motion_refusals`` when given.
+    ``linkage`` skips the recall while a dual-lens camera's firmware is turning its
+    pan/tilt lens after a subject (see :func:`cameras_under_linkage`).
     """
     try:
         cam.setMotionDetection(sensitivity=int(plan.motion_sensitivity))
@@ -459,12 +463,15 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
     # a critical drift key, so the twin reports the parked lens itself.
     if plan.preset:
         move = motion.decide(motion.SCHEDULE, privacy_on=privacy_on, hold=hold,
-                             autotrack_on=plan.autotrack_on)
+                             autotrack_on=plan.autotrack_on, linkage=linkage)
         if move.allowed:
             _recall_preset(cam, plan.preset, camera)
         else:
             if motion_refusals is not None:
                 motion.count_refusal(motion_refusals, camera, motion.SCHEDULE, move.reason)
+            if move.reason == motion.LINKAGE:
+                log.info("preset %s recall held for %s: the firmware's lens linkage is "
+                         "moving the pan/tilt lens", plan.preset, camera)
             if move.reason == motion.HOLD:
                 # Said out loud: a lens that stays off its preset looks identical to a
                 # refused recall, and that failure mode has cost this fleet two days of
@@ -520,7 +527,7 @@ def parked_lenses(state):
 
 def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=None,
              repair_failures=None, privacy=None, hold=None, motion_refusals=None,
-             privacy_seen=None):
+             privacy_seen=None, linkage=None):
     """One pass over all cameras. Dependencies injectable for testing.
 
     Returns a dict {camera_name: CameraPlan} of what was planned. ``repair_failures`` is
@@ -528,7 +535,9 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
     logged one line at a time. ``privacy`` names the cameras whose lens the twin last saw
     parked; they get every configuration call but no motor call. ``hold`` names the
     cameras whose auto-track is currently on a subject; they keep every configuration call
-    too, but their preset recall waits (see :func:`cameras_holding_recall`).
+    too, but their preset recall waits (see :func:`cameras_holding_recall`). ``linkage``
+    names dual-lens cameras whose firmware is moving the pan/tilt lens; their recall
+    waits too, whatever auto-track says (see :func:`cameras_under_linkage`).
 
     A camera that moves (a preset or the pan guard) also has its privacy switch read on
     the connected client this pass (:func:`read_privacy`); a definite answer overrides the
@@ -577,11 +586,13 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
                 # made a camera that refuses auto-track indistinguishable from a healthy
                 # one: every other control call is accepted, and the one setting the night
                 # depends on never takes — with not a single log line to show for it.
+                # Passed only when set, so the call a single-lens camera sees is unchanged.
+                linked = {"linkage": True} if cfg.name in (linkage or ()) else {}
                 if not apply_plan(cam, plan, app.reliability,
                                   repair_failures=repair_failures, camera=cfg.name,
                                   privacy_on=privacy_on,
                                   hold=cfg.name in (hold or ()),
-                                  motion_refusals=motion_refusals):
+                                  motion_refusals=motion_refusals, **linked):
                     log.warning("auto-track %s not confirmed for %s: the camera took the "
                                 "call but read back the other state",
                                 "on" if plan.autotrack_on else "off", cfg.name)
@@ -691,6 +702,10 @@ class MonitorState:
     # cameras_holding_recall). Cleared the moment the recall is let through again, so the
     # cap always measures one stretch rather than the whole night.
     recall_hold_since: dict = field(default_factory=dict)
+    # Per dual-lens camera, the newest camera time (event end, else start) at which an
+    # event fired on its pan/tilt lens: the firmware's lens linkage is moving that lens
+    # then, so the motor paths leave it alone for the profile's linkage_hold after it.
+    lens_linkage_at: dict = field(default_factory=dict)
     # Per camera, refused motor moves by "<requester>:<reason>" (see tapo_monitor.motion),
     # so a lens held on purpose is distinguishable from one nothing is trying to move.
     motion_refusals: dict = field(default_factory=dict)
@@ -890,6 +905,56 @@ def _default_snapshot(cfg: CameraConfig, stream=None, recorder_fallback=False):
 
 def _sampler_snapshot(cfg: CameraConfig):
     return _default_snapshot(cfg, stream=cfg.sampler.stream)
+
+
+def _lens_snapshot(cfg: CameraConfig):
+    """Grab from the second lens of a dual-lens camera (``lens_pick_stream``)."""
+    return _default_snapshot(cfg, stream=cfg.lens_pick_stream)
+
+
+def pick_lens_frame(cfg, first, second, score, blur_score=None):
+    """The better of two frames of one event, one per lens, and its score.
+
+    ``first`` is the ``rtsp_stream`` grab, ``second`` the ``lens_pick_stream`` grab; either
+    may be None. Both are scored; a scorer failure keeps ``first`` (the frame the camera
+    would have sent without the pick) and leaves the verdict to the normal passthrough.
+    Among frames over ``scorer.threshold`` the larger subject wins by the same rule as
+    ``sd_frame_pick: largest`` (:func:`recclip.select_largest`: blur guard, 1.25x gain),
+    falling back to the higher score when a box is missing; with none over it the higher
+    score wins, so the drop or defer that follows sees the best evidence there was. The
+    frame not picked is removed. Returns ``(frame, score)``; the score is None when it was
+    not measured.
+    """
+    frames = [f for f in (first, second) if f]
+    if len(frames) < 2:
+        return (frames[0] if frames else None), None
+    scores = []
+    for frame in frames:
+        s = score(frame)
+        if s is None:
+            _safe_unlink(second)
+            return first, None
+        scores.append(s)
+    above = [(f, s) for f, s in zip(frames, scores, strict=True) if s >= cfg.scorer.threshold]
+    boxes = getattr(score, "boxes", None) or {}
+    if len(above) == 2 and all(boxes.get(f) for f, _ in above):
+        blur_score = blur_score or recclip.blur_score
+        above.sort(key=lambda fs: fs[1], reverse=True)
+        image = recclip.select_largest([(f, blur_score(f, box=boxes[f]), boxes[f])
+                                        for f, _ in above])
+        pick = "largest"
+    else:
+        pool = above or list(zip(frames, scores, strict=True))
+        image = max(pool, key=lambda fs: fs[1])[0]
+        pick = "score"
+    chosen = next(s for f, s in zip(frames, scores, strict=True) if f == image)
+    for frame in frames:
+        if frame != image:
+            _safe_unlink(frame)
+    log.info("lens pick %s: %s (%s) scores=%s", cfg.name,
+             "second lens" if image == second else "first lens", pick,
+             "/".join(f"{s:.3f}" for s in scores))
+    return image, chosen
 
 
 def _default_time_str(event):  # pragma: no cover - trivial formatting
@@ -1209,7 +1274,7 @@ def sd_followup_spans(cfg, event, etype):
     return sdclip.event_span(event, cap=first_cap), full_span
 
 def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
-                     snapshot_for=None, time_str=None, night=True):
+                     snapshot_for=None, time_str=None, night=True, lens_snapshot_for=None):
     """Poll the detection pipeline once per camera that uses ``getevents``.
 
     ``cam_clients`` maps camera name -> connected client (anything exposing ``getEvents()``);
@@ -1218,8 +1283,14 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
 
     A per-camera cooldown (``app.alerts.cooldown``) rate-limits detection alerts so a
     burst of detections within the window produces at most one notification.
+
+    A dual-lens camera (event profile with a pan/tilt lens) reports every event to
+    :func:`note_lens_event`, and with ``lens_pick_stream`` set an event on the pan/tilt
+    lens grabs that stream as well and keeps the better frame (:func:`pick_lens_frame`).
+    ``lens_snapshot_for(cfg)`` builds that second grab; injectable like ``snapshot_for``.
     """
     snapshot_for = snapshot_for or _default_snapshot
+    lens_snapshot_for = lens_snapshot_for or _lens_snapshot
     time_str = time_str or _default_time_str
     cooldown = app.alerts.cooldown
     for cfg in app.cameras:
@@ -1301,7 +1372,13 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             finally:
                 observe_latency("snapshot", _time.monotonic() - started)
 
-        def timed_score(image, _raw=raw_score):
+        # Scores the lens pick already measured, by frame path: the pick scored the frame
+        # it kept, so the live pass takes that answer instead of asking again.
+        lens_scores: dict = {}
+
+        def timed_score(image, _raw=raw_score, _known=lens_scores):
+            if image in _known:
+                return _known.pop(image)
             started = _time.monotonic()
             try:
                 return _raw(image) if _raw is not None else None
@@ -1309,6 +1386,34 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                 observe_latency("scorer", _time.monotonic() - started)
 
         score = timed_score if raw_score is not None else None
+        profile = detection.event_profile(getattr(cfg, "event_profile", None))
+        live_snapshot: Callable[..., Any] = timed_snapshot
+        if (getattr(cfg, "lens_pick_stream", None) and raw_score is not None
+                and profile.pt_channel is not None):
+            raw_second = lens_snapshot_for(cfg)
+
+            def lens_pick_snapshot(camera, event, _first=timed_snapshot, _raw=raw_second,
+                                   _cfg=cfg, _pt=profile.pt_channel, _score=raw_score,
+                                   _known=lens_scores):
+                first = _first(camera, event)
+                if _pt not in detection.event_channels(event):
+                    return first
+                started = _time.monotonic()
+                try:
+                    second = _raw(camera, event)
+                finally:
+                    observe_latency("snapshot", _time.monotonic() - started)
+                image, s = pick_lens_frame(_cfg, first, second, _score)
+                if image and s is not None:
+                    _known[image] = s
+                return image
+
+            live_snapshot = lens_pick_snapshot
+        seen_kw = {}
+        if profile.pt_channel is not None:
+            def event_seen(event, _cfg=cfg):
+                note_lens_event(state, _cfg, event)
+            seen_kw["event_seen"] = event_seen
 
         corroborate = None
         if cfg.sampler.enabled and cfg.scorer.motion_send_threshold is not None:
@@ -1410,7 +1515,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             groq_key=secrets["groq_key"],
             telegram_token=secrets["telegram_token"],
             telegram_chat=secrets["telegram_chat"],
-            snapshot=timed_snapshot,
+            snapshot=live_snapshot,
             time_str=time_str,
             can_alert=can_alert,
             on_alert=on_alert,
@@ -1429,6 +1534,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             hold_archive=hold_archive,
             mute=camera_muted(cfg, night, now),
             trigger_whitelamp=camera.trigger_whitelamp,
+            **seen_kw,
         )
         state.last_seen[cfg.name] = watermark
     return state.last_seen
@@ -1811,7 +1917,9 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
             # does not tell us what it saw, so it is gated as bare motion and the scorer
             # decides.
             etype = "motion"
-            event = {"start_time": clip["start_time"]}
+            # Normalized like a getEvents entry, so a hub event reads the same way downstream.
+            event = detection.normalize_event({"start_time": clip["start_time"]},
+                                              getattr(cfg, "event_profile", None))
             clip_extra = _hub_clip_audit(clip)
             # The clip is fetched first because the clip *is* the event: it carries the
             # moment of detection and arrives in a few seconds. A live grab only happens
@@ -2701,6 +2809,55 @@ def cameras_holding_recall(app: AppConfig, state: "MonitorState", now):
     return names
 
 
+def linkage_due(seen_at, now, hold_seconds):
+    """True while a dual-lens camera's firmware owns its pan/tilt lens. Pure.
+
+    ``seen_at`` is the newest time an event fired on that lens (see
+    :func:`note_lens_event`). The firmware splits a long event every 180 s and a new
+    segment re-arms this, so a subject that stays keeps the lens with the firmware; once
+    no segment has come for ``hold_seconds`` the recall and the guard may move it again.
+    """
+    if not hold_seconds or seen_at is None:
+        return False
+    return now - seen_at < hold_seconds
+
+
+def note_lens_event(state: "MonitorState", cfg: CameraConfig, event):
+    """Remember that ``event`` fired on ``cfg``'s pan/tilt lens, if its profile has one.
+
+    Keeps the newest of the event's start and end time (the end grows while the camera
+    still sees the subject). A profile without a pan/tilt lens records nothing.
+    """
+    profile = detection.event_profile(getattr(cfg, "event_profile", None))
+    if profile.pt_channel is None or profile.pt_channel not in detection.event_channels(event):
+        return
+    times = []
+    for key in ("end_time", "start_time"):
+        try:
+            times.append(float(event.get(key)))
+        except (TypeError, ValueError):
+            continue
+    if not times:
+        return
+    seen = max(times)
+    if seen > state.lens_linkage_at.get(cfg.name, float("-inf")):
+        state.lens_linkage_at[cfg.name] = seen
+
+
+def cameras_under_linkage(app: AppConfig, state: "MonitorState", now):
+    """Names whose pan/tilt lens the firmware's lens linkage is moving right now. Pure-ish.
+
+    Only cameras whose event profile has a pan/tilt lens can appear; every other camera
+    keeps the motor arbitration it always had.
+    """
+    names = set()
+    for cfg in app.cameras:
+        profile = detection.event_profile(getattr(cfg, "event_profile", None))
+        if linkage_due(state.lens_linkage_at.get(cfg.name), now, profile.linkage_hold):
+            names.add(cfg.name)
+    return names
+
+
 def inert_dwell_warning(app: AppConfig):
     """The warning for a ``track_hold`` that no ``back_time`` backs up, or None. Pure.
 
@@ -2733,7 +2890,9 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
             continue
 
         try:
-            snapshot_data = probe(cam)
+            # A multi-lens profile adds the per-lens probes; everyone else is probed as before.
+            lenses = detection.event_profile(getattr(cfg, "event_profile", None)).channels
+            snapshot_data = probe(cam, channels=lenses) if lenses else probe(cam)
             if hasattr(state, "scene_coordinator") and state.scene_coordinator is not None:
                 corr_probe = (
                     (snapshot_data.get("groups") or {})
@@ -2815,6 +2974,12 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
             previous=state.twin_fleet.get(cfg.name),
         )
         entry["alerted_keys"] = sorted(alerted)
+        warnings = capabilities.storage_warnings(snapshot_data)
+        if warnings:
+            # Storage health already reads degraded; this says why, in the state file and
+            # the journal: a fake-capacity card silently loses recordings and SD frames.
+            entry["warnings"] = list(warnings)
+            log.warning("digital twin %s: %s", cfg.name, "; ".join(warnings))
         entry["reliability"] = {
             "recorder": recorder,
             "latency": reliability.latency_snapshot(state.latency.get(cfg.name, {})),
@@ -2948,13 +3113,26 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
             plan = state.desired_plans.get(cfg.name)
             held = hold_due(state.last_seen.get(cfg.name), now, cfg.tracking.track_hold,
                             state.recall_hold_since.get(cfg.name))
+            linked = linkage_due(
+                state.lens_linkage_at.get(cfg.name), now,
+                detection.event_profile(getattr(cfg, "event_profile", None)).linkage_hold)
             move = motion.decide(motion.GUARD, hold=held,
                                  autotrack_on=bool(getattr(plan, "autotrack_on", False)),
                                  out_of_bounds_for=now - out_since,
-                                 hold_grace=pl.hold_grace)
+                                 hold_grace=pl.hold_grace, linkage=linked)
             if not move.allowed:
                 motion.count_refusal(state.motion_refusals, cfg.name, motion.GUARD,
                                      move.reason)
+                if move.reason == motion.LINKAGE:
+                    if g.get("refused") != move.reason:
+                        log.info("pan_limit %s: %s=%.4f out of bounds; recall waits while "
+                                 "the firmware's lens linkage moves the pan/tilt lens",
+                                 cfg.name, axis, value)
+                    g["refused"] = move.reason
+                    # The firmware aimed it there on purpose: the grace starts afresh
+                    # once the linkage lets go.
+                    g.pop("out_since", None)
+                    continue
                 if g.get("refused") != move.reason:
                     log.info("pan_limit %s: %s=%.4f out of bounds; recall waits up to %ds "
                              "while auto-track holds a subject",
@@ -3177,12 +3355,16 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     night = is_night()                    # one source of truth for this tick's night gate
     if control_due(last_control, now, control_interval):
         cam_clients.clear()
+        # Only a dual-lens camera whose firmware is moving its pan/tilt lens adds this;
+        # everything else sees the control call it always did.
+        linked = cameras_under_linkage(app, state, now)
         plans = run_control(app, now=now, connect=connect_factory(cam_clients, state, now),
                             repair_failures=state.repair_failures,
                             privacy=twin.cameras_in_privacy(state.twin_fleet),
                             privacy_seen=state.privacy_seen,
                             hold=cameras_holding_recall(app, state, now),
-                            motion_refusals=state.motion_refusals)
+                            motion_refusals=state.motion_refusals,
+                            **({"linkage": linked} if linked else {}))
         if isinstance(plans, Mapping):
             state.desired_plans.update(plans)
         watchdog(app, cam_clients, state, now=now, secrets=secrets, night=night)

@@ -8,6 +8,7 @@ times in comments are seconds since the scenario started.
 
 
 import functools
+import logging
 import os
 import threading
 import time
@@ -18,6 +19,7 @@ from tests.scenario import (
     Scenario,
     camera_dict,
     collapse,
+    dual_lens,
     motion,
     pan_limit,
     person,
@@ -728,3 +730,102 @@ def test_a_restart_during_a_card_read_reads_the_window_again(monkeypatch, tmp_pa
     assert sc.actions("send") == [("send", "a")]
     assert sc.state.pending_sd == []
     restarted.shutdown(wait=True)
+
+
+# ── dual-lens C545D ──────────────────────────────────────────────────────────
+# Shapes as captured on a C545D: a person is alarm_type 6 with events_1 34 on both lenses
+# (no AI-person bit), plain motion is alarm_type 2 with events_1 2 on the wide lens only.
+# The scorer is stubbed low (0.1) so the two paths differ visibly: a camera-confirmed
+# person still goes out (no SD path: always-send safety net), bare motion is dropped.
+
+def _low_scorer(monkeypatch):
+    def score_for(_cfg):
+        def score(_image):
+            return 0.1
+        score.boxes = {}
+        return score
+    monkeypatch.setattr(daemon, "score_for", score_for)
+
+
+def _c545d(**overrides):
+    base = dict(event_profile="c545d", role="static",
+                tracking={"day_preset": None, "night_preset": None},
+                scorer={"url": "http://127.0.0.1:9/score"})
+    base.update(overrides)
+    return camera_dict("front", HOST_A, **base)
+
+
+def _audit(caplog, etype):
+    return [r.getMessage() for r in caplog.records
+            if r.getMessage().startswith("audit ") and f"etype={etype}" in r.getMessage()]
+
+
+def test_a_c545d_person_alerts_on_the_person_path(monkeypatch, tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+    sc = Scenario(monkeypatch, tmp_path, [_c545d()])
+    _low_scorer(monkeypatch)
+    sc.run(10)
+    sc.cams["front"].push(dual_lens(at(10), 6, {2: 34, 1: 34}))
+    sc.run(20)
+
+    assert sc.actions("send") == [("send", "front")]
+    detect = [line for line in _audit(caplog, "person") if "action=detect" in line]
+    assert len(detect) == 1 and "channels=1,2" in detect[0]
+
+
+def test_c545d_plain_motion_on_the_wide_lens_takes_the_motion_path(
+        monkeypatch, tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+    sc = Scenario(monkeypatch, tmp_path, [_c545d()])
+    _low_scorer(monkeypatch)
+    sc.run(10)
+    sc.cams["front"].push(dual_lens(at(10), 2, {1: 2}))
+    sc.run(20)
+
+    assert sc.actions("send") == []
+    drops = [line for line in _audit(caplog, "motion") if "action=drop" in line]
+    assert len(drops) == 1 and "channels=1" in drops[0]
+    assert _audit(caplog, "person") == []
+    assert "front" not in sc.state.lens_linkage_at          # the pan/tilt lens never fired
+
+
+def test_on_a_c560ws_the_same_pair_is_still_pir_motion(monkeypatch, tmp_path, caplog):
+    # The unchanged default: alarm_type 6 / bit 32 is the C560WS PIR, bare motion that
+    # the scorer must confirm, and a single-lens event carries no channel list.
+    caplog.set_level(logging.INFO)
+    sc = Scenario(monkeypatch, tmp_path, [camera_dict(
+        "a", HOST_A, role="static", tracking={"day_preset": None, "night_preset": None},
+        scorer={"url": "http://127.0.0.1:9/score"})])
+    _low_scorer(monkeypatch)
+    sc.run(10)
+    sc.cams["a"].push({"start_time": at(10), "events_1": 34, "alarm_type": 6})
+    sc.run(20)
+
+    assert sc.actions("send") == []
+    drops = [line for line in _audit(caplog, "motion") if "action=drop" in line]
+    assert len(drops) == 1 and "channels=" not in drops[0]
+    assert "pir=1 person=0" in caplog.text
+    assert sc.state.lens_linkage_at == {}
+
+
+def test_the_firmware_lens_linkage_holds_recall_and_guard(monkeypatch, tmp_path):
+    # A person seen by both lenses: the C545D firmware turns the pan/tilt lens after them
+    # (dual-cam linkage), here past the preset span. Neither the scheduled recall nor the
+    # pan guard may pull it back until 180 s after the event's end, auto-track off or not;
+    # then they move it as usual.
+    sc = Scenario(monkeypatch, tmp_path, [_c545d(
+        role="tracking", tracking={"day_preset": "2", "night_preset": "2"},
+        pan_limit=pan_limit(), scorer={})])
+    cam = sc.cams["front"]
+    sc.run(30)                                   # 0..25: lens home
+    cam.push(dual_lens(at(30), 6, {1: 34, 2: 34}, duration=20))    # ends at 50
+    cam.pan_x = OUT_OF_SPAN                      # the firmware swings the PT lens
+    sc.run(250)                                  # 30..275
+
+    moves = [t for t, a in sc.timeline if a[0] in ("recall", "goto") and t >= at(30)]
+    assert moves, "the lens must come back once the linkage lets go"
+    assert min(moves) >= at(50 + 180)            # nothing moved it inside the hold
+    assert sc.actions("send") == [("send", "front")]
+    refusals = sc.state.motion_refusals["front"]
+    assert refusals["schedule:linkage"] >= 1
+    assert refusals["pan_limit:linkage"] >= 1

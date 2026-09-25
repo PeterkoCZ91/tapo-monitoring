@@ -299,7 +299,7 @@ def _probe_camera(cfg, night):
     has to be something an operator asks for rather than a background behaviour.
     """
     from . import camera as camera_mod
-    from . import capabilities, daemon, twin
+    from . import capabilities, daemon, detection, twin
 
     factory = camera_mod.tapo_factory(
         cfg.host,
@@ -310,7 +310,9 @@ def _probe_camera(cfg, night):
     client, error = camera_mod.connect(factory, retries=1)
     if client is None:
         raise RuntimeError(f"connect failed: {type(error).__name__ if error else 'unknown'}")
-    snapshot = capabilities.collect_snapshot(client)
+    lenses = detection.event_profile(getattr(cfg, "event_profile", None)).channels
+    snapshot = (capabilities.collect_snapshot(client, channels=lenses) if lenses
+                else capabilities.collect_snapshot(client))
     plan = daemon.plan_camera(cfg, daemon.effective_night(cfg, night), False)
     evaluation = twin.evaluate_snapshot(cfg.name, plan, snapshot)
     return twin.fleet_entry(

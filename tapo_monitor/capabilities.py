@@ -58,6 +58,32 @@ _SAFE_PROBES = (
     ("video", "osd", "getOsd"),
 )
 
+# Multi-lens cameras only (an event profile with ``channels``, e.g. the C545D): the lens
+# layout, the firmware's lens linkage, and the detection switches read per lens with
+# ``chn_id``. A getter without ``chn_id`` answers for channel 1 alone, so the pan/tilt
+# lens's own detection settings are invisible without these. Same rules as above: public
+# executeFunction getters only, read-only, each isolated. A single-lens camera never
+# gets these calls.
+_DUAL_LENS_PROBES = (
+    ("dual_cam", "channels", "getAllChnInfo"),
+    ("dual_cam", "capability", "getDualCamCapability"),
+    ("dual_cam", "linkage", "getDualCamLinkage"),
+    ("dual_cam", "linkage_targets", "getLinkageTargetSetting"),
+)
+_PER_CHANNEL_PROBES = (
+    ("detection_chn", "motion", "getMotionDetection"),
+    ("detection_chn", "person", "getPersonDetection"),
+    ("detection_chn", "vehicle", "getVehicleDetection"),
+    ("detection_chn", "pet", "getPetDetection"),
+    ("detection_chn", "tamper", "getTamperDetection"),
+)
+
+# ``getSDCard`` ``detect_status`` values that mean the card itself is bad, whatever the
+# mount status says. ``dilatant_suspect`` is the firmware's name for a card whose real
+# capacity is smaller than it reports (counterfeit or defective): seen on a C545D, where
+# such a card also came up read-only and would not format.
+SD_CARD_WARNINGS = {"dilatant_suspect": "counterfeit or defective SD card"}
+
 _SENSITIVE_KEYS = {
     "account",
     "alias",
@@ -97,22 +123,65 @@ _IPV4_RE = re.compile(r"(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])")
 _EMAIL_RE = re.compile(r"(?i)\b[^\s@]+@[^\s@]+\.[^\s@]+\b")
 
 
-def collect_snapshot(client):
+def collect_snapshot(client, channels=()):
     """Return a redacted, JSON-serializable digital twin for ``client``.
 
     Probe states are ``available``, ``unknown`` (missing or empty response), or
     ``error``.  Error messages are never retained because vendor exceptions may embed
     endpoints, account data or session material.
+
+    ``channels`` (lens channel numbers of a multi-lens camera, from its event profile)
+    adds the ``dual_cam`` group and a ``detection_chn`` group read with
+    ``chn_id=channels``; empty — every single-lens camera — sends exactly the probes it
+    always did.
     """
+    channels = [int(c) for c in (channels or ())]
+    tables = (*_SAFE_PROBES, *_UNSAFE_PROBES)
+    if channels:
+        tables = (*tables, *_DUAL_LENS_PROBES, *_PER_CHANNEL_PROBES)
     # Derived from the probe tables rather than listed again: a hand-kept copy of the
     # group names silently desynchronises, and adding a probe in a new group then raises
     # KeyError deep inside the snapshot instead of simply working.
-    groups = {group: {} for group, _name, _rest in (*_SAFE_PROBES, *_UNSAFE_PROBES)}
+    groups = {group: {} for group, _name, _rest in tables}
     for group, name, method_name in _SAFE_PROBES:
         groups[group][name] = _probe(client, method_name)
     for group, name, reason in _UNSAFE_PROBES:
         groups[group][name] = {"state": "unknown", "reason": reason}
+    if channels:
+        for group, name, method_name in _DUAL_LENS_PROBES:
+            groups[group][name] = _probe(client, method_name)
+        for group, name, method_name in _PER_CHANNEL_PROBES:
+            groups[group][name] = _probe(client, method_name, chn_id=list(channels))
     return {"schema_version": SCHEMA_VERSION, "groups": groups}
+
+
+def storage_warnings(snapshot):
+    """Human-readable warnings about the SD card itself, from a twin snapshot. Pure.
+
+    Reads ``detect_status`` of every card the ``getSDCard`` probe listed (any model);
+    see :data:`SD_CARD_WARNINGS`. Returns a sorted tuple, empty when nothing is wrong or
+    the card was not read.
+    """
+    groups = snapshot.get("groups", {}) if isinstance(snapshot, Mapping) else {}
+    storage = groups.get("storage", {}) if isinstance(groups, Mapping) else {}
+    result = storage.get("sd_card", {}) if isinstance(storage, Mapping) else {}
+    if not isinstance(result, Mapping) or result.get("state") != "available":
+        return ()
+    found = {SD_CARD_WARNINGS[word] for word in _detect_statuses(result.get("value"))
+             if word in SD_CARD_WARNINGS}
+    return tuple(sorted(found))
+
+
+def _detect_statuses(value):
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if str(key).lower() == "detect_status":
+                yield str(item).lower()
+            else:
+                yield from _detect_statuses(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _detect_statuses(item)
 
 
 def redact(value):
@@ -137,12 +206,12 @@ def derive_health(snapshot, *, network=None, events=None, rtsp=None):
     }
 
 
-def _probe(client, method_name):
+def _probe(client, method_name, **kwargs):
     method = getattr(client, method_name, None)
     if not callable(method):
         return {"state": "unknown", "reason": "missing_method"}
     try:
-        value = method()
+        value = method(**kwargs)
     except Exception as exc:  # noqa: BLE001 - isolate every vendor/firmware exception
         return {"state": "error", "error_type": type(exc).__name__}
     if _empty(value):
@@ -252,7 +321,9 @@ def _storage_health(groups):
     value = result.get("value")
     status_words = {word.lower() for word in _strings_for_status(value)}
     bad = {"abnormal", "error", "failed", "fault", "missing", "offline", "unformatted"}
-    return "degraded" if status_words & bad else "ok"
+    if status_words & bad or storage_warnings({"groups": groups}):
+        return "degraded"
+    return "ok"
 
 
 def _strings_for_status(value, parent_key=""):

@@ -98,6 +98,10 @@ def audit_event(cfg, event, etype, path, action, *, score=None, threshold=None,
     incident = incident_id(cfg.name, event)
     if incident:
         parts.append(f"incident={_fmt_audit_value(incident)}")
+    channels = detection.event_channels(event)
+    if channels:
+        # Which lenses of a multi-lens camera fired (see detection.normalize_event).
+        parts.append(f"channels={_fmt_audit_value(','.join(map(str, channels)))}")
     try:
         event_age_s = max(0.0, _time.time() - float(event.get("start_time")))
     except (TypeError, ValueError):
@@ -151,33 +155,49 @@ def has_known_face(event, face_names=None):
     return any(face_names.get(fid) for fid in face_ids(event))
 
 
-def collect_detections(events, last_seen, strict_people=True):
+def collect_detections(events, last_seen, strict_people=True, profile=None, event_seen=None):
     """Return (alertable, new_watermark).
 
     ``alertable`` is a list of (event, event_type) for events newer than ``last_seen``
     that classify as something worth alerting on (vehicles skipped; bare motion dropped
     under ``strict_people``). ``new_watermark`` advances to the newest seen start_time.
+
+    Every event is first put through :func:`detection.normalize_event` under the camera's
+    event ``profile``, so the watermark, classification and everything downstream of the
+    returned events (audit, incident ID, ledger, sampler, SD follow-up) read one shape.
+    ``event_seen(event)`` is called for each fresh normalized event, alertable or not.
     """
+    events = [detection.normalize_event(ev, profile) for ev in (events or [])]
     fresh = camera.new_events(events, last_seen)
     alertable = []
     for ev in fresh:
+        if event_seen is not None:
+            event_seen(ev)
         faces = face_ids(ev)
-        flags = detection.decode_events_1(ev.get("events_1"))
+        flags = detection.event_flags(ev)
         etype = detection.classify_getevent(
             ev.get("event_type") or ev.get("type"),
             has_face=bool(faces),
             strict_people=strict_people,
             events_1=ev.get("events_1"),
+            profile=ev.get("event_profile"),
+            alarm_type=ev.get("alarm_type"),
         )
         # Audit trail: log every camera event with its decoded signal and our verdict,
         # so "the camera is wrong" vs "our parsing is wrong" is always answerable and the
         # still-unmapped AI bits (alarm_type 4/8/9) can be ground-truthed from real traffic.
+        # Multi-lens and non-default-profile cameras add which lenses fired and how the
+        # bits were read; a single-lens default camera keeps the line exactly as it was.
+        channels = detection.event_channels(ev)
+        lens = f" channels={','.join(map(str, channels))}" if channels else ""
+        if ev.get("event_profile"):
+            lens += f" profile={ev['event_profile']}"
         log.info(
             "event t=%s events_1=%d motion=%d pir=%d person=%d unknown_bits=%s "
-            "alarm_type=%s faces=%d -> %s",
+            "alarm_type=%s faces=%d%s -> %s",
             ev.get("start_time"), flags["raw"], flags["motion"], flags["pir"],
             flags["person"], flags["unknown_bits"], ev.get("alarm_type"),
-            len(faces), etype or "drop",
+            len(faces), lens, etype or "drop",
         )
         if etype:
             alertable.append((ev, etype))
@@ -194,7 +214,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 media_observe=None, latency_observe=None, mute=False, corroborate=None,
                 burst_sent=None,
                 send_alert=None, scene_alert=None, hold_archive=None,
-                trigger_whitelamp=camera.trigger_whitelamp):
+                trigger_whitelamp=camera.trigger_whitelamp, event_seen=None):
     """Poll one camera once and alert on new detections. Returns the new watermark.
 
     ``mute`` polls and advances the watermark but skips all grabbing/scoring/alerting.
@@ -231,6 +251,9 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         frame, replacing the inline review-log write. The daemon passes one that also
         remembers the archived path on the sampler group, so an expiring hold broken by
         a pan-limit recall can still send its evidence.
+      event_seen(event) -> sees every fresh (normalized) event, muted or not, before any
+        gate; the daemon uses it to know when a dual-lens camera's firmware is moving its
+        pan/tilt lens (see detection.EventProfile.pt_channel).
     """
     started = _time.monotonic()
     try:
@@ -249,7 +272,9 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         _latency_observe(latency_observe, "getevents", _time.monotonic() - started)
     _health_observe(poll_observe, True, None)
 
-    alertable, watermark = collect_detections(events, last_seen, cfg.detection.strict_people)
+    alertable, watermark = collect_detections(
+        events, last_seen, cfg.detection.strict_people,
+        profile=getattr(cfg, "event_profile", None), event_seen=event_seen)
     if mute:
         return watermark          # outside window: drain silently, no grab/score/alert
     for event, etype in alertable:
@@ -280,7 +305,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                         camera.note_whitelamp(cfg.name, now,
                                               now + (force_time or camera.LAMP_DEFAULT_FORCE_TIME))
                         log.info("light_trigger: turned on white lamp for %s (%s)", cfg.name, etype)
-        event_flags = detection.decode_events_1(event.get("events_1"))
+        event_flags = detection.event_flags(event)
         defer_motion = (
             etype == "motion"
             and defer is not None

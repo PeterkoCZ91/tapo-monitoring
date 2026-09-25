@@ -8,6 +8,7 @@ out, the daemon keeps grabbing frames on a fixed schedule so a late subject is s
 seen. All functions here are pure; the daemon owns the I/O.
 """
 
+from . import detection
 
 PIR_BIT = 32
 
@@ -17,11 +18,19 @@ MOTION_CONFIRM_FRAMES = 2
 
 
 def _is_pir_backed(event):
-    """True when a getEvents event carries the camera's hardware-PIR flag."""
-    try:
-        return bool(int(event.get("events_1", 0)) & PIR_BIT)
-    except (AttributeError, TypeError, ValueError):
+    """True when a getEvents event carries the camera's hardware-PIR flag.
+
+    Decoded under the event's stamped model profile: on a C545D the PIR bit's value
+    means a person (the model has no PIR), so it must not mark the group PIR-backed.
+    """
+    if getattr(event, "get", None) is None:
         return False
+    if not event.get("event_profile"):
+        try:
+            return bool(int(event.get("events_1", 0)) & PIR_BIT)
+        except (TypeError, ValueError):
+            return False
+    return detection.event_flags(event)["pir"]
 
 
 def ensure_group(groups, name, event, etype, now, scfg):

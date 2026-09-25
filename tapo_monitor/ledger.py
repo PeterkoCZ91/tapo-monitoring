@@ -34,6 +34,7 @@ _ADAPTER_SOURCE = {
 }
 _SAFE_METADATA_KEYS = frozenset({
     "bbox",
+    "channels",
     "confirmed",
     "decision",
     "duration_ms",

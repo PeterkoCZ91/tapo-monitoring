@@ -17,6 +17,7 @@ import os
 import re
 from dataclasses import dataclass, field, fields, is_dataclass
 
+from . import detection as event_detection
 from . import reliability, scheduling
 
 log = logging.getLogger(__name__)
@@ -245,6 +246,14 @@ class CameraConfig:
     # per camera, and only as far as the delivered pixels allow — with crop_from_native the
     # crop is cut from a frame several times wider, so it can go lower there.
     crop_min_frac: float = 0.22
+    # How this model's getEvents fields are read (detection.EVENT_PROFILES). "default" is
+    # the C560WS/C260 table every camera had before; "c545d" reads alarm_type 6 / bit 32
+    # as a person (no PIR on that model) and knows its pan/tilt lens moves on its own.
+    event_profile: str = "default"
+    # Dual-lens cameras only: a second RTSP stream (the other lens, e.g. "stream7") grabbed
+    # next to rtsp_stream when an event fired on the profile's pan/tilt lens; the scorer
+    # picks the better of the two frames. None (default) grabs one frame, as always.
+    lens_pick_stream: str | None = None
     # ── hubpoll cameras (battery, hub-backed) ────────────────────────────────
     # A battery camera keeps no usable index of its own: its recordings — and therefore
     # its detections — live on the hub it is bound to, and the camera sleeps between
@@ -904,6 +913,23 @@ def _camera(data, index):
     sampler = _sampler(data.get("sampler"), where)
     scorer = _scorer(data.get("scorer"), where)
     _check_hold_expiry(sampler, scorer, where)
+    event_profile = _check_enum(str(data.get("event_profile", "default")).lower(),
+                                set(event_detection.EVENT_PROFILES), "event_profile", where)
+    lens_pick_stream = data.get("lens_pick_stream")
+    if lens_pick_stream is not None:
+        if not isinstance(lens_pick_stream, str) or not lens_pick_stream.strip():
+            raise ConfigError(f"{where}: 'lens_pick_stream' must be an RTSP stream name")
+        lens_pick_stream = lens_pick_stream.strip()
+        # Both halves are load-bearing: without a pan/tilt channel in the profile no
+        # event ever asks for the second lens, and without a scorer nothing can pick.
+        if event_detection.event_profile(event_profile).pt_channel is None:
+            raise ConfigError(f"{where}: 'lens_pick_stream' needs an event_profile with a "
+                              f"pan/tilt lens (e.g. c545d)")
+        if not scorer.url:
+            raise ConfigError(f"{where}: 'lens_pick_stream' requires scorer.url "
+                              f"(the scorer picks between the two frames)")
+        if lens_pick_stream == data.get("rtsp_stream", "stream1"):
+            raise ConfigError(f"{where}: 'lens_pick_stream' must differ from rtsp_stream")
     return CameraConfig(
         name=name,
         host=host,
@@ -933,6 +959,8 @@ def _camera(data, index):
         crop_to_subject=bool(data.get("crop_to_subject", False)),
         crop_from_native=bool(data.get("crop_from_native", False)),
         crop_min_frac=crop_min_frac,
+        event_profile=event_profile,
+        lens_pick_stream=lens_pick_stream,
         hub_host=data.get("hub_host"),
         hub_device_id=data.get("hub_device_id"),
         hub_device_mac=data.get("hub_device_mac"),

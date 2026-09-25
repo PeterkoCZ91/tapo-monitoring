@@ -1,0 +1,54 @@
+{
+  "_comment": "Tapo C545D (dual lens, fw 1.1.7), read-only captures with identifiers removed. events: getEvents entries as returned (startRelative/endRelative dropped); the first entry is an earlier poll of the second, while it was still running. getters: pytapo getter answers; chn_id [1, 2] answers are keyed by channel. sd_card_dilatant is the sd_card answer rebuilt from a card the firmware flagged as fake capacity (only detect_status/rw_attr observed).",
+  "events": [
+    {"start_time": 1790328055, "end_time": 1790328069, "alarm_type": 2,
+     "chn_events": {"1": {"events_1": 2, "event_start_time": 1790328054}}},
+    {"start_time": 1790328054, "end_time": 1790328118, "alarm_type": 2,
+     "chn_events": {"1": {"events_1": 2, "event_start_time": 1790328054}}},
+    {"start_time": 1790328230, "end_time": 1790328298, "alarm_type": 2,
+     "chn_events": {"1": {"events_1": 2, "event_start_time": 1790328230}}},
+    {"start_time": 1790330876, "end_time": 1790330984, "alarm_type": 6,
+     "chn_events": {"2": {"events_1": 34, "event_start_time": 1790330876},
+                    "1": {"events_1": 34, "event_start_time": 1790330878}}}
+  ],
+  "getters": {
+    "getBasicInfo": {"device_info": {"basic_info": {"device_type": "SMART.IPCAMERA",
+      "device_info": "C545D 1.0 IPC", "device_model": "C545D", "hw_version": "1.0",
+      "sw_version": "1.1.7 Build 260421 Rel.9959n", "no_rtsp_constrain": "1"}}},
+    "getAllChnInfo": {"system": {"chn_info": [
+      {"chn_id": "1", "chn_alias": "Fixed Lens", "chn_dev_id": "<redacted>"},
+      {"chn_id": "2", "chn_alias": "PT Lens", "chn_dev_id": "<redacted>"}]}},
+    "getDualCamCapability": {"image_capability": {"dualCam": {"zooms": ["1.0x", "5.0x"]}}},
+    "getDualCamLinkage": {"dual_cam_linkage": {"linkage_state": {"enabled": "on", "linkage_type": 0}}},
+    "getLinkageTargetSetting": {"dual_cam_linkage": {"people_enabled": "on", "pet_enabled": "off",
+      "vehicle_enabled": "off", "baby_enabled": "LINKAGE_BABY_ENABLE_OFF"}},
+    "getMotionDetection": {"enabled": "on", "sensitivity": "medium", "digital_sensitivity": "60",
+      "people_enabled": "off", "vehicle_enabled": "off", "non_vehicle_enabled": "off"},
+    "getMotionDetection_chn12": {
+      "1": {"enabled": "on", "sensitivity": "medium", "digital_sensitivity": "60",
+            "people_enabled": "off", "vehicle_enabled": "off", "non_vehicle_enabled": "off"},
+      "2": {"enabled": "on", "sensitivity": "high", "digital_sensitivity": "60",
+            "people_enabled": "off", "vehicle_enabled": "off", "non_vehicle_enabled": "off"}},
+    "getPersonDetection": {"enabled": "on", "sensitivity": "60"},
+    "getPersonDetection_chn12": {"1": {"enabled": "on", "sensitivity": "60"},
+                                 "2": {"enabled": "on", "sensitivity": "60"}},
+    "getVehicleDetection": {"enabled": "off", "sensitivity": "60"},
+    "getVehicleDetection_chn12": {"1": {"enabled": "off", "sensitivity": "60"},
+                                  "2": {"enabled": "off", "sensitivity": "60"}},
+    "getPetDetection": {"enabled": "off", "sensitivity": "60"},
+    "getPetDetection_chn12": {"1": {"enabled": "off", "sensitivity": "60"},
+                              "2": {"enabled": "off", "sensitivity": "60"}},
+    "getTamperDetection": {"enabled": "off", "sensitivity": "medium", "digital_sensitivity": "50"},
+    "getTamperDetection_chn12": {
+      "1": {"enabled": "off", "sensitivity": "medium", "digital_sensitivity": "50"},
+      "2": {"enabled": "off", "sensitivity": "high", "digital_sensitivity": "50"}},
+    "getPrivacyMode": {"enabled": "off"},
+    "getAutoTrackTarget": {"enabled": "off", "track_mode": "pantilt", "back_time": "30",
+      "track_time": "0"},
+    "getSDCard": [{"hd_info_1": {"disk_name": "1", "rw_attr": "r", "status": "offline",
+      "detect_status": "offline", "write_protect": "0", "percent": "0", "type": "local",
+      "total_space": "0B", "free_space": "0B"}}],
+    "sd_card_dilatant": [{"hd_info_1": {"disk_name": "1", "rw_attr": "r", "status": "normal",
+      "detect_status": "dilatant_suspect", "write_protect": "0", "type": "local"}}]
+  }
+}

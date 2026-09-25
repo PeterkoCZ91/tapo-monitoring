@@ -62,6 +62,17 @@ def motion(at, **extra):
     return {"start_time": at, "events_1": MOTION_BIT, **extra}
 
 
+def dual_lens(at, alarm_type, masks, duration=20.0):
+    """A multi-lens (C545D) event: ``masks`` maps lens channel -> its ``events_1``.
+
+    The shape the camera reports: no top-level ``events_1``, one ``chn_events`` entry per
+    lens that fired, and an ``end_time`` that has grown by the time it is polled.
+    """
+    return {"start_time": at, "end_time": at + duration, "alarm_type": alarm_type,
+            "chn_events": {str(chn): {"events_1": mask, "event_start_time": at}
+                           for chn, mask in masks.items()}}
+
+
 def camera_dict(name, host, **overrides):
     """One camera's raw config: raw-mode enrich (no Groq), everything else default.
 

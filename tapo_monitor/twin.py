@@ -110,10 +110,43 @@ def evaluate_snapshot(camera_name, plan, snapshot):
                     desired["tracking.smart.vehicle_enabled"] = ("vehicle" in plan.smarttrack)
                     actual["tracking.smart.vehicle_enabled"] = _enabled(st_info.get("vehicle_enabled"))
                     severities["tracking.smart.vehicle_enabled"] = "warning"
+    _dual_lens_paths(snapshot, desired, actual, severities)
     report = drift.evaluate_drift(
         desired, actual, severities=severities, scope=str(camera_name)
     )
     return {"desired": desired, "actual": _json_actual(actual), "drift": report.to_dict()}
+
+
+def _dual_lens_paths(snapshot, desired, actual, severities):
+    """Add the multi-lens drift paths when the snapshot read them. Mutates the dicts.
+
+    Only a snapshot taken with lens channels (see ``capabilities.collect_snapshot``) has
+    the ``dual_cam`` / ``detection_chn`` groups, so a single-lens camera's evaluation is
+    unchanged. The firmware lens linkage is what points the pan/tilt lens at a person;
+    switched off, that lens just sits there, which is worth a warning. AI person
+    detection is read per lens because a setter without ``chn_id`` reaches channel 1
+    only, so the pan/tilt lens can lose it unseen.
+    """
+    groups = snapshot.get("groups") if isinstance(snapshot, Mapping) else None
+    if not isinstance(groups, Mapping):
+        return
+    if "dual_cam" in groups:
+        linkage = _probe_value(snapshot, "dual_cam", "linkage")
+        if isinstance(linkage, Mapping):
+            inner = linkage.get("dual_cam_linkage", linkage)
+            if isinstance(inner, Mapping):
+                linkage = inner.get("linkage_state", inner)
+        desired["dual_cam.linkage.enabled"] = True
+        actual["dual_cam.linkage.enabled"] = _enabled(linkage)
+        severities["dual_cam.linkage.enabled"] = "warning"
+    if "detection_chn" in groups:
+        person = _probe_value(snapshot, "detection_chn", "person")
+        if isinstance(person, Mapping):
+            for chn in sorted(person, key=str):
+                path = f"detection.person.chn{chn}.enabled"
+                desired[path] = True
+                actual[path] = _enabled(person[chn])
+                severities[path] = "critical"
 
 
 def cameras_in_privacy(fleet):
