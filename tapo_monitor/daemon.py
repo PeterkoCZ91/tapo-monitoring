@@ -3398,6 +3398,8 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     is_night = is_night or scheduling.is_night
     night = is_night()                    # one source of truth for this tick's night gate
     if control_due(last_control, now, control_interval):
+        for client in cam_clients.values():
+            camera.close_client(client)
         cam_clients.clear()
         # Only a dual-lens camera whose firmware is moving its pan/tilt lens adds this;
         # everything else sees the control call it always did.

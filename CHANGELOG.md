@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- File-descriptor leak: every pytapo client owns an asyncio loop that pytapo never closes, and
+  the daemon replaces its clients on each control pass. A client still referenced elsewhere
+  kept its loop (an epoll fd and a socket pair); one host hit the 1024 limit after 23 hours
+  and could no longer reach its camera or Telegram. Dropped clients are now closed explicitly.
+
 ### Added
 - `privacy_notice` (per camera): a Telegram message within one control pass when a camera
   enters or leaves privacy mode, persisted across restarts; the privacy switch is now read

@@ -6786,3 +6786,23 @@ def test_log_disk_check_never_raises(monkeypatch, tmp_path):
     _disk_free(monkeypatch, 1)
     daemon._log_disk_pass(daemon.MonitorState(), now=1000, secrets=_DISK_SECRETS,
                           env=_disk_env(tmp_path))
+
+
+def test_a_control_pass_closes_the_clients_it_replaces(monkeypatch):
+    # A client left open by one control pass must not survive into the next: the loop
+    # below keeps its own reference to every client, as leaked references would.
+    closed = []
+    monkeypatch.setattr(daemon.camera, "close_client", lambda c: closed.append(c))
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    state = daemon.MonitorState()
+    old = object()
+    cam_clients = {"a": old}
+    daemon.loop_step(app, cam_clients, state, now=1000, secrets={}, last_control=0,
+                     control_interval=60, run_control=lambda *a, **k: {},
+                     watchdog=lambda *a, **k: None, monitor=lambda *a, **k: None,
+                     drain=lambda *a, **k: None, sample=lambda *a, **k: None,
+                     guard=lambda *a, **k: None, inspect=lambda *a, **k: None,
+                     digest=lambda **k: None, hubpoll=lambda *a, **k: None,
+                     connect_factory=lambda *a, **k: (lambda c: (None, None)),
+                     is_night=lambda: False, privacy_notice=lambda *a, **k: None)
+    assert closed == [old] and cam_clients == {}

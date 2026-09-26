@@ -57,6 +57,26 @@ def tapo_factory(host, user, password, cloud_password=None):
     return make
 
 
+def close_client(client):
+    """Release a pytapo client's event loop; never raises.
+
+    Every ``Tapo`` owns an asyncio loop (an epoll fd and a socket pair) that pytapo never
+    closes. The daemon replaces its clients on every control pass, so a client still
+    referenced anywhere keeps its loop open: one host ran out of file descriptors after
+    23 hours and could no longer reach its camera or Telegram. Closing the loop when a
+    client is dropped makes the count independent of who still holds a reference.
+    """
+    handler = getattr(client, "asyncHandler", None)
+    loop = getattr(handler, "_loop", None)
+    if loop is None:
+        return
+    try:
+        if not loop.is_closed() and not loop.is_running():
+            loop.close()
+    except Exception:  # noqa: BLE001 - cleanup must not break a control pass
+        log.debug("closing a camera client's loop failed", exc_info=True)
+
+
 def connect(factory, retries=3, sleep=_time.sleep, delay=5):
     """Try ``factory()`` up to ``retries`` times. Returns (client, last_error).
 

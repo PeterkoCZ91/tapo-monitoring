@@ -339,3 +339,25 @@ def test_set_osd_safe():
     assert payload["OSD"]["label_info_1"]["text"] == "FRONT"
     assert payload["OSD"]["date"]["enabled"] == "on"
     assert payload["OSD"]["week"]["enabled"] == "on"
+
+
+def test_close_client_closes_the_pytapo_event_loop():
+    # pytapo gives every client its own asyncio loop and never closes it; a dropped client
+    # that is still referenced somewhere keeps an epoll fd and a socket pair open.
+    from pytapo.asyncHandler import AsyncHandler
+
+    async def job():
+        return 1
+
+    class Client:
+        pass
+
+    client = Client()
+    client.asyncHandler = AsyncHandler(None)
+    client.asyncHandler.executeAsyncExecutorJob(job)
+    loop = client.asyncHandler._loop
+    assert not loop.is_closed()
+    camera.close_client(client)
+    assert loop.is_closed()
+    camera.close_client(client)                 # idempotent
+    camera.close_client(object())               # no handler: nothing to do, no error
