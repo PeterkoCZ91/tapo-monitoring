@@ -383,7 +383,7 @@ def _apply_night_vision_mode(cam, mode, camera=None, failures=None):
 
 def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
                repair_failures=None, camera=None, privacy_on=False, hold=False,
-               motion_refusals=None, linkage=False, repaired=None):
+               motion_refusals=None, linkage=False, repaired=None, lenses=None):
     """Apply a CameraPlan to a connected camera in firmware-safe order.
 
     SmartTrack / motion sensitivity / preset first; auto-track asserted LAST and verified.
@@ -400,11 +400,27 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
     pan/tilt lens after a subject (see :func:`cameras_under_linkage`). ``repaired``, when
     given, collects the self-heals the camera accepted this pass (``detection_notice``
     uses it to tell "switched back on" from "still off").
+
+    ``lenses`` is a dual-lens camera's per-lens reading (:func:`read_lenses`). With it,
+    motion sensitivity, person detection and vehicle-off are repaired per lens with
+    ``chn_id`` — only on the lenses that drifted or could not be read — because a setter
+    without ``chn_id`` reaches the wide lens alone. Without it (every single-lens camera)
+    the calls are exactly the chn-less ones sent every pass.
     """
-    try:
-        cam.setMotionDetection(sensitivity=int(plan.motion_sensitivity))
-    except Exception:
-        pass
+    if lenses is not None:
+        _repair_lenses(cam, lenses, "motion_sensitivity",
+                       lambda lens: _int_or_none(lens.get("digital_sensitivity"))
+                       != int(plan.motion_sensitivity),
+                       # The number alone: a write that also carries the ``sensitivity``
+                       # label is overridden by the label (measured on a C545D).
+                       lambda chn: cam.setMotionDetection(
+                           sensitivity=int(plan.motion_sensitivity), chn_id=chn),
+                       None, camera)
+    else:
+        try:
+            cam.setMotionDetection(sensitivity=int(plan.motion_sensitivity))
+        except Exception:
+            pass
     # Force IR night vision when configured (night_vision: ir). The camera otherwise stays
     # in colour mode under a streetlight, whose slow shutter smears any moving subject; IR
     # runs a faster shutter, so the event frame is sharper. Re-asserted every tick so it
@@ -420,7 +436,23 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
     # funnel then dropped. Re-assert ON every tick. When a per-camera
     # person_sensitivity is configured, re-assert it too (lower = fewer false
     # AI-person detections on an empty yard); otherwise leave sensitivity untouched.
-    if _repair_allowed(reliability_config, "person_detection"):
+    if lenses is not None and _repair_allowed(reliability_config, "person_detection"):
+        def _person_drifted(lens):
+            if lens.get("enabled") != "on":
+                return True
+            return (plan.person_sensitivity is not None
+                    and _int_or_none(lens.get("sensitivity")) != plan.person_sensitivity)
+
+        def _person_lenses(chn):
+            if plan.person_sensitivity is not None:
+                cam.setPersonDetection(True, sensitivity=plan.person_sensitivity, chn_id=chn)
+            else:
+                cam.setPersonDetection(True, chn_id=chn)
+        if (_repair_lenses(cam, lenses, "person_detection", _person_drifted,
+                           _person_lenses, repair_failures, camera)
+                and repaired is not None):
+            repaired.add("person_detection")
+    elif _repair_allowed(reliability_config, "person_detection"):
         def _person():
             if plan.person_sensitivity is not None:
                 cam.setPersonDetection(True, sensitivity=plan.person_sensitivity)
@@ -431,7 +463,12 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
     # Keep the camera following people, not cars: the C560WS auto-track swings after any
     # AI-detected target, so vehicle detection is re-asserted OFF every tick (SmartTrack
     # already excludes vehicles, but that alone doesn't stop the detector feeding track).
-    if _repair_allowed(reliability_config, "vehicle_detection"):
+    if lenses is not None and _repair_allowed(reliability_config, "vehicle_detection"):
+        _repair_lenses(cam, lenses, "vehicle_detection",
+                       lambda lens: lens.get("enabled") != "off",
+                       lambda chn: cam.setVehicleDetection(False, chn_id=chn),
+                       repair_failures, camera)
+    elif _repair_allowed(reliability_config, "vehicle_detection"):
         _repair("vehicle_detection", lambda: cam.setVehicleDetection(False),
                 repair_failures)
     if plan.ldc is not None and _repair_allowed(reliability_config, "ldc"):
@@ -514,6 +551,13 @@ def read_privacy(cam):
         return None
 
 
+def _int_or_none(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _switch_state(value):
     """``{"enabled": "on"|"off"}`` -> True/False; any other shape -> None. Pure."""
     if isinstance(value, Mapping):
@@ -527,8 +571,9 @@ def read_detection(cam):
     """Read motion and person detection on a connected client: ``{"motion", "person"}``.
 
     Each value is True/False, or None when the getter is missing, refused or answers an
-    odd shape — "not known", never read as "off". Device-level getters only (no
-    ``chn_id``): on a dual-lens camera that is the switch the app shows for the camera.
+    odd shape — "not known", never read as "off". Getters without ``chn_id``, which on a
+    dual-lens camera answer for the wide lens only; such a camera is read per lens instead
+    (:func:`read_lenses`, :func:`detection_from_lenses`).
     """
     out = {}
     for kind, name in (("motion", "getMotionDetection"), ("person", "getPersonDetection")):
@@ -540,6 +585,104 @@ def read_detection(cam):
             except Exception as exc:  # noqa: BLE001 - an optional read must not stop the pass
                 log.debug("%s detection read failed: %s", kind, exc)
         out[kind] = value
+    return out
+
+
+# What a dual-lens control pass reads per lens (``chn_id``) before repairing it, and which
+# reading each self-heal compares against.
+_LENS_READS = (("motion", "getMotionDetection"), ("person", "getPersonDetection"),
+               ("vehicle", "getVehicleDetection"))
+_LENS_KIND = {"motion_sensitivity": "motion", "person_detection": "person",
+              "vehicle_detection": "vehicle"}
+
+
+def read_lenses(cam, channels):
+    """Read motion, person and vehicle detection per lens: ``{"channels", kind: {chn: …}}``.
+
+    One getter call per kind with ``chn_id=channels`` (three per control pass), for a
+    dual-lens camera only. Each ``kind`` maps a lens channel (int) to that lens's answer;
+    a lens missing from it — getter missing, refused, or an odd shape — is "not known":
+    the repair writes to it anyway, and the detection notice never reads it as "off".
+    """
+    chn = [int(c) for c in channels]
+    out: dict[str, Any] = {"channels": tuple(chn)}
+    for kind, name in _LENS_READS:
+        getter = getattr(cam, name, None)
+        per_lens: dict[int, Mapping] = {}
+        raw = None
+        if callable(getter):
+            try:
+                raw = getter(chn_id=list(chn))
+            except Exception as exc:  # noqa: BLE001 - an optional read must not stop the pass
+                log.debug("per-lens %s detection read failed: %s", kind, exc)
+        if isinstance(raw, Mapping):
+            for c in chn:
+                lens = raw.get(str(c), raw.get(c))
+                if isinstance(lens, Mapping):
+                    per_lens[c] = lens
+        out[kind] = per_lens
+    return out
+
+
+def _repair_lenses(cam, lenses, name, drifted, write, failures, camera):
+    """Send one self-heal to the lenses that drifted or could not be read.
+
+    ``write`` gets the list of lens channels (the ``chn_id``). Returns whether a write
+    went out and the camera took it — False when every lens read back as wanted, which
+    sends no call at all. A refused write is counted into ``failures`` under ``name``
+    like any other self-heal (``None``: not counted).
+    """
+    reading = lenses.get(_LENS_KIND[name]) or {}
+    targets = [c for c in lenses.get("channels", ())
+               if c not in reading or drifted(reading[c])]
+    if not targets:
+        return False
+    drift = [c for c in targets if c in reading]
+    if drift:
+        log.info("self-heal %s on lens %s%s", name, ",".join(map(str, drift)),
+                 f" of {camera}" if camera else "")
+    try:
+        write(targets)
+    except Exception as exc:  # noqa: BLE001 - a camera control failure must not stop polling
+        log.warning("self-heal %s refused by camera for lens %s: %s", name,
+                    ",".join(map(str, targets)), exc)
+        if failures is not None:
+            failures[name] = failures.get(name, 0) + 1
+        return False
+    return True
+
+
+def lens_name(profile, channel):
+    """What a notice calls lens ``channel`` of ``profile``: ``pan/tilt`` or ``wide``. Pure."""
+    if channel == detection.event_profile(profile).pt_channel:
+        return "pan/tilt"
+    return "wide" if channel == 1 else f"lens {channel}"
+
+
+def detection_from_lenses(lenses, profile=None):
+    """:func:`read_detection`'s answer, from a per-lens reading (:func:`read_lenses`). Pure.
+
+    A switch is False when any lens reads it off, True when every lens reads it on, None
+    otherwise. When only some lenses are off they are named under ``lenses`` (kind ->
+    lens names) so the notice can say which; a switch off on every lens names none.
+    """
+    channels = tuple(lenses.get("channels", ()))
+    out: dict[str, Any] = {}
+    named: dict[str, tuple] = {}
+    for kind in ("motion", "person"):
+        reading = lenses.get(kind) or {}
+        states = {c: _switch_state(reading.get(c)) for c in channels}
+        off = [c for c, on in states.items() if on is False]
+        if off:
+            out[kind] = False
+            if len(off) < len(channels):
+                named[kind] = tuple(lens_name(profile, c) for c in off)
+        elif channels and all(on is True for on in states.values()):
+            out[kind] = True
+        else:
+            out[kind] = None
+    if named:
+        out["lenses"] = named
     return out
 
 
@@ -665,9 +808,16 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
         if connect is not None:
             cam, _err = connect(cfg)
             if cam is not None:
-                detection_read = (read_detection(cam)
-                                  if cfg.detection_notice and detection_seen is not None
-                                  else None)
+                profile = detection.event_profile(getattr(cfg, "event_profile", None))
+                # A dual-lens camera has its detection read per lens once, before the
+                # self-heal: the repairs write only to the lenses that drifted, and the
+                # detection notice reads the same answer (no second read).
+                lens_read = (read_lenses(cam, profile.channels) if profile.channels
+                             else None)
+                detection_read = None
+                if cfg.detection_notice and detection_seen is not None:
+                    detection_read = (detection_from_lenses(lens_read, profile)
+                                      if lens_read is not None else read_detection(cam))
                 if cfg.follow_app_notifications and app_push_seen is not None:
                     pushes = read_app_notifications(cam, cfg.name)
                     if pushes is not None:
@@ -689,6 +839,8 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
                 repaired: set[str] = set()
                 if detection_read is not None:
                     linked["repaired"] = repaired
+                if lens_read is not None:
+                    linked["lenses"] = lens_read
                 if not apply_plan(cam, plan, app.reliability,
                                   repair_failures=repair_failures, camera=cfg.name,
                                   privacy_on=privacy_on,
@@ -3113,19 +3265,22 @@ def privacy_notice_pass(app, state, *, secrets, send_text=None):
 PERSON_RESTORED_QUIET = 24 * 3600
 
 
-def _detection_text(camera, kind, state, repeats=0):
+def _detection_text(camera, kind, state, repeats=0, lenses=()):
+    """The notice text; ``lenses`` names the lenses a switch is off on, when not all."""
     label = "motion detection" if kind == "motion" else "person detection"
+    where = f" on the {' and '.join(lenses)} lens" if lenses else ""
     if state == "restored":
         more = f" ({repeats} more time(s) since the last notice)" if repeats else ""
-        return (f"↩️ camera '{camera}': {label} was switched off — switched it back on"
-                f"{more}")
+        return (f"↩️ camera '{camera}': {label} was switched off{where} — switched it "
+                f"back on{more}")
     if state:
         return f"✅ camera '{camera}': {label} is back on"
     if kind == "motion":
-        return (f"🚫 camera '{camera}': motion detection is switched off — the camera "
-                "reports no events")
-    return (f"🚫 camera '{camera}': person detection is off and was not switched back "
-            "on — people arrive as bare motion")
+        reports = "that lens reports" if lenses else "the camera reports"
+        return (f"🚫 camera '{camera}': motion detection is switched off{where} — "
+                f"{reports} no events")
+    return (f"🚫 camera '{camera}': person detection is off{where} and was not switched "
+            "back on — people arrive as bare motion")
 
 
 def detection_notice_pass(app, state, *, secrets, now=None, send_text=None):
@@ -3155,6 +3310,8 @@ def detection_notice_pass(app, state, *, secrets, now=None, send_text=None):
             value = seen.get(kind)
             if value is None:
                 continue
+            # Named only when some lenses of a dual-lens camera are off, not all.
+            lenses = tuple((seen.get("lenses") or {}).get(kind, ()))
             if value == "restored":
                 last = announced.get("restored_at")
                 # An announced "off" is always followed by the news that it is back on.
@@ -3168,7 +3325,7 @@ def detection_notice_pass(app, state, *, secrets, now=None, send_text=None):
                              announced["restored_repeats"])
                     continue
                 text = _detection_text(cfg.name, kind, "restored",
-                                       announced.get("restored_repeats", 0))
+                                       announced.get("restored_repeats", 0), lenses)
                 announced[kind] = True
                 if send_text(text):
                     announced.update(restored_at=now, restored_repeats=0,
@@ -3193,7 +3350,7 @@ def detection_notice_pass(app, state, *, secrets, now=None, send_text=None):
             if previous == value or (previous is None and value is True):
                 announced[kind] = value
                 continue
-            if send_text(_detection_text(cfg.name, kind, value)):
+            if send_text(_detection_text(cfg.name, kind, value, lenses=lenses)):
                 announced[kind] = value
                 log.info("detection notice sent for %s: %s %s", cfg.name, kind,
                          "on" if value else "off")

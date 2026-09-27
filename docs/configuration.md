@@ -245,6 +245,10 @@ Per-camera switches:
     counted into the next message. Only when the self-heal is refused by the camera or
     not allowed (`reliability.allowed_repairs` without `person_detection`) does the
     switch stay off; that is announced once as off and once as back on.
+  - On a dual-lens camera (`event_profile: c545d`) both switches are read per lens, from
+    the same reading the per-lens self-heal uses (no extra call). A switch off on one lens
+    only is announced as off and names it ("… person detection was switched off on the
+    pan/tilt lens — switched it back on").
 
   The last announced state is kept in the runtime state; a failed send is retried.
 - `follow_app_notifications: true` reads the Tapo app's notification switch for the
@@ -280,7 +284,17 @@ every camera had before. `c545d`:
 - knows channel 2 is a pan/tilt lens the firmware moves itself (dual-cam linkage): an
   event on it keeps the scheduled preset recall and the pan-limit guard off the lens for
   180 s after the event ends, whether auto-track is on or not;
-- makes the digital twin read both lenses (`chn_id`) and the linkage state.
+- makes the digital twin read both lenses (`chn_id`) and the linkage state;
+- makes the self-heal work per lens. A setter sent without `chn_id` reaches the wide lens
+  only, so each control pass reads motion, person and vehicle detection of both lenses
+  (three getter calls with `chn_id: [1, 2]`) and writes only to a lens that drifted:
+  motion sensitivity (the number alone — a write carrying the `sensitivity` label is
+  overridden by the label), person detection on (with `person_sensitivity` when set) and
+  vehicle detection off. A lens that cannot be read is written anyway. A camera in tune
+  gets the three reads and no write; a single-lens camera keeps the chn-less writes it
+  always had. Tamper, LDC, day/night, night-vision mode and white lamp are still sent
+  without `chn_id` and reach the wide lens only; SmartTrack and auto-track are
+  device-wide.
 
 Events of either shape are normalized for every camera: a `chn_events` entry becomes a
 top-level `events_1` (OR of the lenses) plus `channels`, which audit lines show as
@@ -299,8 +313,8 @@ live, lens-pick and sampler paths and on a live fallback of the SD follow-up. A 
 the SD card or a local recording names no lens: nothing says which lens it shows.
 
 The C545D keeps its event index on the SD card, so `sources: [getevents]` needs a card.
-Until it is known which lens the self-heal setters (sent without `chn_id`) reach, start
-with `role: static` and no presets (`day_preset:` / `night_preset:` left empty). See
+`role: static` (auto-track off) does not turn the firmware's lens linkage off: the
+pan/tilt lens still turns after a person by itself. See
 [capabilities](capabilities.md#7-dual-lens-cameras-tapo-c545d).
 
 ### Battery cameras on a hub (`hubpoll`)

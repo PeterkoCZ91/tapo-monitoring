@@ -31,6 +31,7 @@ Every motor command, delivery and auto-track change lands in :attr:`Scenario.tim
     ("send", cam)               alert photo delivered
     ("send_failed", cam)        alert photo refused (notifier down)
     ("text", message)           operational text delivered (outage, drift, ...)
+    ("lens_person", cam, chns)  person detection written per lens (``chn_id``)
 """
 
 from __future__ import annotations
@@ -111,6 +112,8 @@ class FakeCamera:
     :attr:`online`, :attr:`privacy`, :attr:`motor_refusal`, :attr:`events_error` and
     :attr:`rtsp_ok` switch failure modes on and off; :attr:`motion_detection`,
     :attr:`person_detection` and :attr:`app_notifications` are the app's switches.
+    Asked per lens (``chn_id``, a dual-lens camera), every lens answers those switches
+    unless :attr:`lens_person` overrides one (channel -> on/off).
 
     A class attribute set to ``None`` models firmware without that call: the twin reads
     it as ``missing_method`` and ``set_autotrack`` falls through to ``executeFunction``.
@@ -134,6 +137,8 @@ class FakeCamera:
         self.person_detection = True
         self.refuse_person = False      # setPersonDetection refused (self-heal fails)
         self.app_notifications = True   # the Tapo app's notification switch
+        self.lens_person = {}           # dual-lens: channel -> person switch of that lens
+        self.lens_sensitivity = {}      # dual-lens: channel -> motion digital_sensitivity
         self._pending = []
 
     # ── scripting ────────────────────────────────────────────────────────────
@@ -162,25 +167,44 @@ class FakeCamera:
             raise self.motor_refusal
         self.pan_x = self.presets[str(preset)]
 
-    def setMotionDetection(self, **_):
+    def setMotionDetection(self, sensitivity=False, chn_id=None, **_):
         self._require_online()
+        for chn in chn_id or ():
+            self.lens_sensitivity[chn] = str(sensitivity)
 
     def setDayNightMode(self, _mode):
         self._require_online()
 
-    def setPersonDetection(self, enabled, *_a, **_k):
+    def setPersonDetection(self, enabled, *_a, chn_id=None, **_k):
         self._require_online()
         if self.refuse_person:
             raise Exception("-40106 unsupported")
+        if chn_id:
+            self._record(("lens_person", self.name, tuple(chn_id)))
+            for chn in chn_id:
+                self.lens_person[chn] = bool(enabled)
+            return
         self.person_detection = bool(enabled)
 
-    def getMotionDetection(self):
+    def getMotionDetection(self, chn_id=None):
         self._require_online()
-        return {"enabled": "on" if self.motion_detection else "off", "sensitivity": "medium"}
+        answer = {"enabled": "on" if self.motion_detection else "off", "sensitivity": "medium"}
+        if chn_id:
+            return {str(chn): {**answer, "digital_sensitivity":
+                               self.lens_sensitivity.get(chn, "50")} for chn in chn_id}
+        return answer
 
-    def getPersonDetection(self):
+    def getPersonDetection(self, chn_id=None):
         self._require_online()
+        if chn_id:
+            return {str(chn): {"enabled": "on" if self.lens_person.get(
+                chn, self.person_detection) else "off"} for chn in chn_id}
         return {"enabled": "on" if self.person_detection else "off"}
+
+    def getVehicleDetection(self, chn_id=None):
+        self._require_online()
+        answer = {"enabled": "off"}
+        return {str(chn): dict(answer) for chn in chn_id} if chn_id else answer
 
     def getNotificationsEnabled(self):
         self._require_online()

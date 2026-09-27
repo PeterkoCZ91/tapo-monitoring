@@ -177,7 +177,8 @@ of view, so a person it follows appears about twice as large.
 ### Local API getters
 
 Per lens (`chn_id`): `getMotionDetection`, `getPersonDetection`, `getVehicleDetection`,
-`getPetDetection`, `getTamperDetection`, `getLinecrossingDetection`, `getDayNightMode`,
+`getPetDetection`, `getTamperDetection`, `getLinecrossingDetection`, `getDayNightMode`
+(only with `name: ["common"]` as a list — pytapo's string form ignores `chn_id`),
 `getLensDistortionCorrection` (channel 2 → `null`, no LDC on the pan/tilt lens),
 `getNightVisionModeConfig` / `getWhitelampConfig` / `getRotationStatus` (channel 2 returns
 only `night_vision_mode` and `wtl_intensity_level`).
@@ -255,15 +256,21 @@ reports the linkage switching off (`dual_cam.linkage.enabled`, warning).
   name none. With two or more people at the threshold it also says how many.
 - Digital twin: with the profile it also reads the lens layout, the linkage state and
   the detection switches of both lenses (`detection.person.chn2.enabled` is a critical
-  drift path — our self-heal setters without `chn_id` reach channel 1 only).
+  drift path).
+- Self-heal per lens: a setter without `chn_id` reaches the wide lens only (measured for
+  motion sensitivity, person, vehicle, tamper, LDC, day/night, night-vision mode and white
+  lamp), so the control pass reads motion, person and vehicle detection with `chn_id:
+  [1, 2]` and repairs only the lens that drifted — motion sensitivity as the number
+  alone, person on, vehicle off. The `detection_notice` reads the same answer and names a
+  lens that is off on its own. The other setters still reach the wide lens only.
 - An SD card whose `detect_status` is `dilatant_suspect` (fake capacity; such cards also
   came up read-only and would not format) marks storage degraded on any model.
 
 ### Open questions
 
-- Which lens a setter without `chn_id` changes, and whether turning auto-track off
-  (`role: static`) also turns the linkage off. Until that is known, run it with
-  `role: static` and no presets, or check the twin after the first control passes.
+- Per-lens repair of tamper, day/night, night-vision mode and white lamp (they reach
+  the wide lens only). A per-lens day/night read needs `name: ["common"]` as a list;
+  pytapo's string form ignores `chn_id` and answers for the wide lens twice.
 - More event samples, in the dark and for pets/vehicles; the table above is n=10.
 - ONVIF PullPoint: the first `PullMessages` succeeded, later ones were closed by the
   camera (`RemoteDisconnected`). Not usable as a source yet.

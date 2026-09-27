@@ -5,6 +5,12 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Fixed
+- Dual-lens self-heal: on a C545D the repairs sent without `chn_id` reached the wide lens
+  only, so the pan/tilt lens's person detection, motion sensitivity and vehicle-off were
+  never repaired. With `event_profile: c545d` the control pass now reads motion, person and
+  vehicle detection per lens and writes (`chn_id`) only to a lens that drifted; motion
+  sensitivity goes as the number alone. `detection_notice` reports a lens that is off on
+  its own and names it. Single-lens cameras send exactly the calls they did.
 - File-descriptor leak: every pytapo client owns an asyncio loop that pytapo never closes, and
   the daemon replaces its clients on each control pass. A client still referenced elsewhere
   kept its loop (an epoll fd and a socket pair); one host hit the 1024 limit after 23 hours

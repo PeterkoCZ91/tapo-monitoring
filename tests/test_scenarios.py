@@ -957,3 +957,22 @@ def test_alerts_follow_the_tapo_apps_notification_switch(monkeypatch, tmp_path):
 
     assert [t for t, a in sc.timeline if a == ("send", "a")] == [at(10), at(130)]
     assert daemon._app_silenced == set()
+
+
+def test_a_c545d_pan_tilt_lens_switched_off_is_repaired_and_named(monkeypatch, tmp_path):
+    # Person detection goes off on the pan/tilt lens only. A chn-less self-heal would
+    # "repair" the wide lens that was never off and leave this one off; per lens, the next
+    # control pass switches exactly that lens back on, once, and the notice names it.
+    sc = Scenario(monkeypatch, tmp_path, [_c545d(detection_notice=True)])
+    cam = sc.cams["front"]
+    sc.run(70)                                   # 0..65: both lenses on, nothing written
+    assert sc.actions("lens_person") == []
+    cam.lens_person[2] = False
+    sc.run(120)                                  # 70..185: control pass at 120
+
+    assert cam.lens_person == {2: True}
+    assert sc.actions("lens_person") == [("lens_person", "front", (2,))]
+    assert sc.when(("lens_person", "front", (2,))) == [at(120)]
+    notices = _notices(sc)
+    assert len(notices) == 1
+    assert "person detection was switched off on the pan/tilt lens" in notices[0]

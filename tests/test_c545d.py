@@ -562,3 +562,209 @@ def test_live_caption_names_the_picked_lens_and_the_people_in_it(monkeypatch, tm
                                      "groq_key": ""},
                             time_str=lambda _e: "12:00:00")
     assert captions == [("pt.jpg", "👤 12:00:00 · 2 people · pan/tilt lens")]
+
+
+# ── self-heal per lens ─────────────────────────────────────────────────────────
+
+_DETECTION_CALLS = {"getMotionDetection", "getPersonDetection", "getVehicleDetection",
+                    "setMotionDetection", "setPersonDetection", "setVehicleDetection"}
+
+
+class LensCam:
+    """A pytapo client with per-lens detection state; records every detection call.
+
+    Asked without ``chn_id`` it answers and writes lens 1 only, as the C545D does.
+    """
+
+    def __init__(self, refuse=(), unreadable=()):
+        self.lens = {c: {"motion": {"enabled": "on", "sensitivity": "medium",
+                                    "digital_sensitivity": "60"},
+                         "person": {"enabled": "on", "sensitivity": "60"},
+                         "vehicle": {"enabled": "off", "sensitivity": "60"}}
+                     for c in (1, 2)}
+        self.calls = []
+        self.refuse = set(refuse)
+        self.unreadable = set(unreadable)
+
+    def _get(self, method, kind, chn_id):
+        self.calls.append((method, None, chn_id))
+        if kind in self.unreadable:
+            raise Exception("-40210 refused")
+        if chn_id:
+            return {str(c): dict(self.lens[c][kind]) for c in chn_id}
+        return dict(self.lens[1][kind])
+
+    def _set(self, method, kind, fields, chn_id):
+        self.calls.append((method, fields, chn_id))
+        if kind in self.refuse:
+            raise Exception("-40106 unsupported")
+        for c in chn_id or [1]:
+            self.lens[c][kind].update(fields)
+
+    def getMotionDetection(self, chn_id=None):
+        return self._get("getMotionDetection", "motion", chn_id)
+
+    def getPersonDetection(self, chn_id=None):
+        return self._get("getPersonDetection", "person", chn_id)
+
+    def getVehicleDetection(self, chn_id=None):
+        return self._get("getVehicleDetection", "vehicle", chn_id)
+
+    def setMotionDetection(self, enabled=None, sensitivity=False, chn_id=None):
+        self._set("setMotionDetection", "motion",
+                  {"digital_sensitivity": str(sensitivity)}, chn_id)
+
+    def setPersonDetection(self, enabled, sensitivity=False, chn_id=None):
+        fields = {"enabled": "on" if enabled else "off"}
+        if sensitivity:
+            fields["sensitivity"] = str(sensitivity)
+        self._set("setPersonDetection", "person", fields, chn_id)
+
+    def setVehicleDetection(self, enabled, sensitivity=False, chn_id=None):
+        self._set("setVehicleDetection", "vehicle",
+                  {"enabled": "on" if enabled else "off"}, chn_id)
+
+    def setDayNightMode(self, _mode):
+        pass
+
+    def executeFunction(self, *_a, **_k):
+        return {}
+
+    def getAutoTrackTarget(self):
+        return {"enabled": "off"}
+
+    def setAutoTrackTarget(self, _enabled):
+        pass
+
+    def getPrivacyMode(self):
+        return {"enabled": "off"}
+
+    def detection_calls(self):
+        return [c for c in self.calls if c[0] in _DETECTION_CALLS]
+
+    def writes(self):
+        return [c for c in self.detection_calls() if c[0].startswith("set")]
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    from tapo_monitor import tracking
+    monkeypatch.setattr(tracking._time, "sleep", lambda _s: None)
+
+
+def _control(cam, raw_app=None, **camera):
+    app = cfg_mod.load_config_from_dict({**(raw_app or {}), "cameras": [camera]})
+    detection_seen, failures = {}, {}
+    plans = daemon.run_once(app, now=1, connect=lambda _c: (cam, None),
+                            is_night=lambda: False, is_raining=lambda *a, **k: False,
+                            privacy=set(), detection_seen=detection_seen,
+                            repair_failures=failures)
+    return plans[camera["name"]], detection_seen.get(camera["name"]), failures
+
+
+def test_a_single_lens_camera_sends_exactly_the_calls_it_always_did(no_sleep):
+    # Pinned: the default profile reads and writes without chn_id, and writes every pass
+    # whatever the camera reads back (the chn-less self-heal of every existing camera).
+    cam = LensCam()
+    plan, _seen, _f = _control(cam, name="a", host="192.0.2.21", detection_notice=True)
+    assert cam.detection_calls() == [
+        ("getMotionDetection", None, None),
+        ("getPersonDetection", None, None),
+        ("setMotionDetection", {"digital_sensitivity": str(plan.motion_sensitivity)}, None),
+        ("setPersonDetection", {"enabled": "on"}, None),
+        ("setVehicleDetection", {"enabled": "off"}, None),
+    ]
+
+
+def test_a_single_lens_camera_without_the_notice_reads_nothing(no_sleep):
+    cam = LensCam()
+    _control(cam, name="a", host="192.0.2.21")
+    assert [c[0] for c in cam.detection_calls()] == [
+        "setMotionDetection", "setPersonDetection", "setVehicleDetection"]
+
+
+def test_a_dual_lens_camera_in_tune_gets_three_reads_and_no_write(no_sleep):
+    cam = LensCam()
+    _control(cam, **c545d_camera(detection_notice=True))
+    assert cam.detection_calls() == [
+        ("getMotionDetection", None, [1, 2]),
+        ("getPersonDetection", None, [1, 2]),
+        ("getVehicleDetection", None, [1, 2]),
+    ]
+
+
+def test_a_dual_lens_camera_repairs_only_the_lenses_that_drifted(no_sleep):
+    cam = LensCam()
+    cam.lens[2]["person"]["enabled"] = "off"
+    cam.lens[2]["motion"]["digital_sensitivity"] = "50"
+    cam.lens[1]["vehicle"]["enabled"] = "on"
+    plan, seen, failures = _control(cam, **c545d_camera(detection_notice=True))
+    assert cam.writes() == [
+        # The number alone, no ``sensitivity`` label: the label would win.
+        ("setMotionDetection", {"digital_sensitivity": str(plan.motion_sensitivity)}, [2]),
+        ("setPersonDetection", {"enabled": "on"}, [2]),
+        ("setVehicleDetection", {"enabled": "off"}, [1]),
+    ]
+    assert seen == {"motion": True, "person": "restored",
+                    "lenses": {"person": ("pan/tilt",)}}
+    assert failures == {}
+    # The next pass finds both lenses as wanted and writes nothing.
+    cam.calls.clear()
+    _control(cam, **c545d_camera())
+    assert cam.writes() == []
+
+
+def test_a_lens_that_cannot_be_read_is_written_anyway(no_sleep):
+    cam = LensCam(unreadable={"person", "motion", "vehicle"})
+    _plan, seen, _f = _control(cam, **c545d_camera(detection_notice=True))
+    assert [(c[0], c[2]) for c in cam.writes()] == [
+        ("setMotionDetection", [1, 2]), ("setPersonDetection", [1, 2]),
+        ("setVehicleDetection", [1, 2])]
+    assert seen == {"motion": None, "person": None}       # not known, never "off"
+
+
+def test_person_sensitivity_is_repaired_per_lens(no_sleep):
+    cam = LensCam()
+    cam.lens[1]["person"]["sensitivity"] = "40"
+    _control(cam, **c545d_camera(person_sensitivity=40))
+    assert [c for c in cam.writes() if c[0] == "setPersonDetection"] == [
+        ("setPersonDetection", {"enabled": "on", "sensitivity": "40"}, [2])]
+
+
+def test_a_refused_lens_repair_is_counted_and_not_reported_restored(no_sleep):
+    cam = LensCam(refuse={"person"})
+    cam.lens[2]["person"]["enabled"] = "off"
+    _plan, seen, failures = _control(cam, **c545d_camera(detection_notice=True))
+    assert failures == {"person_detection": 1}
+    assert seen["person"] is False and seen["lenses"] == {"person": ("pan/tilt",)}
+
+
+def test_a_disallowed_person_repair_sends_no_lens_write(no_sleep):
+    cam = LensCam()
+    cam.lens[2]["person"]["enabled"] = "off"
+    _control(cam, {"reliability": {"enabled": True, "auto_fix": True,
+                                   "allowed_repairs": ["vehicle_detection"]}},
+             **c545d_camera())
+    assert not [c for c in cam.writes() if c[0] == "setPersonDetection"]
+
+
+def test_detection_from_lenses_names_only_a_partly_off_switch():
+    both_off = {"channels": (1, 2), "motion": {1: {"enabled": "off"}, 2: {"enabled": "off"}},
+                "person": {1: {"enabled": "on"}}}
+    assert daemon.detection_from_lenses(both_off, "c545d") == {"motion": False,
+                                                                "person": None}
+    wide_off = {"channels": (1, 2), "motion": {1: {"enabled": "off"}, 2: {"enabled": "on"}},
+                "person": {1: {"enabled": "on"}, 2: {"enabled": "on"}}}
+    assert daemon.detection_from_lenses(wide_off, "c545d") == {
+        "motion": False, "person": True, "lenses": {"motion": ("wide",)}}
+
+
+def test_the_notice_names_the_lens_that_is_off():
+    app = cfg_mod.load_config_from_dict({"cameras": [c545d_camera(detection_notice=True)]})
+    state, sent = daemon.MonitorState(), []
+    state.detection_seen = {"front": {"motion": False, "person": True,
+                                      "lenses": {"motion": ("pan/tilt",)}}}
+    daemon.detection_notice_pass(app, state, secrets={}, now=1,
+                                 send_text=lambda text: sent.append(text) or True)
+    assert sent == ["🚫 camera 'front': motion detection is switched off on the pan/tilt "
+                    "lens — that lens reports no events"]

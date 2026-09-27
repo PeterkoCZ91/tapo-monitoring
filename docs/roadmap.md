@@ -458,11 +458,14 @@ turns after a person the wide lens saw (dual-cam linkage). See
   auto-track are not readable per lens (`chn_id` ignored / refused). The linkage stays
   on with auto-track off, on, and after a SmartTrack write, so `role: static` does not
   turn it off.
-- [ ] Pass `chn_id=[1,2]` in the self-heal repairs on a dual-lens camera (at least
-  person detection and motion sensitivity), and send motion sensitivity as the number
-  alone: a write that also carries the `sensitivity` label is overridden by the label.
-  Per-lens day/night reads need `name: ["common"]` as a list; the string form ignores
-  `chn_id`.
+- [x] Pass `chn_id=[1,2]` in the self-heal repairs on a dual-lens camera, and send
+  motion sensitivity as the number alone: a write that also carries the `sensitivity`
+  label is overridden by the label. Each control pass reads motion, person and vehicle
+  detection per lens (three calls) and writes only to a lens that drifted or could not be
+  read; the detection notice reads the same answer and names a lens that is off alone.
+- [ ] Per-lens repair of tamper, day/night, night-vision mode and white lamp
+  (`whitelamp_intensity` needs `chn_id` on a C545D). Per-lens day/night reads need
+  `name: ["common"]` as a list; the string form ignores `chn_id`.
 - [ ] Grow the event sample (night, pets, vehicles) and re-check the 180 s hold against
   how long the firmware actually keeps the lens on a subject.
 - [ ] Compare `lens_pick_stream` photos with the wide-lens-only ones before recommending
