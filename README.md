@@ -30,6 +30,15 @@ the local API across models is in the [local API reference](docs/tapo-local-api.
 Own a model not listed here? Run `tapo-monitor report` and share the anonymized file:
 see [camera reports](docs/camera-reports.md).
 
+## What's new in 0.8
+
+- **Home Assistant over MQTT** — an opt-in, publish-only bridge with MQTT discovery:
+  person and motion sensors, reachability, privacy mode, "detection off", health and the
+  last alert per camera, for automations ([MQTT and Home Assistant](docs/mqtt.md)).
+- **Your camera model, supported from your report** — `tapo-monitor report` writes an
+  anonymized report of what your camera answers; share it through the *Camera report*
+  issue form ([camera reports](docs/camera-reports.md)).
+
 ## What's new in 0.7
 
 - **Told when a camera stops watching** — one Telegram message when privacy mode, motion

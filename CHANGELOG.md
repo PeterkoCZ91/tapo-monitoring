@@ -4,7 +4,27 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-27
+
+### Highlights
+- **Home Assistant over MQTT:** an opt-in, publish-only bridge with MQTT discovery. Each
+  camera becomes a device with person/motion sensors, reachability, privacy mode,
+  "detection off", health and the last alert, ready for automations. Tested against a live
+  Home Assistant.
+- **Support for new cameras from their owners:** `tapo-monitor report` writes an
+  anonymized report of what a camera model answers; shared through the new issue form,
+  each accepted report becomes a regression test.
+
 ### Added
+- Opt-in MQTT bridge with Home Assistant discovery (`mqtt:` block, extra
+  `pip install 'tapo-monitor[mqtt]'`). Each camera appears as a device with person and
+  motion binary sensors, reachability, privacy mode, "detection off", Digital Twin health,
+  last alert time and score, and — only with `publish_images: true` — the last alert photo;
+  the daemon publishes its own availability through the MQTT last will. Publish-only (no
+  subscriptions, no commands), retained state published on change, its own thread with a
+  bounded drop-oldest queue so a slow or absent broker never delays the main loop, and a
+  full resync on every reconnect. Without the block nothing is imported and nothing
+  changes. See [docs/mqtt.md](docs/mqtt.md).
 - `tapo-monitor report --host IP`: an anonymized, shareable JSON report of what a camera
   model answers, so new models can be supported from community reports. No `cameras.yaml`;
   credentials from `TAPO_USER`/`TAPO_PASSWORD` or a prompt; one session with the API
@@ -30,15 +50,6 @@ All notable changes to this project are documented here.
   in `redacted_keys`. The self-check no longer takes a byte count such as `115203047424B`
   for a hex id.
 - Twin probes that fail now keep the camera's numeric `error_code` (never the message).
-- Opt-in MQTT bridge with Home Assistant discovery (`mqtt:` block, extra
-  `pip install 'tapo-monitor[mqtt]'`). Each camera appears as a device with person and
-  motion binary sensors, reachability, privacy mode, "detection off", Digital Twin health,
-  last alert time and score, and — only with `publish_images: true` — the last alert photo;
-  the daemon publishes its own availability through the MQTT last will. Publish-only (no
-  subscriptions, no commands), retained state published on change, its own thread with a
-  bounded drop-oldest queue so a slow or absent broker never delays the main loop, and a
-  full resync on every reconnect. Without the block nothing is imported and nothing
-  changes. See [docs/mqtt.md](docs/mqtt.md).
 
 ## [0.7.0] - 2026-09-27
 
