@@ -1,14 +1,33 @@
 [build-system]
-requires = ["setuptools>=68"]
+# 77+ for the PEP 639 license expression and license-files below.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "tapo-monitor"
 version = "0.8.0"
 description = "Lightweight reliability, camera-control and Telegram alerting stack for TP-Link Tapo PTZ cameras."
-readme = "README.md"
+readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "PeterkoCZ91" }]
+keywords = ["tapo", "tp-link", "ptz", "camera", "telegram", "home-assistant", "mqtt", "monitoring"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: No Input/Output (Daemon)",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Home Automation",
+    "Topic :: Multimedia :: Video :: Capture",
+    "Topic :: System :: Monitoring",
+]
 dependencies = [
     "pytapo",
     # pytapo's media_stream Downloader (SD-card clip download) imports aiofiles at
@@ -17,6 +36,13 @@ dependencies = [
     "astral",
     "PyYAML",
 ]
+
+[project.urls]
+Homepage = "https://github.com/PeterkoCZ91/tapo-monitoring"
+Documentation = "https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/README.md"
+Changelog = "https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/CHANGELOG.md"
+Issues = "https://github.com/PeterkoCZ91/tapo-monitoring/issues"
+Source = "https://github.com/PeterkoCZ91/tapo-monitoring"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "mypy", "ruff"]
@@ -31,9 +57,12 @@ mqtt = ["paho-mqtt>=1.6"]
 [project.scripts]
 tapo-monitor = "tapo_monitor.cli:main"
 
+# Only the package goes into the wheel. It reads no data files at runtime (the labelling
+# page is inline HTML); tests/, docs/, tools/ and systemd/ belong to a checkout.
 [tool.setuptools]
 packages = ["tapo_monitor"]
 py-modules = []
+include-package-data = false
 
 [tool.ruff]
 line-length = 110

@@ -39,6 +39,13 @@ All notable changes to this project are documented here.
   sanitizer's output, events through the real normalizer and classifier, `--summarize`).
   First fixtures: C260 (fw 1.2.3) and C545D (fw 1.1.7, converted from the earlier
   capture). `report.resanitize` re-cleans an existing report offline.
+- Packaging for PyPI: `pip install tapo-monitor` (extras `mqtt`, `scorer`, `onvif`). The
+  package metadata now carries an SPDX license with the license file, classifiers and
+  project links, the README uses absolute links so they work on the PyPI page, and the
+  wheel holds only the `tapo_monitor` package. A published GitHub release builds the
+  sdist and wheel and uploads them through PyPI Trusted Publishing
+  (`.github/workflows/release.yml`, no token in the repository); the one-time setup is in
+  `docs/releasing.md`.
 
 ### Changed
 - The report's allow-list keeps more harmless settings when they look like an enum or a
