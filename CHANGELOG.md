@@ -15,6 +15,15 @@ All notable changes to this project are documented here.
   to write a file that still contains an IP, MAC, long hex id or e-mail address.
   `report --summarize FILE` digests a report offline. See `docs/camera-reports.md`.
 - Twin probes that fail now keep the camera's numeric `error_code` (never the message).
+- Opt-in MQTT bridge with Home Assistant discovery (`mqtt:` block, extra
+  `pip install 'tapo-monitor[mqtt]'`). Each camera appears as a device with person and
+  motion binary sensors, reachability, privacy mode, "detection off", Digital Twin health,
+  last alert time and score, and — only with `publish_images: true` — the last alert photo;
+  the daemon publishes its own availability through the MQTT last will. Publish-only (no
+  subscriptions, no commands), retained state published on change, its own thread with a
+  bounded drop-oldest queue so a slow or absent broker never delays the main loop, and a
+  full resync on every reconnect. Without the block nothing is imported and nothing
+  changes. See [docs/mqtt.md](docs/mqtt.md).
 
 ## [0.7.0] - 2026-09-27
 

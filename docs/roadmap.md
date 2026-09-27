@@ -167,6 +167,12 @@ The exporter question is settled: the JSON status endpoint stays localhost-first
 opt-in, and no Prometheus/MQTT listener ships while the CLI, twin state and scorer
 endpoints already answer the same questions.
 
+Note (after 0.7.0): an outbound, publish-only MQTT client is a different thing from the
+listener decided against here, and it was added for Home Assistant users (the promise
+made on the forum). It opens no port, subscribes to nothing and accepts no commands; it
+pushes retained state with Home Assistant discovery and is off unless the `mqtt:` block
+is set. See [MQTT and Home Assistant](mqtt.md).
+
 ## Phase 5 — Multi-camera scene intelligence
 
 Status: **pilot v1 deployed (2026-08-25)**
@@ -365,7 +371,8 @@ multi-tick scenarios are written once rather than rebuilt by hand in each test.
 - **Telegram as a command channel.** It would turn the bot token into a remote camera
   controller. Status is already available through `statusd` and the CLI.
 - **Siren, vehicle tracking, Prometheus/MQTT exporter.** Decided earlier; see the
-  architecture non-goals and Phase 4.
+  architecture non-goals and Phase 4. (The opt-in, publish-only MQTT bridge for Home
+  Assistant is not that exporter: no listener, no commands — see Phase 4's note.)
 - **Generic multi-camera abstraction.** Runtime state is already keyed per camera; live
   PTZ handoff (`handoff.py`) waits for a measured overlapping pair (Phase 5).
 

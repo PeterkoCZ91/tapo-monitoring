@@ -343,6 +343,37 @@ class ObservabilityConfig:
 
 
 @dataclass
+class MqttConfig:
+    """Opt-in outbound MQTT bridge with Home Assistant discovery (see tapo_monitor.mqtt).
+
+    Off unless the ``mqtt:`` block is present, and then ``host`` is required. Publish-only:
+    nothing is ever read back from the broker.
+    """
+    host: str | None = None
+    port: int | None = None             # None = 8883 with tls, else 1883
+    # Names of env vars holding the broker login, never the secrets themselves.
+    user_env: str | None = None
+    password_env: str | None = None
+    tls: bool = False
+    discovery_prefix: str = "homeassistant"
+    base_topic: str = "tapo_monitor"
+    # Off by default: alert photos show people, and they reach a broker only when asked.
+    publish_images: bool = False
+    # Seconds the person/motion binary sensors stay on after the last alert/detection.
+    motion_off_after: int = 60
+
+    @property
+    def enabled(self) -> bool:
+        return self.host is not None
+
+    @property
+    def effective_port(self) -> int:
+        if self.port is not None:
+            return self.port
+        return 8883 if self.tls else 1883
+
+
+@dataclass
 class ReliabilityConfig:
     """Operational health and bounded camera self-healing policy."""
     enabled: bool = False
@@ -365,6 +396,7 @@ class AppConfig:
     loop: LoopConfig = field(default_factory=LoopConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     reliability: ReliabilityConfig = field(default_factory=ReliabilityConfig)
+    mqtt: MqttConfig = field(default_factory=MqttConfig)
     cameras: list[CameraConfig] = field(default_factory=list)
 
 
@@ -786,6 +818,68 @@ def _reliability(data, where):
     )
 
 
+def _topic_part(value, key):
+    """A topic prefix from the config: non-empty text without wildcards or empty levels."""
+    where = f"mqtt.{key}"
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{where} must be a non-empty string")
+    if any(ch in value for ch in "+#\0") or any(ch.isspace() for ch in value):
+        raise ConfigError(f"{where} must not contain '+', '#', NUL or whitespace")
+    if any(not level for level in value.split("/")):
+        raise ConfigError(f"{where} must not start or end with '/' or contain '//'")
+    return value
+
+
+def mqtt_slug(name) -> str:
+    """A camera name as one topic level and id fragment: [A-Za-z0-9_-] only. Pure."""
+    return re.sub(r"[^A-Za-z0-9_-]", "_", str(name))
+
+
+def _mqtt(data, cameras):
+    """Parse the optional ``mqtt:`` block; absent (or null) keeps the bridge off."""
+    if data is None:
+        return MqttConfig()
+    if not isinstance(data, dict):
+        raise ConfigError("mqtt must be a mapping")
+    host = data.get("host")
+    if not isinstance(host, str) or not host.strip():
+        raise ConfigError("mqtt: missing required field 'host' (remove the block to turn MQTT off)")
+    port = data.get("port")
+    if port is not None:
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise ConfigError("mqtt.port must be an integer between 1 and 65535")
+    for key in ("user_env", "password_env"):
+        value = data.get(key)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ConfigError(f"mqtt.{key} must name an environment variable")
+    if data.get("password_env") and not data.get("user_env"):
+        raise ConfigError("mqtt.password_env needs mqtt.user_env as well")
+    tls = _check_bool(data.get("tls", False), "tls", "mqtt")
+    publish_images = _check_bool(data.get("publish_images", False), "publish_images", "mqtt")
+    off_after = data.get("motion_off_after", 60)
+    if isinstance(off_after, bool) or not isinstance(off_after, int) or off_after < 1:
+        raise ConfigError("mqtt.motion_off_after must be an integer >= 1 (seconds)")
+    slugs = {}
+    for cam in cameras:
+        slug = mqtt_slug(cam.name)
+        if slug in slugs:
+            raise ConfigError(f"mqtt: cameras {slugs[slug]!r} and {cam.name!r} map to the same "
+                              f"topic level {slug!r}; rename one")
+        slugs[slug] = cam.name
+    return MqttConfig(
+        host=host.strip(),
+        port=port,
+        user_env=data.get("user_env"),
+        password_env=data.get("password_env"),
+        tls=tls,
+        discovery_prefix=_topic_part(data.get("discovery_prefix", "homeassistant"),
+                                     "discovery_prefix"),
+        base_topic=_topic_part(data.get("base_topic", "tapo_monitor"), "base_topic"),
+        publish_images=publish_images,
+        motion_off_after=off_after,
+    )
+
+
 def _camera(data, index):
     if not isinstance(data, dict):
         raise ConfigError(f"cameras[{index}]: must be a mapping")
@@ -1058,7 +1152,7 @@ def load_config_from_dict(data) -> AppConfig:
     if not isinstance(data, dict):
         raise ConfigError("config root must be a mapping")
     # Dataclass-typed top-level fields are the checked sections (location, alerts, loop,
-    # observability, reliability); telegram/groq/faces are plain dicts and stay opaque,
+    # observability, reliability, mqtt); telegram/groq/faces are plain dicts and stay opaque,
     # and the cameras list is checked entry by entry in _camera.
     data = _check_keys(data, AppConfig, "")
     raw_cameras = data.get("cameras")
@@ -1145,6 +1239,7 @@ def load_config_from_dict(data) -> AppConfig:
         loop=loop,
         reliability=reliability_config,
         observability=observability,
+        mqtt=_mqtt(data.get("mqtt"), cameras),
         cameras=cameras,
     )
 

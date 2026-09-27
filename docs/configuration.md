@@ -86,6 +86,7 @@ instead of restarting the daemon in a tight loop.
 | `alerts` | Detection cooldown, outage threshold and event-API recovery. | 120 s cooldown, 900 s outage threshold, 300 s event-API alert. |
 | `loop` | Fast event and slow control cadence. | 4 s events, 60 s control. |
 | `observability` | Digital Twin and Shadow Auditor switches. | Entirely off. |
+| `mqtt` | Outbound MQTT bridge with Home Assistant discovery. | Absent: off, nothing imported. |
 | `cameras` | Non-empty list of camera definitions. | Required. |
 
 ### Location
@@ -887,6 +888,34 @@ export TAPO_LEDGER_FILE=/private/path/events.sqlite3
 ```
 
 See [Observability](observability.md) for schema, privacy and rollout details.
+
+## MQTT (Home Assistant)
+
+```yaml
+mqtt:
+  host: broker.example.org
+  port: 1883                 # default 1883, or 8883 with tls
+  user_env: MQTT_USER
+  password_env: MQTT_PASSWORD
+  tls: false
+  discovery_prefix: homeassistant
+  base_topic: tapo_monitor
+  publish_images: false
+  motion_off_after: 60
+```
+
+- The block's presence is the switch; `host` is then required. Absent, nothing is
+  imported and the daemon behaves as before. Needs `pip install 'tapo-monitor[mqtt]'`.
+- `user_env`/`password_env` name environment variables, like every credential here.
+- `base_topic` and `discovery_prefix` may contain `/` but no wildcards, spaces or empty
+  levels. Give each daemon its own `base_topic` when several share one broker.
+- `publish_images` sends the last alert photo to the broker; off by default because the
+  photos show people.
+- `motion_off_after` (≥ 1 s) is how long Person and Motion stay on after the last event.
+- Camera names become topic levels with anything outside `A-Z a-z 0-9 _ -` replaced by
+  `_`; two cameras that collide that way are refused.
+
+See [MQTT and Home Assistant](mqtt.md) for entities, topics and delivery guarantees.
 
 ## Reliability
 

@@ -289,7 +289,7 @@ class Scenario:
     """
 
     def __init__(self, monkeypatch, tmp_path, cameras, *, alerts=None, observability=None,
-                 control_interval=60, start=START, presets=None, **collaborators):
+                 control_interval=60, start=START, presets=None, mqtt=None, **collaborators):
         raw = {"cameras": list(cameras),
                "telegram": {"token_env": "SCENARIO_TG_TOKEN",
                             "chat_id_env": "SCENARIO_TG_CHAT"}}
@@ -297,6 +297,8 @@ class Scenario:
             raw["alerts"] = alerts
         if observability is not None:
             raw["observability"] = observability
+        if mqtt is not None:
+            raw["mqtt"] = mqtt
         self.app = cfg_mod.load_config_from_dict(raw)
         self.clock = Clock(start)
         self.timeline = []

@@ -12,6 +12,7 @@ import time as _time
 from datetime import datetime
 
 from . import camera, detection, enrich, notify, scheduling, sentlog, snapshot
+from . import mqtt as mqtt_bridge
 from .incident import incident_id
 from .snapshot import frame_lens
 
@@ -280,6 +281,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         return watermark          # outside window: drain silently, no grab/score/alert
     for event, etype in alertable:
         audit_event(cfg, event, etype, "getevents", "detect")
+        mqtt_bridge.note_detect(cfg.name)       # no-op unless the mqtt: block is set
         lt = getattr(cfg, "light_trigger", None)
         if (lt is not None and lt.enabled and getattr(lt, "mode", "software") == "firmware"
                 and cfg.enrich.light_status):

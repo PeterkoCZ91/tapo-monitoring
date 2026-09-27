@@ -49,6 +49,7 @@ from . import (
     ledger,
     monitor,
     motion,
+    mqtt,
     notify,
     panlimit,
     recclip,
@@ -1485,6 +1486,22 @@ def _reduced(src, out_dir, run=None, width=None):
 
 def send_alert_photo(cfg, secrets, image, caption, downscale=None, score=None,
                      incident=None, send_path=None):
+    """Deliver one alert frame (:func:`_deliver_alert_photo`) and tell the MQTT bridge.
+
+    Every alert path funnels through here, so this is where the bridge learns of an alert:
+    only a delivered (or, for a collect-only camera, recorded) one, and after the fact,
+    so MQTT can never delay or change a Telegram send. Without the ``mqtt:`` block the
+    hook is a no-op.
+    """
+    ok = _deliver_alert_photo(cfg, secrets, image, caption, downscale=downscale, score=score,
+                              incident=incident, send_path=send_path)
+    if ok:
+        mqtt.note_alert(cfg.name, image=image, score=score)
+    return ok
+
+
+def _deliver_alert_photo(cfg, secrets, image, caption, downscale=None, score=None,
+                         incident=None, send_path=None):
     """Send one alert frame: the zoom goes to Telegram, the whole scene to the sent log.
 
     ``crop_to_subject`` cameras push a close-up, which is what the user wants to look at
@@ -3886,6 +3903,8 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
         privacy_notice(app, state, secrets=secrets)
         detection_notice(app, state, secrets=secrets, now=now)
         sync_app_silence(app, state)
+        # Privacy and detection switches as this pass read them (no-op without mqtt:).
+        mqtt.observe(app, state)
         last_control = now
     # Everything that scores sees this tick's thresholds (scorer.night_threshold at night).
     scoring = thresholds_for_tick(app, night)
@@ -3901,6 +3920,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     digest(now=now, secrets=secrets, app=app, state=state)
     _log_disk_pass(state, now=now, secrets=secrets)
     runtime_state.save_if_changed(state, now, logger=log)
+    mqtt.observe(app, state)          # reachability/health as of this tick; cache-only
     return last_control
 
 
@@ -3956,6 +3976,9 @@ def main(argv=None):  # pragma: no cover - thin entry point
     # Opt-in JSON status endpoint (observability.status_port). start() contains its own
     # failures and the thread is a daemon, so the monitor loop owes it nothing.
     statusd.start(app, state, started_at=_time.time())
+    # Opt-in MQTT bridge (mqtt: block). Its own thread and bounded queue: a slow or absent
+    # broker never reaches this loop, and a missing paho-mqtt is an error line, not a stop.
+    mqtt.start(app)
     secrets = resolve_secrets(app)
     log.info("loaded %d camera(s); poll events every %ds, control every %ds; face_names=%d known",
              len(app.cameras), poll_interval, control_interval, len(secrets.get("face_names") or {}))
@@ -4050,6 +4073,7 @@ def shutdown(state: MonitorState, *, now, sd_worker=None):
         sd_worker.shutdown(wait=False)
     close_hub_clients(state)
     runtime_state.save_if_changed(state, now, logger=log)
+    mqtt.stop()                       # says "offline" itself; bounded, never raises
     handler = state.ledger_handler
     if handler is not None and not handler.flush(timeout=SHUTDOWN_LEDGER_TIMEOUT):
         log.warning("audit ledger: %d audit line(s) not written before exit",
@@ -4078,6 +4102,7 @@ def tick(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     state.last_tick_at = now
     stall_watchdog(app, state, secrets, ok=tick_ok, now=now)
     statusd.publish(app, state)
+    mqtt.note_tick(tick_ok)
     return last_control
 
 

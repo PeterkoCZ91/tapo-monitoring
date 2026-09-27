@@ -171,6 +171,17 @@ def _selfcheck(path):
         else:
             print("  credentials: ok")
 
+    if app is not None and app.mqtt.enabled:
+        from . import mqtt
+
+        # The daemon only logs this and runs on without MQTT, so a deploy is where it has
+        # to be caught: the operator asked for the bridge and would silently not get it.
+        if mqtt.paho_available():
+            print("  mqtt: ok (paho-mqtt importable)")
+        else:
+            failures.append("mqtt")
+            print(f"  mqtt: FAILED (paho-mqtt not installed: {mqtt.INSTALL_HINT})")
+
     if shutil.which("ffmpeg"):
         print("  ffmpeg: ok")
     else:

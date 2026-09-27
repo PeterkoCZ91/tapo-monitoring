@@ -406,3 +406,22 @@ def test_learn_face_camera_not_found(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "No camera named 'missing'" in err
 
+
+
+def test_selfcheck_fails_when_mqtt_is_configured_without_paho(tmp_path, capsys, monkeypatch):
+    # The daemon only logs a missing paho-mqtt and runs on; the deploy gate is where the
+    # operator who asked for MQTT has to hear about it.
+    from tapo_monitor import mqtt
+
+    config_path = tmp_path / "cameras.yaml"
+    config_path.write_text("mqtt:\n  host: broker.example.org\n"
+                           "cameras:\n  - name: gate\n    host: 203.0.113.10\n",
+                           encoding="utf-8")
+    monkeypatch.setattr(cli.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(mqtt, "paho_available", lambda: False)
+    assert cli.main(["selfcheck", str(config_path)]) == 1
+    assert "mqtt: FAILED" in capsys.readouterr().out
+
+    monkeypatch.setattr(mqtt, "paho_available", lambda: True)
+    assert cli.main(["selfcheck", str(config_path)]) == 0
+    assert "mqtt: ok" in capsys.readouterr().out

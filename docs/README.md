@@ -28,9 +28,11 @@ camera names, addresses, credentials, coordinates and observations do not belong
 6. [Observability](observability.md) — Camera Digital Twin and Shadow Detection Auditor.
 7. [Camera reports](camera-reports.md) — produce an anonymized report of your own camera
    model so it can be supported without the maintainers owning one.
-8. [Labeling](labeling.md) — label collected sent/review-log frames and measure false
+8. [MQTT and Home Assistant](mqtt.md) — the opt-in, publish-only bridge: entities, topics,
+   delivery guarantees and an example automation.
+9. [Labeling](labeling.md) — label collected sent/review-log frames and measure false
    alarms, misses and the best threshold.
-9. [Roadmap](roadmap.md) — remaining product phases and research tracks.
+10. [Roadmap](roadmap.md) — remaining product phases and research tracks.
 
 ## Feature maturity
 
@@ -45,6 +47,7 @@ camera names, addresses, credentials, coordinates and observations do not belong
 | Camera Digital Twin | Operational, opt-in | Read-only probes, layered health, drift and allow-listed self-healing. |
 | Shadow Detection Auditor | Operational, opt-in | Ledger/reporting complete; the nightly `shadow-scan` batch is the independent watcher (v1). |
 | Battery/hub cameras (`hubpoll`) | Operational, opt-in | Detections polled from the hub, frames from a go2rtc sidecar. |
+| MQTT bridge / Home Assistant discovery | New, opt-in | Publish-only; off unless the `mqtt:` block is set. |
 | Deployment and fleet integrity | Operational | Fingerprinted release directories, symlink rollback, selfcheck, digest heartbeat. |
 | ONVIF event source | Researched, not daemon-wired | Do not select it as the only event source. |
 | Multi-camera coordinator | Duplicate gate operational; handoff planned | `group`/`scene_window` suppress cross-camera duplicates; `handoff_preset` is reserved and no runtime handoff exists. |

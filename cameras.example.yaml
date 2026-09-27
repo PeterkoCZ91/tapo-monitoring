@@ -57,6 +57,15 @@ observability:
   # status_bind: 127.0.0.1 # localhost by default on purpose (no auth) — widening it is
   #                        # an explicit operator choice, e.g. a VPN interface address
 
+# Opt-in MQTT bridge with Home Assistant discovery (docs/mqtt.md). Publish-only; absent =
+# off. Needs: pip install 'tapo-monitor[mqtt]'.
+# mqtt:
+#   host: broker.example.org
+#   user_env: MQTT_USER          # env var NAMES, not the login itself
+#   password_env: MQTT_PASSWORD
+#   tls: false
+#   publish_images: false        # alert photos show people: only for a broker you control
+
 reliability:
   enabled: false       # enable layered health, recorder continuity and latency metrics
   auto_fix: true       # only the allow-list below may write camera settings

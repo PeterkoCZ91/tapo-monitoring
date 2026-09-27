@@ -255,6 +255,29 @@ false-alarm rate, the misses and the best-separating threshold, by day and night
 `--config`, and per incident how many visits with a person got no alert and how late the
 first alert came on each delivery path ([Labeling](docs/labeling.md)).
 
+## Home Assistant (MQTT)
+
+An opt-in, publish-only MQTT bridge announces every camera to Home Assistant through MQTT
+discovery: person and motion binary sensors, reachability, privacy mode, "detection off",
+twin health and the last alert's time and score, plus the daemon's own availability.
+Alert photos are published only with `publish_images: true`. Install the extra and add
+the block:
+
+```bash
+pip install 'tapo-monitor[mqtt]'
+```
+
+```yaml
+mqtt:
+  host: broker.example.org
+  user_env: MQTT_USER
+  password_env: MQTT_PASSWORD
+```
+
+The bridge runs on its own thread with a bounded queue, so a slow or unreachable broker
+never delays an alert. Entities, topics and an example automation:
+[docs/mqtt.md](docs/mqtt.md).
+
 ## Safety and privacy
 
 - No credentials, coordinates, camera addresses or face mappings belong in the repository.
@@ -278,6 +301,7 @@ understand the session and sequential-request limitations.
 | [Operations](docs/operations.md) | You are deploying, monitoring or calibrating a live instance. |
 | [Capabilities](docs/capabilities.md) | You need the implemented/planned feature inventory. |
 | [Observability](docs/observability.md) | You are enabling Digital Twin or Shadow Auditor. |
+| [MQTT and Home Assistant](docs/mqtt.md) | You want the cameras as Home Assistant entities. |
 | [Labeling](docs/labeling.md) | You want ground truth for collected alert frames. |
 | [Troubleshooting](docs/troubleshooting.md) | You hit authentication, RTSP, SD or firmware-specific problems. |
 | [`events_1` bitmask](docs/events1-bitmask.md) | Your firmware returns incomplete event types. |
