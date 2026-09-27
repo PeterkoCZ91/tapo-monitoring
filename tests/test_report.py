@@ -374,3 +374,143 @@ def test_credentials_come_from_env_or_prompt_never_argv():
                                ask=lambda _p: pytest.fail("asked")) == ("a", "b")
     assert report._credentials(env={}, prompt=lambda _p: "pw",
                                ask=lambda _p: "me ") == ("me", "pw")
+
+
+# ── allow-list widened from a real C260 report ─────────────────────────────────
+
+def _c260_like():
+    return {
+        "light": {"whitelamp_config": {
+            "image_scene_mode": "Common", "image_scene_mode_autoday": "Day",
+            "full_color_min_keep_time": "30", "full_color_people_enhance": "on",
+            "overexposure_people_suppression": "on", "switch_mode": "common",
+            "best_view_distance": "0", "clear_licence_plate_mode": "off",
+            "schedule_start_time": "64800", "schedule_end_time": "21600"}},
+        "video": {
+            "capability": {"video_capability": {"main": {
+                "change_fps_support": "1", "minor_stream_support": "0",
+                "qualitys": ["high", "normal", "low"]}}},
+            "qualities": {"video": {"main": {
+                "default_bitrate": "2048", "h265_default_bitrate": "1536",
+                "smart_codec": "off", "name": "VideoEncoder_1"}}},
+            "osd": {"OSD": {
+                "date": {"is_hour12": "off", "time_type": "24h"},
+                "week": {"is_hour12": "off", "time_type": "24h"},
+                "font": {"color": "white", "color_type": "auto", "display": "ntnb",
+                         "size": "auto"},
+                "label_info": [{"label_info_1": {"text": "Back yard"}}]}},
+        },
+        "storage": {"sd_card": [{"hd_info_1": {
+            "total_space_accurate": "115203047424B", "crossline_free_space": "0B",
+            "crossline_total_space_accurate": "0B", "msg_push_total_space": "0B",
+            "msg_push_free_space_accurate": "0B", "disk_name": "1",
+            "record_start_time": "1790000000"}}]},
+        "alerts": {"event_types": [{"name": "motion", "enabled": "on"},
+                                   {"name": "tamper", "enabled": "off"}]},
+        "basic": {"info": {"device_info": {"basic_info": {
+            "is_cal": True, "ffs": False, "mobile_access": "0",
+            "avatar": "camera_2", "barcode": "ZZ-1", "region": "EU", "oem_id": "FEDC",
+            "tss": "0", "channel_plan_code": "ce", "device_name": "C260",
+            "manufacturer_name": "TP-LINK", "device_alias": "Gate",
+            "mac": "AA-BB-CC-DD-EE-FF", "latitude": 501234, "longitude": 141234,
+            "dev_id": "0123", "hw_id": "4567", "has_set_location_info": 1}}}},
+    }
+
+
+def test_widened_allow_list_keeps_enum_like_settings():
+    anon = report.Anonymizer()
+    clean = anon.clean(_c260_like(), "values")
+    lamp = clean["light"]["whitelamp_config"]
+    for key in ("image_scene_mode", "image_scene_mode_autoday", "full_color_min_keep_time",
+                "full_color_people_enhance", "overexposure_people_suppression",
+                "switch_mode", "best_view_distance", "clear_licence_plate_mode"):
+        assert lamp[key] != report.REDACTED, key
+    main = clean["video"]["capability"]["video_capability"]["main"]
+    assert main["change_fps_support"] == "1" and main["minor_stream_support"] == "0"
+    assert main["qualitys"] == ["high", "normal", "low"]
+    assert clean["video"]["qualities"]["video"]["main"] == {
+        "default_bitrate": "2048", "h265_default_bitrate": "1536", "smart_codec": "off",
+        "name": "VideoEncoder_1"}
+    osd = clean["video"]["osd"]["OSD"]
+    assert osd["date"] == {"is_hour12": "off", "time_type": "24h"} == osd["week"]
+    assert osd["font"] == {"color": "white", "color_type": "auto", "display": "ntnb",
+                           "size": "auto"}
+    sd = clean["storage"]["sd_card"][0]["hd_info_1"]
+    for key in ("total_space_accurate", "crossline_free_space",
+                "crossline_total_space_accurate", "msg_push_total_space",
+                "msg_push_free_space_accurate"):
+        assert sd[key] != report.REDACTED, key
+    assert [t["name"] for t in clean["alerts"]["event_types"]] == ["motion", "tamper"]
+    info = clean["basic"]["info"]["device_info"]["basic_info"]
+    assert (info["is_cal"], info["ffs"], info["mobile_access"]) == (True, False, "0")
+
+
+def test_widened_allow_list_still_withholds_identity_times_and_label_text():
+    anon = report.Anonymizer()
+    clean = anon.clean(_c260_like(), "values")
+    text = json.dumps(clean)
+    info = "values.basic.info.device_info.basic_info"
+    for key in ("avatar", "barcode", "region", "oem_id", "tss", "channel_plan_code",
+                "device_name", "manufacturer_name", "device_alias", "mac", "latitude",
+                "longitude", "dev_id", "hw_id", "has_set_location_info"):
+        assert f"{info}.{key}" in anon.redacted, key
+    for path in ("values.light.whitelamp_config.schedule_start_time",
+                 "values.light.whitelamp_config.schedule_end_time",
+                 "values.storage.sd_card[].hd_info_1.disk_name",
+                 "values.storage.sd_card[].hd_info_1.record_start_time",
+                 "values.video.osd.OSD.label_info[].label_info_1.text"):
+        assert path in anon.redacted, path
+    for secret in ("Back yard", "Gate", "camera_2", "ZZ-1", "FEDC", "64800", "1790000000",
+                   "TP-LINK", "501234"):
+        assert secret not in text, secret
+
+
+def test_widened_keys_still_withhold_free_text_and_identifier_shaped_values():
+    anon = report.Anonymizer()
+    clean = anon.clean({
+        "switch_mode": "my front garden", "smart_codec": "a1b2c3d4e5f6a7b8",
+        "event_types": [{"name": "Somebody's cam"}],
+        "size": "12", "name": "motion", "color": "white",
+        "OSD": {"label_info_1": {"size": "auto", "color": "red"}},
+        "qualities": {"main": {"name": "x"}},
+    }, "values.x")
+    assert clean["switch_mode"] == clean["smart_codec"] == report.REDACTED
+    assert clean["event_types"] == [{"name": report.REDACTED}]
+    # Generic keys only pass at their known paths.
+    assert clean["size"] == clean["name"] == clean["color"] == report.REDACTED
+    assert clean["OSD"]["label_info_1"] == {"size": report.REDACTED,
+                                            "color": report.REDACTED}
+    assert clean["qualities"]["main"]["name"] == report.REDACTED
+
+
+def test_self_check_accepts_byte_counts_but_not_hex_ids():
+    assert report.self_check('"115203047424B"') == []
+    assert report.self_check('"0B"') == []
+    assert report.self_check('"115203047424b"') == ["long hex identifier"]
+    assert report.self_check('"a15203047424B"') == ["long hex identifier"]
+
+
+def test_a_value_already_withheld_stays_listed():
+    anon = report.Anonymizer()
+    assert anon.clean({"status": report.REDACTED}, "x") == {"status": report.REDACTED}
+    assert anon.redacted == {"x.status"}
+
+
+def test_bare_scalar_answer_is_kept_only_under_a_safe_getter_name():
+    anon = report.Anonymizer()
+    assert anon.clean("off", "values.video.ldc", leaf_key="ldc") == "off"
+    assert anon.clean(3600, "values.basic.clock_correction",
+                      leaf_key="clock_correction") == report.REDACTED
+
+
+def test_resanitize_is_idempotent_and_drops_unknown_fields():
+    data = json.loads(report.render(_build()))
+    assert report.resanitize(data) == data
+    data["events"]["recent"][0]["face_id"] = "f00dfacecafe1234"
+    data["values"]["detection"]["motion"]["note"] = "hello"
+    again = report.resanitize(data)
+    assert "face_id" not in again["events"]["recent"][0]
+    assert again["values"]["detection"]["motion"]["note"] == report.REDACTED
+    assert "values.detection.motion.note" in again["redacted_keys"]
+    with pytest.raises(ValueError):
+        report.resanitize({"schema": "other"})

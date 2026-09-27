@@ -66,9 +66,30 @@ network or location (MAC, serial, device/hardware/OEM ids, SSID, IP, names and a
 face data, coordinates, time zone, cloud ids) are withheld with everything under them,
 and no absolute time is kept.
 
+A second, narrower list keeps setting values only while they look like an enum token or a
+number (`auto`, `on`, `3`, `107.3GB`): image scene and full-colour modes, codec and
+bitrate defaults, stream quality names, OSD font/date display settings, the SD card's
+exact byte counts, alert type names and plain `true`/`false` feature flags. Free text
+under the same keys, OSD label text, schedule times and the card's record start time
+stay withheld.
+
 Before writing, a self-check scans the finished JSON for IPv4 addresses, MAC addresses,
 long hex or numeric identifiers, e-mail addresses and the host/user you typed in. On any
 hit the file is **not** written; please report that as a bug.
 
 Review the file before sharing it anyway: an allow-list can only be as good as the keys
 someone judged safe.
+
+## Sharing a report
+
+Open a [*Camera report* issue](https://github.com/PeterkoCZ91/tapo-monitoring/issues/new?template=camera_report.yml):
+model, firmware, what works and what does not, what you did during `--watch`, the
+`--summarize` output, and the JSON file attached (drag it into the issue) or pasted in a
+code block. Do not edit values by hand; if something looks private, say so, so the
+anonymizer gets fixed for everyone.
+
+An accepted report is added unchanged as `tests/fixtures/cameras/<model>-<firmware>.json`
+and becomes a regression test (`tests/test_camera_fixtures.py`): it must keep the schema,
+pass the leak self-check, equal what the current sanitizer writes
+(`report.resanitize`), decode through the real event normalizer and classifier, and
+summarize offline.

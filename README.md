@@ -21,11 +21,14 @@ Python daemon.
 | Camera | How it is used | Notes |
 | --- | --- | --- |
 | C560WS | reference model, runs the whole pipeline | `event_profile: default` |
+| C260 | `getEvents` with an SD card | `event_profile: default`; [anonymized report](tests/fixtures/cameras/c260-1.2.3.json) |
 | C545D (dual lens) | `getEvents` with an SD card, per-lens RTSP streams | needs `event_profile: c545d`; see [dual-lens cameras](docs/configuration.md#dual-lens-cameras-c545d) |
 | C410 / C460 on an H200 hub | `hubpoll` reads detections off the hub | see [battery cameras on a hub](docs/battery-cameras-on-a-hub.md) |
 
 Other Tapo models with third-party access and `getEvents` may work; what we learned about
 the local API across models is in the [local API reference](docs/tapo-local-api.md).
+Own a model not listed here? Run `tapo-monitor report` and share the anonymized file:
+see [camera reports](docs/camera-reports.md).
 
 ## What's new in 0.7
 

@@ -90,6 +90,34 @@ SAFE_LEAF_KEYS = frozenset({
     "events_1", "alarm_type", "event_type",
 })
 
+# Setting keys that are safe only while the value looks like an enum token or a number
+# ("auto", "on", "3", "107.3GB"): a free-text or oddly shaped value under them is still
+# withheld. Learned from real reports (image, light, codec, SD size and flag fields).
+SAFE_ENUM_KEYS = frozenset({
+    # image / light
+    "overexposure_people_suppression", "switch_mode", "best_view_distance",
+    "clear_licence_plate_mode",
+    # video capability and quality
+    "change_fps_support", "minor_stream_support", "qualitys", "default_bitrate",
+    "h265_default_bitrate", "smart_codec",
+    # SD card sizes
+    "crossline_free_space", "crossline_total_space", "msg_push_total_space",
+    # boolean-like device feature flags
+    "is_cal", "ffs", "mobile_access",
+})
+_SAFE_ENUM_PREFIXES = ("image_scene_mode", "full_color_")
+_SAFE_ENUM_SUFFIXES = ("_accurate", "_support")
+# Keys that are generic or would hit the deny list elsewhere, safe only at these paths
+# (matched against the end of the value's path): alert type names, stream quality
+# names, OSD font/date/week display settings. OSD label text stays withheld.
+_SAFE_ENUM_PATHS = (
+    re.compile(r"\.event_types\[\]\.name$"),
+    re.compile(r"\.video\.(?:main|minor)\.name$"),
+    re.compile(r"(?i)\.osd\.(?:date|week|font)\."
+               r"(?:color|color_type|display|size|is_hour12|time_type)$"),
+)
+_ENUM_RE = re.compile(r"^(?:[A-Za-z0-9][A-Za-z0-9_.*+-]{0,39})?$")
+
 # Keys whose whole subtree is withheld, container or not: identity, location, network,
 # accounts. Matched as substrings of the normalized key.
 _DENY_PARTS = ("mac", "serial", "ssid", "alias", "name", "face", "latitude", "longitude",
@@ -100,7 +128,7 @@ _DENY_EXACT = {"ip", "id", "lat", "lon", "lng", "tz", "host", "hostname", "dns",
 
 # ``*_time`` keys are withheld as possible absolute times, except these durations.
 _DURATION_KEYS = frozenset({"rest_time", "force_time", "wtl_force_time", "back_time",
-                            "track_time"})
+                            "track_time", "full_color_min_keep_time"})
 
 _IPV4_RE = re.compile(
     r"(?<![0-9.])(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}"
@@ -108,8 +136,10 @@ _IPV4_RE = re.compile(
 _MAC_RE = re.compile(r"(?i)(?<![0-9a-f])(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}(?![0-9a-f])")
 # 12+ hex digits mixing letters and digits: a MAC without separators, a device or cloud
 # id, a key. Pure-digit runs of 16+ as well (numeric ids); shorter numbers are sizes.
-_HEX_RE = re.compile(r"(?i)(?<![0-9a-z])(?=[0-9a-f]*[a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{12,}"
-                     r"(?![0-9a-z])")
+# A byte count with its unit ("115203047424B", the SD card's ``*_accurate`` sizes) is
+# digits plus one upper-case B and is not taken for hex.
+_HEX_RE = re.compile(r"(?i)(?<![0-9a-z])(?!(?-i:[0-9]+B)(?![0-9a-z]))"
+                     r"(?=[0-9a-f]*[a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{12,}(?![0-9a-z])")
 _DIGITS_RE = re.compile(r"(?<![0-9])[0-9]{16,}(?![0-9])")
 _EMAIL_RE = re.compile(r"(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}")
 _PATTERNS = (("IPv4 address", _IPV4_RE), ("MAC address", _MAC_RE),
@@ -142,6 +172,26 @@ def _denied_key(key):
     return any(part in key for part in _DENY_PARTS)
 
 
+def _context_allowed(path):
+    return any(rule.search(path) for rule in _SAFE_ENUM_PATHS)
+
+
+def _enum_key(key, path):
+    """True for a key (at ``path``) whose enum- or number-shaped values may be kept."""
+    key = _norm(key)
+    return (key in SAFE_ENUM_KEYS or key.startswith(_SAFE_ENUM_PREFIXES)
+            or key.endswith(_SAFE_ENUM_SUFFIXES) or _context_allowed(path))
+
+
+def _enum_like(value):
+    if isinstance(value, (bool, int)):
+        return True
+    if isinstance(value, float):
+        return value == value and abs(value) != float("inf")
+    return (isinstance(value, str) and _ENUM_RE.match(value) is not None
+            and not _unsafe_text(value))
+
+
 def _unsafe_text(text):
     return any(pattern.search(text) for _label, pattern in _PATTERNS)
 
@@ -157,8 +207,9 @@ class Anonymizer:
     def __init__(self):
         self.redacted: set[str] = set()
 
-    def clean(self, value, path):
-        return self._walk(value, path, leaf_key=None, depth=0)
+    def clean(self, value, path, leaf_key=None):
+        """Sanitized copy of ``value``; ``leaf_key`` names a bare scalar answer."""
+        return self._walk(value, path, leaf_key=leaf_key, depth=0)
 
     def _withhold(self, path):
         self.redacted.add(path)
@@ -172,7 +223,7 @@ class Anonymizer:
             for index, (key, item) in enumerate(value.items()):
                 key_text = str(key) if _safe_key_text(key) else f"<key{index}>"
                 child = f"{path}.{key_text}" if path else key_text
-                if _denied_key(key):
+                if _denied_key(key) and not _context_allowed(child):
                     out[key_text] = self._withhold(child)
                 else:
                     out[key_text] = self._walk(item, child, str(key), depth + 1)
@@ -184,7 +235,13 @@ class Anonymizer:
     def _scalar(self, value, path, leaf_key):
         if value is None:
             return None
-        if leaf_key is None or _norm(leaf_key) not in SAFE_LEAF_KEYS:
+        if value == REDACTED or leaf_key is None:
+            return self._withhold(path)
+        if _norm(leaf_key) not in SAFE_LEAF_KEYS:
+            if isinstance(value, bool):
+                return value    # a true/false flag under a non-denied key names nothing
+            if _enum_key(leaf_key, path) and _enum_like(value):
+                return value
             return self._withhold(path)
         if isinstance(value, bool):
             return value
@@ -510,7 +567,7 @@ def build_report(client, *, now=None, event_hours=DEFAULT_EVENT_HOURS, watch=Non
         getters.append(row)
         if result.get("state") == "available":
             groups.setdefault(group, {})[name] = anon.clean(
-                result.get("value"), f"values.{group}.{name}")
+                result.get("value"), f"values.{group}.{name}", leaf_key=name)
     for group, name, reason in capabilities._UNSAFE_PROBES:
         getters.append({"method": None, "group": group, "name": name, "state": "unknown",
                         "reason": reason})
@@ -539,6 +596,128 @@ def build_report(client, *, now=None, event_hours=DEFAULT_EVENT_HOURS, watch=Non
     }
     report["redacted_keys"] = sorted(anon.redacted)
     return report
+
+
+_GETTER_ROW_KEYS = ("method", "group", "name", "state", "error_type", "error_code",
+                    "reason", "chn_id")
+_EVENT_INT_KEYS = ("age_s", "duration_s", "alarm_type", "events_1", "seen_at_s")
+_RTSP_TRACK_KEYS = ("codec_type", "codec_name", "profile", "width", "height",
+                    "avg_frame_rate", "sample_rate", "channels")
+
+
+def _resanitize_event(entry, anon, path):
+    if not isinstance(entry, Mapping):
+        return {}
+    out = {key: _int(entry[key]) for key in _EVENT_INT_KEYS if key in entry}
+    if entry.get("event_type") is not None:
+        out["event_type"] = anon.clean({"event_type": entry["event_type"]},
+                                       path)["event_type"]
+    chn = entry.get("chn_events")
+    if isinstance(chn, Mapping):
+        lenses = {}
+        for key, item in chn.items():
+            channel = _int(key)
+            if channel is None or not isinstance(item, Mapping):
+                anon.redacted.add(f"{path}.chn_events.<key>")
+                continue
+            lens = {k: _int(item[k]) for k in ("events_1", "start_offset_s") if k in item}
+            lenses[str(channel)] = lens
+        out["chn_events"] = lenses
+    for name in sorted(str(k) for k in entry
+                       if k not in (*_EVENT_INT_KEYS, "event_type", "chn_events")):
+        anon.redacted.add(f"{path}.{_key_label(name)}")
+    return out
+
+
+def _resanitize_rtsp(rtsp):
+    if not isinstance(rtsp, Mapping):
+        return None
+    if "state" in rtsp:     # the whole probe was skipped
+        return {k: rtsp[k] for k in ("state", "reason") if isinstance(rtsp.get(k), str)}
+    out = {}
+    for stream in RTSP_STREAMS:
+        row = rtsp.get(stream)
+        if not isinstance(row, Mapping):
+            continue
+        clean = {k: row[k] for k in ("state", "reason", "exit_code")
+                 if isinstance(row.get(k), (str, int))}
+        if isinstance(row.get("tracks"), list):
+            clean["tracks"] = [
+                {k: t[k] for k in _RTSP_TRACK_KEYS
+                 if k in t and isinstance(t[k], (str, int, float))}
+                for t in row["tracks"] if isinstance(t, Mapping)]
+        out[stream] = clean
+    return out
+
+
+def resanitize(report):
+    """An existing report passed through the current sanitizer, offline. Pure.
+
+    Lets a report written by an older version (or edited by hand) be brought to what this
+    version would write, without touching the camera: every value is cleaned again under
+    the current allow-list, unknown fields are dropped and listed, and ``redacted_keys``
+    is rebuilt. A value an older version withheld stays withheld: it is gone from the
+    file, only a new run against the camera can fill it in. Idempotent.
+    """
+    if not isinstance(report, Mapping) or report.get("schema") != SCHEMA:
+        raise ValueError(f"not a {SCHEMA} report")
+    anon = Anonymizer()
+    cam = report.get("camera") if isinstance(report.get("camera"), Mapping) else {}
+    fields = {"device_model": cam.get("model"), "hw_version": cam.get("hw_version"),
+              "sw_version": cam.get("fw_version"), "device_type": cam.get("device_type"),
+              "device_info": cam.get("device_info")}
+    block = anon.clean({k: v for k, v in fields.items() if v is not None}, "camera")
+    profile = _profile_for_model(block.get("device_model"))
+    channels = [c for c in (_int(c) for c in cam.get("lens_channels") or [])
+                if c is not None]
+    getters = [{k: row[k] for k in _GETTER_ROW_KEYS if k in row}
+               for row in report.get("getters") or [] if isinstance(row, Mapping)]
+    values = {}
+    for group, names in (report.get("values") or {}).items():
+        if not isinstance(names, Mapping) or not _safe_key_text(group):
+            anon.redacted.add(f"values.{_key_label(str(group))}")
+            continue
+        values[group] = {name: anon.clean(value, f"values.{group}.{name}", leaf_key=name)
+                         for name, value in names.items() if _safe_key_text(name)}
+    events = report.get("events")
+    if isinstance(events, Mapping):
+        events = {**{k: events[k] for k in ("state", "window_hours", "total",
+                                            "error_type", "error_code") if k in events},
+                  "recent": [_resanitize_event(e, anon, "events.recent[]")
+                             for e in events.get("recent") or []]}
+        if not events["recent"] and "total" not in events:
+            del events["recent"]
+    watch = report.get("watch")
+    if isinstance(watch, Mapping):
+        watch = {**{k: watch[k] for k in ("seconds", "interval_s", "polls", "stopped_by")
+                    if k in watch},
+                 "errors": [{k: e[k] for k in ("at_s", "error_type", "error_code") if k in e}
+                            for e in watch.get("errors") or [] if isinstance(e, Mapping)],
+                 "events": [_resanitize_event(e, anon, "watch.events[]")
+                            for e in watch.get("events") or []]}
+    tool = report.get("tool") if isinstance(report.get("tool"), Mapping) else {}
+    carried = {k for k in report.get("redacted_keys") or []
+               if isinstance(k, str) and not k.startswith(("values.", "camera."))}
+    return {
+        "schema": SCHEMA,
+        "tool": {k: tool[k] for k in ("name", "version") if isinstance(tool.get(k), str)},
+        "camera": {
+            "model": block.get("device_model"),
+            "hw_version": block.get("hw_version"),
+            "fw_version": block.get("sw_version"),
+            "device_type": block.get("device_type"),
+            "device_info": block.get("device_info"),
+            "lens_channels": channels,
+            "event_profile": profile.name if profile is not None else None,
+        },
+        "getters": getters,
+        "values": values,
+        "events": events if isinstance(events, Mapping) else None,
+        "watch": watch if isinstance(watch, Mapping) else None,
+        "rtsp": _resanitize_rtsp(report.get("rtsp")),
+        "note": REVIEW_NOTE,
+        "redacted_keys": sorted(anon.redacted | carried),
+    }
 
 
 # --------------------------------------------------------------------------- summarize

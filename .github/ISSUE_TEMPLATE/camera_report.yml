@@ -1,0 +1,79 @@
+name: Camera report
+description: Share an anonymized `tapo-monitor report` so your camera model can be supported
+title: "Camera report: <model> <firmware>"
+labels: ["camera-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you. A report tells us which getters your camera answers, the error codes of
+        the rest, and what its event bits look like, without anyone buying the camera.
+        How to make one: [docs/camera-reports.md](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/camera-reports.md).
+
+        ```sh
+        tapo-monitor report --host <camera-ip> --out my-camera.json --watch 120
+        tapo-monitor report --summarize my-camera.json
+        ```
+
+        Stop anything else that polls the camera first (a second session can lock the
+        camera out for ~30 minutes). Nothing is uploaded by the command itself.
+  - type: input
+    id: model
+    attributes:
+      label: Camera model
+      description: As printed on the camera or in `camera.model` of the report.
+      placeholder: C260
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware version
+      description: "`camera.fw_version` of the report, or Device settings in the Tapo app."
+      placeholder: 1.2.3 Build 260805 Rel.20715n
+    validations:
+      required: true
+  - type: textarea
+    id: works
+    attributes:
+      label: What works
+      description: Features that behave as expected with tapo-monitor or in the report.
+      placeholder: getEvents answers; person detection alerts arrive; stream1/stream2 play.
+  - type: textarea
+    id: broken
+    attributes:
+      label: What does not work
+      description: Missing alerts, getters that fail, unknown event bits from `--summarize`.
+      placeholder: "unknown events_1 bits: 3 (value 8) when a car passes"
+  - type: textarea
+    id: watch
+    attributes:
+      label: What happened during `--watch`
+      description: What you did in front of the camera and when (walked past at ~30 s, a cat at ~90 s...).
+  - type: textarea
+    id: summary
+    attributes:
+      label: Output of `tapo-monitor report --summarize`
+      render: text
+  - type: markdown
+    attributes:
+      value: |
+        **How to attach the report:** drag the `.json` file into the box below (GitHub
+        accepts `.json` attachments), or paste its content inside a code block. Please do
+        not rename keys or edit values by hand; if something looks private, say so in the
+        issue instead, so the anonymizer can be fixed.
+  - type: textarea
+    id: attachment
+    attributes:
+      label: Report file
+      description: Attach or paste the JSON file here.
+    validations:
+      required: true
+  - type: checkboxes
+    id: reviewed
+    attributes:
+      label: Privacy check
+      options:
+        - label: I reviewed the file and it contains no name, address, IP, MAC, serial, account or location of mine.
+          required: true
+        - label: I agree that the report may be added to the repository as a test fixture.

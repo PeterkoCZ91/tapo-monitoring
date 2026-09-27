@@ -57,6 +57,22 @@ loudly with exit 99. The `*_remote.bats` files go one step further: their ssh st
 the host argument and runs the remote block here, so the config snapshot, the atomic
 symlink switch and the pruning are exercised against a directory that plays the host.
 
+## Camera reports
+
+A camera model is best supported from a `tapo-monitor report` of it (see
+[camera reports](docs/camera-reports.md)). Share one through the *Camera report* issue
+form. To accept a report, a maintainer:
+
+1. reviews the file for anything personal, then adds it unchanged as
+   `tests/fixtures/cameras/<model>-<firmware>.json` (for example `c260-1.2.3.json`);
+2. runs `pytest -q tests/test_camera_fixtures.py`, which checks every file there: known
+   schema, leak self-check, equal to what the current sanitizer writes, events decoded by
+   the real normalizer and classifier, `--summarize` works;
+3. when the report withholds a harmless setting, widens the allow-list in
+   `tapo_monitor/report.py` with a test both ways (kept, and still withheld as free text or
+   under an identity key). A report written by an older version can be brought up to date
+   offline with `report.resanitize`; values it already withheld stay withheld.
+
 ## Branch naming
 
 | Type | Prefix | Example |

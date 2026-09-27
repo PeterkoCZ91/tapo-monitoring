@@ -1,0 +1,654 @@
+{
+  "camera": {
+    "device_info": "C260 1.0 IPC",
+    "device_type": "SMART.IPCAMERA",
+    "event_profile": null,
+    "fw_version": "1.2.3 Build 260805 Rel.20715n",
+    "hw_version": "1.0",
+    "lens_channels": [],
+    "model": "C260"
+  },
+  "events": {
+    "recent": [
+      {
+        "age_s": 6156,
+        "alarm_type": 6,
+        "duration_s": 66,
+        "events_1": 32
+      }
+    ],
+    "state": "available",
+    "total": 1,
+    "window_hours": 12.0
+  },
+  "getters": [
+    {
+      "group": "basic",
+      "method": "getBasicInfo",
+      "name": "info",
+      "state": "available"
+    },
+    {
+      "group": "basic",
+      "method": "getTimeCorrection",
+      "name": "clock_correction",
+      "state": "available"
+    },
+    {
+      "group": "firmware",
+      "method": "getFirmwareUpdateStatus",
+      "name": "update_status",
+      "state": "available"
+    },
+    {
+      "group": "storage",
+      "method": "getSDCard",
+      "name": "sd_card",
+      "state": "available"
+    },
+    {
+      "group": "storage",
+      "method": "getRecordPlan",
+      "name": "record_plan",
+      "state": "available"
+    },
+    {
+      "group": "storage",
+      "method": "getCircularRecordingConfig",
+      "name": "circular_recording",
+      "state": "available"
+    },
+    {
+      "group": "alerts",
+      "method": "getAlertEventType",
+      "name": "event_types",
+      "state": "available"
+    },
+    {
+      "group": "alerts",
+      "method": "getLED",
+      "name": "led",
+      "state": "available"
+    },
+    {
+      "group": "privacy",
+      "method": "getPrivacyMode",
+      "name": "lens_mask",
+      "state": "available"
+    },
+    {
+      "group": "detection",
+      "method": "getMotionDetection",
+      "name": "motion",
+      "state": "available"
+    },
+    {
+      "group": "detection",
+      "method": "getPersonDetection",
+      "name": "person",
+      "state": "available"
+    },
+    {
+      "group": "detection",
+      "method": "getVehicleDetection",
+      "name": "vehicle",
+      "state": "available"
+    },
+    {
+      "group": "detection",
+      "method": "getPetDetection",
+      "name": "pet",
+      "state": "available"
+    },
+    {
+      "group": "detection",
+      "method": "getTamperDetection",
+      "name": "tamper",
+      "state": "available"
+    },
+    {
+      "group": "detection",
+      "method": "getLinecrossingDetection",
+      "name": "line_crossing",
+      "state": "available"
+    },
+    {
+      "group": "detection",
+      "method": "getBabyCryDetection",
+      "name": "baby_cry",
+      "state": "available"
+    },
+    {
+      "group": "detection",
+      "method": "getBarkDetection",
+      "name": "bark",
+      "state": "available"
+    },
+    {
+      "group": "detection",
+      "method": "getGlassBreakDetection",
+      "name": "glass_break",
+      "state": "available"
+    },
+    {
+      "group": "detection",
+      "method": "getMeowDetection",
+      "name": "meow",
+      "state": "available"
+    },
+    {
+      "group": "track",
+      "method": "getAutoTrackTarget",
+      "name": "auto_target",
+      "state": "available"
+    },
+    {
+      "group": "track",
+      "method": "getSmartTrackConfig",
+      "name": "smart_config",
+      "state": "available"
+    },
+    {
+      "group": "track",
+      "method": "getRotationStatus",
+      "name": "rotation",
+      "state": "available"
+    },
+    {
+      "group": "light",
+      "method": "getWhitelampStatus",
+      "name": "whitelamp_status",
+      "state": "available"
+    },
+    {
+      "group": "light",
+      "method": "getWhitelampConfig",
+      "name": "whitelamp_config",
+      "state": "available"
+    },
+    {
+      "group": "video",
+      "method": "getVideoQualities",
+      "name": "qualities",
+      "state": "available"
+    },
+    {
+      "group": "video",
+      "method": "getVideoCapability",
+      "name": "capability",
+      "state": "available"
+    },
+    {
+      "group": "video",
+      "method": "getLensDistortionCorrection",
+      "name": "ldc",
+      "state": "available"
+    },
+    {
+      "group": "video",
+      "method": "getOsd",
+      "name": "osd",
+      "state": "available"
+    },
+    {
+      "group": "module",
+      "method": null,
+      "name": "spec",
+      "reason": "raw_transport_disabled",
+      "state": "unknown"
+    }
+  ],
+  "note": "Review the file before sharing it; nothing is uploaded.",
+  "redacted_keys": [
+    "events.recent[].event_info",
+    "values.basic.clock_correction",
+    "values.basic.info.device_info.basic_info.avatar",
+    "values.basic.info.device_info.basic_info.barcode",
+    "values.basic.info.device_info.basic_info.channel_plan_code",
+    "values.basic.info.device_info.basic_info.dev_id",
+    "values.basic.info.device_info.basic_info.device_alias",
+    "values.basic.info.device_info.basic_info.device_name",
+    "values.basic.info.device_info.basic_info.features",
+    "values.basic.info.device_info.basic_info.has_set_location_info",
+    "values.basic.info.device_info.basic_info.hw_desc",
+    "values.basic.info.device_info.basic_info.hw_id",
+    "values.basic.info.device_info.basic_info.latitude",
+    "values.basic.info.device_info.basic_info.longitude",
+    "values.basic.info.device_info.basic_info.mac",
+    "values.basic.info.device_info.basic_info.manufacturer_name",
+    "values.basic.info.device_info.basic_info.oem_id",
+    "values.basic.info.device_info.basic_info.region",
+    "values.light.whitelamp_config.schedule_end_time",
+    "values.light.whitelamp_config.schedule_start_time",
+    "values.storage.sd_card[].hd_info_1.disk_name",
+    "values.storage.sd_card[].hd_info_1.free_space_accurate",
+    "values.storage.sd_card[].hd_info_1.record_start_time",
+    "values.storage.sd_card[].hd_info_1.video_free_space_accurate",
+    "values.track.rotation.image.switch.schedule_end_time",
+    "values.track.rotation.image.switch.schedule_start_time",
+    "values.video.osd.OSD.label_info[].label_info_1.align_type",
+    "values.video.osd.OSD.label_info[].label_info_1.text"
+  ],
+  "rtsp": null,
+  "schema": "tapo-monitor-report/1",
+  "tool": {
+    "name": "tapo-monitor",
+    "version": "0.7.0"
+  },
+  "values": {
+    "alerts": {
+      "event_types": [
+        {
+          "enabled": "on",
+          "name": "people_detection"
+        },
+        {
+          "enabled": "on",
+          "name": "pet_detection"
+        },
+        {
+          "enabled": "off",
+          "name": "sound_detection"
+        },
+        {
+          "enabled": "on",
+          "name": "bark_detection"
+        },
+        {
+          "enabled": "on",
+          "name": "meow_detection"
+        },
+        {
+          "enabled": "on",
+          "name": "glass_detection"
+        },
+        {
+          "enabled": "on",
+          "name": "motion_detection"
+        },
+        {
+          "enabled": "on",
+          "name": "tamper_detection"
+        },
+        {
+          "enabled": "on",
+          "name": "linecrossing_detection"
+        },
+        {
+          "enabled": "on",
+          "name": "vehicle_detection"
+        },
+        {
+          "enabled": "on",
+          "name": "face_detection"
+        }
+      ],
+      "led": {
+        "enabled": "on"
+      }
+    },
+    "basic": {
+      "clock_correction": "<redacted>",
+      "info": {
+        "device_info": {
+          "basic_info": {
+            "avatar": "<redacted>",
+            "barcode": "<redacted>",
+            "channel_plan_code": "<redacted>",
+            "dev_id": "<redacted>",
+            "device_alias": "<redacted>",
+            "device_info": "C260 1.0 IPC",
+            "device_model": "C260",
+            "device_name": "<redacted>",
+            "device_type": "SMART.IPCAMERA",
+            "features": "<redacted>",
+            "ffs": false,
+            "has_set_location_info": "<redacted>",
+            "hw_desc": "<redacted>",
+            "hw_id": "<redacted>",
+            "hw_version": "1.0",
+            "is_cal": true,
+            "latitude": "<redacted>",
+            "longitude": "<redacted>",
+            "mac": "<redacted>",
+            "manufacturer_name": "<redacted>",
+            "mobile_access": "0",
+            "no_rtsp_constrain": 1,
+            "oem_id": "<redacted>",
+            "region": "<redacted>",
+            "sw_version": "1.2.3 Build 260805 Rel.20715n",
+            "tss": false
+          }
+        }
+      }
+    },
+    "detection": {
+      "baby_cry": {
+        "digital_sensitivity": "50",
+        "enabled": "off",
+        "sensitivity": "medium"
+      },
+      "bark": {
+        "enabled": "on",
+        "sensitivity": "50"
+      },
+      "glass_break": {
+        "enabled": "on",
+        "sensitivity": "50"
+      },
+      "line_crossing": {
+        "arming_schedule": {
+          "friday": "[\"0000-2400\"]",
+          "monday": "[\"0000-2400\"]",
+          "saturday": "[\"0000-2400\"]",
+          "sunday": "[\"0000-2400\"]",
+          "thursday": "[\"0000-2400\"]",
+          "tuesday": "[\"0000-2400\"]",
+          "wednesday": "[\"0000-2400\"]"
+        },
+        "detection": {
+          "enabled": "off"
+        }
+      },
+      "meow": {
+        "enabled": "off",
+        "sensitivity": "50"
+      },
+      "motion": {
+        "digital_sensitivity": "60",
+        "enabled": "on",
+        "non_vehicle_enabled": "off",
+        "people_enabled": "off",
+        "sensitivity": "medium",
+        "vehicle_enabled": "off"
+      },
+      "person": {
+        "enabled": "on",
+        "sensitivity": "60"
+      },
+      "pet": {
+        "enabled": "off",
+        "sensitivity": "60"
+      },
+      "tamper": {
+        "digital_sensitivity": "80",
+        "enabled": "on",
+        "sensitivity": "high"
+      },
+      "vehicle": {
+        "enabled": "off",
+        "sensitivity": "60"
+      }
+    },
+    "firmware": {
+      "update_status": {
+        "cloud_config": {
+          "upgrade_status": {
+            "lastUpgradingSuccess": true,
+            "state": "normal"
+          }
+        }
+      }
+    },
+    "light": {
+      "whitelamp_config": {
+        "best_view_distance": "0",
+        "clear_licence_plate_mode": "off",
+        "flip_type": "off",
+        "full_color_min_keep_time": "5",
+        "full_color_people_enhance": "off",
+        "image_scene_mode": "normal",
+        "image_scene_mode_autoday": "normal",
+        "image_scene_mode_autonight": "normal",
+        "image_scene_mode_common": "normal",
+        "image_scene_mode_shedday": "normal",
+        "image_scene_mode_shednight": "normal",
+        "ldc": "off",
+        "night_vision_mode": "inf_night_vision",
+        "overexposure_people_suppression": "off",
+        "rotate_type": "off",
+        "schedule_end_time": "<redacted>",
+        "schedule_start_time": "<redacted>",
+        "switch_mode": "common",
+        "wtl_force_time": "300",
+        "wtl_intensity_level": "3"
+      },
+      "whitelamp_status": {
+        "rest_time": 0,
+        "status": 0
+      }
+    },
+    "privacy": {
+      "lens_mask": {
+        "enabled": "off"
+      }
+    },
+    "storage": {
+      "circular_recording": {
+        "loop": "on"
+      },
+      "record_plan": {
+        "enabled": "on",
+        "friday": "[\"0000-2400:2\"]",
+        "monday": "[\"0000-2400:2\"]",
+        "saturday": "[\"0000-2400:2\"]",
+        "sunday": "[\"0000-2400:2\"]",
+        "thursday": "[\"0000-2400:2\"]",
+        "tuesday": "[\"0000-2400:2\"]",
+        "wednesday": "[\"0000-2400:2\"]"
+      },
+      "sd_card": [
+        {
+          "hd_info_1": {
+            "crossline_free_space": "0B",
+            "crossline_free_space_accurate": "0B",
+            "crossline_total_space": "0B",
+            "crossline_total_space_accurate": "0B",
+            "detect_status": "normal",
+            "disk_name": "<redacted>",
+            "free_space": "40.0GB",
+            "free_space_accurate": "<redacted>",
+            "loop_record_status": "0",
+            "msg_push_free_space": "0B",
+            "msg_push_free_space_accurate": "0B",
+            "msg_push_total_space": "0B",
+            "msg_push_total_space_accurate": "0B",
+            "percent": "100",
+            "picture_free_space": "0B",
+            "picture_free_space_accurate": "0B",
+            "picture_total_space": "0B",
+            "picture_total_space_accurate": "0B",
+            "record_duration": "0",
+            "record_free_duration": "0",
+            "record_start_time": "<redacted>",
+            "rw_attr": "rw",
+            "status": "normal",
+            "total_space": "107.3GB",
+            "total_space_accurate": "115158810624B",
+            "type": "local",
+            "video_free_space": "40.0GB",
+            "video_free_space_accurate": "<redacted>",
+            "video_total_space": "107.3GB",
+            "video_total_space_accurate": "115158810624B",
+            "write_protect": "0"
+          }
+        }
+      ]
+    },
+    "track": {
+      "auto_target": {
+        "back_time": "30",
+        "enabled": "off",
+        "track_mode": "pantilt",
+        "track_time": "0"
+      },
+      "rotation": {
+        "image": {
+          "switch": {
+            "best_view_distance": "0",
+            "clear_licence_plate_mode": "off",
+            "flip_type": "off",
+            "full_color_min_keep_time": "5",
+            "full_color_people_enhance": "off",
+            "image_scene_mode": "normal",
+            "image_scene_mode_autoday": "normal",
+            "image_scene_mode_autonight": "normal",
+            "image_scene_mode_common": "normal",
+            "image_scene_mode_shedday": "normal",
+            "image_scene_mode_shednight": "normal",
+            "ldc": "off",
+            "night_vision_mode": "inf_night_vision",
+            "overexposure_people_suppression": "off",
+            "rotate_type": "off",
+            "schedule_end_time": "<redacted>",
+            "schedule_start_time": "<redacted>",
+            "switch_mode": "common",
+            "wtl_force_time": "300",
+            "wtl_intensity_level": "3"
+          }
+        }
+      },
+      "smart_config": {
+        "smart_track": {
+          "smart_track_info": {
+            "people_enabled": "off",
+            "pet_enabled": "off",
+            "vehicle_enabled": "off"
+          }
+        }
+      }
+    },
+    "video": {
+      "capability": {
+        "video_capability": {
+          "main": {
+            "bitrate_types": [
+              "cbr",
+              "vbr"
+            ],
+            "bitrates": [
+              "1024",
+              "1536",
+              "2048",
+              "2560",
+              "3072",
+              "4096"
+            ],
+            "change_fps_support": "1",
+            "encode_types": [
+              "H264",
+              "H265"
+            ],
+            "frame_rates": [
+              "65551",
+              "65556",
+              "65561"
+            ],
+            "minor_stream_support": "1",
+            "qualitys": [
+              "1",
+              "3",
+              "5"
+            ],
+            "resolutions": [
+              "3840*2160",
+              "2560*1440",
+              "1920*1080",
+              "1280*720"
+            ]
+          },
+          "minor": {
+            "bitrate_types": [
+              "cbr",
+              "vbr"
+            ],
+            "bitrates": [
+              "64",
+              "128",
+              "256",
+              "512",
+              "1024"
+            ],
+            "change_fps_support": "1",
+            "encode_types": [
+              "H264",
+              "H265"
+            ],
+            "frame_rates": [
+              "65551",
+              "65556",
+              "65561"
+            ],
+            "minor_stream_support": "1",
+            "qualitys": [
+              "1",
+              "3",
+              "5"
+            ],
+            "resolutions": [
+              "1280*720"
+            ]
+          }
+        }
+      },
+      "ldc": false,
+      "osd": {
+        "OSD": {
+          "date": {
+            "enabled": "on",
+            "is_hour12": "off",
+            "time_type": "0",
+            "x_coor": "0",
+            "y_coor": "0"
+          },
+          "font": {
+            "color": "white",
+            "color_type": "auto",
+            "display": "ntnb",
+            "size": "auto"
+          },
+          "label_info": [
+            {
+              "label_info_1": {
+                "align_type": "<redacted>",
+                "enabled": "off",
+                "text": "<redacted>",
+                "x_coor": 0,
+                "y_coor": 500
+              }
+            }
+          ],
+          "logo": {
+            "enabled": "on",
+            "x_coor": "0",
+            "y_coor": "9150"
+          },
+          "week": {
+            "enabled": "on",
+            "is_hour12": "off",
+            "time_type": "0",
+            "x_coor": "6000",
+            "y_coor": "500"
+          }
+        }
+      },
+      "qualities": {
+        "video": {
+          "main": {
+            "bitrate": "3072",
+            "bitrate_type": "vbr",
+            "default_bitrate": "3072",
+            "encode_type": "H265",
+            "frame_rate": "65556",
+            "h265_default_bitrate": "3072",
+            "name": "VideoEncoder_1",
+            "quality": "5",
+            "resolution": "3840*2160",
+            "smart_codec": "off"
+          }
+        }
+      }
+    }
+  },
+  "watch": null
+}

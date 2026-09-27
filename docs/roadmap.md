@@ -734,7 +734,11 @@ These stay separate from production until repeatable evidence exists:
    store biometric artifacts in the ledger. (**Shipped:** `learn-face` CLI helper and
    `faces.ignore_known` filtering in `tapo_monitor`).
 5. Extend the capability manifest across camera models and firmware versions to replace
-   model assumptions with adapters selected from observed support.
+   model assumptions with adapters selected from observed support. (**Started:**
+   `tapo-monitor report` and the *Camera report* issue form collect anonymized reports;
+   each accepted one lands in `tests/fixtures/cameras/` as a contract test. Next: widen
+   the redaction allow-list from real reports, and add an `event_profile` row when a
+   report's `--watch` shows bits the default table does not know.)
 6. Standalone battery camera onboarding (hubless protocol). (**Paused:** BLE pairing key
    extraction was inconclusive and test hub hardware is no longer available locally;
    production `hubpoll` clip ingestion remains active for existing paired setups).

@@ -14,6 +14,21 @@ All notable changes to this project are documented here.
   pass an allow-list (everything else is `<redacted>` and listed), and a self-check refuses
   to write a file that still contains an IP, MAC, long hex id or e-mail address.
   `report --summarize FILE` digests a report offline. See `docs/camera-reports.md`.
+- A *Camera report* GitHub issue form, and `tests/fixtures/cameras/`: every accepted
+  report there is a contract test (schema, leak self-check, equal to the current
+  sanitizer's output, events through the real normalizer and classifier, `--summarize`).
+  First fixtures: C260 (fw 1.2.3) and C545D (fw 1.1.7, converted from the earlier
+  capture). `report.resanitize` re-cleans an existing report offline.
+
+### Changed
+- The report's allow-list keeps more harmless settings when they look like an enum or a
+  number: image scene and full-colour modes, codec and bitrate defaults, stream quality
+  names, OSD font/date display, exact SD byte counts, alert type names and boolean flags.
+  Identity fields, schedule times, the card's record start time and OSD label text stay
+  withheld. A getter answering a bare value (`getLensDistortionCorrection`) is kept when
+  its name is on the list, and a value an earlier sanitizer layer withheld is now listed
+  in `redacted_keys`. The self-check no longer takes a byte count such as `115203047424B`
+  for a hex id.
 - Twin probes that fail now keep the camera's numeric `error_code` (never the message).
 - Opt-in MQTT bridge with Home Assistant discovery (`mqtt:` block, extra
   `pip install 'tapo-monitor[mqtt]'`). Each camera appears as a device with person and

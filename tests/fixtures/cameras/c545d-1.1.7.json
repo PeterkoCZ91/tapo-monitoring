@@ -1,0 +1,532 @@
+{
+  "camera": {
+    "device_info": "C545D 1.0 IPC",
+    "device_type": "SMART.IPCAMERA",
+    "event_profile": "c545d",
+    "fw_version": "1.1.7 Build 260421 Rel.9959n",
+    "hw_version": "1.0",
+    "lens_channels": [
+      1,
+      2
+    ],
+    "model": "C545D"
+  },
+  "events": {
+    "recent": [
+      {
+        "age_s": 2990,
+        "alarm_type": 2,
+        "chn_events": {
+          "1": {
+            "events_1": 2,
+            "start_offset_s": 0
+          }
+        },
+        "duration_s": 64
+      },
+      {
+        "age_s": 2989,
+        "alarm_type": 2,
+        "chn_events": {
+          "1": {
+            "events_1": 2,
+            "start_offset_s": -1
+          }
+        },
+        "duration_s": 14
+      },
+      {
+        "age_s": 2814,
+        "alarm_type": 2,
+        "chn_events": {
+          "1": {
+            "events_1": 2,
+            "start_offset_s": 0
+          }
+        },
+        "duration_s": 68
+      },
+      {
+        "age_s": 168,
+        "alarm_type": 6,
+        "chn_events": {
+          "1": {
+            "events_1": 34,
+            "start_offset_s": 2
+          },
+          "2": {
+            "events_1": 34,
+            "start_offset_s": 0
+          }
+        },
+        "duration_s": 108
+      }
+    ],
+    "state": "available",
+    "total": 4,
+    "window_hours": 12.0
+  },
+  "getters": [
+    {
+      "group": "basic",
+      "method": "getBasicInfo",
+      "name": "info",
+      "state": "available"
+    },
+    {
+      "group": "basic",
+      "method": "getTimeCorrection",
+      "name": "clock_correction",
+      "reason": "not_captured",
+      "state": "unknown"
+    },
+    {
+      "group": "firmware",
+      "method": "getFirmwareUpdateStatus",
+      "name": "update_status",
+      "reason": "not_captured",
+      "state": "unknown"
+    },
+    {
+      "group": "storage",
+      "method": "getSDCard",
+      "name": "sd_card",
+      "state": "available"
+    },
+    {
+      "group": "storage",
+      "method": "getRecordPlan",
+      "name": "record_plan",
+      "reason": "not_captured",
+      "state": "unknown"
+    },
+    {
+      "group": "storage",
+      "method": "getCircularRecordingConfig",
+      "name": "circular_recording",
+      "reason": "not_captured",
+      "state": "unknown"
+    },
+    {
+      "group": "alerts",
+      "method": "getAlertEventType",
+      "name": "event_types",
+      "reason": "not_captured",
+      "state": "unknown"
+    },
+    {
+      "group": "alerts",
+      "method": "getLED",
+      "name": "led",
+      "reason": "not_captured",
+      "state": "unknown"
+    },
+    {
+      "group": "privacy",
+      "method": "getPrivacyMode",
+      "name": "lens_mask",
+      "state": "available"
+    },
+    {
+      "group": "detection",
+      "method": "getMotionDetection",
+      "name": "motion",
+      "state": "available"
+    },
+    {
+      "group": "detection",
+      "method": "getPersonDetection",
+      "name": "person",
+      "state": "available"
+    },
+    {
+      "group": "detection",
+      "method": "getVehicleDetection",
+      "name": "vehicle",
+      "state": "available"
+    },
+    {
+      "group": "detection",
+      "method": "getPetDetection",
+      "name": "pet",
+      "state": "available"
+    },
+    {
+      "group": "detection",
+      "method": "getTamperDetection",
+      "name": "tamper",
+      "state": "available"
+    },
+    {
+      "group": "detection",
+      "method": "getLinecrossingDetection",
+      "name": "line_crossing",
+      "reason": "not_captured",
+      "state": "unknown"
+    },
+    {
+      "group": "detection",
+      "method": "getBabyCryDetection",
+      "name": "baby_cry",
+      "reason": "not_captured",
+      "state": "unknown"
+    },
+    {
+      "group": "detection",
+      "method": "getBarkDetection",
+      "name": "bark",
+      "reason": "not_captured",
+      "state": "unknown"
+    },
+    {
+      "group": "detection",
+      "method": "getGlassBreakDetection",
+      "name": "glass_break",
+      "reason": "not_captured",
+      "state": "unknown"
+    },
+    {
+      "group": "detection",
+      "method": "getMeowDetection",
+      "name": "meow",
+      "reason": "not_captured",
+      "state": "unknown"
+    },
+    {
+      "group": "track",
+      "method": "getAutoTrackTarget",
+      "name": "auto_target",
+      "state": "available"
+    },
+    {
+      "group": "track",
+      "method": "getSmartTrackConfig",
+      "name": "smart_config",
+      "reason": "not_captured",
+      "state": "unknown"
+    },
+    {
+      "group": "track",
+      "method": "getRotationStatus",
+      "name": "rotation",
+      "reason": "not_captured",
+      "state": "unknown"
+    },
+    {
+      "group": "light",
+      "method": "getWhitelampStatus",
+      "name": "whitelamp_status",
+      "reason": "not_captured",
+      "state": "unknown"
+    },
+    {
+      "group": "light",
+      "method": "getWhitelampConfig",
+      "name": "whitelamp_config",
+      "reason": "not_captured",
+      "state": "unknown"
+    },
+    {
+      "group": "video",
+      "method": "getVideoQualities",
+      "name": "qualities",
+      "reason": "not_captured",
+      "state": "unknown"
+    },
+    {
+      "group": "video",
+      "method": "getVideoCapability",
+      "name": "capability",
+      "reason": "not_captured",
+      "state": "unknown"
+    },
+    {
+      "group": "video",
+      "method": "getLensDistortionCorrection",
+      "name": "ldc",
+      "reason": "not_captured",
+      "state": "unknown"
+    },
+    {
+      "group": "video",
+      "method": "getOsd",
+      "name": "osd",
+      "reason": "not_captured",
+      "state": "unknown"
+    },
+    {
+      "group": "dual_cam",
+      "method": "getAllChnInfo",
+      "name": "channels",
+      "state": "available"
+    },
+    {
+      "group": "dual_cam",
+      "method": "getDualCamCapability",
+      "name": "capability",
+      "state": "available"
+    },
+    {
+      "group": "dual_cam",
+      "method": "getDualCamLinkage",
+      "name": "linkage",
+      "state": "available"
+    },
+    {
+      "group": "dual_cam",
+      "method": "getLinkageTargetSetting",
+      "name": "linkage_targets",
+      "state": "available"
+    },
+    {
+      "chn_id": [
+        1,
+        2
+      ],
+      "group": "detection_chn",
+      "method": "getMotionDetection",
+      "name": "motion",
+      "state": "available"
+    },
+    {
+      "chn_id": [
+        1,
+        2
+      ],
+      "group": "detection_chn",
+      "method": "getPersonDetection",
+      "name": "person",
+      "state": "available"
+    },
+    {
+      "chn_id": [
+        1,
+        2
+      ],
+      "group": "detection_chn",
+      "method": "getVehicleDetection",
+      "name": "vehicle",
+      "state": "available"
+    },
+    {
+      "chn_id": [
+        1,
+        2
+      ],
+      "group": "detection_chn",
+      "method": "getPetDetection",
+      "name": "pet",
+      "state": "available"
+    },
+    {
+      "chn_id": [
+        1,
+        2
+      ],
+      "group": "detection_chn",
+      "method": "getTamperDetection",
+      "name": "tamper",
+      "state": "available"
+    },
+    {
+      "group": "module",
+      "method": null,
+      "name": "spec",
+      "reason": "raw_transport_disabled",
+      "state": "unknown"
+    }
+  ],
+  "note": "Review the file before sharing it; nothing is uploaded.",
+  "redacted_keys": [
+    "values.dual_cam.channels.system.chn_info[].chn_alias",
+    "values.dual_cam.channels.system.chn_info[].chn_dev_id",
+    "values.dual_cam.channels.system.chn_info[].chn_id",
+    "values.storage.sd_card[].hd_info_1.disk_name"
+  ],
+  "rtsp": null,
+  "schema": "tapo-monitor-report/1",
+  "tool": {
+    "name": "tapo-monitor",
+    "version": "0.7.0"
+  },
+  "values": {
+    "basic": {
+      "info": {
+        "device_info": {
+          "basic_info": {
+            "device_info": "C545D 1.0 IPC",
+            "device_model": "C545D",
+            "device_type": "SMART.IPCAMERA",
+            "hw_version": "1.0",
+            "no_rtsp_constrain": "1",
+            "sw_version": "1.1.7 Build 260421 Rel.9959n"
+          }
+        }
+      }
+    },
+    "detection": {
+      "motion": {
+        "digital_sensitivity": "60",
+        "enabled": "on",
+        "non_vehicle_enabled": "off",
+        "people_enabled": "off",
+        "sensitivity": "medium",
+        "vehicle_enabled": "off"
+      },
+      "person": {
+        "enabled": "on",
+        "sensitivity": "60"
+      },
+      "pet": {
+        "enabled": "off",
+        "sensitivity": "60"
+      },
+      "tamper": {
+        "digital_sensitivity": "50",
+        "enabled": "off",
+        "sensitivity": "medium"
+      },
+      "vehicle": {
+        "enabled": "off",
+        "sensitivity": "60"
+      }
+    },
+    "detection_chn": {
+      "motion": {
+        "1": {
+          "digital_sensitivity": "60",
+          "enabled": "on",
+          "non_vehicle_enabled": "off",
+          "people_enabled": "off",
+          "sensitivity": "medium",
+          "vehicle_enabled": "off"
+        },
+        "2": {
+          "digital_sensitivity": "60",
+          "enabled": "on",
+          "non_vehicle_enabled": "off",
+          "people_enabled": "off",
+          "sensitivity": "high",
+          "vehicle_enabled": "off"
+        }
+      },
+      "person": {
+        "1": {
+          "enabled": "on",
+          "sensitivity": "60"
+        },
+        "2": {
+          "enabled": "on",
+          "sensitivity": "60"
+        }
+      },
+      "pet": {
+        "1": {
+          "enabled": "off",
+          "sensitivity": "60"
+        },
+        "2": {
+          "enabled": "off",
+          "sensitivity": "60"
+        }
+      },
+      "tamper": {
+        "1": {
+          "digital_sensitivity": "50",
+          "enabled": "off",
+          "sensitivity": "medium"
+        },
+        "2": {
+          "digital_sensitivity": "50",
+          "enabled": "off",
+          "sensitivity": "high"
+        }
+      },
+      "vehicle": {
+        "1": {
+          "enabled": "off",
+          "sensitivity": "60"
+        },
+        "2": {
+          "enabled": "off",
+          "sensitivity": "60"
+        }
+      }
+    },
+    "dual_cam": {
+      "capability": {
+        "image_capability": {
+          "dualCam": {
+            "zooms": [
+              "1.0x",
+              "5.0x"
+            ]
+          }
+        }
+      },
+      "channels": {
+        "system": {
+          "chn_info": [
+            {
+              "chn_alias": "<redacted>",
+              "chn_dev_id": "<redacted>",
+              "chn_id": "<redacted>"
+            },
+            {
+              "chn_alias": "<redacted>",
+              "chn_dev_id": "<redacted>",
+              "chn_id": "<redacted>"
+            }
+          ]
+        }
+      },
+      "linkage": {
+        "dual_cam_linkage": {
+          "linkage_state": {
+            "enabled": "on",
+            "linkage_type": 0
+          }
+        }
+      },
+      "linkage_targets": {
+        "dual_cam_linkage": {
+          "baby_enabled": "LINKAGE_BABY_ENABLE_OFF",
+          "people_enabled": "on",
+          "pet_enabled": "off",
+          "vehicle_enabled": "off"
+        }
+      }
+    },
+    "privacy": {
+      "lens_mask": {
+        "enabled": "off"
+      }
+    },
+    "storage": {
+      "sd_card": [
+        {
+          "hd_info_1": {
+            "detect_status": "offline",
+            "disk_name": "<redacted>",
+            "free_space": "0B",
+            "percent": "0",
+            "rw_attr": "r",
+            "status": "offline",
+            "total_space": "0B",
+            "type": "local",
+            "write_protect": "0"
+          }
+        }
+      ]
+    },
+    "track": {
+      "auto_target": {
+        "back_time": "30",
+        "enabled": "off",
+        "track_mode": "pantilt",
+        "track_time": "0"
+      }
+    }
+  },
+  "watch": null
+}
