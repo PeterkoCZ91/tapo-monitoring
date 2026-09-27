@@ -829,3 +829,64 @@ def test_the_firmware_lens_linkage_holds_recall_and_guard(monkeypatch, tmp_path)
     refusals = sc.state.motion_refusals["front"]
     assert refusals["schedule:linkage"] >= 1
     assert refusals["pan_limit:linkage"] >= 1
+
+
+# ── detection switched off / the app's notifications silenced (10.8) ─────────
+
+def _notices(sc):
+    return [a[1] for a in sc.actions("text") if "detection" in a[1]]
+
+
+def test_detection_switched_off_in_the_app_is_told_once_per_change(monkeypatch, tmp_path):
+    # The owner switches person detection off in the app at 70 s: the next control pass
+    # (120) reads it before the self-heal turns it back on and says so once — not an
+    # off/on pair, not once per pass. Motion detection, which nothing re-asserts, goes off
+    # at 190: one 🚫, then a restart that must neither repeat it nor forget it, and one ✅
+    # when the owner switches it back on.
+    sc = Scenario(monkeypatch, tmp_path,
+                  [tracking_camera(pan_limit={"enabled": False}, detection_notice=True)])
+    cam = sc.cams["a"]
+    sc.run(70)                                   # 0..65: all on, nothing to say
+    assert _notices(sc) == []
+    cam.person_detection = False
+    sc.run(120)                                  # 70..185
+    assert cam.person_detection is True          # the self-heal still wins
+    cam.motion_detection = False
+    sc.run(60)                                   # 190..245
+    sc.restart()
+    sc.run(120)                                  # 250..365: still off after the restart
+    cam.motion_detection = True
+    sc.run(60)                                   # 370..425
+
+    notices = _notices(sc)
+    assert len(notices) == 3
+    assert "person detection was switched off — switched it back on" in notices[0]
+    assert "motion detection is switched off" in notices[1]
+    assert "motion detection is back on" in notices[2]
+    times = [t for t, a in sc.timeline if a[0] == "text" and "detection" in a[1]]
+    assert times == [at(120), at(240), at(370)]   # restart moved control to 250, 310, 370
+
+
+def test_alerts_follow_the_tapo_apps_notification_switch(monkeypatch, tmp_path):
+    # With follow_app_notifications the camera keeps detecting and recording, but while
+    # the app's notifications are off no photo leaves the host. The switch is read on the
+    # control pass, so a change takes effect within one control interval.
+    sc = Scenario(monkeypatch, tmp_path,
+                  [tracking_camera(pan_limit={"enabled": False},
+                                   follow_app_notifications=True)],
+                  alerts={"cooldown": 1})
+    cam = sc.cams["a"]
+    sc.run(10)                                   # control pass at 0: notifications on
+    cam.push(person(sc.clock.now))
+    sc.run(50)                                   # 10..55: delivered
+    cam.app_notifications = False
+    sc.run(10)                                   # 60: control pass reads "off"
+    cam.push(person(sc.clock.now))
+    sc.run(50)                                   # 70..115: recorded, not sent
+    cam.app_notifications = True
+    sc.run(10)                                   # 120: back on
+    cam.push(person(sc.clock.now))
+    sc.run(20)
+
+    assert [t for t, a in sc.timeline if a == ("send", "a")] == [at(10), at(130)]
+    assert daemon._app_silenced == set()

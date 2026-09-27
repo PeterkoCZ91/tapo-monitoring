@@ -210,13 +210,15 @@ event sources; never configure them as the only source. `strict_people: true` pr
 camera-confirmed people while still allowing bare motion to enter the scorer/follow-up
 funnel where configured.
 
-### Data collection and privacy notices
+### Data collection, privacy and detection notices
 
-Two per-camera switches:
+Per-camera switches:
 
 ```yaml
-    telegram_alerts: false   # decide and record every alert as usual, send no photo
-    privacy_notice: true     # one Telegram message when privacy mode goes on / off
+    telegram_alerts: false          # decide and record every alert as usual, send no photo
+    privacy_notice: true            # one Telegram message when privacy mode goes on / off
+    detection_notice: true          # one message when motion/person detection goes off / on
+    follow_app_notifications: true  # no alert photos while the Tapo app's notifications are off
 ```
 
 - `telegram_alerts: false` keeps a camera in data-collection mode: every decision, the
@@ -230,6 +232,31 @@ Two per-camera switches:
   parked and "🔓 … watching again" when it comes back. The last announced state is kept in
   the runtime state, so a restart neither repeats nor misses a change; a failed send is
   retried on the next pass.
+- `detection_notice: true` reads motion and person detection on every control pass (two
+  getter calls) and tells Telegram when either is switched off in the Tapo app:
+  - Motion detection is never re-asserted by the daemon, so it works like the privacy
+    notice: "🚫 camera '…': motion detection is switched off" once, "✅ … is back on"
+    once. A fresh start announces only "off".
+  - Person detection is re-asserted ON every pass (the self-heal against a switch that
+    drops by itself). It is read *before* that, so a switch flipped off in the app is
+    still seen: "↩️ … person detection was switched off — switched it back on" is ONE
+    message, not an off/on pair. These are capped at one per camera per 24 h; repeats in
+    between (something turning it off before every pass, or on every restart) are
+    counted into the next message. Only when the self-heal is refused by the camera or
+    not allowed (`reliability.allowed_repairs` without `person_detection`) does the
+    switch stay off; that is announced once as off and once as back on.
+
+  The last announced state is kept in the runtime state; a failed send is retried.
+- `follow_app_notifications: true` reads the Tapo app's notification switch for the
+  camera (`getMsgPushConfig`, `chn1_msg_push_info.notification_enabled`) on every control
+  pass. While it is `off`, alert photos are handled exactly as with
+  `telegram_alerts: false` — recorded, not sent — and system notices (outage, privacy,
+  detection, drift) still go out. The change takes effect within one control pass. An
+  unreadable or unknown answer never silences anything and is logged once per camera;
+  fields next to the switch that tapo-monitor does not interpret (a notification
+  schedule, if a firmware exposes one) are logged once and ignored. Tested firmware
+  exposes only the on/off switch over the local API, no schedule: a schedule the app
+  keeps is not visible to the daemon.
 
 ## Dual-lens cameras (C545D)
 

@@ -24,6 +24,13 @@ All notable changes to this project are documented here.
 - API deny-list: every camera client refuses `checkDetectEventState` and
   `getInfLampCapability` (each took the local API down for ~12 s on a C545D), also inside
   `multipleRequest` batches and hub envelopes; twin probes skip them as `denied_method`.
+- `detection_notice` (per camera): one Telegram message when motion or person detection
+  is switched off in the app and one when it is back on. Person detection is read before
+  the self-heal re-enables it, so a switch flipped off is reported as one "switched it
+  back on" message, at most once a day per camera.
+- `follow_app_notifications` (per camera): while the Tapo app's notification switch
+  (`getMsgPushConfig`) is off, alerts are recorded but not sent; an unreadable switch
+  never silences.
 
 ## [0.6.0] - 2026-09-25
 

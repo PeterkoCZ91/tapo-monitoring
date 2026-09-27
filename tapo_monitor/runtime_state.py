@@ -53,6 +53,27 @@ def _serializable(entries, what, logger):
     return out
 
 
+_ANNOUNCED_FLAGS = ("motion", "person", "restored_unsent")
+
+
+def _detection_announced(raw):
+    """Only the known, well-typed fields of ``detection_announced`` (per camera). Pure."""
+    out = {}
+    for camera, entry in (raw or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        kept = {k: entry[k] for k in _ANNOUNCED_FLAGS if isinstance(entry.get(k), bool)}
+        at = entry.get("restored_at")
+        if isinstance(at, (int, float)) and not isinstance(at, bool):
+            kept["restored_at"] = float(at)
+        repeats = entry.get("restored_repeats")
+        if isinstance(repeats, int) and not isinstance(repeats, bool) and repeats >= 0:
+            kept["restored_repeats"] = repeats
+        if kept:
+            out[str(camera)] = kept
+    return out
+
+
 def snapshot(state, logger=None):
     """The persisted subset of a MonitorState, JSON-ready. ``saved_at`` is added on save."""
     return {
@@ -63,6 +84,8 @@ def snapshot(state, logger=None):
         "privacy_announced": {str(k): bool(v)
                               for k, v in (getattr(state, "privacy_announced", None)
                                            or {}).items()},
+        "detection_announced": _detection_announced(
+            getattr(state, "detection_announced", None)),
     }
 
 
@@ -171,6 +194,9 @@ def load(path, state, now, logger=None, max_age=MAX_AGE):
     if isinstance(announced, dict) and hasattr(state, "privacy_announced"):
         state.privacy_announced.update(
             {str(k): v for k, v in announced.items() if isinstance(v, bool)})
+    detection = payload.get("detection_announced") or {}
+    if isinstance(detection, dict) and hasattr(state, "detection_announced"):
+        state.detection_announced.update(_detection_announced(detection))
     state.runtime_saved = snapshot(state, logger)
     return {"pending_hub": len(kept_hub), "pending_sd": len(kept_sd),
             "cooldowns": len(last_alert) + len(last_event_start)}

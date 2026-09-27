@@ -133,6 +133,15 @@ cameras:
     #                          # and keeping the sharpest unless the box is >=1.25x larger.
     # sd_dense_start: false    # optional; also take a frame every 2 s over the event's
     #                          # first 12 s (+3-6 frames). Unset = on with "largest".
+    # telegram_alerts: true    # optional; false = record every alert as sent, send no photo
+    # privacy_notice: false    # optional; one Telegram message when privacy mode goes on/off
+    # detection_notice: false  # optional; one message when motion or person detection is
+    #                          # switched off in the app (and when back on). Person is read
+    #                          # before the daemon switches it back on: one "switched it back
+    #                          # on" message, at most one a day.
+    # follow_app_notifications: false  # optional; while the Tapo app's notifications for
+    #                          # this camera are off, alerts are recorded but not sent.
+    #                          # Unreadable switch = alerts sent as usual.
     # night_only: false      # optional; detect and alert only during the astral night
     #                          # window. Camera control/tracking still runs 24/7, but by
     #                          # day detection is muted (events drained silently so the

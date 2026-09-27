@@ -43,3 +43,11 @@ def _no_random_drop_sample(monkeypatch):
     from tapo_monitor import sentlog
     monkeypatch.setenv(sentlog.ENV_DROP_SAMPLE, "0")
     monkeypatch.setattr(sentlog, "_drop_cap", sentlog.DropSampleCap())
+
+
+@pytest.fixture(autouse=True)
+def _fresh_app_silence(monkeypatch):
+    """Tapo-app notification silencing is module-level state in the daemon: start empty."""
+    from tapo_monitor import daemon
+    monkeypatch.setattr(daemon, "_app_silenced", set())
+    monkeypatch.setattr(daemon, "_app_push_logged", set())

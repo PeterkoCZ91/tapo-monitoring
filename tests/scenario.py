@@ -109,7 +109,8 @@ class FakeCamera:
     Script it between ticks: :meth:`push` queues events for the next ``getEvents``,
     :attr:`pan_x` is where the lens points (auto-track moving it = assigning it), and
     :attr:`online`, :attr:`privacy`, :attr:`motor_refusal`, :attr:`events_error` and
-    :attr:`rtsp_ok` switch failure modes on and off.
+    :attr:`rtsp_ok` switch failure modes on and off; :attr:`motion_detection`,
+    :attr:`person_detection` and :attr:`app_notifications` are the app's switches.
 
     A class attribute set to ``None`` models firmware without that call: the twin reads
     it as ``missing_method`` and ``set_autotrack`` falls through to ``executeFunction``.
@@ -129,6 +130,10 @@ class FakeCamera:
         self.autotrack = None           # unknown until the daemon asserts it
         self.back_time = None
         self.refuse_autotrack = False   # firmware that accepts no auto-track call at all
+        self.motion_detection = True    # the app's detection switches
+        self.person_detection = True
+        self.refuse_person = False      # setPersonDetection refused (self-heal fails)
+        self.app_notifications = True   # the Tapo app's notification switch
         self._pending = []
 
     # ── scripting ────────────────────────────────────────────────────────────
@@ -163,8 +168,24 @@ class FakeCamera:
     def setDayNightMode(self, _mode):
         self._require_online()
 
-    def setPersonDetection(self, *_a, **_k):
+    def setPersonDetection(self, enabled, *_a, **_k):
         self._require_online()
+        if self.refuse_person:
+            raise Exception("-40106 unsupported")
+        self.person_detection = bool(enabled)
+
+    def getMotionDetection(self):
+        self._require_online()
+        return {"enabled": "on" if self.motion_detection else "off", "sensitivity": "medium"}
+
+    def getPersonDetection(self):
+        self._require_online()
+        return {"enabled": "on" if self.person_detection else "off"}
+
+    def getNotificationsEnabled(self):
+        self._require_online()
+        return {"notification_enabled": "on" if self.app_notifications else "off",
+                "rich_notification_enabled": "off"}
 
     def setVehicleDetection(self, *_a, **_k):
         self._require_online()
@@ -306,6 +327,8 @@ class Scenario:
             mp.delenv(var, raising=False)
         # Module-level throttles that would otherwise leak between scenarios.
         mp.setattr(daemon, "_recall_state", {})
+        mp.setattr(daemon, "_app_silenced", set())
+        mp.setattr(daemon, "_app_push_logged", set())
         mp.setattr(tracking, "_BACK_TIME_WARNED", set())
         # Nothing sleeps: auto-track verify waits 1-6 s, connect retries 5 s apart.
         mp.setattr(tracking, "_time", types.SimpleNamespace(sleep=lambda _s: None))

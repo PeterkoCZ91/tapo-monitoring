@@ -282,7 +282,7 @@ def _repair(name, call, failures):
     signal is not how often they ran but whether the camera is refusing them: a camera
     with person detection stuck off demotes every person to bare motion. Counting into
     ``failures`` lets the daily digest say so; the exception stays contained, because a
-    control failure must never stop polling.
+    control failure must never stop polling. Returns whether the camera took the call.
     """
     try:
         call()
@@ -290,6 +290,8 @@ def _repair(name, call, failures):
         log.warning("self-heal %s refused by camera: %s", name, exc)
         if failures is not None:
             failures[name] = failures.get(name, 0) + 1
+        return False
+    return True
 
 
 RECALL_REPEAT_SECONDS = 1800
@@ -381,7 +383,7 @@ def _apply_night_vision_mode(cam, mode, camera=None, failures=None):
 
 def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
                repair_failures=None, camera=None, privacy_on=False, hold=False,
-               motion_refusals=None, linkage=False):
+               motion_refusals=None, linkage=False, repaired=None):
     """Apply a CameraPlan to a connected camera in firmware-safe order.
 
     SmartTrack / motion sensitivity / preset first; auto-track asserted LAST and verified.
@@ -395,7 +397,9 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
     Both exceptions are decided by :func:`tapo_monitor.motion.decide`, the same arbiter
     the pan-limit guard asks; refusals are counted into ``motion_refusals`` when given.
     ``linkage`` skips the recall while a dual-lens camera's firmware is turning its
-    pan/tilt lens after a subject (see :func:`cameras_under_linkage`).
+    pan/tilt lens after a subject (see :func:`cameras_under_linkage`). ``repaired``, when
+    given, collects the self-heals the camera accepted this pass (``detection_notice``
+    uses it to tell "switched back on" from "still off").
     """
     try:
         cam.setMotionDetection(sensitivity=int(plan.motion_sensitivity))
@@ -422,7 +426,8 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
                 cam.setPersonDetection(True, sensitivity=plan.person_sensitivity)
             else:
                 cam.setPersonDetection(True)
-        _repair("person_detection", _person, repair_failures)
+        if _repair("person_detection", _person, repair_failures) and repaired is not None:
+            repaired.add("person_detection")
     # Keep the camera following people, not cars: the C560WS auto-track swings after any
     # AI-detected target, so vehicle detection is re-asserted OFF every tick (SmartTrack
     # already excludes vehicles, but that alone doesn't stop the detector feeding track).
@@ -509,6 +514,81 @@ def read_privacy(cam):
         return None
 
 
+def _switch_state(value):
+    """``{"enabled": "on"|"off"}`` -> True/False; any other shape -> None. Pure."""
+    if isinstance(value, Mapping):
+        flag = value.get("enabled")
+        if flag in ("on", "off"):
+            return flag == "on"
+    return None
+
+
+def read_detection(cam):
+    """Read motion and person detection on a connected client: ``{"motion", "person"}``.
+
+    Each value is True/False, or None when the getter is missing, refused or answers an
+    odd shape — "not known", never read as "off". Device-level getters only (no
+    ``chn_id``): on a dual-lens camera that is the switch the app shows for the camera.
+    """
+    out = {}
+    for kind, name in (("motion", "getMotionDetection"), ("person", "getPersonDetection")):
+        getter = getattr(cam, name, None)
+        value = None
+        if callable(getter):
+            try:
+                value = _switch_state(getter())
+            except Exception as exc:  # noqa: BLE001 - an optional read must not stop the pass
+                log.debug("%s detection read failed: %s", kind, exc)
+        out[kind] = value
+    return out
+
+
+# Cameras whose getMsgPushConfig answer was not understood (or carried fields this
+# module does not interpret), so each is logged once per process rather than every pass.
+_app_push_logged: set = set()
+_APP_PUSH_KNOWN = {"notification_enabled", "rich_notification_enabled"}
+
+
+def app_notifications_from_reading(value, camera=None):
+    """``chn1_msg_push_info`` -> True (app notifies), False (silenced) or None. Pure-ish.
+
+    The only shape seen on tested firmware is ``{"notification_enabled": "on"|"off",
+    "rich_notification_enabled": ...}``: an on/off switch, no schedule. Anything else is
+    None ("not known", never silencing) and logged once per camera; extra fields next to a
+    readable switch — a schedule on some firmware, perhaps — are logged once and ignored.
+    """
+    flag = value.get("notification_enabled") if isinstance(value, Mapping) else None
+    if flag not in ("on", "off"):
+        if camera not in _app_push_logged:
+            _app_push_logged.add(camera)
+            log.warning("app notification switch of %s not understood, ignored: %r",
+                        camera, value)
+        return None
+    extra = sorted(set(value) - _APP_PUSH_KNOWN)
+    if extra and camera not in _app_push_logged:
+        _app_push_logged.add(camera)
+        log.info("app notification config of %s has fields not interpreted: %s",
+                 camera, ", ".join(map(str, extra)))
+    return flag == "on"
+
+
+def read_app_notifications(cam, camera=None):
+    """Read the Tapo app's notification switch (``getMsgPushConfig``): True/False/None.
+
+    pytapo's ``getNotificationsEnabled`` asks ``chn1_msg_push_info``, which is device-wide
+    (``chn2_…`` answers -40101 on a dual-lens camera). A missing or refused call is None.
+    """
+    getter = getattr(cam, "getNotificationsEnabled", None)
+    if not callable(getter):
+        return None
+    try:
+        value = getter()
+    except Exception as exc:  # noqa: BLE001 - an optional read must not stop the pass
+        log.debug("app notification read failed for %s: %s", camera, exc)
+        return None
+    return app_notifications_from_reading(value, camera)
+
+
 def parked_lenses(state):
     """Cameras whose lens privacy mode has parked, freshest reading first. Pure.
 
@@ -527,7 +607,7 @@ def parked_lenses(state):
 
 def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=None,
              repair_failures=None, privacy=None, hold=None, motion_refusals=None,
-             privacy_seen=None, linkage=None):
+             privacy_seen=None, linkage=None, detection_seen=None, app_push_seen=None):
     """One pass over all cameras. Dependencies injectable for testing.
 
     Returns a dict {camera_name: CameraPlan} of what was planned. ``repair_failures`` is
@@ -542,6 +622,12 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
     A camera that moves (a preset or the pan guard) also has its privacy switch read on
     the connected client this pass (:func:`read_privacy`); a definite answer overrides the
     twin's ``privacy`` for this pass and is stored in ``privacy_seen`` for the guard.
+
+    A ``detection_notice`` camera has motion and person detection read BEFORE
+    :func:`apply_plan` re-asserts person detection, into ``detection_seen``: person is
+    ``"restored"`` when it was off and the self-heal switched it back on this pass. A
+    ``follow_app_notifications`` camera has the app's notification switch read into
+    ``app_push_seen``. Both are cleared per camera first, so an unread pass decides nothing.
     """
     now = now if now is not None else _time.time()
     is_night = is_night or scheduling.is_night
@@ -572,9 +658,20 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
         plans[cfg.name] = plan
         if privacy_seen is not None:
             privacy_seen.pop(cfg.name, None)
+        if detection_seen is not None:
+            detection_seen.pop(cfg.name, None)
+        if app_push_seen is not None:
+            app_push_seen.pop(cfg.name, None)
         if connect is not None:
             cam, _err = connect(cfg)
             if cam is not None:
+                detection_read = (read_detection(cam)
+                                  if cfg.detection_notice and detection_seen is not None
+                                  else None)
+                if cfg.follow_app_notifications and app_push_seen is not None:
+                    pushes = read_app_notifications(cam, cfg.name)
+                    if pushes is not None:
+                        app_push_seen[cfg.name] = pushes
                 privacy_on = cfg.name in (privacy or ())
                 if plan.preset or cfg.pan_limit.enabled or cfg.privacy_notice:
                     fresh = read_privacy(cam)
@@ -587,7 +684,11 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
                 # one: every other control call is accepted, and the one setting the night
                 # depends on never takes — with not a single log line to show for it.
                 # Passed only when set, so the call a single-lens camera sees is unchanged.
-                linked = {"linkage": True} if cfg.name in (linkage or ()) else {}
+                linked: dict[str, Any] = ({"linkage": True} if cfg.name in (linkage or ())
+                                          else {})
+                repaired: set[str] = set()
+                if detection_read is not None:
+                    linked["repaired"] = repaired
                 if not apply_plan(cam, plan, app.reliability,
                                   repair_failures=repair_failures, camera=cfg.name,
                                   privacy_on=privacy_on,
@@ -596,6 +697,11 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
                     log.warning("auto-track %s not confirmed for %s: the camera took the "
                                 "call but read back the other state",
                                 "on" if plan.autotrack_on else "off", cfg.name)
+                if detection_read is not None and detection_seen is not None:
+                    if (detection_read["person"] is False
+                            and "person_detection" in repaired):
+                        detection_read["person"] = "restored"
+                    detection_seen[cfg.name] = detection_read
     return plans
 
 
@@ -696,6 +802,13 @@ class MonitorState:
     privacy_seen: dict = field(default_factory=dict)
     # camera -> privacy state last announced on Telegram (privacy_notice); persisted
     privacy_announced: dict = field(default_factory=dict)
+    # Per camera, motion/person detection as the last control pass read it (see run_once;
+    # person may be "restored"), and what detection_notice last announced; the latter is
+    # persisted. Per camera, the Tapo app's notification switch as last read (True/False,
+    # absent when unread: an unread switch never silences).
+    detection_seen: dict = field(default_factory=dict)
+    detection_announced: dict = field(default_factory=dict)
+    app_push_seen: dict = field(default_factory=dict)
     # Wall time of the last pan_limit recall per camera (the tick's own `now`, so it is
     # directly comparable to the sampler's): lets an expiring hold tell "no second frame
     # ever came" from "the guard yanked the subject out of view mid-corroboration".
@@ -1235,7 +1348,8 @@ def send_alert_photo(cfg, secrets, image, caption, downscale=None, score=None,
     the sent-log index with the frame.
     """
     token, chat = secrets["telegram_token"], secrets["telegram_chat"]
-    if not cfg.telegram_alerts:
+    app_silenced = cfg.follow_app_notifications and cfg.name in _app_silenced
+    if not cfg.telegram_alerts or app_silenced:
         # Data collection only: keep the record a real send leaves and report success, so
         # cooldowns, audits and the incident statistics stay what they would be live.
         try:
@@ -1245,7 +1359,9 @@ def send_alert_photo(cfg, secrets, image, caption, downscale=None, score=None,
             return False
         sentlog.archive_if_configured(frame, caption, camera=cfg.name, score=score,
                                       incident=incident, send_path=send_path)
-        log.info("alert recorded, not sent (telegram_alerts off) for %s", cfg.name)
+        log.info("alert recorded, not sent (%s) for %s",
+                 "telegram_alerts off" if not cfg.telegram_alerts
+                 else "Tapo app notifications off", cfg.name)
         return True
     out_dir = os.path.dirname(image)
     cropped = crop_for_subject(cfg, image, out_dir, secrets,
@@ -2926,6 +3042,123 @@ def privacy_notice_pass(app, state, *, secrets, send_text=None):
             log.warning("privacy notice for %s not delivered; retrying next pass", cfg.name)
 
 
+# A person-detection switch the self-heal turns back on is announced at most this often
+# per camera; the repeats in between are counted into the next message. The 2026-06-15
+# failure (the switch dropping after every daemon restart) would otherwise send one
+# message per restart, and a switch something keeps turning off one per control pass.
+PERSON_RESTORED_QUIET = 24 * 3600
+
+
+def _detection_text(camera, kind, state, repeats=0):
+    label = "motion detection" if kind == "motion" else "person detection"
+    if state == "restored":
+        more = f" ({repeats} more time(s) since the last notice)" if repeats else ""
+        return (f"↩️ camera '{camera}': {label} was switched off — switched it back on"
+                f"{more}")
+    if state:
+        return f"✅ camera '{camera}': {label} is back on"
+    if kind == "motion":
+        return (f"🚫 camera '{camera}': motion detection is switched off — the camera "
+                "reports no events")
+    return (f"🚫 camera '{camera}': person detection is off and was not switched back "
+            "on — people arrive as bare motion")
+
+
+def detection_notice_pass(app, state, *, secrets, now=None, send_text=None):
+    """Tell Telegram once when a ``detection_notice`` camera's motion or person detection
+    is switched off, and once when it is back on.
+
+    Reads ``state.detection_seen`` from the control pass (no reading, no decision). Motion
+    detection is never re-asserted, so it works like the privacy notice: off is announced,
+    then on; a fresh start announces only "off". Person detection is re-asserted ON every
+    pass (the self-heal), so the switch is read before that and a pass that found it off
+    and switched it back reads ``"restored"``: ONE message ("switched it back on"), no
+    off/on pair — the next pass reads "on" and that is already what was announced. Those
+    messages are capped to one per :data:`PERSON_RESTORED_QUIET`, the repeats counted
+    into the next one. Only when the self-heal is refused or not allowed does person stay
+    off; that is announced once as off, then once as back on. ``detection_announced`` is
+    persisted; a failed send is retried on the next pass.
+    """
+    now = _time.time() if now is None else now
+    send_text = send_text or (lambda text: notify.send_text(
+        secrets["telegram_token"], secrets["telegram_chat"], text))
+    for cfg in app.cameras:
+        if not cfg.detection_notice:
+            continue
+        seen = (state.detection_seen or {}).get(cfg.name) or {}
+        announced = state.detection_announced.setdefault(cfg.name, {})
+        for kind in ("motion", "person"):
+            value = seen.get(kind)
+            if value is None:
+                continue
+            if value == "restored":
+                last = announced.get("restored_at")
+                # An announced "off" is always followed by the news that it is back on.
+                if (last is not None and now - last < PERSON_RESTORED_QUIET
+                        and not announced.get("restored_unsent")
+                        and announced.get(kind) is not False):
+                    announced["restored_repeats"] = announced.get("restored_repeats", 0) + 1
+                    announced[kind] = True
+                    log.info("person detection of %s switched back on again (notice "
+                             "held, %d since the last one)", cfg.name,
+                             announced["restored_repeats"])
+                    continue
+                text = _detection_text(cfg.name, kind, "restored",
+                                       announced.get("restored_repeats", 0))
+                announced[kind] = True
+                if send_text(text):
+                    announced.update(restored_at=now, restored_repeats=0,
+                                     restored_unsent=False)
+                    log.info("detection notice sent for %s: person restored", cfg.name)
+                else:
+                    announced["restored_unsent"] = True
+                    log.warning("detection notice for %s not delivered; retrying next "
+                                "pass", cfg.name)
+                continue
+            if kind == "person" and value is True and announced.get("restored_unsent"):
+                # A "switched it back on" that did not go out is still owed: the state it
+                # reports is the one read now, so it is sent rather than dropped.
+                text = _detection_text(cfg.name, kind, "restored",
+                                       announced.get("restored_repeats", 0))
+                if send_text(text):
+                    announced.update(restored_at=now, restored_repeats=0,
+                                     restored_unsent=False)
+                announced[kind] = True
+                continue
+            previous = announced.get(kind)
+            if previous == value or (previous is None and value is True):
+                announced[kind] = value
+                continue
+            if send_text(_detection_text(cfg.name, kind, value)):
+                announced[kind] = value
+                log.info("detection notice sent for %s: %s %s", cfg.name, kind,
+                         "on" if value else "off")
+            else:
+                log.warning("detection notice for %s not delivered; retrying next pass",
+                            cfg.name)
+
+
+# Cameras whose Tapo app notifications are off right now (follow_app_notifications),
+# rebuilt from ``MonitorState.app_push_seen`` after every control pass. Module-level
+# because every delivery path funnels into send_alert_photo, which is handed the camera's
+# config but not the daemon state; the daemon runs one MonitorState per process.
+_app_silenced: set = set()
+
+
+def sync_app_silence(app, state):
+    """Rebuild :data:`_app_silenced` from this control pass's reads; log each change."""
+    now_off = {cfg.name for cfg in app.cameras
+               if cfg.follow_app_notifications
+               and (state.app_push_seen or {}).get(cfg.name) is False}
+    for name in sorted(now_off - _app_silenced):
+        log.info("Tapo app notifications off for %s: alerts recorded, not sent", name)
+    for name in sorted(_app_silenced - now_off):
+        log.info("Tapo app notifications on again for %s (or unread): alerts sent", name)
+    _app_silenced.clear()
+    _app_silenced.update(now_off)
+    return now_off
+
+
 def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
     """Refresh the opt-in Camera Digital Twin using already-connected clients only."""
     if not app.observability.digital_twin and not app.reliability.enabled:
@@ -3374,7 +3607,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
               last_control, control_interval,
               run_control=None, watchdog=None, monitor=None, drain=None, sample=None,
               connect_factory=None, is_night=None, guard=None, inspect=None, digest=None,
-              hubpoll=None, sd_worker=None, privacy_notice=None):
+              hubpoll=None, sd_worker=None, privacy_notice=None, detection_notice=None):
     """One loop iteration with control decoupled from event polling.
 
     The slow, rarely-changing work (camera tracking/sensitivity/preset + the per-tick
@@ -3401,6 +3634,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     guard = guard or _pan_guard_pass
     inspect = inspect or process_digital_twin
     privacy_notice = privacy_notice or privacy_notice_pass
+    detection_notice = detection_notice or detection_notice_pass
     digest = digest or _review_digest_pass
     connect_factory = connect_factory or _connect_camera
     is_night = is_night or scheduling.is_night
@@ -3412,18 +3646,25 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
         # Only a dual-lens camera whose firmware is moving its pan/tilt lens adds this;
         # everything else sees the control call it always did.
         linked = cameras_under_linkage(app, state, now)
+        extra = {"linkage": linked} if linked else {}
+        # Passed only when a camera opts in, so every other control call is unchanged.
+        if any(c.detection_notice for c in app.cameras):
+            extra["detection_seen"] = state.detection_seen
+        if any(c.follow_app_notifications for c in app.cameras):
+            extra["app_push_seen"] = state.app_push_seen
         plans = run_control(app, now=now, connect=connect_factory(cam_clients, state, now),
                             repair_failures=state.repair_failures,
                             privacy=twin.cameras_in_privacy(state.twin_fleet),
                             privacy_seen=state.privacy_seen,
                             hold=cameras_holding_recall(app, state, now),
-                            motion_refusals=state.motion_refusals,
-                            **({"linkage": linked} if linked else {}))
+                            motion_refusals=state.motion_refusals, **extra)
         if isinstance(plans, Mapping):
             state.desired_plans.update(plans)
         watchdog(app, cam_clients, state, now=now, secrets=secrets, night=night)
         inspect(app, cam_clients, state, now=now, secrets=secrets)
         privacy_notice(app, state, secrets=secrets)
+        detection_notice(app, state, secrets=secrets, now=now)
+        sync_app_silence(app, state)
         last_control = now
     # Everything that scores sees this tick's thresholds (scorer.night_threshold at night).
     scoring = thresholds_for_tick(app, night)

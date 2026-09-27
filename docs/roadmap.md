@@ -672,9 +672,13 @@ closest.
   opt-out. Today only the twin's drift alert covers it: off by default
   (`observability.drift_alerts`), up to `probe_interval` (900 s) late, and worded as a
   configuration drift.
-- [ ] The same for detection switched off in the app (motion or person), and read the app's
+- [x] The same for detection switched off in the app (motion or person), and read the app's
   own notification schedule (`getMsgPushConfig`) so a customer who silences the Tapo app
-  can choose to silence these alerts too.
+  can choose to silence these alerts too. `detection_notice` (person read before the
+  self-heal re-enables it: one "switched it back on", at most daily) and
+  `follow_app_notifications` (alerts recorded, not sent, while the app's switch is off).
+  Tested firmware exposes only an on/off switch locally, no schedule; unknown shapes never
+  silence.
 
 ### 10.7 — A public reference for the local API
 

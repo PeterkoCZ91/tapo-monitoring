@@ -215,6 +215,16 @@ class CameraConfig:
     # Read the privacy switch on every control pass and tell Telegram once when the camera
     # enters or leaves privacy mode (it is not watching while the lens is parked).
     privacy_notice: bool = False
+    # Read motion and person detection on every control pass and tell Telegram once when
+    # either is switched off (in the Tapo app) and once when it is back on. Person
+    # detection is read BEFORE the daemon re-asserts it, so a switch the self-heal flips
+    # back is still reported (at most once a day), instead of never being seen.
+    detection_notice: bool = False
+    # Follow the Tapo app's notification switch for this camera (getMsgPushConfig): while
+    # the app's notifications are off, alert photos are recorded but not sent, exactly as
+    # with telegram_alerts: false. System notices still go out. An unreadable switch
+    # never silences anything.
+    follow_app_notifications: bool = False
     # Optional AI person-detection sensitivity (0-100) re-asserted every control tick.
     # None leaves the camera's value unchanged; lower = fewer false AI-person detections.
     person_sensitivity: int | None = None
@@ -407,6 +417,12 @@ def _check_enum(value, allowed, key, where):
     if value not in allowed:
         opts = ", ".join(sorted(allowed))
         raise ConfigError(f"{where}: '{key}' must be one of [{opts}], got {value!r}")
+    return value
+
+
+def _check_bool(value, key, where):
+    if not isinstance(value, bool):
+        raise ConfigError(f"{where}: '{key}' must be true or false")
     return value
 
 
@@ -959,6 +975,10 @@ def _camera(data, index):
         sd_frame_pick=sd_frame_pick,
         telegram_alerts=bool(data.get("telegram_alerts", True)),
         privacy_notice=bool(data.get("privacy_notice", False)),
+        detection_notice=_check_bool(data.get("detection_notice", False),
+                                     "detection_notice", where),
+        follow_app_notifications=_check_bool(data.get("follow_app_notifications", False),
+                                             "follow_app_notifications", where),
         sd_dense_start=sd_dense_start,
         person_sensitivity=int(data["person_sensitivity"]) if data.get("person_sensitivity") is not None else None,
         night_only=bool(data.get("night_only", False)),
