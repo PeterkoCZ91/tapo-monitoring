@@ -9,4 +9,4 @@ No personal data lives in this package: coordinates, hosts and secrets all come 
 configuration/environment.
 """
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"

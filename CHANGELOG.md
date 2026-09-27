@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-27
+
 ### Added
 - Packaging for PyPI: `pip install tapo-monitor` (extras `mqtt`, `scorer`, `onvif`). The
   package metadata now carries an SPDX license with the license file, classifiers and
