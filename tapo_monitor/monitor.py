@@ -13,6 +13,7 @@ from datetime import datetime
 
 from . import camera, detection, enrich, notify, scheduling, sentlog, snapshot
 from .incident import incident_id
+from .snapshot import frame_lens
 
 log = logging.getLogger(__name__)
 
@@ -488,7 +489,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             caption = notify.build_caption(
                 TYPE_EMOJI.get(etype, "👁"), time_str(event),
                 description=description or None, detail=label or None, score=s,
-                light=light,
+                light=light, lens=frame_lens(image),
             )
             incident = incident_id(cfg.name, event)
             ok = (send_alert(image, caption, s, incident=incident, send_path="live")

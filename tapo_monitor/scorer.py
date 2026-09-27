@@ -62,12 +62,17 @@ def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None):
 
 
 class SubjectScore(float):
-    """Person score with animal confidence retained for audit telemetry."""
+    """Person score with animal confidence retained for audit telemetry.
 
-    def __new__(cls, person, animal):
+    ``persons`` is how many people the frame holds at or above the caller's threshold
+    (see :func:`person_count`), or None when the scorer did not report it.
+    """
+
+    def __new__(cls, person, animal, persons=None):
         value = float.__new__(cls, person)
         value.person = person
         value.animal = animal
+        value.persons = persons
         return value
 
 
@@ -87,10 +92,34 @@ def subject_scores(result):
     return scores["person"], scores["animal"]
 
 
-def subject_score(result):
-    """Use person confidence for alert gating; preserve animal confidence for audit."""
+def person_count(result, threshold):
+    """People at or above ``threshold`` in a response, or None when it cannot say. Pure.
+
+    The service lists every separate person it found (``person_scores``, after
+    non-maximum suppression, full frame only). An older service sends no such list, and a
+    malformed one is ignored: either way the answer is None, never a guessed count.
+    """
+    values = result.get("person_scores") if isinstance(result, dict) else None
+    if not isinstance(values, list) or threshold is None:
+        return None
+    try:
+        scores = [float(v) for v in values]
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(v) and 0.0 <= v <= 1.0 for v in scores):
+        return None
+    return sum(1 for v in scores if v >= threshold)
+
+
+def subject_score(result, threshold=None):
+    """Use person confidence for alert gating; preserve animal confidence for audit.
+
+    With ``threshold`` the score also carries the person count at it (``persons``).
+    """
     values = subject_scores(result)
-    return None if values is None else SubjectScore(*values)
+    if values is None:
+        return None
+    return SubjectScore(*values, persons=person_count(result, threshold))
 
 
 def subject_box(result):

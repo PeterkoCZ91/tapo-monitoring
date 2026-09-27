@@ -47,6 +47,8 @@ class EventProfile:
                      scheduled preset recall nor the pan-limit guard moves that lens.
     ``channels``     lens channels the twin reads per channel (``chn_id``); empty for a
                      single-lens camera, which keeps its probes exactly as they were.
+    ``stream_lenses`` RTSP stream name -> the lens it shows, as an alert caption names
+                     it; empty for a single-lens camera, whose captions name no lens.
     """
 
     name: str
@@ -55,6 +57,7 @@ class EventProfile:
     pt_channel: int | None = None
     linkage_hold: int = 0
     channels: tuple[int, ...] = ()
+    stream_lenses: Mapping[str, str] = field(default_factory=dict)
 
 
 # One entry per model whose events differ from the default. Amend a row when the audit
@@ -75,6 +78,9 @@ EVENT_PROFILES = {
         pt_channel=2,
         linkage_hold=180,
         channels=(1, 2),
+        # Measured per path (docs/capabilities.md, "Lens addressing").
+        stream_lenses={"stream1": "wide", "stream2": "wide", "stream8": "wide",
+                       "stream6": "pan/tilt", "stream7": "pan/tilt"},
     ),
 }
 DEFAULT_PROFILE = EVENT_PROFILES["default"]
@@ -85,6 +91,17 @@ def event_profile(name=None):
     if isinstance(name, EventProfile):
         return name
     return EVENT_PROFILES.get(str(name).lower(), DEFAULT_PROFILE) if name else DEFAULT_PROFILE
+
+
+def stream_lens(profile, stream):
+    """The lens RTSP ``stream`` shows on a camera of ``profile``, or None. Pure.
+
+    None for a single-lens profile and for a stream the profile does not map, so a caption
+    never names a lens it cannot vouch for.
+    """
+    if not stream:
+        return None
+    return event_profile(profile).stream_lenses.get(str(stream))
 
 
 def _int_or_none(value):

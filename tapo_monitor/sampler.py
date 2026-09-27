@@ -132,13 +132,14 @@ def corroborate_motion(group, score, confirm, send_now):
     return "drop"
 
 
-def remember_held_frame(group, path, score, now):
+def remember_held_frame(group, path, score, now, lens=None):
     """Stamp the archived held frame an expiring hold may still send. Mutates the group.
 
     ``path`` is where the review log archived the frame (None when it is off or the
     write failed: nothing to remember). The group keeps the best-scoring archived hold,
     later ones winning ties, so an expiry sends the strongest evidence it saw rather than
-    whichever marginal frame happened to come last; path, time and score stay one frame.
+    whichever marginal frame happened to come last; path, time, score and ``lens`` (the
+    dual-lens source its caption names, None when unknown) stay one frame.
     """
     if not path:
         return
@@ -148,6 +149,7 @@ def remember_held_frame(group, path, score, now):
     group["hold_path"] = path
     group["hold_at"] = now
     group["hold_score"] = score
+    group["hold_lens"] = lens
 
 
 def held_score(group):

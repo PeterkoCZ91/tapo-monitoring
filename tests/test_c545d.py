@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from tapo_monitor import capabilities, daemon, detection, monitor, motion, sampler, twin
+from tapo_monitor import capabilities, daemon, detection, monitor, motion, sampler, scorer, twin
 from tapo_monitor import config as cfg_mod
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "c545d.json").read_text())
@@ -506,3 +506,59 @@ def test_run_monitor_pass_without_lens_pick_grabs_one_lens(monkeypatch, tmp_path
         scorer={"url": "http://127.0.0.1:1/score"})
     assert grabs == ["wide"] and sent == ["wide.jpg"]
     assert state.lens_linkage_at["front"] == PERSON["end_time"]
+
+
+# ── caption: lens and person count ──────────────────────────────────────────
+
+def test_stream_lens_maps_the_c545d_paths_and_nothing_else():
+    assert detection.stream_lens("c545d", "stream2") == "wide"
+    assert detection.stream_lens("c545d", "stream8") == "wide"
+    assert detection.stream_lens("c545d", "stream6") == "pan/tilt"
+    assert detection.stream_lens("c545d", "stream7") == "pan/tilt"
+    assert detection.stream_lens("c545d", "stream9") is None
+    assert detection.stream_lens(None, "stream1") is None       # single lens
+    assert detection.stream_lens("default", "stream2") is None
+
+
+def test_default_snapshot_tags_the_lens_of_a_dual_lens_stream(monkeypatch, tmp_path):
+    frame = _frame(tmp_path, "grab.jpg")
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp", lambda url, **kw: frame)
+    monkeypatch.setattr(daemon, "resolve_rtsp_credentials", lambda _c: ("u", "p"))
+    cam = cfg_mod.load_camera_config(c545d_camera(rtsp_stream="stream2"))
+    single = cfg_mod.load_camera_config({"name": "c", "host": "192.0.2.21"})
+
+    assert daemon.snapshot.frame_lens(daemon._default_snapshot(cam)(None, None)) == "wide"
+    assert daemon.snapshot.frame_lens(
+        daemon._default_snapshot(cam, stream="stream6")(None, None)) == "pan/tilt"
+    plain = daemon._default_snapshot(single)(None, None)
+    assert plain == frame and daemon.snapshot.frame_lens(plain) is None
+
+
+def test_live_caption_names_the_picked_lens_and_the_people_in_it(monkeypatch, tmp_path):
+    app = cfg_mod.load_config_from_dict({"cameras": [c545d_camera(
+        rtsp_stream="stream2", lens_pick_stream="stream7",
+        scorer={"url": "http://127.0.0.1:1/score"})]})
+    grabs = {"stream2": _frame(tmp_path, "wide.jpg"), "stream7": _frame(tmp_path, "pt.jpg")}
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp",
+                        lambda url, **kw: grabs[url.rsplit("/", 1)[-1]])
+    monkeypatch.setattr(daemon, "resolve_rtsp_credentials", lambda _c: ("u", "p"))
+
+    def score_for(_cfg):
+        def score(image):
+            if os.path.basename(image) == "pt.jpg":
+                return scorer.SubjectScore(0.8, 0.0, persons=2)
+            return scorer.SubjectScore(0.1, 0.0, persons=0)
+        score.boxes = {}
+        return score
+
+    captions = []
+    monkeypatch.setattr(daemon, "score_for", score_for)
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda token, chat, image, caption, *a, **k: captions.append(
+                            (os.path.basename(image), caption)) or True)
+    daemon.run_monitor_pass(app, {"front": _Cam([copy.deepcopy(PERSON)])},
+                            daemon.MonitorState(), now=PERSON["start_time"],
+                            secrets={"telegram_token": "t", "telegram_chat": "c",
+                                     "groq_key": ""},
+                            time_str=lambda _e: "12:00:00")
+    assert captions == [("pt.jpg", "👤 12:00:00 · 2 people · pan/tilt lens")]

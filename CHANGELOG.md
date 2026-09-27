@@ -11,6 +11,11 @@ All notable changes to this project are documented here.
   and could no longer reach its camera or Telegram. Dropped clients are now closed explicitly.
 
 ### Added
+- Alert captions name the lens of a dual-lens camera that took the photo
+  (`· wide lens` / `· pan/tilt lens`) and, when the scorer found two or more people at the
+  camera's threshold, how many (`· 2 people`). The scorer response gains `person_scores`
+  (one confidence per person, full frame, after non-maximum suppression); a daemon talking
+  to an older scorer simply shows no count.
 - `privacy_notice` (per camera): a Telegram message within one control pass when a camera
   enters or leaves privacy mode, persisted across restarts; the privacy switch is now read
   on static cameras too when it is set.

@@ -42,7 +42,7 @@ def is_empty_scene(description, marker=EMPTY_MARKER):
 
 
 def build_caption(emoji, time_str, description=None, detail=None, count=None,
-                  minutes_since_last=None, score=None, light=None):
+                  minutes_since_last=None, score=None, light=None, lens=None):
     """Assemble an alert caption. Pure — no I/O.
 
     ``score`` may carry the scorer's animal confidence alongside the person one; when the
@@ -55,6 +55,14 @@ def build_caption(emoji, time_str, description=None, detail=None, count=None,
     unknown/not checked (``enrich.light_status`` off, or the query failed) — a caption
     never claims a light state it did not actually observe.
 
+    ``score`` may also carry the number of people the scorer found at the camera's
+    threshold (``persons``); two or more are named in the headline, because the scorer's
+    box and score describe only the most confident one. An older scorer reports no
+    count, and the caption then says nothing about it.
+
+    ``lens`` names the lens of a dual-lens camera that took the photo ("wide",
+    "pan/tilt"); None — a single-lens camera, or a frame of unknown source — adds nothing.
+
     This never changes *whether* an alert goes out — the threshold gates on person
     confidence alone.
     """
@@ -64,6 +72,11 @@ def build_caption(emoji, time_str, description=None, detail=None, count=None,
     if light is True:
         emoji = f"{emoji}🔦"
     headline = f"{emoji} {detail} {time_str}".strip() if detail else f"{emoji} {time_str}"
+    persons = getattr(score, "persons", None)
+    if isinstance(persons, int) and persons >= 2:
+        headline = f"{headline} · {persons} people"
+    if lens:
+        headline = f"{headline} · {lens} lens"
     lines = [headline]
     if description:
         lines.append(f'"{description}"')

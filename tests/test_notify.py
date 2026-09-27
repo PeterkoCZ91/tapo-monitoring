@@ -229,3 +229,24 @@ def test_caption_keeps_detail_and_description_with_an_animal():
                                detail="Jana", score=scorer.SubjectScore(0.3, 0.9))
     assert cap.startswith("👤🐾 Jana 23:14")
     assert '"a dog on a lead"' in cap
+
+
+# ── person count and lens ────────────────────────────────────────────────────
+
+def test_caption_names_two_or_more_people():
+    cap = notify.build_caption("👤", "23:14", description="two walkers",
+                               score=scorer.SubjectScore(0.9, 0.0, persons=2))
+    assert cap == '👤 23:14 · 2 people\n"two walkers"'
+
+
+def test_caption_says_nothing_about_one_person_or_an_unknown_count():
+    for persons in (None, 0, 1):
+        assert notify.build_caption(
+            "👤", "23:14", score=scorer.SubjectScore(0.9, 0.0, persons=persons)) == "👤 23:14"
+
+
+def test_caption_names_the_lens_after_the_count():
+    cap = notify.build_caption("👤", "23:14", detail="Jana", lens="pan/tilt",
+                               score=scorer.SubjectScore(0.9, 0.9, persons=3), light=True)
+    assert cap == "👤🐾🔦 Jana 23:14 · 3 people · pan/tilt lens"
+    assert notify.build_caption("👤", "23:14", lens=None) == "👤 23:14"

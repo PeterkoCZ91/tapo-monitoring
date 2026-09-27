@@ -114,3 +114,21 @@ def test_subject_box_parses_and_validates():
     assert scorer.subject_box({"box": None}) is None
     assert scorer.subject_box({}) is None
     assert scorer.subject_box({"box": [1, 2, 3]}) is None
+
+
+def test_person_count_counts_at_the_callers_threshold():
+    result = {"person": 0.9, "animal": 0.0, "person_scores": [0.9, 0.45, 0.2]}
+    assert scorer.person_count(result, 0.4) == 2
+    assert scorer.person_count(result, 0.5) == 1
+    assert scorer.subject_score(result, threshold=0.4).persons == 2
+
+
+def test_person_count_is_unknown_for_an_older_or_malformed_reply():
+    assert scorer.person_count({"person": 0.9}, 0.4) is None          # older scorer
+    assert scorer.person_count({"person_scores": [0.9]}, None) is None
+    assert scorer.person_count({"person_scores": "0.9"}, 0.4) is None
+    assert scorer.person_count({"person_scores": [0.9, "x"]}, 0.4) is None
+    assert scorer.person_count({"person_scores": [float("nan")]}, 0.4) is None
+    assert scorer.person_count({"person_scores": [1.5]}, 0.4) is None
+    assert scorer.subject_score({"person": 0.9}, threshold=0.4).persons is None
+    assert scorer.subject_score({"person": 0.9, "person_scores": [0.9, 0.8]}).persons is None

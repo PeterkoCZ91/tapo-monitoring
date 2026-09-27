@@ -430,6 +430,58 @@ def test_best_person_box_falls_back_when_anchor_count_mismatch():
         pytest.approx((80.0, 50.0, 120.0, 110.0))
 
 
+def _person_anchor(out, i, conf, raw_box=(0.0, 0.0, 0.0, 0.0)):
+    out[0, i, :4] = raw_box
+    out[0, i, 4] = 1.0
+    out[0, i, 5 + 0] = conf
+
+
+def test_person_scores_counts_two_separate_people_highest_first():
+    # input 64: anchors 0 and 7 are grid cells (0,0) and (7,0) at stride 8 -> boxes
+    # 56 px apart, no overlap: two people.
+    out = np.zeros((1, 84, 85), dtype=np.float32)
+    _person_anchor(out, 0, 0.55)
+    _person_anchor(out, 7, 0.90)
+    assert scorer_service.person_scores(out, input_size=64) == \
+        pytest.approx([0.90, 0.55], abs=1e-4)
+
+
+def test_person_scores_merges_anchors_of_one_person():
+    # Anchor 0 (stride 8) and anchor 64 (stride 16, grid (0,0)) both centre on the
+    # origin; widening anchor 0 to 16 px makes them the same box -> one person.
+    out = np.zeros((1, 84, 85), dtype=np.float32)
+    _person_anchor(out, 0, 0.80, raw_box=(0.0, 0.0, float(np.log(2)), float(np.log(2))))
+    _person_anchor(out, 64, 0.60)
+    assert scorer_service.person_scores(out, input_size=64) == pytest.approx([0.80], abs=1e-4)
+
+
+def test_person_scores_skips_anchors_below_the_floor_and_caps_the_list():
+    out = np.zeros((1, 84, 85), dtype=np.float32)
+    for i in range(8):                       # 8 separate cells along the first grid row
+        _person_anchor(out, i, 0.50)
+    _person_anchor(out, 16, 0.05)            # below the 0.10 floor
+    assert len(scorer_service.person_scores(out, input_size=64)) == 8
+    assert len(scorer_service.person_scores(out, input_size=64, limit=3)) == 3
+    assert scorer_service.person_scores(np.zeros((1, 84, 85), dtype=np.float32),
+                                        input_size=64) == []
+
+
+def test_person_scores_falls_back_when_anchor_count_mismatch():
+    out = np.zeros((1, 3, 85), dtype=np.float32)
+    _person_anchor(out, 0, 0.9, raw_box=(100, 80, 40, 60))
+    _person_anchor(out, 1, 0.7, raw_box=(102, 82, 40, 60))   # the same person
+    _person_anchor(out, 2, 0.6, raw_box=(400, 80, 40, 60))   # someone else
+    assert scorer_service.person_scores(out, input_size=640) == \
+        pytest.approx([0.9, 0.6], abs=1e-4)
+
+
+def test_combine_keeps_the_full_frame_person_list_only():
+    full = _rect(0.9) | {"person_scores": [0.9, 0.5]}
+    tile = _rect(0.95) | {"person_scores": [0.95, 0.9, 0.5]}
+    assert scorer_service.combine_rect_scores([full, tile])["person_scores"] == [0.9, 0.5]
+    assert "person_scores" not in scorer_service.combine_rect_scores([_rect(0.9)])
+
+
 def test_tile_rects_whole_frame_only_when_tiles_1():
     assert scorer_service.tile_rects(400, 300, 1) == [(0.0, 0.0, 400.0, 300.0)]
 
@@ -679,3 +731,37 @@ def test_open_session_falls_back_to_cpu_when_gpu_start_fails(monkeypatch):
 
     assert ss._open_session(Ort, "m.onnx") == "cpu-session"
     assert calls == [["OpenVINOExecutionProvider"], ["CPUExecutionProvider"]]
+
+
+def test_score_fn_reports_one_person_score_per_person(monkeypatch):
+    """End to end through build_score_fn with a fake model: two people in the frame."""
+    import io
+    import types
+
+    image_mod = pytest.importorskip("PIL.Image")
+    out = np.zeros((1, 84, 85), dtype=np.float32)
+    _person_anchor(out, 0, 0.55)
+    _person_anchor(out, 7, 0.90)
+
+    class Session:
+        def get_inputs(self):
+            return [types.SimpleNamespace(name="images")]
+
+        def get_providers(self):
+            return ["CPUExecutionProvider"]
+
+        def run(self, _names, _feed):
+            return (out,)
+
+    fake_ort = types.SimpleNamespace(InferenceSession=lambda *a, **k: Session())
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
+    monkeypatch.delenv(scorer_service.ENV_PROVIDER, raising=False)
+    buf = io.BytesIO()
+    image_mod.new("RGB", (128, 72)).save(buf, format="JPEG")
+    score_fn = scorer_service.build_score_fn("m.onnx", input_size=64)
+
+    for tiles in (1, 2):
+        result = score_fn(buf.getvalue(), tiles)
+        assert result["person"] == pytest.approx(0.90, abs=1e-4)
+        assert result["person_scores"] == pytest.approx([0.90, 0.55], abs=1e-4)
+    json.dumps(result)                       # the reply must stay JSON-serialisable

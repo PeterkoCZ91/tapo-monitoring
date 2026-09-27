@@ -72,7 +72,8 @@ documented below as *available* but intentionally **not implemented** — see "A
   follow-up queue) and falls back to the SD/live path when no segment is available.
 - **Local YOLO scorer (optional)** — a stateless HTTP scorer gates person alerts by
   person confidence; animal confidence never triggers an alert, but a confident animal
-  score does add a paw to the caption of an alert that was already going out.
+  score does add a paw to the caption of an alert that was already going out, and two or
+  more people at the threshold are counted in it (`· 2 people`).
   Groq then captions only frames that already passed the scorer. Optional tiled inference
   scores the whole image plus a grid to rescue distant subjects in wide views; `crop_to_subject` uses the
   winning person box for a padded alert-photo zoom and safely falls back to the full frame.
@@ -249,6 +250,9 @@ reports the linkage switching off (`dual_cam.linkage.enabled`, warning).
   stream6` for follow-up grabs from the lens that turns toward the subject, and optionally
   `lens_pick_stream: stream7` to grab both lenses on a pan/tilt event and keep the frame
   with the larger subject.
+- Captions: the alert caption names the lens the photo came from (`· wide lens` /
+  `· pan/tilt lens`), taken from the stream it was grabbed from; SD and recording frames
+  name none. With two or more people at the threshold it also says how many.
 - Digital twin: with the profile it also reads the lens layout, the linkage state and
   the detection switches of both lenses (`detection.person.chn2.enabled` is a critical
   drift path — our self-heal setters without `chn_id` reach channel 1 only).

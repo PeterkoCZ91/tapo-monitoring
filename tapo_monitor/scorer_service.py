@@ -1,8 +1,9 @@
 """Tiny HTTP scoring service: POST a JPEG, get person/animal confidence back.
 
 Runs a YOLOX ONNX model (Apache-2.0, e.g. yolox_tiny.onnx) on the local CPU and
-answers ``{"person": 0.87, "animal": 0.0}`` — the daemon compares that to a config
-threshold instead of asking a vision LLM whether the scene is empty. Heavy deps
+answers ``{"person": 0.87, "animal": 0.0, "person_scores": [0.87, 0.52]}`` — the daemon
+compares ``person`` to a config threshold instead of asking a vision LLM whether the scene
+is empty, and counts ``person_scores`` at that threshold for the caption. Heavy deps
 (onnxruntime / numpy / Pillow) are imported lazily so the core package never needs
 them; install with ``pip install tapo-monitor[scorer]``.
 
@@ -70,6 +71,12 @@ def _percentile(samples, fraction):
 PERSON_CLASS = 0
 # COCO ids: bird, cat, dog, horse, sheep, cow, bear
 ANIMAL_CLASSES = (14, 15, 16, 17, 18, 19, 21)
+# ``person_scores``: every separate person over this floor, at most this many, with
+# anchors of one person merged at this IoU. The floor sits well under any configured
+# threshold, so the daemon can count at its own (day or night) value.
+PERSON_LIST_FLOOR = 0.10
+PERSON_LIST_LIMIT = 10
+PERSON_NMS_IOU = 0.45
 COCO_NAMES = (
     "person", "bicycle", "car", "motorbike", "aeroplane", "bus", "train", "truck",
     "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
@@ -482,6 +489,59 @@ def best_person_box(output, input_size=640, strides=(8, 16, 32), floor=0.05):
     return (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
 
 
+def _box_iou(box, boxes):
+    """IoU of one xyxy box against an (N, 4) array of them. Pure (numpy)."""
+    import numpy as np
+
+    x1 = np.maximum(box[0], boxes[:, 0])
+    y1 = np.maximum(box[1], boxes[:, 1])
+    x2 = np.minimum(box[2], boxes[:, 2])
+    y2 = np.minimum(box[3], boxes[:, 3])
+    inter = np.clip(x2 - x1, 0, None) * np.clip(y2 - y1, 0, None)
+    area = (box[2] - box[0]) * (box[3] - box[1])
+    areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+    return inter / np.maximum(area + areas - inter, 1e-9)
+
+
+def person_scores(output, input_size=640, strides=(8, 16, 32), floor=PERSON_LIST_FLOOR,
+                  iou=PERSON_NMS_IOU, limit=PERSON_LIST_LIMIT):
+    """Confidence of each separate person in a raw YOLOX head output, highest first. Pure.
+
+    One person lights up many neighbouring anchors, so the anchors over ``floor`` are
+    decoded (as in :func:`best_person_box`) and thinned by greedy non-maximum suppression
+    at ``iou``: what survives is one entry per person. The first entry is the ``person``
+    score itself. The caller counts the entries at its own threshold; the list is capped
+    at ``limit`` so a crowd cannot bloat the response.
+    """
+    import numpy as np
+
+    preds = output[0]
+    if not len(preds):
+        return []
+    conf = preds[:, 4] * preds[:, 5 + PERSON_CLASS]
+    keep = np.flatnonzero(conf >= floor)
+    if not len(keep):
+        return []
+    grids, expanded = _grids_and_strides(input_size, strides)
+    if len(grids) == len(preds):
+        s = expanded[keep, 0].astype(np.float64)
+        cx = (preds[keep, 0] + grids[keep, 0]) * s
+        cy = (preds[keep, 1] + grids[keep, 1]) * s
+        w = np.exp(preds[keep, 2]) * s
+        h = np.exp(preds[keep, 3]) * s
+    else:
+        cx, cy, w, h = (preds[keep, k].astype(np.float64) for k in range(4))
+    boxes = np.stack((cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2), axis=1)
+    order = np.argsort(-conf[keep], kind="stable")
+    boxes, scores = boxes[order], conf[keep][order]
+    found = []
+    while len(scores) and len(found) < limit:
+        found.append(round(float(scores[0]), 4))
+        rest = _box_iou(boxes[0], boxes[1:]) < iou
+        boxes, scores = boxes[1:][rest], scores[1:][rest]
+    return found
+
+
 def tile_rects(width, height, tiles, overlap=0.15):
     """Original-coord ``(x0, y0, x1, y1)`` rects: the whole frame plus a tiles×tiles grid.
 
@@ -549,11 +609,15 @@ def combine_rect_scores(rect_results):
     false alert per event. Tiles still earn their keep for localisation: ``box`` falls
     back to the best-person tile when the full frame has none (a distant subject the
     caller wants to crop to), and ``tile_person`` reports the best tile score for
-    diagnostics.
+    diagnostics. ``person_scores`` (one entry per person, see :func:`person_scores`)
+    is the full frame's too, for the same reason: one person split across two
+    overlapping tiles would otherwise count twice.
     """
     full = rect_results[0]
     combined = {"person": full["person"], "animal": full["animal"],
                 "classes": full["classes"], "box": full["box"]}
+    if "person_scores" in full:
+        combined["person_scores"] = full["person_scores"]
     tiles = rect_results[1:]
     if tiles:
         best_tile = max(tiles, key=lambda r: r["person"])
@@ -633,9 +697,12 @@ def build_score_fn(model_path, input_size=416):
             output, ratio = _run(crop)
             scores = scores_from_output(output)
             box = best_person_box(output, input_size)
-            results.append({"person": scores["person"], "animal": scores["animal"],
-                            "classes": scores["classes"],
-                            "box": list(scale_box(box, ratio, x0, y0)) if box else None})
+            entry = {"person": scores["person"], "animal": scores["animal"],
+                     "classes": scores["classes"],
+                     "box": list(scale_box(box, ratio, x0, y0)) if box else None}
+            if not results:     # full frame only, like the decision scores
+                entry["person_scores"] = person_scores(output, input_size)
+            results.append(entry)
         combined = combine_rect_scores(results)
         combined["w"], combined["h"] = img.width, img.height
         return combined

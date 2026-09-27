@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tapo_monitor import cli, labeling
+from tapo_monitor import cli, labeling, notify, scorer
 
 # A few bytes are enough: the tool hashes and serves images, it never decodes them.
 JPEG = b"\xff\xd8\xff\xe0" + b"frame" + b"\xff\xd9"
@@ -793,6 +793,14 @@ def test_caption_start_reads_the_event_time_and_rejects_implausible_ones():
     assert labeling.caption_start("Person 2026-01-01 22:00:00", start - 5) is None
     assert labeling.caption_start("Person 2026-01-01 22:00:00", start + 7200) is None
     assert labeling.caption_start("Person", start) is None
+
+
+def test_caption_start_reads_a_caption_with_a_person_count_and_lens():
+    start = time.mktime(time.strptime("2026-01-01 22:00:00", "%Y-%m-%d %H:%M:%S"))
+    caption = notify.build_caption("👤", "2026-01-01 22:00:00", description="two walkers",
+                                   score=scorer.SubjectScore(0.9, 0.0, persons=2),
+                                   lens="pan/tilt")
+    assert labeling.caption_start(caption, start + 30) == start
 
 
 def _incident_dataset(root):

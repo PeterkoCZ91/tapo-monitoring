@@ -44,16 +44,38 @@ class Frame(str):
 
     ``native_height`` exists so the crop can clamp a scaled rect inside the original;
     without it an overflowing rect kills ffmpeg and the alert silently loses its zoom.
+
+    ``lens`` names the lens of a dual-lens camera the frame came from ("wide",
+    "pan/tilt"), for the alert caption; None when the camera has one lens or the source
+    is not known.
     """
 
-    __slots__ = ("native", "native_width", "native_height")
+    __slots__ = ("native", "native_width", "native_height", "lens")
 
-    def __new__(cls, path, native=None, native_width=None, native_height=None):
+    def __new__(cls, path, native=None, native_width=None, native_height=None, lens=None):
         self = super().__new__(cls, path)
         self.native = native
         self.native_width = native_width
         self.native_height = native_height
+        self.lens = lens
         return self
+
+
+def with_lens(image, lens):
+    """``image`` tagged with the lens it came from (see :class:`Frame`). Pure.
+
+    A falsy image or lens comes back unchanged; a :class:`Frame` keeps its native twin.
+    """
+    if not image or not lens:
+        return image
+    return Frame(image, native=getattr(image, "native", None),
+                 native_width=getattr(image, "native_width", None),
+                 native_height=getattr(image, "native_height", None), lens=lens)
+
+
+def frame_lens(image):
+    """The lens a frame was tagged with by :func:`with_lens`, or None. Pure."""
+    return getattr(image, "lens", None)
 
 
 def scaled_vf(rotate=0, scale=True):

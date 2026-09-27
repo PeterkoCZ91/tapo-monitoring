@@ -265,6 +265,12 @@ subject (the `sd_frame_pick: largest` rule), or the higher score when a box is m
 It requires an `event_profile` with a pan/tilt lens and `scorer.url`, costs a second grab
 and a second scoring on those events only, and must differ from `rtsp_stream`.
 
+The alert caption of a dual-lens camera names the lens that took the photo, e.g.
+`👤 2026-09-27 12:00:00 · pan/tilt lens`. The lens follows from the stream the frame was
+grabbed from (`stream1`/`stream2`/`stream8` wide, `stream6`/`stream7` pan/tilt), on the
+live, lens-pick and sampler paths and on a live fallback of the SD follow-up. A frame from
+the SD card or a local recording names no lens: nothing says which lens it shows.
+
 The C545D keeps its event index on the SD card, so `sources: [getevents]` needs a card.
 Until it is known which lens the self-heal setters (sent without `chn_id`) reach, start
 with `role: static` and no presets (`day_preset:` / `night_preset:` left empty). See
@@ -570,6 +576,14 @@ returned `animal` score is audit telemetry only. The best tile contributes the p
 `box` (for `crop_to_subject`) plus a
 diagnostic `tile_person` score. Blown-up tile crops of night IR grain routinely
 hallucinate 0.3–0.6 "person" scores, so tile scores never gate alerts.
+
+The response also lists `person_scores`: one confidence per separate person in the full
+frame (anchors of one person merged by non-maximum suppression, floor 0.10, at most 10).
+The daemon counts the entries at the camera's threshold in force (`night_threshold` at
+night) and, with two or more, adds `· 2 people` to the caption — the box, the crop and the
+score still describe only the most confident one. It never changes whether an alert goes
+out. A scorer from before this field sends no list, and the caption then shows no count;
+update the scorer host to get it.
 
 `motion_send_threshold` adds multi-frame corroboration for **bare (non-PIR) motion**.
 An empty IR scene hallucinates a 0.3–0.6 "person" score on one frame and not the next,

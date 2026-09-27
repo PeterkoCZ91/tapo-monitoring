@@ -869,8 +869,11 @@ def _default_snapshot(cfg: CameraConfig, stream=None, recorder_fallback=False):
     grabs may want the high-res stream even where the hot path uses the fast one).
     """
     user, password = resolve_rtsp_credentials(cfg)
+    # A dual-lens camera's frame says which lens took it, for the caption; the recorder
+    # fallback below stays untagged, since nothing says which lens that recording shows.
+    lens = detection.stream_lens(getattr(cfg, "event_profile", None), stream or cfg.rtsp_stream)
 
-    def snap(_cam, _event):
+    def grab():
         url = snapshot.rtsp_url(
             cfg.host, user, password, stream=stream or cfg.rtsp_stream, port=cfg.rtsp_port
         )
@@ -893,10 +896,12 @@ def _default_snapshot(cfg: CameraConfig, stream=None, recorder_fallback=False):
                                       native_height=height)
             log.debug("crop_from_native %s: reduction failed, sending the native frame",
                       cfg.name)
-        if image:
-            return image
-        if not recorder_fallback:
-            return None
+        return image
+
+    def snap(_cam, _event):
+        image = snapshot.with_lens(grab(), lens)
+        if image or not recorder_fallback:
+            return image or None
         image = snapshot.latest_recording_frame(cfg.host, timeout=cfg.rtsp_timeout,
                                                 rotate=cfg.rotate)
         if image:
@@ -1044,7 +1049,8 @@ def score_for(cfg: CameraConfig):
             result = score_remote(image_path)
         if result is not None:
             boxes[image_path] = scorer.subject_box(result)
-        return None if result is None else scorer.subject_score(result)
+        return (None if result is None
+                else scorer.subject_score(result, threshold=cfg.scorer.threshold))
 
     boxes: dict = {}   # frame path -> subject box; lets sharpness be judged on the subject
     score.boxes = boxes  # type: ignore[attr-defined]
@@ -1473,7 +1479,8 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                 # Remembered so the sampler's expiry can tell "no second frame ever came"
                 # from "a pan_limit recall yanked the subject out of view mid-wait", and
                 # still has a frame to send when the hold expiry policy says so.
-                sampler.remember_held_frame(g, path, s, now)
+                sampler.remember_held_frame(g, path, s, now,
+                                            lens=snapshot.frame_lens(image))
             return path
 
         def burst_sent(_name=name, _cfg=cfg):
@@ -2453,7 +2460,7 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
         caption = notify.build_caption(
             monitor.TYPE_EMOJI.get(etype, "👤"), time_str(event),
             description=description or None, detail=label or None,
-            score=selected_score, light=light,
+            score=selected_score, light=light, lens=snapshot.frame_lens(image),
         )
         ok = send_alert_photo(cfg, secrets, image, caption, score=selected_score,
                               incident=incident.incident_id(cfg.name, event),
@@ -2501,7 +2508,8 @@ def _suppress_sampler_frame(cfg, group, etype, s, scfg, image, verdict, *, now):
         path = sentlog.archive_review_if_configured(
             image, sentlog.review_meta(cfg.name, "hold", etype, s, group["event"]))
         # Same stamps the live pass leaves via hold_archive: the hold expiry reads them.
-        sampler.remember_held_frame(group, path, s, now)
+        sampler.remember_held_frame(group, path, s, now,
+                                    lens=snapshot.frame_lens(image))
     else:
         log.info("sampler %s frame %d/%d: score %.2f below threshold %.2f",
                  cfg.name, group["frames"], scfg.max_frames, s, cfg.scorer.threshold)
@@ -2531,7 +2539,7 @@ def _send_held_frame(app, cfg, state, group, *, now, secrets, time_str, reason, 
     description = _caption_describe(cfg, secrets["groq_key"], path)
     caption = notify.build_caption(
         monitor.TYPE_EMOJI.get("motion", "👁"), time_str(group["event"]),
-        description=description or None, score=s)
+        description=description or None, score=s, lens=group.get("hold_lens"))
     ok = send_alert_photo(cfg, secrets, path, caption, score=s,
                           incident=incident.incident_id(cfg.name, group["event"]),
                           send_path=send_path)
@@ -2749,7 +2757,7 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
             caption = notify.build_caption(
                 monitor.TYPE_EMOJI.get(etype, "👁"), time_str(group["event"]),
                 description=description or None, detail=label or None, score=s,
-                light=light,
+                light=light, lens=snapshot.frame_lens(image),
             )
             ok = send_alert_photo(cfg, secrets, image, caption, score=s,
                                   incident=incident.incident_id(cfg.name, group["event"]),

@@ -214,6 +214,14 @@ def test_remember_held_frame_keeps_the_best_scoring_archive():
     assert (g["hold_path"], g["hold_at"], g["hold_score"]) == ("/rl/a.jpg", 1000, 0.45)
     sampler.remember_held_frame(g, "/rl/c.jpg", 0.45, 1060)   # a tie goes to the later
     assert (g["hold_path"], g["hold_at"]) == ("/rl/c.jpg", 1060)
+    assert g["hold_lens"] is None
+
+
+def test_remember_held_frame_keeps_the_lens_with_its_frame():
+    g = {}
+    sampler.remember_held_frame(g, "/rl/a.jpg", 0.45, 1000, lens="pan/tilt")
+    sampler.remember_held_frame(g, "/rl/b.jpg", 0.41, 1030, lens="wide")   # weaker
+    assert (g["hold_path"], g["hold_lens"]) == ("/rl/a.jpg", "pan/tilt")
 
 
 def test_held_score_prefers_the_archived_frame():
