@@ -9,6 +9,11 @@ All notable changes to this project are documented here.
   the daemon replaces its clients on each control pass. A client still referenced elsewhere
   kept its loop (an epoll fd and a socket pair); one host hit the 1024 limit after 23 hours
   and could no longer reach its camera or Telegram. Dropped clients are now closed explicitly.
+- One visit, one message: a person SD/recording follow-up whose read came back after
+  another passage of the same camera had alerted live arrived a fraction of a second behind
+  that alert. It is now held to the confirmed cooldown: skipped, audited as `sd` `cooldown`
+  (`reason=sd_within_cooldown`) and kept in the review log. Three such pairs in 997
+  delivered person follow-ups across the fleet.
 
 ### Added
 - Alert captions name the lens of a dual-lens camera that took the photo

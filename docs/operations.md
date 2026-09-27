@@ -444,6 +444,13 @@ The monitor chooses frames in this order:
    Sharpness measures the whole frame, so it cannot guarantee an unblurred moving subject.
    `recording` reuses the SD follow-up queue, so it requires `sd_snapshot: true`, and it
    falls back to the SD/live path when no matching segment exists or `RECORDING_ROOT` is unset.
+   A person follow-up arrives a minute or two after its event, so it is held to the
+   confirmed cooldown when its result is back: if another passage of the same camera
+   reached the phone in between, the follow-up is not sent but audited as `sd` `cooldown`
+   with `reason=sd_within_cooldown`, and its frame goes to the review log (verdict
+   `cooldown`) when `TAPO_REVIEW_LOG_DIR` is set. The cooldown the live pass arms when it
+   queues the follow-up does not count, and neither does a motion alert: a person found
+   on the card still follows a motion photo.
 3. Optional local-recorder fallback, only in the late fallback path after SD produced no
    usable frames.
 

@@ -1488,6 +1488,10 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                              else sdclip.fresh_delay(first_span)),
                 "live_sent": live_sent,
             }
+            if key == "confirmed":
+                # The live pass armed the cooldown for this defer just before queuing
+                # it; a later arming is a delivery (see _sd_within_cooldown).
+                entry["armed_at"] = state.last_alert.get((_name, key))
             if early:
                 entry["rest_span"] = first_span     # read the remainder if the look is empty
             state.pending_sd.append(entry)
@@ -2336,9 +2340,13 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
       * SD produced no frames at all and no live went out -> send a live-RTSP grab
         (zero checked frames is no evidence of absence; trust the camera).
 
-    There is no cooldown gate here: the follow-up belongs to an already-alerted event (and
-    the inline path emits at most one defer per cooldown window). Entries past
-    PENDING_MAX_AGE are dropped; entries for a camera not reachable this tick are kept.
+    A follow-up is queued only when its live frame did not go out, so it is the first
+    message about its event, but it arrives minutes later: by then another passage may
+    have alerted live. A person photo is therefore held to the confirmed cooldown when
+    its result is back (:func:`_sd_within_cooldown`): inside it the frame goes to the
+    review log instead of the phone, so one visit makes one message. Motion follow-ups
+    have their own gate (:func:`_sd_followup_blocked`). Entries past PENDING_MAX_AGE are
+    dropped; entries for a camera not reachable this tick are kept.
 
     The read and the frame pick run on ``worker`` (:mod:`tapo_monitor.sdworker`): the loop
     submits a due entry and, on a later tick, collects the result and decides what to
@@ -2483,6 +2491,55 @@ def _sd_followup_blocked(app, cfg, state, entry, now):
     return None
 
 
+def _sd_within_cooldown(app, cfg, state, etype, now):
+    """Whether a confirmed follow-up would reach the phone inside the cooldown. Pure.
+
+    The follow-up re-reads a passage whose live frame stayed below the threshold, about
+    two minutes after it. When the next passage alerted live in between, the two photos
+    land within a second of each other (seen on a dual-lens camera: the live alert, then
+    0.3 s later the card photo of a passage 145 s earlier). So the confirmed cooldown
+    applies to it as to every live send.
+
+    The live pass arms that cooldown when it queues a follow-up, too (so the rest of the
+    burst is quiet), and a queued follow-up is not a message. Each queued entry keeps
+    the arming its defer made (``armed_at``): when the newest arming is one of those,
+    nothing has reached the phone since. An entry queued by an older daemon has no such
+    stamp, and then the follow-up is sent as before. A motion alert does not count, so a
+    person found on the card still upgrades a motion photo; motion follow-ups are gated
+    before their read (:func:`_sd_followup_blocked`).
+    """
+    if etype == "motion":
+        return False
+    last = state.last_alert.get((cfg.name, "confirmed"))
+    if notify.should_send_alert(last, now, app.alerts.cooldown):
+        return False
+    for pending in state.pending_sd:
+        if pending["camera"] != cfg.name or pending["etype"] == "motion":
+            continue
+        if pending.get("armed_at", last) == last:
+            return False                 # armed by a defer: nothing reached the phone
+    return True
+
+
+def _skip_sd_within_cooldown(cfg, event, etype, image, score, threshold):
+    """Log, audit and archive (review log) a follow-up the cooldown keeps off the phone.
+
+    ``image`` is the chosen card frame, or None when the read produced none (no live
+    grab is made for a photo that will not be sent).
+    """
+    reason = "sd_within_cooldown"
+    log.info("skip %s: camera alerted within the cooldown [sd]", etype)
+    monitor.audit_event(cfg, event, etype, "sd", "cooldown", score=score,
+                        threshold=threshold, reason=reason)
+    if image:
+        meta = sentlog.review_meta(cfg.name, "cooldown", etype,
+                                   score if score is not None else 0.0, event)
+        if score is None:       # an unscored read: no invented score in the index
+            meta.pop("person", None)
+            meta.pop("animal", None)
+        sentlog.archive_review_if_configured(image, {**meta, "path": "sd", "reason": reason})
+
+
 def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secrets,
                         snapshot_for, time_str, night):
     """Decide and send one follow-up whose job came back. Runs on the loop.
@@ -2552,12 +2609,19 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
                 log.info("drop %s: SD produced no frames%s", etype,
                          ", live already sent" if entry.get("live_sent") else "")
                 return False
+            if _sd_within_cooldown(app, cfg, state, etype, now):
+                _skip_sd_within_cooldown(cfg, event, etype, None, None, None)
+                return False
             snap = snapshot_for(cfg)                      # SD download failed -> live RTSP
             cam = cam_clients.get(entry["camera"])
             image = fallback_image = snap(cam, event) or snap(cam, event)
         if not image:
             log.warning("skip %s: snapshot failed (after retry)", etype)
             return False                              # drop
+        if _sd_within_cooldown(app, cfg, state, etype, now):
+            _skip_sd_within_cooldown(cfg, event, etype, image, selected_score,
+                                     cfg.scorer.threshold if job.scored else None)
+            return False
         cam = cam_clients.get(entry["camera"])
         if not description:
             # Caption from the whole (thinned) frame sequence when the chosen frame

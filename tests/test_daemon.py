@@ -6806,3 +6806,31 @@ def test_a_control_pass_closes_the_clients_it_replaces(monkeypatch):
                      connect_factory=lambda *a, **k: (lambda c: (None, None)),
                      is_night=lambda: False, privacy_notice=lambda *a, **k: None)
     assert closed == [old] and cam_clients == {}
+
+
+def _cooldown_case(entries, last_alert):
+    app = cfg.load_config_from_dict(
+        {"alerts": {"cooldown": 120}, "cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    state = daemon.MonitorState()
+    state.pending_sd = [{"camera": "a", "etype": "person", "event": {"start_time": 10},
+                         **e} for e in entries]
+    state.last_alert.update(last_alert)
+    return app, app.cameras[0], state
+
+
+def test_sd_person_waits_out_a_confirmed_delivery_made_after_its_defer():
+    app, c, state = _cooldown_case([{"armed_at": 12.0}], {("a", "confirmed"): 155.0})
+    assert daemon._sd_within_cooldown(app, c, state, "person", 160.0)
+    assert not daemon._sd_within_cooldown(app, c, state, "person", 275.0)   # expired
+    assert not daemon._sd_within_cooldown(app, c, state, "motion", 160.0)
+
+
+def test_sd_person_is_not_held_by_its_own_defer_or_a_motion_alert():
+    app, c, state = _cooldown_case([{"armed_at": 12.0}],
+                                   {("a", "confirmed"): 12.0, ("a", "motion"): 150.0})
+    assert not daemon._sd_within_cooldown(app, c, state, "person", 160.0)
+
+
+def test_sd_person_queued_by_an_older_daemon_is_sent_as_before():
+    app, c, state = _cooldown_case([{}], {("a", "confirmed"): 155.0})
+    assert not daemon._sd_within_cooldown(app, c, state, "person", 160.0)

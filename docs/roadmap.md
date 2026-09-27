@@ -555,10 +555,10 @@ shadows. The generic detector has never seen this fleet's IR night scenes.
 
 ## Phase 10 — Incidents, not frames
 
-Status: **in progress** (10.1, 10.3 and 10.7 done; 10.2 and 10.5 in trials on one
+Status: **in progress** (10.1, 10.3, 10.6 and 10.7 done; 10.2 and 10.5 in trials on one
 camera; 10.4: recording follow-ups 119 s -> 56 s and follow-ups off the main loop on one host,
-camera-card path and hub clips next; 10.8: privacy notice done, detection-off notice next; 10.6
-open)
+camera-card path and hub clips next; 10.8: privacy notice done, detection-off notice
+next)
 
 Frame statistics hide what matters to the person holding the phone: was each visit
 alerted, and how late. A first join of labels with deliveries showed that of 31 held
@@ -656,12 +656,24 @@ closest.
 
 ### 10.6 — One visit, one message
 
-- [ ] A person SD follow-up is not gated by the cooldown (it belongs to an event that was
+- [x] A person SD follow-up is not gated by the cooldown (it belongs to an event that was
   already confirmed), so when its live frame was below the threshold and the next passage
   alerts live, both arrive within a second: seen on the dual-lens test camera (a live
   alert, then 0.3 s later the SD photo of the passage two minutes earlier). Skip or merge
   an SD photo when the camera alerted within the cooldown, with a scenario test, and
-  count how often it happens in the fleet's audit lines first.
+  count how often it happens in the fleet's audit lines first. Counted in the delivered
+  audit lines of every site (cooldown 120 s everywhere): of 997 delivered person
+  follow-ups, 3 went out less than a cooldown after another confirmed alert of the same
+  camera — none in 79 days and 904 follow-ups on the busiest site, none in 11 days on
+  the second, one in 6 days on a third (96 s after the card photo of a passage 169 s
+  earlier) and two in 3 days on the dual-lens test camera (0.3 s and 16 s after a live
+  alert of a passage 145 s and 138 s later). Rare enough that merging (an album, or
+  editing the sent message) is not worth its code: such a follow-up is now skipped when
+  its result is back, audited as `sd` `cooldown` with `reason=sd_within_cooldown`, and
+  its frame kept in the review log (verdict `cooldown`) for labelling. The cooldown the
+  defer arms itself does not count (each queued entry stamps it), nor does a motion
+  alert, so a person on the card still follows a motion photo (30 person follow-ups on
+  the busiest site came within a cooldown of a motion alert; they still go out).
 
 ### 10.8 — Tell the owner when a camera stops watching
 

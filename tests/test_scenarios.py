@@ -8,6 +8,7 @@ times in comments are seconds since the scenario started.
 
 
 import functools
+import json
 import logging
 import os
 import threading
@@ -730,6 +731,72 @@ def test_a_restart_during_a_card_read_reads_the_window_again(monkeypatch, tmp_pa
     assert sc.actions("send") == [("send", "a")]
     assert sc.state.pending_sd == []
     restarted.shutdown(wait=True)
+
+
+def test_a_card_photo_behind_a_live_alert_of_the_next_passage_is_kept_off_the_phone(
+        monkeypatch, tmp_path, caplog):
+    # One visit, one message. Passage A gets no live frame and is queued for the card; the
+    # next passage, 145 s later, alerts live while A's card is still being read. A's card
+    # photo would land a fraction of a second after that alert (seen on a dual-lens
+    # camera), so it goes to the review log instead, with its reason in the audit.
+    caplog.set_level(logging.INFO)
+    sc, reading, release, reads = _sd_story(monkeypatch, tmp_path)
+    review = tmp_path / "review"
+    monkeypatch.setenv("TAPO_REVIEW_LOG_DIR", str(review))
+    worker = sc._collaborators["sd_worker"]
+    cam = sc.cams["a"]
+    sc.run(10)
+    cam.push(person(at(10)))
+    sc.tick(advance=5)                           # 10: no live frame, A queued
+    while not reading.wait(0.05):
+        sc.tick(advance=5)                       # until A's card read is running
+    while sc.clock.now < at(155):
+        sc.tick(advance=5)
+    cam.rtsp_ok = True
+    cam.push(person(at(155)))
+    live_at = sc.tick(advance=5)                 # 155: the next passage, live
+    assert sc.when(("send", "a")) == [live_at]
+
+    release.set()
+    _until_read_is_back(worker)
+    sc.tick(advance=5)                           # A's result: inside the cooldown
+    sc.run(60)
+
+    assert sc.actions("send", "send_failed") == [("send", "a")]
+    assert sc.notifier.send_paths == ["live"]
+    assert sc.state.pending_sd == []
+    skipped = [line for line in _audit(caplog, "person")
+               if "path=sd" in line and "action=cooldown" in line]
+    assert len(skipped) == 1
+    assert f"start={int(at(10))}" in skipped[0] and "reason=sd_within_cooldown" in skipped[0]
+    [record] = [json.loads(line) for line in (review / "index.jsonl").read_text().splitlines()]
+    assert record["verdict"] == "cooldown" and record["reason"] == "sd_within_cooldown"
+    assert record["path"] == "sd" and record["event_start"] == at(10)
+    worker.shutdown(wait=True)
+
+
+def test_a_card_photo_with_no_alert_since_its_own_defer_still_goes_out(
+        monkeypatch, tmp_path, caplog):
+    # The defer arms the cooldown itself (the rest of the burst stays quiet); that arming
+    # is not a message, so the follow-up it queued is delivered as before.
+    caplog.set_level(logging.INFO)
+    sc, reading, release, reads = _sd_story(monkeypatch, tmp_path)
+    worker = sc._collaborators["sd_worker"]
+    sc.run(10)
+    sc.cams["a"].push(person(at(10)))
+    sc.tick(advance=5)
+    while not reading.wait(0.05):
+        sc.tick(advance=5)
+    sc.cams["a"].push(person(at(30)))            # same passage, quiet under the cooldown
+    sc.tick(advance=5)
+    release.set()
+    _until_read_is_back(worker)
+    sc.tick(advance=5)
+
+    assert sc.actions("send") == [("send", "a")]
+    assert sc.notifier.send_paths == ["sd"]
+    assert not [line for line in _audit(caplog, "person") if "sd_within_cooldown" in line]
+    worker.shutdown(wait=True)
 
 
 # ── dual-lens C545D ──────────────────────────────────────────────────────────
