@@ -27,7 +27,7 @@ import sys
 import threading
 import time as _time
 
-from . import snapshot
+from . import apiguard, snapshot
 
 log = logging.getLogger(__name__)
 
@@ -142,7 +142,7 @@ def build_client(host, user, password, cloud_password):  # pragma: no cover - ne
     """A fresh pytapo client dedicated to one SD download (separate from the poller)."""
     from pytapo import Tapo
 
-    return Tapo(host, user, password, cloud_password or password)
+    return apiguard.guard_client(Tapo(host, user, password, cloud_password or password))
 
 
 def _run_in_fresh_loop(make_coro, timeout=SD_DOWNLOAD_TIMEOUT):

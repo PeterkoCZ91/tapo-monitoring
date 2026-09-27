@@ -37,6 +37,10 @@ not a fact).
 >   C560WS just returns `{}`.
 > - **`getInfLampCapability` with `{}` did the same on the C545D.** *Seen once, not
 >   repeated on purpose.* It answers normally on a C560WS.
+> - Both are on the client deny-list (`tapo_monitor/apiguard.py`): every pytapo client
+>   the package builds refuses them in `performRequest`, also inside a `multipleRequest`
+>   batch, on every model. There is no config opt-in; a research script passes `allow=`
+>   to `guard_client` explicitly.
 > - **Methods borrowed from another model family are not harmless probes.** Call unknown
 >   methods one at a time, a few seconds apart, and watch whether port 443 still accepts
 >   connections after each one.

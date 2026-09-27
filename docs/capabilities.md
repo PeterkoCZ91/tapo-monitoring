@@ -203,7 +203,9 @@ last alarm's time and a coarse type (a person was reported as `motion`).
 **Do not call:** `checkDetectEventState {}` — the HTTPS API refused connections for about
 10 s right after it. Keep calls at least ~1.5 s apart; closer ones return -40109
 `ONE_SECOND_REPEAT_REQUEST`. The raw `performRequest` wrappers stay off-limits as on
-every model.
+every model. `checkDetectEventState` and `getInfLampCapability` are on the client
+deny-list (`tapo_monitor/apiguard.py`): the package's clients refuse to send them to any
+camera, and a twin probe naming one is recorded as `unknown` / `denied_method`.
 
 ### Events
 

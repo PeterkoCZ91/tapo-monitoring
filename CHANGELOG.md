@@ -16,6 +16,9 @@ All notable changes to this project are documented here.
   on static cameras too when it is set.
 - `telegram_alerts: false` (per camera): data-collection mode — alerts are decided,
   recorded and counted as live, but no photo is sent; system notices still go out.
+- API deny-list: every camera client refuses `checkDetectEventState` and
+  `getInfLampCapability` (each took the local API down for ~12 s on a C545D), also inside
+  `multipleRequest` batches and hub envelopes; twin probes skip them as `denied_method`.
 
 ## [0.6.0] - 2026-09-25
 

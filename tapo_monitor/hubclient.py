@@ -29,7 +29,7 @@ import logging
 import time as _time
 import uuid
 
-from . import snapshot
+from . import apiguard, snapshot
 
 log = logging.getLogger(__name__)
 
@@ -56,7 +56,13 @@ SESSION_QUERY_TIMEOUT = 30
 
 
 def wrap(method, params):
-    """Build the ``multipleRequest`` envelope carrying exactly one method. Pure."""
+    """Build the ``multipleRequest`` envelope carrying exactly one method. Pure.
+
+    Raises :class:`apiguard.DeniedMethodError` for a denied method, so no hub request
+    can carry one either.
+    """
+    if apiguard.is_denied(method):
+        raise apiguard.DeniedMethodError(method)
     return {"method": "multipleRequest",
             "params": {"requests": [{"method": method, "params": params}]}}
 

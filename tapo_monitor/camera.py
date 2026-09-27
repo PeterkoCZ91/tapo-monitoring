@@ -18,6 +18,8 @@ import logging
 import subprocess
 import time as _time
 
+from . import apiguard
+
 log = logging.getLogger(__name__)
 
 PING_ECHOES = 3
@@ -50,10 +52,13 @@ def ping_reachable(host, timeout=1, run=subprocess.run):
 
 
 def tapo_factory(host, user, password, cloud_password=None):
-    """Return a zero-arg callable that builds a pytapo client (import kept lazy)."""
+    """Return a zero-arg callable that builds a pytapo client (import kept lazy).
+
+    The client refuses the methods on :data:`apiguard.DENIED_METHODS`.
+    """
     def make():
         from pytapo import Tapo
-        return Tapo(host, user, password, cloud_password or password)
+        return apiguard.guard_client(Tapo(host, user, password, cloud_password or password))
     return make
 
 

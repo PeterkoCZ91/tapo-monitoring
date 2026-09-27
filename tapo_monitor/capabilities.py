@@ -13,6 +13,8 @@ import re
 from collections.abc import Mapping
 from urllib.parse import urlsplit, urlunsplit
 
+from . import apiguard
+
 SCHEMA_VERSION = 1
 REDACTED = "<redacted>"
 
@@ -207,11 +209,17 @@ def derive_health(snapshot, *, network=None, events=None, rtsp=None):
 
 
 def _probe(client, method_name, **kwargs):
+    # A method on the API deny-list is skipped, not sent: the twin records why, and a
+    # getter that reaches a denied method internally is refused by the client guard.
+    if apiguard.is_denied(method_name):
+        return {"state": "unknown", "reason": "denied_method"}
     method = getattr(client, method_name, None)
     if not callable(method):
         return {"state": "unknown", "reason": "missing_method"}
     try:
         value = method(**kwargs)
+    except apiguard.DeniedMethodError:
+        return {"state": "unknown", "reason": "denied_method"}
     except Exception as exc:  # noqa: BLE001 - isolate every vendor/firmware exception
         return {"state": "error", "error_type": type(exc).__name__}
     if _empty(value):

@@ -462,9 +462,11 @@ turns after a person the wide lens saw (dual-cam linkage). See
   wide view but the pan/tilt lens still follows); on another both scored ~0.92.
 - [ ] Decide whether a dual-lens camera should take its live frame from the pan/tilt lens
   first, or use a lower threshold for it, from a day of per-lens scores.
-- [ ] Keep calls that drop the local API off the device: `checkDetectEventState` and
+- [x] Keep calls that drop the local API off the device: `checkDetectEventState` and
   `getInfLampCapability` each closed port 443 for ~12 s on a C545D (reproduced against an
   idle baseline). Add a deny-list in the client so no probe or future getter can send them.
+  Done: `apiguard` refuses both in every client's `performRequest` (batches and hub
+  envelopes included, all models, no config opt-in); twin probes skip them as `denied_method`.
 - [ ] An event source for a camera without an SD card: `getLastAlarmInfo` returns the type
   and time of the last alarm without storage.
 - [ ] Say which lens took the photo in the alert caption.
