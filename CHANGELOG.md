@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+- `tapo-monitor report --host IP`: an anonymized, shareable JSON report of what a camera
+  model answers, so new models can be supported from community reports. No `cameras.yaml`;
+  credentials from `TAPO_USER`/`TAPO_PASSWORD` or a prompt; one session with the API
+  deny-list on; read-only twin getters (per lens on a multi-lens camera) with the camera's
+  error code per getter; recent events with relative times; `--watch SECONDS` polls
+  `getEvents` while the owner walks past; `--rtsp` ffprobes `stream1`/`stream2`. Values
+  pass an allow-list (everything else is `<redacted>` and listed), and a self-check refuses
+  to write a file that still contains an IP, MAC, long hex id or e-mail address.
+  `report --summarize FILE` digests a report offline. See `docs/camera-reports.md`.
+- Twin probes that fail now keep the camera's numeric `error_code` (never the message).
+
 ## [0.7.0] - 2026-09-27
 
 ### Highlights

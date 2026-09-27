@@ -221,10 +221,33 @@ def _probe(client, method_name, **kwargs):
     except apiguard.DeniedMethodError:
         return {"state": "unknown", "reason": "denied_method"}
     except Exception as exc:  # noqa: BLE001 - isolate every vendor/firmware exception
-        return {"state": "error", "error_type": type(exc).__name__}
+        failed = {"state": "error", "error_type": type(exc).__name__}
+        code = error_code(exc)
+        if code is not None:
+            failed["error_code"] = code
+        return failed
     if _empty(value):
         return {"state": "unknown", "reason": "empty_response"}
     return {"state": "available", "value": redact(value)}
+
+
+_ERROR_CODE_JSON_RE = re.compile(r'"error_code"\s*:\s*(-?[0-9]+)')
+_ERROR_CODE_BARE_RE = re.compile(r"(?<![0-9.\-])(-[0-9]{4,6})(?![0-9.])")
+
+
+def error_code(exc):
+    """The camera's numeric error code carried by a pytapo exception, or None. Pure.
+
+    pytapo raises a bare ``Exception("Error: <text>, Response: {...}")`` with the JSON
+    answer embedded; only the integer is taken, never the text, which may echo request
+    data. A code of 0 means "no error" and is not returned.
+    """
+    text = str(exc)
+    match = _ERROR_CODE_JSON_RE.search(text) or _ERROR_CODE_BARE_RE.search(text)
+    if not match:
+        return None
+    code = int(match.group(1))
+    return code or None
 
 
 def _empty(value):

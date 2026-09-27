@@ -26,9 +26,11 @@ camera names, addresses, credentials, coordinates and observations do not belong
 5. [Battery cameras on a hub](battery-cameras-on-a-hub.md) — how a sleeping camera's events
    are read off the hub it records to, and the hub rules that shape the client.
 6. [Observability](observability.md) — Camera Digital Twin and Shadow Detection Auditor.
-7. [Labeling](labeling.md) — label collected sent/review-log frames and measure false
+7. [Camera reports](camera-reports.md) — produce an anonymized report of your own camera
+   model so it can be supported without the maintainers owning one.
+8. [Labeling](labeling.md) — label collected sent/review-log frames and measure false
    alarms, misses and the best threshold.
-8. [Roadmap](roadmap.md) — remaining product phases and research tracks.
+9. [Roadmap](roadmap.md) — remaining product phases and research tracks.
 
 ## Feature maturity
 

@@ -6,6 +6,8 @@ Usage:
   tapo-monitor status [health.json]     # show observed camera uptime/outages
   tapo-monitor twin-status [twin.json]  # show layered health and configuration drift
   tapo-monitor probe [cameras.yaml]     # one-shot camera probe (own authenticated session)
+  tapo-monitor report --host IP [--out FILE] [--watch S] [--rtsp]  # anonymized camera report
+  tapo-monitor report --summarize FILE  # offline digest of a camera report
   tapo-monitor shadow-record ...        # ingest an independent local observation
   tapo-monitor shadow-report ...        # compare camera and shadow observations
   tapo-monitor shadow-scan ...          # nightly recorder audit batch
@@ -582,6 +584,9 @@ def main(argv=None):
         return _twin_status(args[0] if args else None, json_output=json_output)
     if cmd == "probe":
         return _probe(argv[1:])
+    if cmd == "report":
+        from .report import main as report_main
+        return report_main(argv[1:])
     if cmd == "shadow-record":
         return _shadow_record(argv[1:])
     if cmd == "shadow-report":

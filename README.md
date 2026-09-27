@@ -216,6 +216,7 @@ available frame contains the subject.
 | `tapo-monitor audit-log [logfile\|-]` | Summarize event/scorer/Telegram audit records. |
 | `tapo-monitor twin-status [twin.json] [--json]` | Inspect layered health and config drift offline. |
 | `tapo-monitor probe [cameras.yaml] [--camera N] [--json]` | Probe cameras now; opens its own authenticated session. |
+| `tapo-monitor report --host IP [--out FILE] [--watch S] [--rtsp]` | Anonymized, shareable report of what your camera model answers; see [camera reports](docs/camera-reports.md). |
 | `tapo-monitor shadow-record ...` | Ingest one independent media-free observation. |
 | `tapo-monitor shadow-report ...` | Correlate camera and shadow observations. |
 | `tapo-monitor shadow-scan ...` | Nightly recorder audit: re-score yesterday's segments for miss candidates. |
