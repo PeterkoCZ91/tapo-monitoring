@@ -1,0 +1,89 @@
+name: Docker images
+
+# Builds the monitor and scorer images for amd64 and arm64 (Raspberry Pi 4/5 and other
+# 64-bit ARM boards) and pushes them to the GitHub Container Registry of this repository:
+#   ghcr.io/<owner>/<repo>:<version>, :latest               monitor
+#   ghcr.io/<owner>/<repo>:<version>-scorer, :scorer        scorer
+# Authentication is the workflow's own GITHUB_TOKEN; the repository holds no secrets.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag to publish (e.g. 0.7.1); empty = pyproject version"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: monitor
+            suffix: ""
+            latest: latest
+          - target: scorer
+            suffix: "-scorer"
+            latest: scorer
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve image name and version
+        id: meta
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          version="${RELEASE_TAG:-$INPUT_VERSION}"
+          if [ -z "$version" ]; then
+            version="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -n1)"
+          fi
+          version="${version#v}"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'; then
+            echo "refusing to publish unexpected version '$version'" >&2
+            exit 1
+          fi
+          # Registry paths must be lowercase; the owner name may not be.
+          image="ghcr.io/${REPOSITORY,,}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}${{ matrix.suffix }}
+            ${{ steps.meta.outputs.image }}:${{ matrix.latest }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}

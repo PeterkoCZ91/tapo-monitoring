@@ -13,6 +13,8 @@ camera names, addresses, credentials, coordinates and observations do not belong
    alert thresholds.
 3. [Troubleshooting](troubleshooting.md) — diagnose login lockouts, missing frames and
    firmware-specific behavior.
+4. [Docker](docker.md) — run the monitor and the optional scorer from the container
+   images, with Compose, instead of a venv and systemd.
 
 ### I want to understand or extend it
 

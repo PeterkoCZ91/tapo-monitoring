@@ -1,0 +1,55 @@
+# Example Docker Compose setup for tapo-monitor. See docs/docker.md.
+#
+#   cp docker-compose.example.yml docker-compose.yml
+#   cp cameras.example.yaml cameras.yaml   && $EDITOR cameras.yaml
+#   cp tapo.env.example tapo.env           && $EDITOR tapo.env
+#   docker compose run --rm monitor check /config/cameras.yaml
+#   docker compose up -d
+#
+# Networking: the default bridge network is enough. The daemon only opens outbound
+# connections to the cameras (HTTPS API, RTSP over TCP, ONVIF) and to Telegram, and
+# Docker NATs those through the host like any other client, including to cameras behind
+# a VPN subnet route the host has. Use `network_mode: host` only when the container
+# must reach something on the host's own loopback (a go2rtc or scorer bound to
+# 127.0.0.1), or when you want observability.status_port reachable without widening
+# status_bind — see docs/docker.md.
+
+services:
+  monitor:
+    image: ghcr.io/peterkocz91/tapo-monitoring:latest
+    # Or build it from this checkout instead of pulling:
+    # build: .
+    restart: unless-stopped
+    env_file: tapo.env
+    environment:
+      TZ: Etc/UTC            # set your timezone so logs and HH:MM schedules match
+    volumes:
+      - ./cameras.yaml:/config/cameras.yaml:ro
+      - tapo-data:/data
+      # Recorder tree for RECORDING_ROOT (read-only is enough):
+      # - /path/to/recordings:/recordings:ro
+    # network_mode: host
+    # With the scorer below, set scorer.url in cameras.yaml to http://scorer:8766/score.
+    # depends_on:
+    #   - scorer
+
+  # Optional YOLOX scorer. You provide the .onnx model; it is not shipped.
+  # scorer:
+  #   image: ghcr.io/peterkocz91/tapo-monitoring:scorer
+  #   # build:
+  #   #   context: .
+  #   #   target: scorer
+  #   restart: unless-stopped
+  #   environment:
+  #     TAPO_SCORER_MODEL: /models/yolox_m.onnx
+  #     TAPO_SCORER_INPUT_SIZE: "640"
+  #   volumes:
+  #     - ./models:/models:ro
+  #     - scorer-data:/data
+  #   # Publish only if another host's daemon uses this scorer; it has no authentication.
+  #   # ports:
+  #   #   - "8766:8766"
+
+volumes:
+  tapo-data:
+  # scorer-data:

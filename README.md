@@ -195,6 +195,10 @@ tapo-monitor check cameras.yaml
 tapo-monitor run cameras.yaml
 ```
 
+Prefer containers? `docker compose` with the shipped `Dockerfile`,
+`docker-compose.example.yml` and `tapo.env.example` gets the same daemon running without a
+local Python setup, on amd64 or a 64-bit Raspberry Pi — see [Docker](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/docker.md).
+
 The YAML contains environment-variable **names**, never secret values. `cameras.yaml`,
 `.env` files and runtime media are git-ignored. Start from the
 [configuration guide](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/configuration.md), not by enabling every optional feature.
@@ -331,6 +335,7 @@ understand the session and sequential-request limitations.
 | [Configuration](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/configuration.md) | You are preparing `cameras.yaml` and environment variables. |
 | [Architecture](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/architecture.md) | You want component boundaries, timing and failure semantics. |
 | [Operations](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/operations.md) | You are deploying, monitoring or calibrating a live instance. |
+| [Docker](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/docker.md) | You want to run the monitor (and optional scorer) in containers. |
 | [Capabilities](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/capabilities.md) | You need the implemented/planned feature inventory. |
 | [Observability](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/observability.md) | You are enabling Digital Twin or Shadow Auditor. |
 | [MQTT and Home Assistant](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/mqtt.md) | You want the cameras as Home Assistant entities. |

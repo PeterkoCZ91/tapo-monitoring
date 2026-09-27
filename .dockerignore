@@ -1,0 +1,47 @@
+# Build context for the Dockerfile: only pyproject.toml, README.md, LICENSE and the
+# tapo_monitor package are copied, so everything else is excluded to keep the context
+# small and to make sure no secret or private file can ever reach an image layer.
+.git
+.github
+.gitignore
+.claude
+.codegraph
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+.coverage.*
+htmlcov
+
+# Private deployment state and secrets
+private
+AGENTS.md
+cameras.yaml
+cameras.*.yaml
+cameras.yaml.*
+go2rtc.yaml
+*.env
+*.env.*
+tapo.env
+
+# Tests, fixtures, tooling and docs are not needed at runtime
+tests
+tools
+systemd
+docs
+discovery
+
+# Media and captures can contain private scenes
+*.jpg
+*.jpeg
+*.png
+*.mp4
+*.mov
+*.onnx
+*.jsonl
+*.log

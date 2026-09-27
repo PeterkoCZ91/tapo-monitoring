@@ -4,6 +4,24 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+- Packaging for PyPI: `pip install tapo-monitor` (extras `mqtt`, `scorer`, `onvif`). The
+  package metadata now carries an SPDX license with the license file, classifiers and
+  project links, the README uses absolute links so they work on the PyPI page, and the
+  wheel holds only the `tapo_monitor` package. A published GitHub release builds the
+  sdist and wheel and uploads them through PyPI Trusted Publishing
+  (`.github/workflows/release.yml`, no token in the repository); the one-time setup is in
+  `docs/releasing.md`.
+
+- Container images: a multi-stage `Dockerfile` whose default target is the monitor
+  (Alpine, ffmpeg, `[mqtt]` extra, ~240 MB) and whose `scorer` target is the YOLOX scoring
+  service (Debian slim, `[scorer]` extra, model mounted at `/models`, port 8766, health
+  check on `/health`). Both run as a non-root user and keep all state under a `/data`
+  volume (`XDG_STATE_HOME`, `STATE_DIR` and `HOME` point there). Ships with
+  `docker-compose.example.yml`, `tapo.env.example` (variable names and placeholders only)
+  and `.dockerignore`. A `Docker images` workflow publishes both for amd64 and arm64 to
+  the GitHub Container Registry on every published release. See `docs/docker.md`.
+
 ## [0.8.0] - 2026-09-27
 
 ### Highlights
@@ -39,13 +57,6 @@ All notable changes to this project are documented here.
   sanitizer's output, events through the real normalizer and classifier, `--summarize`).
   First fixtures: C260 (fw 1.2.3) and C545D (fw 1.1.7, converted from the earlier
   capture). `report.resanitize` re-cleans an existing report offline.
-- Packaging for PyPI: `pip install tapo-monitor` (extras `mqtt`, `scorer`, `onvif`). The
-  package metadata now carries an SPDX license with the license file, classifiers and
-  project links, the README uses absolute links so they work on the PyPI page, and the
-  wheel holds only the `tapo_monitor` package. A published GitHub release builds the
-  sdist and wheel and uploads them through PyPI Trusted Publishing
-  (`.github/workflows/release.yml`, no token in the repository); the one-time setup is in
-  `docs/releasing.md`.
 
 ### Changed
 - The report's allow-list keeps more harmless settings when they look like an enum or a
