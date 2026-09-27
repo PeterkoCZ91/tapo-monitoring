@@ -27,6 +27,18 @@ Python daemon.
 Other Tapo models with third-party access and `getEvents` may work; what we learned about
 the local API across models is in the [local API reference](docs/tapo-local-api.md).
 
+## What's new in 0.7
+
+- **Told when a camera stops watching** — one Telegram message when privacy mode, motion
+  or person detection is switched off or back on (`privacy_notice`, `detection_notice`),
+  and `follow_app_notifications` to go quiet while the Tapo app's notifications are off
+  ([configuration](docs/configuration.md)).
+- **One visit, one message** — an SD follow-up is held to the cooldown when the camera
+  already alerted live.
+- **Dual-lens C545D** — per-lens self-heal, the lens and the number of people in the
+  caption, and a client-side deny-list for the calls that drop the camera's API.
+- **Collect-only mode** — `telegram_alerts: false` records alerts without sending them.
+
 ## What's new in 0.6
 
 - **Quality per visit, not per frame** — `label-stats` groups frames into incidents and

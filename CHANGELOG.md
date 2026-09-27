@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-27
+
+### Highlights
+- **The owner hears when a camera stops watching:** `privacy_notice` and `detection_notice`
+  send one Telegram message when privacy mode, motion or person detection is switched on or
+  off in the app; `follow_app_notifications` silences alerts while the app's own
+  notifications are off.
+- **One visit, one message:** a card follow-up no longer lands a second behind a live alert
+  of the next passage.
+- **Dual-lens C545D, both lenses kept healthy:** the self-heal reads and repairs each lens,
+  captions name the lens and the number of people, and the calls that take the camera's API
+  down are refused in the client.
+- **Collect-only cameras:** `telegram_alerts: false` records alerts without sending them,
+  for a new site that should gather data before it notifies.
+- **A file-descriptor leak fixed** that cut one host off its camera and Telegram after a day.
+
 ### Fixed
 - Dual-lens self-heal: on a C545D the repairs sent without `chn_id` reached the wide lens
   only, so the pan/tilt lens's person detection, motion sensitivity and vehicle-off were
