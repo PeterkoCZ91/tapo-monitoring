@@ -450,10 +450,19 @@ turns after a person the wide lens saw (dual-cam linkage). See
   subject.
 - [x] Twin: lens layout, linkage state and per-lens detection switches (`chn_id`); SD
   cards flagged `dilatant_suspect` read as degraded storage on any model.
-- [ ] Verify on the camera which lens the self-heal setters reach without `chn_id`, and
-  whether `role: static` (auto-track off) turns the linkage off; pass `chn_id` where it
-  matters. White lamp done: without `chn_id` a write reaches only the wide lens, with
-  `chn_id` only the named lens — so `whitelamp_intensity` needs `chn_id` on a C545D.
+- [x] Verify on the camera which lens the self-heal setters reach without `chn_id`, and
+  whether `role: static` (auto-track off) turns the linkage off. Measured: every
+  detection and image setter the daemon sends without `chn_id` (motion sensitivity,
+  person, vehicle, tamper, LDC, day/night `inf_type`, night-vision mode, white lamp)
+  reaches only the wide lens; the pan/tilt lens keeps its own values. SmartTrack and
+  auto-track are not readable per lens (`chn_id` ignored / refused). The linkage stays
+  on with auto-track off, on, and after a SmartTrack write, so `role: static` does not
+  turn it off.
+- [ ] Pass `chn_id=[1,2]` in the self-heal repairs on a dual-lens camera (at least
+  person detection and motion sensitivity), and send motion sensitivity as the number
+  alone: a write that also carries the `sensitivity` label is overridden by the label.
+  Per-lens day/night reads need `name: ["common"]` as a list; the string form ignores
+  `chn_id`.
 - [ ] Grow the event sample (night, pets, vehicles) and re-check the 180 s hold against
   how long the firmware actually keeps the lens on a subject.
 - [ ] Compare `lens_pick_stream` photos with the wide-lens-only ones before recommending
