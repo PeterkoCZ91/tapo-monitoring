@@ -564,3 +564,12 @@ def test_scenario_without_the_block_behaves_exactly_as_before(monkeypatch, tmp_p
     with_bridge = story({"host": BROKER}, tmp_path / "on")
     assert without == with_bridge
     assert ("send", "a") in [a for _t, a in without]
+
+
+def test_daemon_device_name_gives_clean_entity_ids():
+    msgs = mqtt.discovery_messages(cfg_mod.MqttConfig(host="broker"), ["front"])
+    running = next(json.loads(p) for t, p in msgs if t.endswith("/running/config"))
+    assert running["device"]["name"] == "tapo-monitor"
+    other = mqtt.discovery_messages(cfg_mod.MqttConfig(host="broker", base_topic="site_b"), [])
+    running = next(json.loads(p) for t, p in other if t.endswith("/running/config"))
+    assert running["device"]["name"] == "tapo-monitor site_b"

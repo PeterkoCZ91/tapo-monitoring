@@ -120,7 +120,10 @@ ever published; camera names are, so pick names you are happy to see on the brok
 
 Entity ids follow the device and entity names; with a camera named `front` they are
 `binary_sensor.front_person`, `binary_sensor.front_motion`, `sensor.front_last_alert`,
-and so on. Check them under *Settings → Devices & services → MQTT*.
+and so on; the daemon's own are `binary_sensor.tapo_monitor_running` and
+`binary_sensor.tapo_monitor_loop_failing` (with a non-default `base_topic` its name is
+appended). Checked against a live Home Assistant. Check them under
+*Settings → Devices & services → MQTT*.
 
 ```yaml
 automation:

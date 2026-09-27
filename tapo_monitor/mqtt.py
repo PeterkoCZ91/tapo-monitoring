@@ -139,7 +139,12 @@ def discovery_messages(mqtt_cfg, camera_names, version="0"):
     t = Topics(mqtt_cfg.base_topic, mqtt_cfg.discovery_prefix)
     origin = {"name": "tapo-monitor", "sw_version": version}
     daemon_id = f"{t.node}_daemon"
-    daemon_device = {"identifiers": [daemon_id], "name": f"tapo-monitor ({mqtt_cfg.base_topic})",
+    # Home Assistant builds entity ids from device + entity name: "tapo-monitor" gives
+    # binary_sensor.tapo_monitor_running; a non-default base_topic is appended to tell
+    # several daemons on one broker apart.
+    daemon_name = ("tapo-monitor" if mqtt_cfg.base_topic == "tapo_monitor"
+                   else f"tapo-monitor {mqtt_cfg.base_topic}")
+    daemon_device = {"identifiers": [daemon_id], "name": daemon_name,
                      "manufacturer": "tapo-monitor", "model": "daemon", "sw_version": version}
     availability = {"availability_topic": t.availability, "payload_available": "online",
                     "payload_not_available": "offline"}
