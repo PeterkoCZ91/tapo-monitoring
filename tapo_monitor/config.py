@@ -488,7 +488,7 @@ def _check_keys(data, cls, where):
     renamed key reaches them under its new name.
     """
     data = _migrate_renamed_keys(data, where)
-    _warn_unknown_keys(data, _field_names(cls), where)
+    _reject_unknown_keys(data, _field_names(cls), where)
     for f in fields(cls):
         if not is_dataclass(f.default_factory):
             continue
@@ -496,11 +496,11 @@ def _check_keys(data, cls, where):
         section = _migrate_renamed_keys(data.get(f.name), path)
         if section is not data.get(f.name):
             data = {**data, f.name: section}
-        _warn_unknown_keys(section, _field_names(f.default_factory), path)
+        _reject_unknown_keys(section, _field_names(f.default_factory), path)
     return data
 
 
-def _warn_unknown_keys(mapping, known, where):
+def _reject_unknown_keys(mapping, known, where):
     """Reject keys in ``mapping`` that no parser reads.
 
     A mistyped key silently takes its default — a dropped ``rotate`` costs about a third
