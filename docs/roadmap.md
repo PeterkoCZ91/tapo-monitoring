@@ -262,7 +262,7 @@ so the canonical unit edit becomes cosmetic rather than blocking.
 
 ## Phase 7 — Runtime correctness and deterministic behaviour
 
-Status: **complete** (not yet deployed)
+Status: **complete** (deployed on the fleet)
 
 A gap review against a generic "autonomous PTZ platform" wish list found that most of
 it already exists here (digital twin, drift, self-healing, clock offsets, host watch,
@@ -371,7 +371,8 @@ multi-tick scenarios are written once rather than rebuilt by hand in each test.
 
 ## Phase 8 — Prove phase 7 in production, close what it exposed
 
-Status: **in progress** (8.2–8.4 done; 8.1 trial running on one camera; 8.5 waits for a second camera; 8.6 code shipped, on-camera checks open)
+Status: **in progress** (8.2–8.4 done; 8.1 trial running on one camera; 8.5 waits for a second camera; 8.6: lens reach measured and per-lens repair shipped; photo comparison, pan/tilt-first live frame and
+the album still open)
 
 Phase 7 was built and tested against fakes; the scenario harness and a replay of a real
 recorded day then surfaced a handful of smaller gaps. This phase ships phase 7 the way
@@ -568,9 +569,8 @@ shadows. The generic detector has never seen this fleet's IR night scenes.
 ## Phase 10 — Incidents, not frames
 
 Status: **in progress** (10.1, 10.3, 10.6 and 10.7 done; 10.2 and 10.5 in trials on one
-camera; 10.4: recording follow-ups 119 s -> 56 s and follow-ups off the main loop on one host,
-camera-card path and hub clips next; 10.8: privacy notice done, detection-off notice
-next)
+camera; 10.4: recording follow-ups 119 s -> 56 s and follow-ups off the main loop on the fleet,
+camera-card path and hub clips next; 10.8 done)
 
 Frame statistics hide what matters to the person holding the phone: was each visit
 alerted, and how late. A first join of labels with deliveries showed that of 31 held
