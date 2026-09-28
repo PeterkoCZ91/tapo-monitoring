@@ -577,7 +577,7 @@ shadows. The generic detector has never seen this fleet's IR night scenes.
 
 Status: **in progress** (10.1, 10.3, 10.6 and 10.7 done; 10.2 and 10.5 in trials on one
 camera; 10.4: recording follow-ups 119 s -> 56 s and follow-ups off the main loop on the fleet,
-camera-card path and hub clips next; 10.8 done)
+camera-card path and hub clips next; 10.8 done; 10.9 in a trial on one site)
 
 Frame statistics hide what matters to the person holding the phone: was each visit
 alerted, and how late. A first join of labels with deliveries showed that of 31 held
@@ -718,6 +718,22 @@ closest.
   `follow_app_notifications` (alerts recorded, not sent, while the app's switch is off).
   Tested firmware exposes only an on/off switch locally, no schedule; unknown shapes never
   silence.
+
+### 10.9 — Alerts that outlive an internet outage
+
+A host that loses its uplink for hours lost every alert of that window: the live send
+failed, the follow-up retried for ten minutes and dropped the event. The shared scorer is
+reached over the same uplink, so the frames of that window also went out unscored.
+
+- [x] Opt-in `outbox:` block: a failed alert is kept on disk; once Telegram answers again
+  the daemon rescores what the scorer missed, sends one summary of the outage per camera
+  and the person photos marked as delayed, and moves the rest to the review log.
+  Incidents delivered or deliberately suppressed later are cleared, and each drain works
+  within a small per-tick budget so it never holds up live polling.
+- [ ] Trial on one site; after its first real outage, compare the summary and the delayed
+  photos with the review log before enabling it on the other hosts.
+- [ ] Decide whether a host needs a small local fallback scorer for the time the shared
+  one is unreachable, so an outage stops meaning unscored motion alerts.
 
 ### 10.7 — A public reference for the local API
 
