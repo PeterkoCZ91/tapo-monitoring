@@ -673,12 +673,19 @@ closest.
   or it is less than 1.25× larger; with it, the first 12 s of a clip are sampled every
   2 s. On 28 recording follow-ups the pick changed in 15, the person a median 1.32×
   taller, none judged worse by eye. Cost: 9 frames instead of 6 per early look (~1.5 s).
-- [ ] After a week on the recording-source camera, compare delay and photo size per
-  incident; switch camera-card sites only with their own evidence (one clip so far,
-  where the gain was 1.16× with more motion blur). Delay and score after three days show
-  no cost (median 57 s vs 55 s, person score 0.82 vs 0.79), but frames before the switch
-  logged no box size: a before/after size comparison needs the old sent frames re-scored
-  while they are still retained.
+- [x] After a week on the recording-source camera, compare delay and photo size per
+  incident. The sent frames of four days before and after the switch were re-scored (the
+  re-scored boxes match the logged `box_area` exactly): by day the person is a median
+  1.07× taller (96 → 102 px) and 1.35× larger in area, the share of small persons
+  (< 85 px) fell from 30 % to 11 %, at no cost in delay (57 s vs 55 s) or score (0.82 vs
+  0.80); at night no measurable change. Live frames of the same days did not move, so it
+  is not scene drift. Kept on the recording-source camera.
+- [ ] `largest` ranks by box area, so part of its gain is people side-on or mid-stride
+  rather than closer, and more boxes touch the frame edge (9 % → 15 %, feet cut off).
+  Try ranking by box height before recommending it further.
+- [ ] Camera-card sites stay on `sharpest`: their card path is already the slowest, and
+  their one checked clip gained 1.16× with more motion blur. Revisit with their own
+  week of `box_area` after the card early look (10.4) lands.
 
 ### 10.6 — One visit, one message
 
