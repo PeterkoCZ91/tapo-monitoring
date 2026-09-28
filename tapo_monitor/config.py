@@ -208,6 +208,12 @@ class CameraConfig:
     # Extra frames every 2 s over the event's first 12 s of the follow-up window. Unset in
     # the YAML it follows sd_frame_pick: on for "largest", off for "sharpest".
     sd_dense_start: bool = False
+    # Camera card only: read the event's first 18 s as soon as they clear pytapo's
+    # freshness guard, and the rest of the window only when that look shows nobody.
+    sd_early_look: bool = False
+    # Camera card only: seconds a window's end must be in the past before pytapo downloads
+    # it (its FRESH_RECORDING_TIME_SECONDS). The due time of every card read follows it.
+    sd_fresh_guard: int = 60
     # False records every alert decision exactly as if it went out (sent log, cooldowns,
     # audit) but sends no photo to Telegram: a camera that is only collecting data. System
     # notices (privacy, outage, drift) still go out.
@@ -946,6 +952,12 @@ def _camera(data, index):
         sd_dense_start = sd_frame_pick == "largest"
     elif not isinstance(sd_dense_start, bool):
         raise ConfigError(f"{where}: 'sd_dense_start' must be true or false")
+    try:
+        sd_fresh_guard = int(data.get("sd_fresh_guard", 60))
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}: 'sd_fresh_guard' must be an integer") from None
+    if not 10 <= sd_fresh_guard <= 120:
+        raise ConfigError(f"{where}: 'sd_fresh_guard' must be between 10 and 120")
     night_vision = data.get("night_vision")
     if night_vision is not None and night_vision not in ("ir", "auto"):
         raise ConfigError(f"{where}: 'night_vision' must be 'ir' or 'auto'")
@@ -1091,6 +1103,8 @@ def _camera(data, index):
         follow_app_notifications=_check_bool(data.get("follow_app_notifications", False),
                                              "follow_app_notifications", where),
         sd_dense_start=sd_dense_start,
+        sd_early_look=_check_bool(data.get("sd_early_look", False), "sd_early_look", where),
+        sd_fresh_guard=sd_fresh_guard,
         person_sensitivity=int(data["person_sensitivity"]) if data.get("person_sensitivity") is not None else None,
         night_only=bool(data.get("night_only", False)),
         quiet_hours=quiet_hours,

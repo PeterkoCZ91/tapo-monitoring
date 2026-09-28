@@ -3151,6 +3151,215 @@ def test_empty_early_look_reads_only_the_rest_at_the_full_windows_time(monkeypat
     assert sent == ["/tmp/rest.jpg"] and state.pending_sd == []
 
 
+def _card_early_followup(monkeypatch, **extra):
+    monkeypatch.setattr(daemon.notify, "send_photo", lambda *a, **k: True)
+    monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "empty scene")
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
+                                  "sd_early_look": True, **extra}]})
+    state = daemon.MonitorState()
+
+    class Cam:
+        def getEvents(self):
+            return [{"start_time": 500, "end_time": 536,
+                     "events_1": 524290, "alarm_type": 2}]
+
+    secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
+    daemon.run_monitor_pass(app, {"a": Cam()}, state, now=2000, secrets=secrets,
+                            snapshot_for=lambda _cfg: (lambda cam, ev: "/tmp/live.jpg"),
+                            time_str=lambda ev: "T")
+    return app, state, Cam, secrets
+
+
+def test_card_early_look_reads_the_first_seconds_sooner(monkeypatch):
+    _, state, _, _ = _card_early_followup(monkeypatch)
+    entry = state.pending_sd[0]
+    early = daemon.sdclip.CARD_EARLY_SPAN
+    assert (entry["span"], entry["rest_span"]) == (early, 36)
+    assert entry["due_at"] == 500 + daemon.sdclip.fresh_delay(early)   # +87, not +105
+
+
+def test_card_early_look_skips_a_window_too_short_to_split(monkeypatch):
+    # A span capped below 24 s cannot be split; 20 is below the 36 s floor anyway, so
+    # force the cap through the first-span helper.
+    monkeypatch.setattr(daemon, "sd_followup_spans", lambda *a: (20, 20))
+    _, state, _, _ = _card_early_followup(monkeypatch)
+    entry = state.pending_sd[0]
+    assert entry["span"] == 20 and "rest_span" not in entry
+    assert entry["due_at"] == 500 + daemon.sdclip.fresh_delay(20)
+
+
+def test_card_early_look_is_off_by_default(monkeypatch):
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    assert app.cameras[0].sd_early_look is False
+    with pytest.raises(cfg.ConfigError, match="sd_early_look"):
+        cfg.load_config_from_dict(
+            {"cameras": [{"name": "a", "host": "203.0.113.10", "sd_early_look": "yes"}]})
+
+
+def test_card_early_look_with_a_subject_sends_without_reading_the_rest(monkeypatch):
+    app, state, Cam, secrets = _card_early_followup(monkeypatch)
+    calls, sent = [], []
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap, **k: sent.append(img) or True)
+    monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "Person")
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None, **kw):
+        calls.append((start_time, span, kw))
+        return ["/tmp/card.jpg"]
+    daemon.process_pending_sd(app, {"a": Cam()}, state, now=state.pending_sd[0]["due_at"],
+                              secrets=secrets, snapshot_for=lambda _cfg: (lambda cam, ev: None),
+                              time_str=lambda ev: "T", fetch_frames=fetch_frames)
+    assert calls == [(500, daemon.sdclip.CARD_EARLY_SPAN, {})]
+    assert sent == ["/tmp/card.jpg"] and state.pending_sd == []
+
+
+def test_empty_card_early_look_reads_the_rest_by_offset_behind_the_card_guard(monkeypatch):
+    # The early look read frames and saw nobody: only the rest is read, by offset.
+    app, state, Cam, secrets = _card_early_followup(monkeypatch)
+    early = daemon.sdclip.CARD_EARLY_SPAN
+    calls, sent, live = [], [], []
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap, **k: sent.append(img) or True)
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None, **kw):
+        calls.append((start_time, span, kw))
+        return ["/tmp/early.jpg"] if len(calls) == 1 else ["/tmp/rest.jpg"]
+    def snapshot_for(_cfg):
+        return lambda cam, ev: live.append(ev) or "/tmp/live.jpg"
+    run = lambda now: daemon.process_pending_sd(  # noqa: E731
+        app, {"a": Cam()}, state, now=now, secrets=secrets, snapshot_for=snapshot_for,
+        time_str=lambda ev: "T", fetch_frames=fetch_frames)
+
+    run(state.pending_sd[0]["due_at"])            # groq: "empty scene" -> nobody
+    assert sent == [] and live == []
+    entry = state.pending_sd[0]
+    assert (entry["offset"], entry["span"]) == (early, 36 - early)
+    assert entry["early_frames"] is True
+    # The card's rest waits for the whole window to clear pytapo's guard (+105), not
+    # the recorder's +15 margin.
+    assert entry["due_at"] == 500 + daemon.sdclip.fresh_delay(36)
+    run(entry["due_at"] - 1)
+    assert len(calls) == 1
+
+    monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "Person")
+    run(entry["due_at"])
+    # The card is looked up by the event start and skips the offset inside its segment.
+    assert calls == [(500, early, {}), (500, 36 - early, {"offset": early})]
+    assert sent == ["/tmp/rest.jpg"] and state.pending_sd == []
+
+
+def test_unread_card_early_look_rereads_the_whole_window_from_the_start(monkeypatch):
+    # The early look produced no frames at all (download or lookup failed): the opening
+    # seconds were never checked, so the whole window is read at its usual time.
+    app, state, Cam, secrets = _card_early_followup(monkeypatch, sd_fresh_guard=40)
+    early = daemon.sdclip.CARD_EARLY_SPAN
+    calls, sent, audits = [], [], []
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap, **k: sent.append(img) or True)
+    monkeypatch.setattr(daemon.monitor, "audit_event",
+                        lambda *a, **k: audits.append((a[4], k.get("reason"))))
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None, **kw):
+        calls.append((start_time, span, kw))
+        return [] if len(calls) == 1 else ["/tmp/whole.jpg"]
+    run = lambda now: daemon.process_pending_sd(  # noqa: E731
+        app, {"a": Cam()}, state, now=now, secrets=secrets,
+        snapshot_for=lambda _cfg: (lambda cam, ev: None), time_str=lambda ev: "T",
+        fetch_frames=fetch_frames)
+    run(state.pending_sd[0]["due_at"])
+    entry = state.pending_sd[0]
+    assert entry["span"] == 36 and "offset" not in entry and "rest_span" not in entry
+    assert "early_frames" not in entry
+    assert entry["due_at"] == 500 + daemon.sdclip.fresh_delay(36, guard=40)
+    assert ("retry", f"early_look_unread={early}->36") in audits
+    monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "Person")
+    run(entry["due_at"])
+    assert calls == [(500, early, {"guard": 40}), (500, 36, {"guard": 40})]
+    assert sent == ["/tmp/whole.jpg"] and state.pending_sd == []
+
+
+def test_card_rest_with_no_frames_after_a_checked_early_look_drops(monkeypatch):
+    # The early look checked frames of nobody; the rest produced none (past a short
+    # segment's end, or a failed read): a checked window, dropped, no blind live grab.
+    app, state, Cam, secrets = _card_early_followup(monkeypatch)
+    sent, live, resolved = [], [], []
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap, **k: sent.append(img) or True)
+    monkeypatch.setattr(daemon, "resolve_outbox", lambda cfg_, ev, why: resolved.append(why))
+    frames = [["/tmp/early.jpg"], []]
+    def snapshot_for(_cfg):
+        return lambda cam, ev: live.append(ev) or "/tmp/live.jpg"
+    run = lambda now: daemon.process_pending_sd(  # noqa: E731
+        app, {"a": Cam()}, state, now=now, secrets=secrets, snapshot_for=snapshot_for,
+        time_str=lambda ev: "T", fetch_frames=lambda *a, **k: frames.pop(0))
+    run(state.pending_sd[0]["due_at"])
+    run(state.pending_sd[0]["due_at"])
+    assert live == [] and sent == [] and state.pending_sd == []
+    assert resolved == ["dropped, no subject on the card [sd]"]
+
+
+def test_card_reads_that_both_fail_fall_back_to_the_live_grab(monkeypatch):
+    # The early look read nothing and the whole-window re-read read nothing either:
+    # the full look owns the live fallback, as without the early look.
+    app, state, Cam, secrets = _card_early_followup(monkeypatch)
+    sent, live = [], []
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap, **k: sent.append(img) or True)
+    monkeypatch.setattr(daemon, "score_for", lambda cfg_: None)
+    def snapshot_for(_cfg):
+        return lambda cam, ev: live.append(ev) or "/tmp/live.jpg"
+    run = lambda now: daemon.process_pending_sd(  # noqa: E731
+        app, {"a": Cam()}, state, now=now, secrets=secrets, snapshot_for=snapshot_for,
+        time_str=lambda ev: "T", fetch_frames=lambda *a, **k: [])
+    run(state.pending_sd[0]["due_at"])
+    assert live == []
+    run(state.pending_sd[0]["due_at"])
+    assert len(live) == 1 and sent == ["/tmp/live.jpg"] and state.pending_sd == []
+
+
+def test_card_rest_goes_to_the_card_subprocess_with_its_offset(monkeypatch):
+    app, state, Cam, secrets = _card_early_followup(monkeypatch)
+    calls = []
+    def fake_subprocess(cfg_, start_time, span=None, out_dir=None, **kw):
+        calls.append((start_time, span, kw))
+        return ["/tmp/nobody.jpg"]
+    monkeypatch.setattr(daemon.sdclip, "fetch_sd_frames_subprocess", fake_subprocess)
+    monkeypatch.setattr(daemon, "score_for", lambda cfg_: None)   # groq: "empty scene"
+    run = lambda now: daemon.process_pending_sd(  # noqa: E731
+        app, {"a": Cam()}, state, now=now, secrets=secrets,
+        snapshot_for=lambda _cfg: (lambda cam, ev: None), time_str=lambda ev: "T")
+    run(state.pending_sd[0]["due_at"])
+    run(state.pending_sd[0]["due_at"])
+    early = daemon.sdclip.CARD_EARLY_SPAN
+    assert calls == [(500, early, {}), (500, 36 - early, {"offset": early})]
+
+
+def test_card_fresh_guard_moves_both_due_times_and_reaches_the_fetch(monkeypatch):
+    app, state, Cam, secrets = _card_early_followup(monkeypatch, sd_fresh_guard=30)
+    early = daemon.sdclip.CARD_EARLY_SPAN
+    entry = state.pending_sd[0]
+    assert entry["due_at"] == 500 + daemon.sdclip.fresh_delay(early, guard=30)
+    calls = []
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None, **kw):
+        calls.append(kw)
+        return ["/tmp/nobody.jpg"]
+    run = lambda now: daemon.process_pending_sd(  # noqa: E731
+        app, {"a": Cam()}, state, now=now, secrets=secrets,
+        snapshot_for=lambda _cfg: (lambda cam, ev: None), time_str=lambda ev: "T",
+        fetch_frames=fetch_frames)
+    run(entry["due_at"])
+    assert state.pending_sd[0]["due_at"] == 500 + daemon.sdclip.fresh_delay(36, guard=30)
+    run(state.pending_sd[0]["due_at"])
+    assert calls == [{"guard": 30}, {"offset": early, "guard": 30}]
+
+
+def test_card_fresh_guard_default_and_bounds():
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    assert app.cameras[0].sd_fresh_guard == daemon.sdclip.PYTAPO_FRESH_GUARD == 60
+    for bad in (5, 200, "soon"):
+        with pytest.raises(cfg.ConfigError, match="sd_fresh_guard"):
+            cfg.load_config_from_dict(
+                {"cameras": [{"name": "a", "host": "203.0.113.10", "sd_fresh_guard": bad}]})
+
+
 def test_recording_frames_are_scored_while_the_next_is_extracted(monkeypatch):
     # The fake extractor hands over frame 0 and then waits until someone scores it:
     # only a follow-up that scores during extraction gets past the wait.

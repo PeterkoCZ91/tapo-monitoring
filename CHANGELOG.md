@@ -15,6 +15,29 @@ All notable changes to this project are documented here.
   photos (sent-log `path: outbox`) arm no cooldown; each tick drains a bounded amount. Before,
   the in-memory retries gave up after ten minutes, so a night-long internet outage lost
   every alert of the night.
+- Opt-in early look for camera-card follow-ups (`sd_early_look: true`, off by default).
+  A card window of 24 s or more is read in two parts, as the local recording already is:
+  the first 18 s from the start of the camera's recorded segment, due about 87 s after
+  the event instead of 105 s and a shorter download, and the rest of the window only
+  when that look shows nobody, at the time the whole window was read before. The card
+  download now honours an offset into the segment (the rest window starts 18 s in rather
+  than at the segment start again). On two sites the photo a card follow-up sent lay in
+  the first 12 s of its window in about 90 % of cases. With it on, a failed card segment
+  lookup is tried once more after 5 s (the C560WS sometimes answers a fresh session's
+  first calls with `-40214`, and the read then fell back to a guessed window that comes
+  back empty). An early look that read no frames is followed by a read of the whole
+  window; one that showed frames of nobody followed by an empty rest is dropped, never
+  replaced by a live grab.
+- One `SD read` log line per camera-card read: window, offset, segment lead, bytes, and
+  the connect, download and extraction seconds.
+- `sd_fresh_guard` (camera card, default 60, 10-120): the seconds a card window's end
+  must be in the past before pytapo downloads it. Every card due time follows it. The
+  default is pytapo's own guard; lower it only on a camera where a trial shows complete
+  clips.
+
+### Changed
+- The camera-card segment lookup error is printed with the read's output (the journal
+  shows it when a read comes back empty); before it was swallowed.
 
 ### Fixed
 - One visit, one message, also behind a motion alert: a person SD/recording follow-up is

@@ -1817,9 +1817,15 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                     log.info("drop %s: SD follow-up already pending for %s", etype, _name)
                     return
             # A local recording is cheap to read twice, so it gets an early first look
-            # at the event's opening seconds; the SD card (a slow download behind
-            # pytapo's freshness guard) keeps its single window.
-            early = recclip.early_span(first_span) if _source == "recording" else None
+            # at the event's opening seconds. The SD card (a slow download behind
+            # pytapo's freshness guard) does so only when the camera opts in
+            # (sd_early_look): its look is shorter, from the aligned segment start.
+            if _source == "recording":
+                early = recclip.early_span(first_span)
+            elif _cfg.sd_early_look:
+                early = sdclip.card_early_span(first_span)
+            else:
+                early = None
             entry = {
                 "camera": _name,
                 "etype": etype,
@@ -1833,7 +1839,8 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                 "due_at": (event.get("start_time") or now)
                           + (recclip.fresh_delay(early or first_span)
                              if _source == "recording"
-                             else sdclip.fresh_delay(first_span)),
+                             else sdclip.fresh_delay(early or first_span,
+                                                     guard=_cfg.sd_fresh_guard)),
                 "live_sent": live_sent,
             }
             if key == "confirmed":
@@ -2633,6 +2640,7 @@ def _sd_followup_job(cfg, event, etype, fetch, start, span, out_dir, score, *,
     """
     prescorer = _Prescorer(score) if prescore else None
     fetch_started = _time.monotonic()
+    # dense_kw carries every optional fetch keyword (dense frames, the card's offset).
     try:
         # A local recording yields its frames one ffmpeg seek at a time: score each as it
         # lands instead of after the last one, so decoding and the (uplink-bound) scoring
@@ -2792,10 +2800,20 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
         # injected fetch without the keyword keeps working.
         dense_kw = ({"dense": (sdclip.DENSE_START_SECONDS, sdclip.DENSE_START_EVERY)}
                     if cfg.sd_dense_start and offset == 0 else {})
+        # The card looks its segment up by the event start and skips the offset inside
+        # the segment (which can begin before the event); a local recording is indexed
+        # by wall clock, so it simply starts later.
+        fetch_start = start_time + offset
+        if offset and cfg.snapshot_source != "recording":
+            fetch_start = start_time
+            dense_kw["offset"] = offset
+        if (cfg.snapshot_source != "recording"
+                and cfg.sd_fresh_guard != sdclip.PYTAPO_FRESH_GUARD):
+            dense_kw["guard"] = cfg.sd_fresh_guard
         job = _SdJob(entry=entry, cfg=cfg, out_dir=sdworker.job_dir(), span=span,
                      offset=offset, full_span=full_span, scored=score is not None)
         run = functools.partial(
-            _sd_followup_job, cfg, dict(event), etype, fetch, start_time + offset, span,
+            _sd_followup_job, cfg, dict(event), etype, fetch, fetch_start, span,
             job.out_dir, score,
             prescore=score is not None and fetch is recclip.fetch_recording_frames,
             dense_kw=dense_kw,
@@ -2955,6 +2973,20 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
         verdict = _sd_followup_blocked(app, cfg, state, entry, now)
         if verdict:
             return verdict == "wait"
+        card = cfg.snapshot_source != "recording"
+        if image is None and entry.get("rest_span") and card and not frames:
+            # The card's early look read nothing at all (download or lookup failed): the
+            # opening seconds, where most subjects are, were never checked. Read the
+            # whole window from the start at its usual time, as without the early look.
+            rest = entry.pop("rest_span")
+            entry.pop("offset", None)
+            entry["span"] = rest
+            entry["due_at"] = start_time + sdclip.fresh_delay(rest, guard=cfg.sd_fresh_guard)
+            monitor.audit_event(cfg, event, etype, "sd", "retry",
+                                reason=f"early_look_unread={span}->{rest}")
+            log.info("retry %s: the card's early look read no frames; "
+                     "reading the whole %ss window", etype, rest)
+            return True
         if image is None and entry.get("rest_span"):
             # The early look found nobody (or the recording had nothing yet): read the
             # rest of the window at the time the whole window would have been read.
@@ -2962,11 +2994,16 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
             rest = entry.pop("rest_span")
             entry["offset"] = offset + span
             entry["span"] = rest - entry["offset"]
-            entry["due_at"] = start_time + recclip.fresh_delay(rest)
+            if card:
+                # Checked frames of nobody: an empty rest must not become a blind grab.
+                entry["early_frames"] = True
+            entry["due_at"] = start_time + (sdclip.fresh_delay(rest, guard=cfg.sd_fresh_guard)
+                                            if card else recclip.fresh_delay(rest))
             monitor.audit_event(cfg, event, etype, "sd", "retry",
                                 reason=f"early_look={span}->{rest}")
-            log.info("retry %s: no subject in the first %ss of the recording; "
-                     "reading the rest at %ss", etype, span, rest)
+            log.info("retry %s: no subject in the first %ss of the %s; "
+                     "reading the rest at %ss", etype, span,
+                     "card" if card else "recording", rest)
             return True
         if image is None:
             if frames:
@@ -2987,6 +3024,15 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
                 # at night), so a blank photo helps nobody — drop, keep the trace.
                 log.info("drop %s: SD found no subject in %d frames%s", etype,
                          len(frames), ", live already sent" if entry.get("live_sent") else "")
+                resolve_outbox(cfg, event, "dropped, no subject on the card [sd]")
+                return False
+            if entry.get("early_frames"):
+                # The card's early look checked the opening seconds and saw nobody; the
+                # rest produced nothing (past a short segment's end, or a failed read).
+                # That is a checked window, not a blind one: drop as "no subject".
+                log.info("drop %s: SD found no subject in the early look and the rest "
+                         "produced no frames%s", etype,
+                         ", live already sent" if entry.get("live_sent") else "")
                 resolve_outbox(cfg, event, "dropped, no subject on the card [sd]")
                 return False
             if entry.get("live_sent") or etype == "motion":

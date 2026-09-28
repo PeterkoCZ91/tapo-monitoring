@@ -489,6 +489,8 @@ sd_span_cap: 120
 sd_motion_span_cap: 48
 sd_motion: false
 sd_jobs_per_tick: 1
+sd_early_look: false
+sd_fresh_guard: 60
 ```
 
 - `sd_snapshot` gives confirmed events an event-time follow-up when the live frame fails or
@@ -500,7 +502,29 @@ sd_jobs_per_tick: 1
   event's first 24 s as soon as they are on disk, then the rest at the usual time only
   when the first part shows no subject, so a subject already in view is alerted about
   40 s after the event starts. The camera card (`sd`) keeps one window behind pytapo's
-  60 s freshness guard.
+  60 s freshness guard unless `sd_early_look` is on.
+- `sd_early_look: true` (camera card only, off by default) splits a card window of 24 s
+  or more the same way: the first 18 s from the start of the camera's recorded segment
+  (frames at 0, 6 and 12 s) are downloaded as soon as they clear the freshness guard,
+  about 87 s after the event starts instead of 105 s, and the download itself is about
+  half as long. Only when that look shows no subject is the rest of the window read, from
+  18 s into the same segment, at the time the whole window would have been read. On two
+  sites the photo a card follow-up sent lay in the first 12 s of its window in about
+  90 % of cases, so most photos stay the same and arrive earlier; the rest arrive about
+  as late as before. An early look that reads no frames at all (a failed download or
+  lookup) is followed by a read of the whole window from the start, at the usual time.
+  When the look showed frames of nobody and the rest yields none, the follow-up is
+  dropped like any window without a subject, never replaced by a live grab. Each read
+  opens its own camera session, so an empty early look costs a second login a few
+  seconds later. With the early look on, a failed segment lookup is also tried once more
+  after 5 s. A card read logs one `SD read` line with its window, bytes and the
+  download and extraction seconds.
+- `sd_fresh_guard` (camera card, default 60, 10–120) is the number of seconds a card
+  window's end must be in the past before it is downloaded (pytapo's own guard is 60).
+  Every card due time moves with it. The camera lists a segment while it is still
+  recording, but about 10–20 s behind, and the read is clipped to what is listed. So a
+  guard that is too low gives a shorter clip with fewer frames, not an error. Keep the
+  default unless a trial on your camera shows complete clips.
 - `sd_span_cap` bounds the event window downloaded/scanned.
 - `sd_motion_span_cap` bounds the first window for unconfirmed motion/PIR; one empty
   result retries with `sd_span_cap`. Confirmed person events use the full window directly.

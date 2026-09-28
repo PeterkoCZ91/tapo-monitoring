@@ -85,7 +85,7 @@ def event_span(event, cap=None):
     return max(SD_SPAN, min(duration, cap or SD_SPAN_CAP))
 
 
-def fresh_delay(span=SD_SPAN):
+def fresh_delay(span=SD_SPAN, guard=None):
     """Seconds past the event start before its SD window can be downloaded.
 
     The window end sits ``span`` past the (segment-aligned ~ event) start, so the wait
@@ -94,10 +94,28 @@ def fresh_delay(span=SD_SPAN):
     downloads (live 2026-07-02..05) and alerts fell back to stale live photos — hence
     derived, not hardcoded.
     """
-    return span + PYTAPO_FRESH_GUARD + FRESH_SLACK
+    return span + (PYTAPO_FRESH_GUARD if guard is None else int(guard)) + FRESH_SLACK
 
 
 SD_FRESH_DELAY = fresh_delay()  # = 105 for the default span
+
+# The card's early look (config ``sd_early_look``): the first CARD_EARLY_SPAN seconds from
+# the aligned segment start, read as soon as they clear the freshness guard. The frame a
+# follow-up sent lay in the first 12 s in 87.5-92.5 % of card reads (two sites, 7 days,
+# 2026-09-28), and 18 s on the 6 s grid keeps the frames at 0, 6 and 12 s, so most photos
+# are the same ones, only earlier: a shorter window is both due and downloaded sooner.
+CARD_EARLY_SPAN = 18
+
+
+def card_early_span(span):
+    """The card's first-look window for a ``span``-second follow-up, or None. Pure.
+
+    A window that ends barely later than the look would read almost the same frames
+    twice, so the split needs at least one more frame interval beyond it.
+    """
+    if int(span) >= CARD_EARLY_SPAN + SD_FRAME_EVERY:
+        return CARD_EARLY_SPAN
+    return None
 # Extract one candidate frame every N seconds of the downloaded span (36/6 -> 7 candidates,
 # so a mid-clip subject is caught without exploding the per-event Groq call count).
 SD_FRAME_EVERY = 6
@@ -187,8 +205,12 @@ def _run_in_fresh_loop(make_coro, timeout=SD_DOWNLOAD_TIMEOUT):
     return box.get("result")
 
 
-def _download_segment(client, start, end, time_correction, out_dir):  # pragma: no cover - I/O
-    """Download an SD segment [start, end] to an mp4. Returns the path or None."""
+def _download_segment(client, start, end, time_correction, out_dir,
+                      guard=None):  # pragma: no cover - I/O
+    """Download an SD segment [start, end] to an mp4. Returns the path or None.
+
+    ``guard`` overrides pytapo's freshness guard on this one downloader.
+    """
     from pytapo.media_stream.downloader import Downloader
 
     out_dir = out_dir.rstrip("/")
@@ -201,6 +223,8 @@ def _download_segment(client, start, end, time_correction, out_dir):  # pragma: 
         # downloads failed with no data); 50 is the camera-friendly value.
         downloader = Downloader(client, start, end, time_correction, out_dir + "/",
                                 overwriteFiles=True, window_size=50, fileName=file_name)
+        if guard is not None:
+            downloader.FRESH_RECORDING_TIME_SECONDS = int(guard)
 
         # Pre-warm pytapo's synchronous control calls BEFORE any event loop is running.
         # Downloader.download() calls client.getUserID() from *inside* the running
@@ -284,7 +308,15 @@ SD_SEG_LOOKBACK = 180
 SD_SEG_LOOKAHEAD = 60
 
 
-def _segment_bounds(client, event_start, lookback=SD_SEG_LOOKBACK, lookahead=SD_SEG_LOOKAHEAD):
+# A fresh session's first control calls sometimes fail with a transient camera error
+# (-40214, seen on getUserID inside the segment lookup: 8 of ~120 card reads in 7 days on
+# one C560WS, each a lost read). One more try after a short pause; the pause is far
+# below the download itself.
+SD_LOOKUP_RETRY_PAUSE = 5
+
+
+def _segment_bounds(client, event_start, lookback=SD_SEG_LOOKBACK, lookahead=SD_SEG_LOOKAHEAD,
+                    sleep=_time.sleep, retry_pause=None):
     """Bounds (start, end) of the recorded SD segment nearest the event, or None.
 
     The camera records event-triggered clips; asking the download API for those *actual*
@@ -293,11 +325,24 @@ def _segment_bounds(client, event_start, lookback=SD_SEG_LOOKBACK, lookahead=SD_
     ``getRecordingsUTC`` is a control call, so this runs before the download loop (no
     event loop yet). Tolerant of a missing API / odd result shapes -> None (caller falls
     back to the guessed window). It also warms ``getUserID`` for the download.
+
+    A failed lookup is printed (the parent logs the subprocess's stderr when the read
+    comes back empty). With ``retry_pause`` (seconds) it is tried once more after that
+    pause; without it (the default) one failure is final, as before.
     """
-    try:
-        results = client.getRecordingsUTC(int(event_start - lookback), int(event_start + lookahead))
-    except Exception:
+    lookup = getattr(client, "getRecordingsUTC", None)
+    if lookup is None:
         return None
+    results = None
+    for attempt in (1, 2):
+        try:
+            results = lookup(int(event_start - lookback), int(event_start + lookahead))
+            break
+        except Exception as exc:
+            print(f"SD segment lookup failed (attempt {attempt}): {exc}", file=sys.stderr)
+            if attempt == 2 or retry_pause is None:
+                return None
+            sleep(retry_pause)
     best = None
     for item in results or []:
         seg = item if isinstance(item, dict) and "startTime" in item else None
@@ -316,33 +361,61 @@ def _segment_bounds(client, event_start, lookback=SD_SEG_LOOKBACK, lookahead=SD_
 
 def fetch_sd_frames(client, start_time, out_dir="/tmp", span=SD_SPAN, every=SD_FRAME_EVERY,
                     download=_download_segment, extract_frames=_extract_frames,
-                    segment_bounds=_segment_bounds, rotate=0, dense=None):
+                    segment_bounds=_segment_bounds, rotate=0, dense=None, offset=0,
+                    stats=None, guard=None, lookup_retry=False):
     """Return candidate JPEG paths spanning the event, oldest first (empty list on failure).
 
     ``client`` should be a dedicated, freshly-connected pytapo client (see
     :func:`build_client`). ``dense = (seconds, step)`` adds denser frames over the
     event's opening seconds (:data:`DENSE_START_SECONDS`), counted from the event start
     even when the camera's segment began earlier.
+
+    ``offset`` seconds are skipped from the start of the window: the rest of a window
+    after the card's early look. The segment is still looked up by the *event* start
+    (the camera's index is what makes the download reliable), and the window is
+    ``[segment start + offset, segment start + offset + span]``, clipped to the segment.
+
+    ``stats``, when a dict, receives the read's window, bytes and stage seconds.
+    ``guard`` overrides pytapo's freshness guard (config ``sd_fresh_guard``).
+    ``lookup_retry`` tries a failed segment lookup once more after
+    :data:`SD_LOOKUP_RETRY_PAUSE` seconds (on with ``sd_early_look``).
     """
     try:
         time_correction = client.getTimeCorrection() or 0
     except Exception:
         time_correction = 0
+    offset = max(int(offset or 0), 0)
     # Align to the camera's real recorded segment when we can find it; otherwise fall back
     # to the guessed window. The real bounds download reliably where the guess returns
     # nothing. Cap the span so a long segment doesn't pull a huge file for a few frames.
-    seg = segment_bounds(client, start_time)
+    seg = (segment_bounds(client, start_time, retry_pause=SD_LOOKUP_RETRY_PAUSE)
+           if lookup_retry else segment_bounds(client, start_time))
     if seg:
-        dl_start, dl_end = seg[0], min(seg[1], seg[0] + span)
+        dl_start, dl_end = seg[0] + offset, min(seg[1], seg[0] + offset + span)
     else:
-        dl_start, dl_end = start_time, start_time + span
+        dl_start, dl_end = start_time + offset, start_time + offset + span
+    info = stats if stats is not None else {}
+    info.update(window=[int(dl_start), int(dl_end)], offset=offset, aligned=bool(seg),
+                lead=(int(start_time - seg[0]) if seg else None))
+    if dl_end <= dl_start:
+        print(f"SD fetch: the segment ends before offset {offset} "
+              f"(segment={seg[0]}..{seg[1]})", file=sys.stderr)
+        return []
     dl_span = max(int(dl_end - dl_start), 1)
-    mp4 = download(client, dl_start, dl_end, time_correction, out_dir)
+    started = _time.monotonic()
+    mp4 = download(client, dl_start, dl_end, time_correction, out_dir,
+                   **({"guard": guard} if guard is not None else {}))
+    info["download_s"] = round(_time.monotonic() - started, 1)
     if not mp4:
         print(f"SD fetch: download returned no segment "
               f"(start={int(dl_start)}, end={int(dl_end)}, aligned={bool(seg)}, "
               f"tc={time_correction})", file=sys.stderr)
         return []
+    try:
+        info["bytes"] = os.path.getsize(mp4)
+    except OSError:
+        info["bytes"] = None
+    started = _time.monotonic()
     try:
         base = f"sdf_{int(start_time)}_{int(_time.time() * 1000)}"
         extra = ({"dense": dense, "dense_from": max(int(start_time - dl_start), 0)}
@@ -353,17 +426,39 @@ def fetch_sd_frames(client, start_time, out_dir="/tmp", span=SD_SPAN, every=SD_F
             print(f"SD fetch: extracted 0 frames from {mp4}", file=sys.stderr)
         return frames
     finally:
+        info["extract_s"] = round(_time.monotonic() - started, 1)
         _safe_unlink(mp4)
 
 
 # Stdout marker the download subprocess prints for each extracted frame, so the parent
 # can pick the paths out of any pytapo/ffmpeg chatter on stdout.
 _FRAME_MARKER = "FRAME:"
+# ...and one line with the read's window, bytes and stage seconds (JSON), for the log.
+_STATS_MARKER = "STATS:"
+
+
+def log_card_read(camera_name, stats_json, frames, total_seconds):
+    """Log one line per card read from the subprocess's STATS line; never raises."""
+    import json
+
+    try:
+        st = json.loads(stats_json)
+        window = st.get("window") or [0, 0]
+    except (ValueError, AttributeError):
+        return
+    def num(key, fmt="%.1f"):
+        value = st.get(key)
+        return "-" if value is None else fmt % value
+    log.info("SD read %s: window=%ss offset=%s lead=%s aligned=%s bytes=%s "
+             "connect=%ss download=%ss extract=%ss frames=%d total=%.1fs",
+             camera_name, int(window[1]) - int(window[0]), st.get("offset", 0),
+             st.get("lead"), st.get("aligned"), num("bytes", "%d"), num("connect_s"),
+             num("download_s"), num("extract_s"), frames, total_seconds)
 
 
 def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
                                every=None, run=None, python=None, timeout=None,
-                               dense=None):
+                               dense=None, offset=0, guard=None):
     """Download SD frames in a FRESH subprocess and return its JPEG paths ([] on failure).
 
     The in-process download silently fails inside the daemon: its long-lived getEvents
@@ -373,7 +468,9 @@ def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
     state and downloads reliably, so we shell out to one. Credentials are inherited from
     the daemon's environment (systemd EnvironmentFile); we pass only the env-var *names*.
     ``dense = (seconds, step)`` travels as two trailing arguments, appended only when
-    set, so the argv without it is exactly the older one.
+    set, so the argv without it is exactly the older one. A non-zero ``offset`` (the
+    rest of a window after the card's early look) travels as a trailing ``offset=N``,
+    a freshness ``guard`` other than pytapo's as ``guard=N``.
     """
     import subprocess as _sp
     import sys as _sys
@@ -390,6 +487,13 @@ def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
             str(int(span)), str(int(every)), str(int(getattr(cfg, "rotate", 0)))]
     if dense:
         argv += [str(int(dense[0])), str(int(dense[1]))]
+    if offset:
+        argv.append(f"offset={int(offset)}")
+    if guard is not None:
+        argv.append(f"guard={int(guard)}")
+    if getattr(cfg, "sd_early_look", False) is True:
+        argv.append("lookup_retry=1")
+    started = _time.monotonic()
     try:
         proc = run(argv, capture_output=True, text=True, timeout=timeout)
     except Exception as exc:
@@ -403,9 +507,12 @@ def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
     if proc.returncode != 0:
         log.warning("SD subprocess exit=%s; stderr: %s", proc.returncode, stderr_tail)
         return []
-    frames = [ln[len(_FRAME_MARKER):].strip()
-              for ln in (proc.stdout or "").splitlines()
-              if ln.startswith(_FRAME_MARKER)]
+    lines = (proc.stdout or "").splitlines()
+    frames = [ln[len(_FRAME_MARKER):].strip() for ln in lines if ln.startswith(_FRAME_MARKER)]
+    for ln in lines:
+        if ln.startswith(_STATS_MARKER):
+            log_card_read(getattr(cfg, "name", cfg.host), ln[len(_STATS_MARKER):],
+                          len(frames), _time.monotonic() - started)
     if not frames:
         log.warning("SD subprocess returned no frames; stderr: %s", stderr_tail)
     return frames
@@ -415,26 +522,37 @@ def download_main(argv):  # pragma: no cover - subprocess entry, real camera I/O
     """Entry for the download subprocess: build a fresh client, fetch frames, print paths.
 
     argv: host user_env password_env cloud_env start out_dir span every [rotate
-    [dense_seconds dense_every]]
+    [dense_seconds dense_every]] [offset=N] [guard=N] [lookup_retry=1]
     """
+    import json
+
     from . import camera
 
+    options = dict(a.split("=", 1) for a in argv if "=" in a)
+    argv = [a for a in argv if "=" not in a]
     host, user_env, pass_env, cloud_env, start, out_dir, span, every = argv[:8]
     rotate = int(argv[8]) if len(argv) > 8 else 0
     dense = (int(argv[9]), int(argv[10])) if len(argv) > 10 else None
+    offset = int(options.get("offset", 0))
+    guard = int(options["guard"]) if "guard" in options else None
     user = os.environ.get(user_env, "") if user_env else ""
     password = os.environ.get(pass_env, "") if pass_env else ""
     cloud = (os.environ.get(cloud_env, "") if cloud_env else "") or password
     factory = camera.tapo_factory(host, user, password, cloud)
+    started = _time.monotonic()
     client, _err = camera.connect(factory)
+    stats = {"connect_s": round(_time.monotonic() - started, 1)}
     if client is None:
         print(f"SD connect failed: {_err}", file=sys.stderr)
+        print(_STATS_MARKER + json.dumps(stats))
         return 4
     frames = fetch_sd_frames(client, int(start), out_dir=out_dir,
                              span=int(span), every=int(every), rotate=rotate,
-                             dense=dense)
+                             dense=dense, offset=offset, stats=stats, guard=guard,
+                             lookup_retry=options.get("lookup_retry") == "1")
     for path in frames:
         print(f"{_FRAME_MARKER}{path}")
+    print(_STATS_MARKER + json.dumps(stats))
     return 0
 
 
