@@ -1914,6 +1914,12 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
         if cfg.sampler.enabled and cfg.scorer.motion_send_threshold is not None:
             def corroborate(event, s, _name=name, _cfg=cfg):
                 g = sampler.ensure_group(state.groups, _name, event, "motion", now, _cfg.sampler)
+                if _cfg.scorer.person_bit_skips_hold and sampler.is_pir_backed(event):
+                    # Bit 5 is the camera's person class (alarm code 6): such events reach
+                    # the person threshold about as often as AI-person ones (43-80 % vs
+                    # 59-79 % on three cameras), and a replay of their journals found the
+                    # hold only delaying or losing them, never catching a false alarm.
+                    return "drop" if s < _cfg.scorer.threshold else "send"
                 return sampler.corroborate_motion(
                     g, s, _cfg.scorer.threshold, _cfg.scorer.motion_send_threshold)
 

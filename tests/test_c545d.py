@@ -179,8 +179,8 @@ def test_audit_line_of_a_single_lens_event_has_no_channels(caplog):
 # ── sampler PIR flag ────────────────────────────────────────────────────────
 
 def test_sampler_does_not_call_a_c545d_person_pir_backed():
-    assert sampler._is_pir_backed(detection.normalize_event(PERSON, "c545d")) is False
-    assert sampler._is_pir_backed({"start_time": 1, "events_1": 34}) is True
+    assert sampler.is_pir_backed(detection.normalize_event(PERSON, "c545d")) is False
+    assert sampler.is_pir_backed({"start_time": 1, "events_1": 34}) is True
 
 
 # ── config ──────────────────────────────────────────────────────────────────

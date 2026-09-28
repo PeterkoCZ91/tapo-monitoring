@@ -262,16 +262,16 @@ each value*):
 | Bit | Value | Meaning | Evidence |
 |---:|---:|---|---|
 | 1 | 2 | motion | all models above |
-| 3 | 8 | unknown, seen with `alarm_type` 4 | C560WS, unconfirmed |
-| 5 | 32 | C560WS: PIR sensor (always together with `alarm_type` 6). C545D: came with every person walk-by, together with `alarm_type` 6, on both lenses — the C545D has no PIR | C560WS: ~10,400 events over 2.5 months, two cameras. C545D: n=8 person walks, one camera, one day |
-| 7 | 128 | unknown, seen with `alarm_type` 8; vehicle suspected | C560WS, unconfirmed |
-| 8 | 256 | unknown, seen with `alarm_type` 9; pet or line crossing suspected | C560WS, unconfirmed |
-| 19 | 524288 | on-device AI person | C560WS, C260. **Not set** on the C545D for any of its 8 person walks |
+| 3 | 8 | line crossing (code 4), seen with `alarm_type` 4 | C560WS; meaning from the app's code list, not captured deliberately |
+| 5 | 32 | person (alarm code 6). Always together with `alarm_type` 6, since `alarm_type` is the event's main code; earlier read here as a PIR sensor, which that pairing never showed. On the C545D it is the only person signal (no bit 19) | C560WS: ~10,400 events over 2.5 months, two cameras; bit-5-only events reach the scorer's person threshold about as often as bit-19 ones. C545D: n=8 person walks. Code list: [the `events_1` bitmask](events1-bitmask.md) |
+| 7 | 128 | vehicle (code 8), seen with `alarm_type` 8 | C560WS; as above |
+| 8 | 256 | pet (code 9), seen with `alarm_type` 9 | C560WS; as above |
+| 19 | 524288 | face (code 20); read as the on-device AI person, since a recognised `face_id` comes with only 6–12 % of these events | C560WS, C260. **Not set** on the C545D for any of its 8 person walks |
 
-So the same bit means different things on different models — decode per model. On the
-C545D plain motion was `alarm_type` 2 with `events_1` 2 on the wide lens only (n=2).
-`alarm_type` alone is not a reliable class either: on the C560WS it separates a
-PIR-corroborated channel (6) from the plain one (2) rather than naming what was seen.
+Bit *n* is alarm code *n* + 1, and `alarm_type` is the event's main code, so the two
+always agree. Models differ in which codes they set: the C545D signals a person with bit
+5 only, the C560WS with bit 5, bit 19 or both. On the C545D plain motion was `alarm_type`
+2 with `events_1` 2 on the wide lens only (n=2).
 More detail: [the `events_1` bitmask](events1-bitmask.md).
 
 Also observed on the C545D: a long event is split into consecutive events about every

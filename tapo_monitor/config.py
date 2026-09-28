@@ -120,6 +120,10 @@ class ScorerConfig:
     # sends immediately, a frame in [threshold, motion_send_threshold) needs a second
     # corroborating frame within the sampler window. None = feature off (legacy behaviour).
     motion_send_threshold: float | None = None
+    # Let a live motion frame whose event carries events_1 bit 5 (alarm code 6, the
+    # camera's person class; the default profile still calls it PIR) skip that hold, as
+    # the sampler already does for such a burst: at or above ``threshold`` it sends.
+    person_bit_skips_hold: bool = False
     # Threshold while the camera's night is on (its schedule applied to the astral night):
     # IR scenes score differently from daylight ones. None = ``threshold`` around the clock.
     night_threshold: float | None = None
@@ -739,8 +743,11 @@ def _scorer(data, where):
         if motion_send_threshold is not None and not night_threshold < motion_send_threshold:
             raise ConfigError(
                 f"{where}: scorer motion_send_threshold must be > night_threshold")
+    person_bit_skips_hold = _check_bool(d.get("person_bit_skips_hold", False),
+                                        "person_bit_skips_hold", f"{where}: scorer")
     return ScorerConfig(url=d.get("url"), threshold=threshold, timeout=timeout, tiles=tiles,
                         motion_send_threshold=motion_send_threshold,
+                        person_bit_skips_hold=person_bit_skips_hold,
                         night_threshold=night_threshold)
 
 

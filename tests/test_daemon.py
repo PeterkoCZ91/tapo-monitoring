@@ -1942,6 +1942,61 @@ def test_run_monitor_pass_sends_clear_recording_motion_without_deferring(monkeyp
     assert state.pending_sd == []
 
 
+def _run_person_bit_pass(monkeypatch, events_1, skip, person):
+    """One live motion frame at ``person`` on a camera with the corroboration band."""
+    from tapo_monitor import monitor as mon
+    counter = _CountingNotify()
+    monkeypatch.setattr(mon.notify, "send_photo", counter.send_photo)
+    monkeypatch.setattr(mon.enrich, "groq_describe", lambda *a, **k: "x")
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, img, timeout=10, tiles=1, **kw: {"person": person,
+                                                                    "animal": 0.0})
+    app = cfg.load_config_from_dict({"groq": {}, "cameras": [{
+        "name": "a", "host": "203.0.113.10",
+        "sampler": {"enabled": True, "interval": 30, "max_frames": 6, "group_gap": 90},
+        "scorer": {"url": "http://127.0.0.1:1/score", "threshold": 0.3,
+                   "motion_send_threshold": 0.6, "person_bit_skips_hold": skip},
+    }]})
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": "k"}
+    cam = _FakeEventCam([[{"start_time": 100, "events_1": events_1}]])
+    daemon.run_monitor_pass(app, {"a": cam}, state, now=1000, secrets=secrets,
+                            snapshot_for=lambda c: (lambda cam, ev: "/tmp/x.jpg"),
+                            time_str=lambda e: "t")
+    return counter.photos, state
+
+
+def test_person_bit_frame_in_the_band_sends_without_waiting_when_enabled(monkeypatch):
+    # events_1 34 = bits 1 + 5: bit 5 is the camera's person class (alarm code 6).
+    photos, state = _run_person_bit_pass(monkeypatch, 34, skip=True, person=0.4)
+    assert photos == 1
+    assert state.groups["a"].get("motion_candidates", 0) == 0
+
+
+def test_person_bit_frame_is_still_held_while_the_switch_is_off(monkeypatch):
+    photos, state = _run_person_bit_pass(monkeypatch, 34, skip=False, person=0.4)
+    assert photos == 0
+    assert state.groups["a"]["motion_candidates"] == 1
+
+
+def test_person_bit_frame_below_the_threshold_is_still_dropped(monkeypatch):
+    photos, _state = _run_person_bit_pass(monkeypatch, 34, skip=True, person=0.1)
+    assert photos == 0
+
+
+def test_bare_motion_keeps_the_hold_with_the_switch_on(monkeypatch):
+    photos, state = _run_person_bit_pass(monkeypatch, 2, skip=True, person=0.4)
+    assert photos == 0
+    assert state.groups["a"]["motion_candidates"] == 1
+
+
+def test_person_bit_switch_must_be_a_boolean():
+    with pytest.raises(cfg.ConfigError, match="person_bit_skips_hold"):
+        cfg.load_config_from_dict({"cameras": [{
+            "name": "a", "host": "203.0.113.10",
+            "scorer": {"url": "http://x", "person_bit_skips_hold": "yes"}}]})
+
+
 def test_run_monitor_pass_holds_first_marginal_motion(monkeypatch):
     photos, state = _run_marginal_motion_pass(monkeypatch, motion_send=0.6)
     assert photos == 0                                   # held, not sent

@@ -652,18 +652,27 @@ score still describe only the most confident one. It never changes whether an al
 out. A scorer from before this field sends no list, and the caption then shows no count;
 update the scorer host to get it.
 
-`motion_send_threshold` adds multi-frame corroboration for **bare (non-PIR) motion**.
+`motion_send_threshold` adds multi-frame corroboration for **motion** events.
 An empty IR scene hallucinates a 0.3–0.6 "person" score on one frame and not the next,
-while a real subject persists across frames. So, for non-PIR motion:
+while a real subject persists across frames. So, for a motion frame:
 
 - a frame `>= motion_send_threshold` sends immediately (a clear single frame);
 - a frame in `[threshold, motion_send_threshold)` is *held* until a second frame in that
   band corroborates it within the sampler window (needs `sampler.enabled`), otherwise it
   is dropped when the group closes (unless `sampler.hold_expiry` sends it);
-- camera-confirmed people and PIR-backed motion are unaffected — they keep the immediate
-  path, so a confirmed person is never delayed or dropped.
+- camera-confirmed people (bit 19) are unaffected — they keep the immediate path, so a
+  confirmed person is never delayed or dropped;
+- a sampler frame of a burst that carried `events_1` bit 5 (alarm code 6, the camera's
+  person class — see [the `events_1` bitmask](events1-bitmask.md)) skips the hold; a live
+  frame of such an event skips it only with `person_bit_skips_hold: true`.
 
 Unset (the default) keeps the legacy behaviour: any motion frame `>= threshold` sends.
+
+`person_bit_skips_hold` (default `false`) lets a live motion frame whose event carries
+bit 5 send at `>= threshold` instead of waiting for a second frame, as the sampler already
+does for such a burst. A replay of three cameras' journals found the hold only delaying or
+losing these frames (held bit-5 frames were a person 9 in 10 times by label), and none a
+false alarm the hold had stopped. Needs `motion_send_threshold`; without it nothing is held.
 
 `night_threshold` replaces `threshold` while the camera's night is on — the shared astral
 night with the camera's `schedule` applied, so an `always_night` camera uses it around the

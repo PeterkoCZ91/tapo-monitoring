@@ -2,8 +2,8 @@
 
 The camera's `getEvents` API is how the on-device AI reports activity — but on the C560WS
 many events arrive with `event_type = None`, and the only usable signal is the integer
-`events_1` **bitmask**. This field is barely documented anywhere, so the values below were
-reverse-engineered from ~24 h of real captures across two C560WS cameras. `tapo_monitor`
+`events_1` **bitmask**. This field is barely documented anywhere; the meanings below come from the Tapo app's
+own list of event codes and were checked against the fleet's captures. `tapo_monitor`
 decodes it in [`detection.decode_events_1()`](../tapo_monitor/detection.py) and logs every
 event's decoded flags (see the audit log), so the still-unmapped bits can be ground-truthed
 from your own traffic.
@@ -11,35 +11,54 @@ from your own traffic.
 A single event can carry several bits at once — e.g. `events_1 = 524290` is bits 19 **and**
 1, i.e. an AI person who is also moving.
 
-## Confirmed bits
+## What the bits are
 
-| bit | value | meaning | notes |
-|----:|------:|---------|-------|
-| 1   | 2        | motion          | basic/software motion; a frequent false positive on its own |
-| 5   | 32       | PIR sensor      | fires 1:1 with `alarm_type=6` — confirmed over ~10,400 events across two C560WS cameras over 2.5 months (2026-07 to 2026-09), never once alongside any other `alarm_type` |
-| 19  | 524288   | AI person       | the on-device AI confirmed a person — this is what `strict_people` alerts on |
+`events_1` is a set of the camera's **alarm codes**, one bit per code: bit *n* is code
+*n* + 1. The codes are the Tapo app's playback event types (its `PlayBackEventType`
+enum, the same numbers the playback search takes as `event_type`), and `alarm_type` is
+the event's main code:
 
-## `alarm_type`: two parallel channels, only one hardware-corroborated
+| code | bit | value | meaning |
+|-----:|----:|------:|---------|
+| 2    | 1   | 2       | motion |
+| 3    | 2   | 4       | tamper |
+| 4    | 3   | 8       | line crossing |
+| 5    | 4   | 16      | area intrusion |
+| 6    | 5   | 32      | person |
+| 8    | 7   | 128     | vehicle |
+| 9    | 8   | 256     | pet |
+| 20   | 19  | 524288  | face (see below) |
+| 21 / 22 | 20 / 21 | | unfamiliar face / unfamiliar person |
 
-`alarm_type` isn't just correlated with the bits above, it gates which of two channels an
-event came in on. Across both fleet cameras' full retained history (674 events on one,
-9,722 on the other):
+The app's list also has timing (1), baby cry (7), doorbell, bark, meow, glass break,
+smoke and CO alarms, package, anti-theft, panoramic and animal codes. A missing
+`alarm_type` is read as 2 by the app. Sources: a pytapo issue comment that took the list
+from the app ([JurajNyiri/pytapo#199](https://github.com/JurajNyiri/pytapo/issues/199)),
+and the labels an H500 hub shows next to the same codes
+([Sujeom/tapo-h500-local-recordings](https://github.com/Sujeom/tapo-h500-local-recordings)).
 
-| `alarm_type` | PIR (bit 5) | share of events | AI-person (bit 19) rate |
-|-------------:|:-----------:|-----------------:|-------------------------:|
-| 2            | never       | ~82%             | 2–7%                     |
-| 6            | always      | ~18%             | 36–43%                   |
+What we measured on the C560WS agrees:
 
-So `alarm_type=6` is the **PIR-corroborated** counterpart of the plain motion/person
-class (`alarm_type=2`), not a rare or unmapped value — earlier text in this doc claimed
-PIR "never once observed firing" and treated one `alarm_type=6` capture as a fluke; both
-were wrong, corrected 2026-09-22 against the real fleet history instead of a ~24h sample.
+- `alarm_type` 6 comes with bit 5 and `alarm_type` 2 with the plain motion class — trivially,
+  since `alarm_type` is the main code. `alarm_type` 4 / 8 / 9 line up with bits 3 / 7 / 8,
+  i.e. line crossing, vehicle and pet.
+- **Bit 5 is the camera's person class.** Events carrying bit 5 without bit 19 reached the
+  local scorer's person threshold in 43–80 % of incidents on three cameras, against
+  59–79 % for bit 19 and 4–17 % for bare motion.
+- **Bit 19 is still read as the AI person.** On the C560WS a recognised face (`face_id`)
+  comes with only 6–12 % of bit-19 events, and never without it: the camera sets it for a
+  detected face, which is a person, not for a known one.
 
-The practical upshot: an `alarm_type=6` event is 5–15× more likely to carry the AI-person
-bit than a plain `alarm_type=2` one, but well under half still don't — a PIR hit raises
-the odds, it doesn't confirm a person by itself. `strict_people` still gates on bit 19
-alone, so an unconfirmed `alarm_type=6` event (motion+PIR, no person bit) can still only
-alert via a downstream image scorer, same as unconfirmed `alarm_type=2`.
+### Correction
+
+Until 2026-09 this page called bit 5 the **PIR sensor**, because it fired 1:1 with
+`alarm_type` 6 on ~10,400 events. That was never evidence of PIR: `alarm_type` is the main
+code, so the two always go together. The default event profile still decodes bit 5 as
+`pir` (a PIR-backed burst skips the sampler's corroboration hold), because routing every
+bit-5 event as a person was measured and is worse: a person event whose live frame is
+empty queues a card follow-up, which stands the sampler down and arms the cooldown, and on
+the fleet's journals that lost more alerted passages than it rescued. The narrower
+`scorer.person_bit_skips_hold` lets a bit-5 live frame skip the corroboration hold too.
 
 ## Model-specific meaning
 
@@ -55,28 +74,20 @@ are not universal:
 - **Meaning.** On the C545D a person walking by arrived as `alarm_type=6` with
   `events_1 = 34` (bits 1 + 5) on both lenses, and bit 19 was **not** set; plain motion
   was `alarm_type=2`, `events_1 = 2`, wide lens only. Observed, n=10 (8 person walks, 2 plain motion), checked against
-  what the app reported. The C545D has no PIR, so here bit 5 / `alarm_type=6` is the
-  person class, not the PIR it is on the C560WS.
+  what the app reported. Bit 5 / `alarm_type=6` is the person class here as on the
+  C560WS; the difference is that the C545D sets no bit 19, so bit 5 is its only person
+  signal.
 
 The per-model reading is a small table, `EVENT_PROFILES` in
 [`detection.py`](../tapo_monitor/detection.py), picked per camera with `event_profile`
-(`default` | `c545d`). `default` is the C560WS table above; `c545d` maps bit 5 and
+(`default` | `c545d`). `default` decodes bit 5 as `pir` and bit 19 as `person` (see the correction above); `c545d` maps bit 5 and
 `alarm_type=6` to `person`. The audit line `event ... alarm_type=... channels=...
 profile=...` shows the raw values next to the verdict, so a row can be amended when more
 samples disagree — a new model gets a new row rather than a change to `default`.
 
-## Observed but not yet ground-truthed
+## Not yet ground-truthed
 
-Reported as `unknown_bits` rather than guessed at:
-
-| bit | value | correlated `alarm_type` | suspected (unconfirmed) |
-|----:|------:|------------------------:|-------------------------|
-| 3   | 8     | 4 | another AI category |
-| 7   | 128   | 8 | **vehicle** — by far the most common non-person event |
-| 8   | 256   | 9 | pet / line-crossing? |
-
-`alarm_type` correlates with the bits above; in our data `alarm_type = 2` accompanies the
-motion/person class, while `4 / 8 / 9` line up with bits `3 / 7 / 8`. These mappings are
-empirical, not from a spec — treat the unconfirmed rows as hypotheses and verify against the
-audit log before relying on them. If your captures pin down bits 3/7/8, a PR updating this
-table is very welcome.
+The codes above come from the app, not from captures of every class. Bits 3, 7 and 8
+(line crossing, vehicle, pet) match the `alarm_type` they arrive with, but `tapo_monitor`
+still reports them as `unknown_bits` in the default profile rather than acting on them.
+If your captures confirm one, a PR updating this page and the profile is welcome.

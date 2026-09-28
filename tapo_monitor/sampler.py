@@ -17,7 +17,7 @@ PIR_BIT = 32
 MOTION_CONFIRM_FRAMES = 2
 
 
-def _is_pir_backed(event):
+def is_pir_backed(event):
     """True when a getEvents event carries the camera's hardware-PIR flag.
 
     Decoded under the event's stamped model profile: on a C545D the PIR bit's value
@@ -53,7 +53,7 @@ def ensure_group(groups, name, event, etype, now, scfg):
             "next_due": started + scfg.interval,
             "sent": False,
             "delivered": False,
-            "pir_backed": _is_pir_backed(event),
+            "pir_backed": is_pir_backed(event),
         }
         groups[name] = g
     return g
@@ -72,7 +72,7 @@ def observe_event(groups, name, event, etype, sent, now, scfg, delivered=False):
     g["last_event_at"] = now
     g["sent"] = g["sent"] or bool(sent)
     g["delivered"] = g.get("delivered", False) or bool(delivered)
-    g["pir_backed"] = g.get("pir_backed", False) or _is_pir_backed(event)
+    g["pir_backed"] = g.get("pir_backed", False) or is_pir_backed(event)
     if etype != "motion":
         g["etype"] = etype        # camera-confirmed detection outranks bare motion
         g["event"] = event

@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `scorer.person_bit_skips_hold` (off by default): a live motion frame whose event carries
+  `events_1` bit 5 skips the corroboration hold and sends at `>= threshold`, as the
+  sampler already did for such a burst. Bit 5 is the camera's person class (alarm code 6),
+  not a PIR sensor: the docs are corrected from the Tapo app's own list of event codes,
+  and bits 3 / 7 / 8 are named line crossing / vehicle / pet. Routing every bit-5 event as
+  a person was replayed on three cameras' journals and rejected: it lost more alerted
+  passages than it rescued.
 - Opt-in outbox for alerts Telegram did not take (`outbox:` block, off by default). A
   failed real send is kept on disk (frame + JSON sidecar, keyed by incident) and, once
   Telegram answers again, delivered late: one outage summary per camera, then the photos
