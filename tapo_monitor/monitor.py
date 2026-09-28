@@ -53,8 +53,13 @@ def _can_alert(can_alert, etype, event):
         return can_alert(etype)
 
 
-def _on_alert(on_alert, etype, event):
+def _on_alert(on_alert, etype, event, score=None, threshold=None):
+    """Arm the caller's gate. ``score``/``threshold`` are passed only for a delivery whose
+    photo was scored, so a plain ``on_alert(etype[, event])`` callback keeps working."""
     if on_alert is None:
+        return
+    if score is not None and threshold is not None:
+        on_alert(etype, event, score=score, threshold=threshold)
         return
     try:
         on_alert(etype, event)
@@ -503,7 +508,8 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                         telegram=ok)
             if ok:
                 log.info("alert %s sent (faces=%r, desc=%r)", etype, label, description)
-                _on_alert(on_alert, etype, event)
+                _on_alert(on_alert, etype, event, s,
+                          cfg.scorer.threshold if score is not None else None)
                 _observe(observe, event, etype, True, delivered=True)
             else:
                 # The event watermark has already advanced, so the live poll cannot

@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- One visit, one message, also behind a motion alert: a person SD/recording follow-up is
+  now skipped (`reason=sd_within_cooldown`) when the camera delivered, within the
+  cooldown, a photo whose person score reached the camera's threshold, whatever its
+  event type. Before, only a confirmed person alert counted, so a sampler motion photo of
+  a person (0.69) was followed 36 s later by the card photo of the same second (0.79).
+  A motion photo of nobody, or an unscored one, still lets the person on the card
+  through. The fact is recorded at delivery and persisted with the cooldowns; state
+  written by an older version behaves as before. On the busiest site, 32 of 921
+  delivered person follow-ups in 80 days were such duplicates, and none followed a
+  motion photo of nobody.
+
 ## [0.8.1] - 2026-09-27
 
 ### Added

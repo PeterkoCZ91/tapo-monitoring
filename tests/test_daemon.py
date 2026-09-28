@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tapo_monitor import config as cfg
-from tapo_monitor import daemon, notify, snapshot
+from tapo_monitor import daemon, notify, runtime_state, snapshot
 from tests.conftest import FakeResponse as _Resp
 
 
@@ -6834,3 +6834,29 @@ def test_sd_person_is_not_held_by_its_own_defer_or_a_motion_alert():
 def test_sd_person_queued_by_an_older_daemon_is_sent_as_before():
     app, c, state = _cooldown_case([{}], {("a", "confirmed"): 155.0})
     assert not daemon._sd_within_cooldown(app, c, state, "person", 160.0)
+
+
+def test_a_delivered_motion_photo_counts_as_a_person_only_at_the_threshold():
+    app, c, state = _cooldown_case([{"armed_at": 12.0}], {("a", "confirmed"): 12.0})
+    _, on_alert = daemon.alert_gate(state, "a", 120, 150.0)
+    on_alert("motion", score=0.44, threshold=0.45)       # nobody on the photo
+    on_alert("motion")                                   # unscored
+    assert ("a", daemon.PERSON_PHOTO) not in state.last_alert
+    assert not daemon._sd_within_cooldown(app, c, state, "person", 160.0)
+    on_alert("motion", score=0.45, threshold=0.45)
+    assert state.last_alert[("a", daemon.PERSON_PHOTO)] == 150.0
+    assert state.last_alert[("a", "confirmed")] == 12.0  # the motion gate is untouched
+    assert daemon._sd_within_cooldown(app, c, state, "person", 160.0)
+    assert not daemon._sd_within_cooldown(app, c, state, "person", 270.0)   # expired
+    assert not daemon._sd_within_cooldown(app, c, state, "motion", 160.0)
+
+
+def test_the_person_photo_stamp_survives_a_restart(tmp_path):
+    app, c, state = _cooldown_case([{"armed_at": 12.0}], {("a", "confirmed"): 12.0})
+    _, on_alert = daemon.alert_gate(state, "a", 120, 150.0)
+    on_alert("motion", score=0.69, threshold=0.45)
+    path = str(tmp_path / "runtime.json")
+    assert runtime_state.save(path, runtime_state.snapshot(state), 151.0)
+    restored = daemon.MonitorState()
+    runtime_state.load(path, restored, 155.0)
+    assert daemon._sd_within_cooldown(app, c, restored, "person", 160.0)

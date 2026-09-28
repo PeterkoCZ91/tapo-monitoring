@@ -691,8 +691,16 @@ closest.
   its result is back, audited as `sd` `cooldown` with `reason=sd_within_cooldown`, and
   its frame kept in the review log (verdict `cooldown`) for labelling. The cooldown the
   defer arms itself does not count (each queued entry stamps it), nor does a motion
-  alert, so a person on the card still follows a motion photo (30 person follow-ups on
-  the busiest site came within a cooldown of a motion alert; they still go out).
+  alert whose photo showed nobody, so a person on the card still upgrades such a photo.
+  A motion alert whose photo's person score reached the camera's threshold at send time
+  does count (seen: a sampler motion photo at 0.69, then 36 s later the card photo of a
+  person event from the same second at 0.79): the delivery stamps it in the cooldown
+  state (`person_photo`, persisted with the rest; state without it behaves as before).
+  Counted on the busiest site over 80 days of audit lines: of 921 delivered person
+  follow-ups, 32 came within 120 s after a delivered motion alert of the same camera
+  (18 sampler photos, 13 motion card photos, one live photo), and every one of those
+  motion photos had already reached the threshold (0.47–0.91). None followed a motion
+  photo of nobody or an unscored one, so all 32 are duplicates the rule now skips.
 
 ### 10.8 — Tell the owner when a camera stops watching
 

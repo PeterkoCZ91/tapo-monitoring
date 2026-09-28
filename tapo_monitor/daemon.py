@@ -1234,6 +1234,21 @@ def _default_time_str(event):  # pragma: no cover - trivial formatting
     return _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(event.get("start_time", _time.time())))
 
 
+# ``last_alert`` key of the newest delivered photo whose person score reached the camera's
+# threshold, whatever its event type (see _sd_within_cooldown). Not a cooldown of its own.
+PERSON_PHOTO = "person_photo"
+
+
+def photo_had_person(score, threshold):
+    """Whether a delivered photo's person score reached ``threshold``. Pure.
+
+    No score or no threshold (an unscored send) is no evidence of a person.
+    """
+    if score is None or threshold is None:
+        return False
+    return float(getattr(score, "person", score)) >= float(threshold)
+
+
 def alert_gate(state, name, cooldown, now):
     """Build (can_alert, on_alert) for one camera at ``now``.
 
@@ -1245,6 +1260,10 @@ def alert_gate(state, name, cooldown, now):
     person events seconds apart, and a later one may only be processed minutes later after
     an SD follow-up. Wall-clock cooldown alone then expires even though the camera event is
     the same passage.
+
+    ``on_alert`` also takes the delivered photo's ``score`` and the ``threshold`` it was
+    held to; a photo that showed a person is stamped under :data:`PERSON_PHOTO`, which
+    only :func:`_sd_within_cooldown` reads. Arming for a defer passes neither.
     """
     def key_for(etype):
         return "motion" if etype == "motion" else "confirmed"
@@ -1277,9 +1296,11 @@ def alert_gate(state, name, cooldown, now):
         return (notify.should_send_alert(max(recent) if recent else None, now, cooldown)
                 and event_time_allowed(("confirmed", "motion"), event))
 
-    def on_alert(etype, event=None):
+    def on_alert(etype, event=None, *, score=None, threshold=None):
         key = key_for(etype)
         state.last_alert[(name, key)] = now
+        if photo_had_person(score, threshold):
+            state.last_alert[(name, PERSON_PHOTO)] = now
         start = event_start(event)
         if start is not None:
             state.last_event_start[(name, key)] = start
@@ -2045,7 +2066,7 @@ def process_pending_hub(app, state, *, now, secrets):
             log.info("alert hub clip sent for %s on retry %d [hubpoll]",
                      cfg.name, entry["attempts"])
             _, on_alert = alert_gate(state, cfg.name, app.alerts.cooldown, now)
-            on_alert("motion", event)
+            on_alert("motion", event, score=entry["score"], threshold=cfg.scorer.threshold)
             _safe_unlink(entry["image"])
         elif entry["attempts"] >= HUB_RETRY_MAX_ATTEMPTS:
             log.warning("drop hub alert for %s: delivery failed %d times",
@@ -2296,7 +2317,8 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
                 if ok:
                     log.info("alert hub clip sent for %s (score=%s) [hubpoll]",
                              cfg.name, f"{s:.2f}" if s is not None else "n/a")
-                    on_alert(etype, event)
+                    on_alert(etype, event, score=s,
+                             threshold=cfg.scorer.threshold if score is not None else None)
                 else:
                     log.warning("hub clip Telegram delivery failed for %s; retry queued",
                                 cfg.name)
@@ -2673,12 +2695,21 @@ def _sd_within_cooldown(app, cfg, state, etype, now):
     burst is quiet), and a queued follow-up is not a message. Each queued entry keeps
     the arming its defer made (``armed_at``): when the newest arming is one of those,
     nothing has reached the phone since. An entry queued by an older daemon has no such
-    stamp, and then the follow-up is sent as before. A motion alert does not count, so a
-    person found on the card still upgrades a motion photo; motion follow-ups are gated
+    stamp, and then the follow-up is sent as before.
+
+    A motion alert counts only when its photo showed a person (its person score reached
+    the camera's threshold at send time, stamped as :data:`PERSON_PHOTO`): the card
+    photo would then be the same person again, seconds apart (seen: a sampler motion
+    photo at 0.69, then 36 s later the card photo of the same second at 0.79). A motion
+    photo of nobody still lets the person on the card upgrade it. State written before
+    the stamp existed has none, so it behaves as before. Motion follow-ups are gated
     before their read (:func:`_sd_followup_blocked`).
     """
     if etype == "motion":
         return False
+    person_photo = state.last_alert.get((cfg.name, PERSON_PHOTO))
+    if not notify.should_send_alert(person_photo, now, app.alerts.cooldown):
+        return True                      # a delivered photo already showed a person
     last = state.last_alert.get((cfg.name, "confirmed"))
     if notify.should_send_alert(last, now, app.alerts.cooldown):
         return False
@@ -2821,7 +2852,8 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
         kept = False
         if ok:
             log.info("alert %s sent (faces=%r, desc=%r) [sd]", etype, label, description)
-            on_alert(etype, event)
+            on_alert(etype, event, score=selected_score,
+                     threshold=cfg.scorer.threshold if job.scored else None)
             open_group = state.groups.get(entry["camera"])
             if open_group is not None:
                 # This burst has now really been alerted on: a later empty-live frame
@@ -2897,7 +2929,7 @@ def _send_held_frame(app, cfg, state, group, *, now, secrets, time_str, reason, 
     if ok:
         log.info("%s %s: held frame sent (score=%s)",
                  reason, cfg.name, f"{s:.2f}" if s is not None else "n/a")
-        on_alert("motion")
+        on_alert("motion", score=s, threshold=cfg.scorer.threshold)
         group["sent"] = True
         group["delivered"] = True
         state.scene_coordinator.record_delivery(
@@ -3117,7 +3149,8 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
             if ok:
                 log.info("alert %s sent (faces=%r, desc=%r, score=%s) [sampler]",
                          etype, label, description, f"{s:.2f}" if s is not None else "n/a")
-                on_alert(etype)
+                on_alert(etype, score=s,
+                         threshold=cfg.scorer.threshold if score is not None else None)
                 group["sent"] = True
                 group["delivered"] = True
                 state.scene_coordinator.record_delivery(

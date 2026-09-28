@@ -799,6 +799,90 @@ def test_a_card_photo_with_no_alert_since_its_own_defer_still_goes_out(
     worker.shutdown(wait=True)
 
 
+def _motion_then_person_story(monkeypatch, tmp_path, motion_score):
+    """Camera "a" samples bare motion and reads its card for person follow-ups (threshold
+    0.45; cooldown 180 s, so the card read, due about two minutes after its event, comes
+    back inside it). A motion at 10 has a live frame of nobody (0.3); the sampler's frame
+    at 20 scores ``motion_score`` and goes out when it reaches the threshold (``None``: the
+    scorer is down, so the sampler passes the frame through unscored). A person
+    event at 40 has a live frame of nobody (0.1), so it is queued for the card, whose
+    frame shows the person at 0.79. Runs until the card result has been decided."""
+    sc = Scenario(monkeypatch, tmp_path,
+                  [camera_dict("a", HOST_A, sd_snapshot=True,
+                               scorer={"url": "http://scorer.invalid/score",
+                                       "threshold": 0.45},
+                               sampler={"enabled": True, "interval": 10, "max_frames": 1,
+                                        "group_gap": 20})],
+                  alerts={"cooldown": 180})
+    live = []
+
+    def score(_url, image_path, *_a, **_k):
+        with open(image_path, "rb") as f:
+            if b"card" in f.read():
+                return {"person": 0.79, "animal": 0.0}
+        live.append(image_path)
+        if len(live) in (2, 3) and motion_score is None:
+            return None                          # down for the sampler frame and its retry
+        scores = {1: 0.3, 2: motion_score}
+        return {"person": scores.get(len(live), 0.1), "animal": 0.0}
+
+    monkeypatch.setattr("tapo_monitor.daemon.scorer.score_image", score)
+    real_job_dir = sdworker.job_dir
+    monkeypatch.setattr(sdworker, "job_dir", lambda tmp=None: real_job_dir(tmp or str(tmp_path)))
+
+    def fetch(_cfg, _start, span=None, out_dir=None, **_):
+        path = os.path.join(out_dir, "sd.jpg")
+        with open(path, "wb") as f:
+            f.write(b"\xff\xd8card")
+        return [path]
+
+    sc._collaborators["drain"] = functools.partial(
+        daemon.process_pending_sd, snapshot_for=sc._snapshot_for,
+        time_str=lambda _e: "scenario", fetch_frames=fetch)
+    sc._collaborators["sd_worker"] = worker = sdworker.SdWorker()
+    sc.run(10)
+    sc.cams["a"].push(motion(at(10)))
+    sc.run(30)                                   # 20: the sampler's photo; group closes
+    sc.cams["a"].push(person(at(40)))
+    sc.tick(advance=5)                           # 40: nobody in the live frame -> card
+    assert len(sc.state.pending_sd) == 1
+    while sc.state.pending_sd:
+        sc.tick(advance=5)
+        if worker.busy("a"):
+            _until_read_is_back(worker)
+    assert sc.clock.now < at(20) + 180           # decided inside the motion's cooldown
+    worker.shutdown(wait=True)
+    return sc
+
+
+def test_a_card_photo_behind_a_motion_photo_that_showed_the_person_is_kept_off_the_phone(
+        monkeypatch, tmp_path, caplog):
+    # Seen live: a sampler motion photo at 0.69 (threshold 0.45), then 36 s later the card
+    # photo of a person event from the same second at 0.79. The motion photo already
+    # showed the person, so it counts like a confirmed alert and the card photo is
+    # skipped as a duplicate of the same visit.
+    caplog.set_level(logging.INFO)
+    sc = _motion_then_person_story(monkeypatch, tmp_path, 0.69)
+
+    assert sc.actions("send", "send_failed") == [("send", "a")]
+    assert sc.notifier.send_paths == ["sampler"]
+    skipped = [line for line in _audit(caplog, "person")
+               if "path=sd" in line and "action=cooldown" in line]
+    assert len(skipped) == 1
+    assert f"start={int(at(40))}" in skipped[0] and "reason=sd_within_cooldown" in skipped[0]
+
+
+def test_a_card_photo_behind_a_motion_photo_with_no_person_score_still_goes_out(
+        monkeypatch, tmp_path, caplog):
+    # The motion photo went out unscored (scorer down): no evidence it showed anyone, so
+    # the person on the card upgrades it and the follow-up is delivered as before.
+    caplog.set_level(logging.INFO)
+    sc = _motion_then_person_story(monkeypatch, tmp_path, None)
+
+    assert sc.notifier.send_paths == ["sampler", "sd"]
+    assert not [line for line in _audit(caplog, "person") if "sd_within_cooldown" in line]
+
+
 # ── dual-lens C545D ──────────────────────────────────────────────────────────
 # Shapes as captured on a C545D: a person is alarm_type 6 with events_1 34 on both lenses
 # (no AI-person bit), plain motion is alarm_type 2 with events_1 2 on the wide lens only.
