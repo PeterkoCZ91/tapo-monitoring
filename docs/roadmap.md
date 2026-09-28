@@ -633,9 +633,13 @@ busiest site.
 - [x] Shorten the recording follow-up: a 15 s margin, and an early look at the event's first
   24 s that sends as soon as a subject is there. First sends after the change left 56-58 s
   after the event.
-- [ ] Confirm on a few days of first alerts per path (median and p90 before and after).
+- [x] Confirm on a few days of first alerts per path (median and p90 before and after).
   First evening after the change, busiest site: 14 recording first alerts, median 56 s,
-  p90 71 s (before: 119 s and 176 s).
+  p90 71 s (before: 119 s and 176 s). Held over the following days: 207 recording first
+  alerts, median 57 s, p90 100 s (per day 55-58 s median, 71-92 s p90); the site's
+  first alert of any path moved from about 115 s to 54-57 s. Camera-card follow-ups on
+  the other sites did not move (median 179 s and 194 s, p90 232 s and 283 s) and are now
+  the slowest path.
 - [x] Measure the early look's ~15 s (on the busiest site, 4K recording, two cores): frame
   extraction 3.2 s, scoring 7.3 s, blur 0.8 s for six frames; scoring is bound by the site's
   uplink. Scoring the frames concurrently gives identical scores in 3.5 s instead of 5.9 s.
@@ -671,7 +675,10 @@ closest.
   taller, none judged worse by eye. Cost: 9 frames instead of 6 per early look (~1.5 s).
 - [ ] After a week on the recording-source camera, compare delay and photo size per
   incident; switch camera-card sites only with their own evidence (one clip so far,
-  where the gain was 1.16× with more motion blur).
+  where the gain was 1.16× with more motion blur). Delay and score after three days show
+  no cost (median 57 s vs 55 s, person score 0.82 vs 0.79), but frames before the switch
+  logged no box size: a before/after size comparison needs the old sent frames re-scored
+  while they are still retained.
 
 ### 10.6 — One visit, one message
 
