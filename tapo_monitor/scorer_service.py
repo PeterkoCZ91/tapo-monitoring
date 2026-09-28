@@ -504,24 +504,25 @@ def _box_iou(box, boxes):
 
 
 def person_scores(output, input_size=640, strides=(8, 16, 32), floor=PERSON_LIST_FLOOR,
-                  iou=PERSON_NMS_IOU, limit=PERSON_LIST_LIMIT):
+                  iou=PERSON_NMS_IOU, limit=PERSON_LIST_LIMIT, with_boxes=False):
     """Confidence of each separate person in a raw YOLOX head output, highest first. Pure.
 
     One person lights up many neighbouring anchors, so the anchors over ``floor`` are
     decoded (as in :func:`best_person_box`) and thinned by greedy non-maximum suppression
     at ``iou``: what survives is one entry per person. The first entry is the ``person``
     score itself. The caller counts the entries at its own threshold; the list is capped
-    at ``limit`` so a crowd cannot bloat the response.
+    at ``limit`` so a crowd cannot bloat the response. ``with_boxes`` also returns each
+    person's ``(x1, y1, x2, y2)`` in model-input pixels, parallel to the scores.
     """
     import numpy as np
 
     preds = output[0]
     if not len(preds):
-        return []
+        return ([], []) if with_boxes else []
     conf = preds[:, 4] * preds[:, 5 + PERSON_CLASS]
     keep = np.flatnonzero(conf >= floor)
     if not len(keep):
-        return []
+        return ([], []) if with_boxes else []
     grids, expanded = _grids_and_strides(input_size, strides)
     if len(grids) == len(preds):
         s = expanded[keep, 0].astype(np.float64)
@@ -534,12 +535,13 @@ def person_scores(output, input_size=640, strides=(8, 16, 32), floor=PERSON_LIST
     boxes = np.stack((cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2), axis=1)
     order = np.argsort(-conf[keep], kind="stable")
     boxes, scores = boxes[order], conf[keep][order]
-    found = []
+    found, found_boxes = [], []
     while len(scores) and len(found) < limit:
         found.append(round(float(scores[0]), 4))
+        found_boxes.append(tuple(float(v) for v in boxes[0]))
         rest = _box_iou(boxes[0], boxes[1:]) < iou
         boxes, scores = boxes[1:][rest], scores[1:][rest]
-    return found
+    return (found, found_boxes) if with_boxes else found
 
 
 def tile_rects(width, height, tiles, overlap=0.15):
@@ -616,8 +618,9 @@ def combine_rect_scores(rect_results):
     full = rect_results[0]
     combined = {"person": full["person"], "animal": full["animal"],
                 "classes": full["classes"], "box": full["box"]}
-    if "person_scores" in full:
-        combined["person_scores"] = full["person_scores"]
+    for key in ("person_scores", "person_boxes"):
+        if key in full:
+            combined[key] = full[key]
     tiles = rect_results[1:]
     if tiles:
         best_tile = max(tiles, key=lambda r: r["person"])
@@ -701,7 +704,12 @@ def build_score_fn(model_path, input_size=416):
                      "classes": scores["classes"],
                      "box": list(scale_box(box, ratio, x0, y0)) if box else None}
             if not results:     # full frame only, like the decision scores
-                entry["person_scores"] = person_scores(output, input_size)
+                found, found_boxes = person_scores(output, input_size, with_boxes=True)
+                entry["person_scores"] = found
+                # Parallel to person_scores, in original pixels: lets a camera ignore a
+                # static person-shaped object (an ignore zone) without losing the others.
+                entry["person_boxes"] = [[round(v, 1) for v in scale_box(b, ratio, x0, y0)]
+                                         for b in found_boxes]
             results.append(entry)
         combined = combine_rect_scores(results)
         combined["w"], combined["h"] = img.width, img.height

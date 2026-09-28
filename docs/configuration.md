@@ -674,6 +674,21 @@ does for such a burst. A replay of three cameras' journals found the hold only d
 losing these frames (held bit-5 frames were a person 9 in 10 times by label), and none a
 false alarm the hold had stopped. Needs `motion_send_threshold`; without it nothing is held.
 
+`ignore_zones` (default none) lists rects `[x1, y1, x2, y2]` as fractions of the frame
+whose people do not count. A static person-shaped object — sacks, a coat on a hook, a
+garden statue — scores as a person on every frame, so any event the camera raises
+nearby (a bird, a shadow) "confirms" it. A person whose box lies at least 80 % inside a
+zone is removed from the answer; the score becomes the best remaining person, so a real
+person elsewhere, or one standing in front of the object (a taller box), still counts.
+Keep a zone tight around the object. It needs a scoring service that returns
+`person_boxes` (this release on); an older one is left alone, with one warning.
+
+```yaml
+scorer:
+  ignore_zones:
+    - [0.0, 0.48, 0.12, 0.66]   # sacks under the woodshed, left edge
+```
+
 `night_threshold` replaces `threshold` while the camera's night is on — the shared astral
 night with the camera's `schedule` applied, so an `always_night` camera uses it around the
 clock and an `always_day` one never does. IR night scenes score differently from daylight

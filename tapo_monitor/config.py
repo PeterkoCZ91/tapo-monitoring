@@ -124,6 +124,9 @@ class ScorerConfig:
     # camera's person class; the default profile still calls it PIR) skip that hold, as
     # the sampler already does for such a burst: at or above ``threshold`` it sends.
     person_bit_skips_hold: bool = False
+    # Rects ``[x1, y1, x2, y2]`` as fractions of the frame whose people are ignored: a
+    # static person-shaped object there stops counting (see scorer.apply_ignore_zones).
+    ignore_zones: tuple = ()
     # Threshold while the camera's night is on (its schedule applied to the astral night):
     # IR scenes score differently from daylight ones. None = ``threshold`` around the clock.
     night_threshold: float | None = None
@@ -745,10 +748,34 @@ def _scorer(data, where):
                 f"{where}: scorer motion_send_threshold must be > night_threshold")
     person_bit_skips_hold = _check_bool(d.get("person_bit_skips_hold", False),
                                         "person_bit_skips_hold", f"{where}: scorer")
+    ignore_zones = _ignore_zones(d.get("ignore_zones"), where)
     return ScorerConfig(url=d.get("url"), threshold=threshold, timeout=timeout, tiles=tiles,
                         motion_send_threshold=motion_send_threshold,
                         person_bit_skips_hold=person_bit_skips_hold,
+                        ignore_zones=ignore_zones,
                         night_threshold=night_threshold)
+
+
+def _ignore_zones(value, where):
+    """``scorer.ignore_zones``: a list of ``[x1, y1, x2, y2]`` fractions, x1<x2, y1<y2."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ConfigError(f"{where}: scorer ignore_zones must be a list of [x1, y1, x2, y2]")
+    zones = []
+    for zone in value:
+        try:
+            if isinstance(zone, (str, bytes)) or len(zone) != 4:
+                raise ValueError
+            x1, y1, x2, y2 = (float(v) for v in zone)
+        except (TypeError, ValueError):
+            raise ConfigError(f"{where}: scorer ignore_zones entries must be "
+                              "[x1, y1, x2, y2] numbers") from None
+        if not (0.0 <= x1 < x2 <= 1.0 and 0.0 <= y1 < y2 <= 1.0):
+            raise ConfigError(f"{where}: scorer ignore_zones entries are fractions of the "
+                              "frame with x1 < x2 and y1 < y2")
+        zones.append((x1, y1, x2, y2))
+    return tuple(zones)
 
 
 def _pan_limit(data, where):

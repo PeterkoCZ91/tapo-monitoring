@@ -475,6 +475,24 @@ def test_person_scores_falls_back_when_anchor_count_mismatch():
         pytest.approx([0.9, 0.6], abs=1e-4)
 
 
+def test_person_scores_with_boxes_lists_each_persons_box():
+    out = np.zeros((1, 3, 85), dtype=np.float32)
+    _person_anchor(out, 0, 0.9, raw_box=(100, 80, 40, 60))
+    _person_anchor(out, 2, 0.6, raw_box=(400, 80, 40, 60))
+    scores, boxes = scorer_service.person_scores(out, input_size=640, with_boxes=True)
+    assert scores == pytest.approx([0.9, 0.6], abs=1e-4)
+    assert boxes[0] == pytest.approx((80.0, 50.0, 120.0, 110.0))
+    assert boxes[1] == pytest.approx((380.0, 50.0, 420.0, 110.0))
+    assert scorer_service.person_scores(np.zeros((1, 3, 85), dtype=np.float32),
+                                        input_size=640, with_boxes=True) == ([], [])
+
+
+def test_combine_keeps_the_full_frame_person_boxes():
+    full = _rect(0.9) | {"person_scores": [0.9], "person_boxes": [[1, 2, 3, 4]]}
+    tile = _rect(0.95) | {"person_scores": [0.95], "person_boxes": [[5, 6, 7, 8]]}
+    assert scorer_service.combine_rect_scores([full, tile])["person_boxes"] == [[1, 2, 3, 4]]
+
+
 def test_combine_keeps_the_full_frame_person_list_only():
     full = _rect(0.9) | {"person_scores": [0.9, 0.5]}
     tile = _rect(0.95) | {"person_scores": [0.95, 0.9, 0.5]}

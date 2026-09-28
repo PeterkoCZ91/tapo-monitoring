@@ -5,6 +5,10 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `scorer.ignore_zones`: rects (fractions of the frame) whose people do not count, for a
+  static person-shaped object that "confirms" every event nearby. The scoring service now
+  returns `person_boxes`, one box per entry of `person_scores`; the daemon removes the
+  people at least 80 % inside a zone and scores the best remaining one.
 - `scorer.person_bit_skips_hold` (off by default): a live motion frame whose event carries
   `events_1` bit 5 skips the corroboration hold and sends at `>= threshold`, as the
   sampler already did for such a burst. Bit 5 is the camera's person class (alarm code 6),

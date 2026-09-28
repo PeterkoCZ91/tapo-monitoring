@@ -132,3 +132,59 @@ def test_person_count_is_unknown_for_an_older_or_malformed_reply():
     assert scorer.person_count({"person_scores": [1.5]}, 0.4) is None
     assert scorer.subject_score({"person": 0.9}, threshold=0.4).persons is None
     assert scorer.subject_score({"person": 0.9, "person_scores": [0.9, 0.8]}).persons is None
+
+
+# ── ignore zones ────────────────────────────────────────────────────────────
+
+def _zoned(scores, boxes, person=None):
+    return {"person": scores[0] if person is None else person, "animal": 0.01,
+            "classes": {"person": scores[0] if person is None else person},
+            "box": boxes[0] if boxes else None, "person_scores": scores,
+            "person_boxes": boxes, "w": 1000, "h": 500}
+
+
+SACKS = (0.0, 0.5, 0.1, 0.7)   # left edge, the lower middle of the frame
+
+
+def test_ignore_zone_removes_a_static_object_and_keeps_the_real_person():
+    result = _zoned([0.58, 0.54, 0.9], [[5, 260, 60, 330], [20, 270, 90, 340],
+                                         [500, 100, 560, 300]], person=0.9)
+    result["box"] = [500, 100, 560, 300]
+    out = scorer.apply_ignore_zones(result, [SACKS])
+    assert out["person"] == 0.9 and out["box"] == [500, 100, 560, 300]
+    assert out["person_scores"] == [0.9] and out["ignored_persons"] == 2
+
+
+def test_ignore_zone_with_only_the_object_scores_nobody():
+    out = scorer.apply_ignore_zones(_zoned([0.58, 0.54], [[5, 260, 60, 330],
+                                                          [20, 270, 90, 340]]), [SACKS])
+    assert out["person"] == 0.0 and out["box"] is None
+    assert out["classes"]["person"] == 0.0
+    assert scorer.subject_score(out, threshold=0.45) < 0.45
+
+
+def test_ignore_zone_keeps_the_next_best_person_as_the_score():
+    out = scorer.apply_ignore_zones(_zoned([0.58, 0.5], [[5, 260, 60, 330],
+                                                         [400, 50, 450, 200]]), [SACKS])
+    assert out["person"] == 0.5 and out["box"] == [400, 50, 450, 200]
+
+
+def test_a_person_mostly_outside_the_zone_still_counts():
+    # A person standing in front of the sacks is taller than the zone: well under 80 % in.
+    result = _zoned([0.9], [[10, 100, 90, 340]])
+    assert scorer.apply_ignore_zones(result, [SACKS]) is result
+
+
+def test_ignore_zones_leave_an_older_scorer_answer_alone():
+    result = {"person": 0.58, "animal": 0.0, "box": [5, 260, 60, 330], "w": 1000, "h": 500}
+    assert scorer.apply_ignore_zones(result, [SACKS]) is result
+
+
+def test_score_image_applies_the_zones(monkeypatch, tmp_path):
+    img = tmp_path / "f.jpg"
+    img.write_bytes(b"jpg")
+    body = json.dumps(_zoned([0.58], [[5, 260, 60, 330]])).encode()
+    monkeypatch.setattr(scorer.urllib.request, "urlopen",
+                        lambda req, timeout=10: io.BytesIO(body))
+    assert scorer.score_image("http://x/score", str(img), ignore_zones=[SACKS])["person"] == 0.0
+    assert scorer.score_image("http://x/score", str(img))["person"] == 0.58

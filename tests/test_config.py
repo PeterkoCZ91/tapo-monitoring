@@ -1401,3 +1401,19 @@ def test_shipped_renames_stay_within_their_own_section():
     for old, new in cfg.RENAMED_KEYS.items():
         assert old.rpartition(".")[0] == new.rpartition(".")[0], (old, new)
         assert old != new
+
+
+def test_scorer_ignore_zones_parse_as_fractions():
+    app = cfg.load_config_from_dict({"cameras": [{
+        "name": "a", "host": "203.0.113.10",
+        "scorer": {"url": "http://x", "ignore_zones": [[0, 0.45, 0.12, 0.7]]}}]})
+    assert app.cameras[0].scorer.ignore_zones == ((0.0, 0.45, 0.12, 0.7),)
+
+
+@pytest.mark.parametrize("zones", [[[0, 0, 1]], [[0.5, 0, 0.4, 1]], [[0, 0, 1.5, 1]],
+                                   "0,0,1,1", [["a", 0, 1, 1]]])
+def test_scorer_ignore_zones_reject_bad_rects(zones):
+    with pytest.raises(cfg.ConfigError, match="ignore_zones"):
+        cfg.load_config_from_dict({"cameras": [{
+            "name": "a", "host": "203.0.113.10",
+            "scorer": {"url": "http://x", "ignore_zones": zones}}]})
