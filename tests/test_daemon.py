@@ -7169,3 +7169,112 @@ def test_the_person_photo_stamp_survives_a_restart(tmp_path):
     restored = daemon.MonitorState()
     runtime_state.load(path, restored, 155.0)
     assert daemon._sd_within_cooldown(app, c, restored, "person", 160.0)
+
+
+# ── sampler.keep_sampling_on_defer: which deliveries finish an open-burst follow-up ──
+
+def _keep_app(cooldown=120):
+    return cfg.load_config_from_dict(
+        {"alerts": {"cooldown": cooldown},
+         "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
+                      "scorer": {"url": "http://scorer.invalid/score", "threshold": 0.45},
+                      "sampler": {"enabled": True, "keep_sampling_on_defer": True}}]})
+
+
+def _open_entry(start, **extra):
+    return {"camera": "a", "etype": "person", "event": {"start_time": start},
+            "keep_sampling": True, "armed_at": start, **extra}
+
+
+@pytest.mark.parametrize("held_score, marked", [(0.6, True), (0.3, False)])
+def test_a_held_frame_send_marks_the_open_burst_only_when_it_showed_a_person(
+        monkeypatch, tmp_path, held_score, marked):
+    app = _keep_app()
+    camera = app.cameras[0]
+    state = daemon.MonitorState()
+    entry = _open_entry(1000.0)
+    state.pending_sd.append(entry)
+    frame = tmp_path / "held.jpg"
+    frame.write_bytes(b"\xff\xd8held")
+    group = {"event": {"start_time": 1030.0}, "started": 1000.0, "hold_path": str(frame),
+             "hold_score": held_score}
+    monkeypatch.setattr(daemon, "send_alert_photo", lambda *a, **k: True)
+    monkeypatch.setattr(daemon, "_caption_describe", lambda *a, **k: "")
+    daemon._send_held_frame(app, camera, state, group, now=1200.0,
+                            secrets={"groq_key": ""}, time_str=lambda _e: "T",
+                            reason="hold_expiry_send", threshold=0.45,
+                            send_path="hold_expiry")
+    assert bool(entry.get("passage_delivered")) is marked
+
+
+@pytest.mark.parametrize("etype, person_photo, marked", [
+    ("tamper", False, False), ("pet", False, False), ("motion", False, False),
+    ("person", False, False),                  # an unscored person photo
+    ("person", True, True), ("motion", True, True), ("tamper", True, True),
+])
+def test_only_a_photo_that_showed_a_person_marks_the_open_burst(etype, person_photo, marked):
+    state = daemon.MonitorState()
+    entry = _open_entry(1000.0)
+    state.pending_sd.append(entry)
+    daemon.note_passage_delivered(state, "a", 1030.0, 1030.0, person_photo=person_photo,
+                                  cooldown=120)
+    assert bool(entry.get("passage_delivered")) is marked
+
+
+def test_a_sampler_group_marks_every_follow_up_of_a_burst_longer_than_the_cooldown():
+    # Follow-ups at 1000 and 1130 (two passages for the defer dedup), one sampler group
+    # from 1000 whose newest person event is 1260: its delivery covers both.
+    state = daemon.MonitorState()
+    first, second, other = _open_entry(1000.0), _open_entry(1130.0), _open_entry(1500.0)
+    state.pending_sd.extend([first, second, other])
+    group = {"started": 1000.0, "event": {"start_time": 1260.0}}
+    daemon.note_passage_delivered(state, "a", *daemon.group_span(group), person_photo=True,
+                                  cooldown=120)
+    assert first.get("passage_delivered") and second.get("passage_delivered")
+    assert not other.get("passage_delivered")
+
+
+def test_an_sd_delivery_marks_the_open_burst_of_the_same_passage(monkeypatch, tmp_path):
+    # A motion card follow-up of the same passage delivers a person photo: the queued
+    # person follow-up of the open burst is done too.
+    app = _keep_app()
+    camera = app.cameras[0]
+    state = daemon.MonitorState()
+    person_entry = _open_entry(1010.0)
+    motion_entry = {"camera": "a", "etype": "motion", "event": {"start_time": 1000.0},
+                    "due_at": 0, "live_sent": False}
+    state.pending_sd.extend([motion_entry, person_entry])
+    frame = tmp_path / "card.jpg"
+    frame.write_bytes(b"\xff\xd8card")
+    job = daemon._SdJob(entry=motion_entry, cfg=camera, out_dir=str(tmp_path / "job"),
+                        span=36, offset=0, full_span=36, scored=True)
+    pick = daemon._SdPick(frames=[str(frame)], image=str(frame), score=0.79)
+    monkeypatch.setattr(daemon, "send_alert_photo", lambda *a, **k: True)
+    monkeypatch.setattr(daemon, "_caption_describe", lambda *a, **k: "")
+    kept = daemon._finish_sd_followup(app, {}, state, job, pick, None, now=1100.0,
+                                      secrets={"groq_key": "", "face_names": {}},
+                                      snapshot_for=None, time_str=lambda _e: "T",
+                                      night=True)
+    assert kept is False
+    assert person_entry.get("passage_delivered") is True
+
+
+def test_defer_answers_whether_it_queued(monkeypatch):
+    app = _keep_app()
+    captured = {}
+
+    def fake_run_monitor(cam, cfg_, last_seen, **kw):
+        captured.update(kw)
+        return last_seen
+
+    monkeypatch.setattr(daemon.monitor, "run_monitor", fake_run_monitor)
+    monkeypatch.setattr(daemon, "score_for", lambda _cfg: None)
+    state = daemon.MonitorState()
+    daemon.run_monitor_pass(app, {"a": object()}, state, now=2000.0,
+                            secrets={"groq_key": "", "telegram_token": "t",
+                                     "telegram_chat": "c"},
+                            snapshot_for=lambda _cfg: (lambda *a: None))
+    defer = captured["defer"]
+    assert defer({"start_time": 1000.0}, "person", False, keep_sampling=True) is True
+    assert defer({"start_time": 1010.0}, "person", False, keep_sampling=True) is False
+    assert len(state.pending_sd) == 1 and state.pending_sd[0]["keep_sampling"] is True

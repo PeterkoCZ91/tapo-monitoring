@@ -1450,3 +1450,67 @@ def test_run_monitor_triggers_whitelamp_fallback_on_legacy_callable():
     assert len(triggered) == 1
 
 
+
+
+def _keep_cfg(scorer=True):
+    cam = {"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
+           "sampler": {"enabled": True, "keep_sampling_on_defer": True}}
+    if scorer:
+        cam["scorer"] = {"url": "http://127.0.0.1:8765/score", "threshold": 0.4}
+    return config.load_config_from_dict({"cameras": [cam]}).cameras[0]
+
+
+def _keep_run(monkeypatch, caplog, cfg, *, defer, score=None):
+    caplog.set_level("INFO")
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "empty scene")
+    observed, alerted = [], []
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        on_alert=lambda et, ev=None: alerted.append(et), defer=defer, score=score,
+        observe=lambda ev, et, sent, delivered=False: observed.append(sent))
+    audits = [r.getMessage() for r in caplog.records if r.getMessage().startswith("audit ")]
+    return audits, observed, alerted
+
+
+def test_keep_sampling_duplicate_defer_is_audited_as_pending_not_defer(monkeypatch, caplog):
+    calls = []
+
+    def defer(ev, et, live_sent, keep_sampling=False):
+        calls.append(keep_sampling)
+        return False                                  # already pending for this passage
+
+    audits, observed, _ = _keep_run(monkeypatch, caplog, _keep_cfg(), defer=defer,
+                                    score=lambda img: 0.1)
+    assert calls == [True]
+    assert not [a for a in audits if "action=defer" in a]
+    [drop] = [a for a in audits if "action=drop" in a]
+    assert "reason=followup_pending" in drop and "keep_sampling=true" in drop
+    assert observed == [False]
+
+
+def test_keep_sampling_queued_defer_arms_and_leaves_the_group_open(monkeypatch, caplog):
+    audits, observed, alerted = _keep_run(
+        monkeypatch, caplog, _keep_cfg(),
+        defer=lambda ev, et, live_sent, keep_sampling=False: True, score=lambda img: 0.1)
+    [line] = [a for a in audits if "action=defer" in a]
+    assert "keep_sampling=true" in line and "reason=below_threshold" in line
+    assert alerted == ["person"] and observed == [False]
+
+
+def test_keep_sampling_needs_a_scorer_groq_only_defers_as_before(monkeypatch, caplog):
+    calls = []
+
+    def defer(ev, et, live_sent, keep_sampling=False):
+        calls.append(keep_sampling)
+
+    audits, observed, alerted = _keep_run(monkeypatch, caplog, _keep_cfg(scorer=False),
+                                          defer=defer)
+    assert calls == [False]                           # the legacy defer
+    assert observed == [True] and alerted == ["person"]
+    assert not [a for a in audits if "keep_sampling" in a]

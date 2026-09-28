@@ -1403,6 +1403,20 @@ def test_shipped_renames_stay_within_their_own_section():
         assert old != new
 
 
+def test_sampler_keep_sampling_on_defer_defaults_off_and_parses(caplog):
+    assert cfg.load_config_from_dict(_minimal()).cameras[0].sampler \
+        .keep_sampling_on_defer is False
+    with caplog.at_level("WARNING", logger="tapo_monitor.config"):
+        app = cfg.load_config_from_dict(_hold_expiry_config(keep_sampling_on_defer=True))
+    assert app.cameras[0].sampler.keep_sampling_on_defer is True
+    assert "unknown key" not in caplog.text
+
+
+def test_sampler_keep_sampling_on_defer_must_be_a_bool():
+    with pytest.raises(cfg.ConfigError, match="keep_sampling_on_defer' must be true or false"):
+        cfg.load_config_from_dict(_hold_expiry_config(keep_sampling_on_defer="yes"))
+
+
 def test_scorer_ignore_zones_parse_as_fractions():
     app = cfg.load_config_from_dict({"cameras": [{
         "name": "a", "host": "203.0.113.10",

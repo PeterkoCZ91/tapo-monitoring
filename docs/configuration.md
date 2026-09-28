@@ -586,6 +586,7 @@ sampler:
   low_score: 0.15
   hold_expiry: observe
   hold_expiry_min_score: 0.35
+  keep_sampling_on_defer: false
 ```
 
 The sampler takes additional live frames across a long event. Nearby events are grouped;
@@ -623,6 +624,34 @@ it the daemon warns once at startup and every expiry stays `hold_expired` with
 `tapo-monitor replay --compare` before switching a camera on (see
 [observability](observability.md#replaying-a-night)). Write `off` bare or quoted; YAML
 reads a bare `off` as false, which is accepted as `off`.
+
+`keep_sampling_on_defer` (off by default) changes what a camera-confirmed person whose
+live frame scores below the threshold does to the rest of its burst. The frame is still
+handed to the SD/recording follow-up (`sd_snapshot`) and the confirmed cooldown is armed,
+as before. Off, the defer also closes the burst for the sampler, and the cooldown skips the
+next person frames of the same passage although nothing was delivered, so the person
+arrives only with the follow-up, minutes later, or not at all when it finds nobody. On,
+the sampler keeps sampling the burst with its usual interval, frame budget and threshold
+(a person group is held to `scorer.threshold`, never to the motion corroboration), and
+while the follow-up is queued a frame of the passage whose person score reaches the
+threshold may pass the cooldown: a sampler frame, or a live frame of a later event
+(scored first, then sent). Every other frame stays under the cooldown exactly as with the
+switch off: a tamper/pet/motion frame of nobody, an empty person frame (audited
+`action=cooldown reason=open_burst_no_person`), and any frame the scorer could not judge.
+One visit still makes one message: once a photo of the passage that showed a person is
+delivered (sampler, live, held frame or another follow-up), the queued follow-up is
+dropped, before its read if it has not started, audited `path=sd action=cooldown
+reason=passage_already_alerted`. When none is, it sends exactly as before. "The passage"
+is the gate's own notion: camera event starts less than `alerts.cooldown` apart (for the
+sampler, apart from the span of its group), so one burst queues a single follow-up. The
+defer's audit line carries `keep_sampling=true`. It needs a local scorer (without one a
+camera defers as before), has no effect while the sampler is off, and leaves the
+`reason=snapshot_failed` defer unchanged. Queued follow-ups and their marks survive a
+restart; the sampler's group does not, so a burst interrupted by a restart falls back to
+the follow-up.
+One known gap: when Telegram refuses a photo let through the cooldown this way, nothing is
+delivered, so the queued follow-up still goes out, and with the `outbox` on the refused
+photo may be delivered late as well, so after an outage one visit can make two messages.
 
 ### Local scorer and crop
 

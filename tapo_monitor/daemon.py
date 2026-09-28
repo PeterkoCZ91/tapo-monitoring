@@ -1250,6 +1250,69 @@ def photo_had_person(score, threshold):
     return float(getattr(score, "person", score)) >= float(threshold)
 
 
+def _start_of(event):
+    try:
+        return float(event.get("start_time"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def keeps_sampling(cfg):
+    """Whether ``sampler.keep_sampling_on_defer`` is in force for this camera now."""
+    return bool(cfg.sampler.enabled and cfg.sampler.keep_sampling_on_defer)
+
+
+def open_burst_entries(state, name, first, last, cooldown):
+    """Queued person follow-ups of camera ``name`` whose burst is kept open. Pure.
+
+    Those queued with ``sampler.keep_sampling_on_defer`` (``keep_sampling``) that no
+    delivery has marked yet, belonging to the passage whose camera event starts span
+    ``first``..``last``: an entry's start less than ``cooldown`` outside that span, the
+    gate's own notion of one passage (the defer dedup uses it too). A sampler group
+    passes its first and newest event start, so a burst longer than the cooldown still
+    covers every follow-up it queued.
+    """
+    if first is None or last is None:
+        return []
+    lo, hi = min(first, last), max(first, last)
+    out = []
+    for entry in state.pending_sd:
+        if (entry.get("camera") != name or entry.get("etype") == "motion"
+                or not entry.get("keep_sampling") or entry.get("passage_delivered")):
+            continue
+        start = _start_of(entry.get("event"))
+        if start is not None and lo - cooldown < start < hi + cooldown:
+            out.append(entry)
+    return out
+
+
+def group_span(group):
+    """First and newest camera event start of a sampler group (see open_burst_entries)."""
+    newest = _start_of(group.get("event"))
+    try:
+        first = float(group.get("started"))
+    except (TypeError, ValueError):
+        first = newest
+    return first, newest if newest is not None else first
+
+
+def note_passage_delivered(state, name, first, last, *, person_photo, cooldown):
+    """A photo of this passage reached the phone: mark its open-burst follow-ups done.
+
+    Marks ``passage_delivered`` on :func:`open_burst_entries`, which
+    :func:`_sd_followup_blocked` then drops: their defer left the burst open, so the
+    sampler or a later live frame may have delivered the person while the follow-up
+    waited for its window, and one visit must stay one message. Only a photo that showed
+    a person (``person_photo``: its person score reached the camera's threshold) counts,
+    whatever the event type; an unscored photo, or a tamper/pet/motion photo of nobody,
+    never does, so the person on the card still goes out.
+    """
+    if not person_photo:
+        return
+    for entry in open_burst_entries(state, name, first, last, cooldown):
+        entry["passage_delivered"] = True
+
+
 def alert_gate(state, name, cooldown, now):
     """Build (can_alert, on_alert) for one camera at ``now``.
 
@@ -1788,9 +1851,25 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
         last_seen = state.last_seen.get(cfg.name, 0)
         name = cfg.name
 
-        can_alert, on_alert = alert_gate(state, name, cooldown, now)
+        can_alert, gate_on_alert = alert_gate(state, name, cooldown, now)
+        # What the live pass's last arming said about its photo: the delivery's observe
+        # call right after it reads whether that photo showed a person.
+        live_armed: dict = {}
 
-        def defer(event, etype, live_sent, _name=name, _cfg=cfg,
+        def on_alert(etype, event=None, *, score=None, threshold=None,
+                     _raw=gate_on_alert, _armed=live_armed):
+            _armed["person_photo"] = photo_had_person(score, threshold)
+            _raw(etype, event, score=score, threshold=threshold)
+
+        def open_burst(event, _name=name, _cfg=cfg):
+            # The camera's switch, not only the entry's stamp: queued entries persist, and
+            # turning the switch off must end the exception at once.
+            if not keeps_sampling(_cfg):
+                return False
+            start = _start_of(event)
+            return bool(open_burst_entries(state, _name, start, start, cooldown))
+
+        def defer(event, etype, live_sent, keep_sampling=False, _name=name, _cfg=cfg,
                   _source=cfg.snapshot_source):
             key = "motion" if etype == "motion" else "confirmed"
             first_span, full_span = sd_followup_spans(_cfg, event, etype)
@@ -1806,7 +1885,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                     continue
                 if key == "motion":
                     log.info("drop %s: SD follow-up already pending for %s", etype, _name)
-                    return
+                    return False
                 try:
                     pending_start = float(pending["event"].get("start_time"))
                 except (TypeError, ValueError):
@@ -1814,10 +1893,10 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                 if start is not None and pending_start is not None:
                     if abs(start - pending_start) < cooldown:
                         log.info("drop %s: duplicate SD follow-up already pending for %s", etype, _name)
-                        return
+                        return False
                 elif pending["etype"] == etype:
                     log.info("drop %s: SD follow-up already pending for %s", etype, _name)
-                    return
+                    return False
             # A local recording is cheap to read twice, so it gets an early first look
             # at the event's opening seconds. The SD card (a slow download behind
             # pytapo's freshness guard) does so only when the camera opts in
@@ -1849,9 +1928,15 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                 # The live pass armed the cooldown for this defer just before queuing
                 # it; a later arming is a delivery (see _sd_within_cooldown).
                 entry["armed_at"] = state.last_alert.get((_name, key))
+                if keep_sampling:
+                    # sampler.keep_sampling_on_defer: the burst stays open; a person
+                    # photo of it may pass the cooldown and then marks this entry
+                    # (open_burst_entries, note_passage_delivered).
+                    entry["keep_sampling"] = True
             if early:
                 entry["rest_span"] = first_span     # read the remainder if the look is empty
             state.pending_sd.append(entry)
+            return True
         defer_fn = defer if cfg.sd_snapshot else None
         raw_snapshot = snapshot_for(cfg)
         raw_score = score_for(cfg)
@@ -1925,8 +2010,13 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                 return sampler.corroborate_motion(
                     g, s, _cfg.scorer.threshold, _cfg.scorer.motion_send_threshold)
 
-        def observe(event, etype, sent, delivered=False, _name=name, _cfg=cfg):
+        def observe(event, etype, sent, delivered=False, _name=name, _cfg=cfg,
+                    _armed=live_armed):
             if delivered:
+                # The live send armed the gate (live_on_alert) just before this call.
+                start = _start_of(event)
+                note_passage_delivered(state, _name, start, start, cooldown=cooldown,
+                                       person_photo=_armed.pop("person_photo", False))
                 state.scene_coordinator.record_delivery(
                     _cfg.coordinator.group, _name, etype, event, now,
                     window=_cfg.coordinator.scene_window,
@@ -2032,6 +2122,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             corroborate=corroborate,
             observe=observe,
             burst_sent=burst_sent,
+            open_burst=open_burst,
             latency_observe=observe_latency,
             send_alert=send_alert,
             poll_observe=poll_observe,
@@ -2841,6 +2932,14 @@ def _sd_followup_blocked(app, cfg, state, entry, now):
     pass and the sampler keep alerting while the job runs.
     """
     event, etype = entry["event"], entry["etype"]
+    if entry.get("passage_delivered"):
+        # Queued with the burst left open (sampler.keep_sampling_on_defer), and the
+        # sampler or a later live frame has since delivered this passage.
+        log.info("drop %s: this passage already alerted [sd]", etype)
+        monitor.audit_event(cfg, event, etype, "sd", "cooldown",
+                            reason="passage_already_alerted")
+        resolve_outbox(cfg, event, "dropped, passage already alerted [sd]")
+        return "drop"
     if not state.scene_coordinator.allows(
             cfg.coordinator.group, entry["camera"], etype, event, now,
             window=cfg.coordinator.scene_window):
@@ -3105,6 +3204,11 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
                 # This burst has now really been alerted on: a later empty-live frame
                 # of the same passage may skip its duplicate follow-up.
                 open_group["delivered"] = True
+            start = _start_of(event)
+            note_passage_delivered(
+                state, entry["camera"], start, start, cooldown=app.alerts.cooldown,
+                person_photo=photo_had_person(
+                    selected_score, cfg.scorer.threshold if job.scored else None))
         else:
             log.warning("alert %s Telegram delivery failed [sd]; retry queued", etype)
             entry["due_at"] = now + 60
@@ -3178,6 +3282,9 @@ def _send_held_frame(app, cfg, state, group, *, now, secrets, time_str, reason, 
         on_alert("motion", score=s, threshold=cfg.scorer.threshold)
         group["sent"] = True
         group["delivered"] = True
+        note_passage_delivered(state, cfg.name, *group_span(group),
+                               cooldown=app.alerts.cooldown,
+                               person_photo=photo_had_person(s, cfg.scorer.threshold))
         state.scene_coordinator.record_delivery(
             cfg.coordinator.group, cfg.name, "motion", group["event"], now,
             window=cfg.coordinator.scene_window)
@@ -3361,7 +3468,16 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                 log.warning("scorer unavailable; sampler passes %s frame through", cfg.name)
                 monitor.audit_event(cfg, group["event"], etype, "sampler", "scorer_unavailable")
             can_alert, on_alert = alert_gate(state, cfg.name, app.alerts.cooldown, now)
-            if not can_alert(etype):
+            if (not can_alert(etype) and keeps_sampling(cfg)
+                    and photo_had_person(s, cfg.scorer.threshold if score is not None else None)
+                    and open_burst_entries(state, cfg.name, *group_span(group),
+                                           app.alerts.cooldown)):
+                # sampler.keep_sampling_on_defer: the cooldown was armed by this burst's
+                # own empty-frame defer and nothing has reached the phone; a frame that
+                # shows the person may pass it (the queued follow-up is then dropped).
+                log.info("cooldown override %s: person in sampler frame, follow-up "
+                         "still queued", etype)
+            elif not can_alert(etype):
                 # A confirmed alert for this walk already went out elsewhere; this
                 # group's job is done.
                 log.info("skip %s: cooldown active [sampler]", etype)
@@ -3400,6 +3516,10 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                          threshold=cfg.scorer.threshold if score is not None else None)
                 group["sent"] = True
                 group["delivered"] = True
+                note_passage_delivered(
+                    state, cfg.name, *group_span(group), cooldown=app.alerts.cooldown,
+                    person_photo=photo_had_person(
+                        s, cfg.scorer.threshold if score is not None else None))
                 state.scene_coordinator.record_delivery(
                     cfg.coordinator.group, cfg.name, etype, group["event"], now,
                     window=cfg.coordinator.scene_window,

@@ -14,6 +14,8 @@ import os
 import threading
 import time
 
+import pytest
+
 from tapo_monitor import daemon, sdworker, twin
 from tests.scenario import (
     START,
@@ -881,6 +883,337 @@ def test_a_card_photo_behind_a_motion_photo_with_no_person_score_still_goes_out(
 
     assert sc.notifier.send_paths == ["sampler", "sd"]
     assert not [line for line in _audit(caplog, "person") if "sd_within_cooldown" in line]
+
+
+# ── sampler.keep_sampling_on_defer: an empty live person frame leaves the burst open ──
+# Camera "a" reads its card for follow-ups (threshold 0.45, cooldown 120 s) and samples
+# every 10 s for three frames. Scores are scripted by tick time (default 0.1, nobody); a
+# card frame shows the person at 0.79. motion_send_threshold 0.7 is set so a sampler
+# frame between 0.45 and 0.7 shows which rule the person group is held to.
+
+def _open_burst_story(monkeypatch, tmp_path, *, keep, scores=None, cooldown=120):
+    sc = Scenario(monkeypatch, tmp_path,
+                  [camera_dict("a", HOST_A, sd_snapshot=True,
+                               scorer={"url": "http://scorer.invalid/score",
+                                       "threshold": 0.45, "motion_send_threshold": 0.7},
+                               sampler={"enabled": True, "interval": 10, "max_frames": 3,
+                                        "group_gap": 60, "keep_sampling_on_defer": keep})],
+                  alerts={"cooldown": cooldown})
+    scores = scores or {}
+    reads = []
+
+    def score(_url, image_path, *_a, **_k):
+        with open(image_path, "rb") as f:
+            if b"card" in f.read():
+                return {"person": 0.79, "animal": 0.0}
+        value = scores.get(sc.clock.now - START, 0.1)
+        return None if value is None else {"person": value, "animal": 0.0}
+
+    def fetch(_cfg, start_time, span=None, out_dir=None, **_):
+        reads.append(start_time)
+        path = os.path.join(out_dir, "sd.jpg")
+        with open(path, "wb") as f:
+            f.write(b"\xff\xd8card")
+        return [path]
+
+    monkeypatch.setattr("tapo_monitor.daemon.scorer.score_image", score)
+    real_job_dir = sdworker.job_dir
+    monkeypatch.setattr(sdworker, "job_dir", lambda tmp=None: real_job_dir(tmp or str(tmp_path)))
+    sc._collaborators["drain"] = functools.partial(
+        daemon.process_pending_sd, snapshot_for=sc._snapshot_for,
+        time_str=lambda _e: "scenario", fetch_frames=fetch)
+    sc.run(10)
+    return sc, reads
+
+
+def _until_follow_ups_done(sc, limit=400):
+    while sc.state.pending_sd:
+        assert sc.clock.now < at(limit), "the follow-up never finished"
+        sc.tick(advance=5)
+    sc.run(30)
+
+
+def test_open_burst_the_sampler_photographs_the_person_and_the_card_is_skipped(
+        monkeypatch, tmp_path, caplog):
+    # The person's live frame is empty (0.1): the follow-up is queued and the cooldown
+    # armed, but the burst stays open, so the sampler's frame at 20 (0.55: above the
+    # threshold, below motion_send_threshold, so a person group is held to the threshold
+    # and not corroborated) goes out at once. The card follow-up is then dropped as the
+    # same passage: one visit, one message.
+    caplog.set_level(logging.INFO)
+    sc, reads = _open_burst_story(monkeypatch, tmp_path, keep=True, scores={20: 0.55})
+    sc.cams["a"].push(person(at(10)))
+    sc.tick(advance=5)                           # 10: empty live frame, queued
+    [entry] = sc.state.pending_sd
+    assert entry["keep_sampling"] and entry["armed_at"] == at(10)   # armed as always
+    assert sc.state.groups["a"]["sent"] is False                   # but still sampling
+    sc.run(10)                                   # 15, 20: the sampler's frame
+    assert sc.when(("send", "a")) == [at(20)]
+    _until_follow_ups_done(sc)
+
+    assert sc.actions("send", "send_failed") == [("send", "a")]
+    assert sc.notifier.send_paths == ["sampler"]
+    assert reads == []                           # dropped before the card was read
+    [dropped] = [line for line in _audit(caplog, "person")
+                 if "path=sd" in line and "action=cooldown" in line]
+    assert "reason=passage_already_alerted" in dropped and f"start={int(at(10))}" in dropped
+    [deferred] = [line for line in _audit(caplog, "person") if "action=defer" in line]
+    assert "keep_sampling=true" in deferred
+
+
+def test_open_burst_card_due_past_the_cooldown_is_still_skipped(monkeypatch, tmp_path):
+    # With a 60 s cooldown the card is due 95 s after the sampler's photo: the cooldown
+    # rule (sd_within_cooldown) no longer covers it, the passage mark does.
+    sc, reads = _open_burst_story(monkeypatch, tmp_path, keep=True, scores={20: 0.55},
+                                  cooldown=60)
+    sc.cams["a"].push(person(at(10)))
+    sc.tick(advance=5)
+    _until_follow_ups_done(sc)
+
+    assert sc.notifier.send_paths == ["sampler"]
+    assert reads == []
+
+
+def test_legacy_defer_stops_the_sampler_and_the_card_brings_the_person(
+        monkeypatch, tmp_path):
+    # The same story with the switch off: the defer arms the cooldown and closes the
+    # burst, so the sampler never looks and the person arrives minutes later from the card.
+    sc, reads = _open_burst_story(monkeypatch, tmp_path, keep=False, scores={20: 0.55})
+    sc.cams["a"].push(person(at(10)))
+    sc.tick(advance=5)
+    assert "keep_sampling" not in sc.state.pending_sd[0]
+    _until_follow_ups_done(sc)
+
+    assert sc.notifier.send_paths == ["sd"]
+    assert reads == [at(10)]
+
+
+def test_open_burst_with_nobody_in_the_sampler_frames_still_sends_the_card(
+        monkeypatch, tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+    sc, reads = _open_burst_story(monkeypatch, tmp_path, keep=True)
+    sc.cams["a"].push(person(at(10)))
+    sc.tick(advance=5)
+    sc.run(40)                                   # three sampler frames, all 0.1
+    assert sc.actions("send") == []
+    sampled = [line for line in _audit(caplog, "person")
+               if "path=sampler" in line and "action=drop" in line]
+    assert len(sampled) == 3
+    _until_follow_ups_done(sc)
+
+    assert sc.actions("send", "send_failed") == [("send", "a")]
+    assert sc.notifier.send_paths == ["sd"]
+    assert reads == [at(10)]
+
+
+def test_open_burst_several_empty_person_events_queue_one_follow_up(
+        monkeypatch, tmp_path, caplog):
+    # The later person events of the burst are scored under the open cooldown; empty,
+    # they stay under it (no second defer), so the burst keeps its one follow-up.
+    caplog.set_level(logging.INFO)
+    sc, reads = _open_burst_story(monkeypatch, tmp_path, keep=True)
+    for offset in (10, 15, 20):
+        sc.cams["a"].push(person(at(offset)))
+        sc.tick(advance=5)
+    assert len(sc.state.pending_sd) == 1
+    assert sc.state.pending_sd[0]["event"]["start_time"] == at(10)
+    cooled = [line for line in _audit(caplog, "person")
+              if "path=live" in line and "reason=open_burst_no_person" in line]
+    assert len(cooled) == 2
+    assert len([line for line in _audit(caplog, "person") if "action=defer" in line]) == 1
+    _until_follow_ups_done(sc)
+
+    assert sc.notifier.send_paths == ["sd"]
+    assert reads == [at(10)]
+
+
+def test_open_burst_a_later_good_live_frame_sends_and_the_card_is_skipped(
+        monkeypatch, tmp_path, caplog):
+    # A second person event at 60 has a good live frame (0.8). The cooldown the empty
+    # frame at 10 armed lets a person photo of the passage through while its follow-up is
+    # queued, so it goes out live at once, and the card follow-up is dropped.
+    caplog.set_level(logging.INFO)
+    sc, reads = _open_burst_story(monkeypatch, tmp_path, keep=True, scores={60: 0.8})
+    sc.cams["a"].push(person(at(10)))
+    sc.tick(advance=5)
+    while sc.clock.now < at(60):
+        sc.tick(advance=5)
+    sc.cams["a"].push(person(at(60)))
+    live_at = sc.tick(advance=5)
+    assert sc.when(("send", "a")) == [live_at]
+    assert sc.state.pending_sd[0]["passage_delivered"] is True
+    _until_follow_ups_done(sc)
+
+    assert sc.notifier.send_paths == ["live"]
+    assert reads == []
+
+
+@pytest.mark.parametrize("kind", ["tamperDetection", "petDetection"])
+def test_open_burst_a_later_tamper_or_pet_photo_of_nobody_stays_under_the_cooldown(
+        monkeypatch, tmp_path, caplog, kind):
+    # A tamper/pet event of the same passage whose frame shows nobody (0.1) is not a
+    # delivery of the person: it stays under the cooldown the defer armed, exactly as
+    # with the switch off, and the person on the card still goes out.
+    caplog.set_level(logging.INFO)
+    sc, reads = _open_burst_story(monkeypatch, tmp_path, keep=True)
+    sc.cams["a"].push(person(at(10)))
+    sc.tick(advance=5)
+    sc.run(15)
+    sc.cams["a"].push({"start_time": at(30), "event_type": kind})
+    sc.tick(advance=5)
+    assert sc.actions("send") == []
+    _until_follow_ups_done(sc)
+
+    assert sc.notifier.send_paths == ["sd"]
+    assert reads == [at(10)]
+
+
+def test_open_burst_scorer_down_later_frames_stay_under_the_cooldown(
+        monkeypatch, tmp_path, caplog):
+    # The scorer is down for the sampler's frame at 20 and for a bare motion at 30:
+    # nothing can tell a person photo, so both stay under the cooldown (as with the
+    # switch off) instead of passing through unscored, and only the card goes out.
+    caplog.set_level(logging.INFO)
+    sc, reads = _open_burst_story(monkeypatch, tmp_path, keep=True,
+                                  scores={20: None, 30: None})
+    sc.cams["a"].push(person(at(10)))
+    sc.tick(advance=5)
+    sc.run(15)                                   # 15, 20 (sampler), 25
+    sc.cams["a"].push(motion(at(30)))
+    sc.tick(advance=5)
+    assert sc.actions("send") == []
+    assert sc.state.groups["a"]["sent"] is True  # the sampler stood down as before
+    _until_follow_ups_done(sc)
+
+    assert sc.notifier.send_paths == ["sd"]
+    assert reads == [at(10)]
+
+
+def test_open_burst_after_the_sampler_delivered_a_later_person_frame_stays_quiet(
+        monkeypatch, tmp_path):
+    # The sampler's photo at 20 finished the open burst: a live person frame at 30
+    # (0.8) of the same passage is no longer let through the cooldown.
+    sc, reads = _open_burst_story(monkeypatch, tmp_path, keep=True,
+                                  scores={20: 0.55, 30: 0.8})
+    sc.cams["a"].push(person(at(10)))
+    sc.tick(advance=5)
+    sc.run(15)                                   # 15, 20 (sampler photo), 25
+    sc.cams["a"].push(person(at(30)))
+    sc.tick(advance=5)
+    _until_follow_ups_done(sc)
+
+    assert sc.notifier.send_paths == ["sampler"]
+
+
+def test_open_burst_lets_one_live_person_photo_through_not_two(monkeypatch, tmp_path):
+    sc, reads = _open_burst_story(monkeypatch, tmp_path, keep=True,
+                                  scores={60: 0.8, 70: 0.8})
+    sc.cams["a"].push(person(at(10)))
+    sc.tick(advance=5)
+    while sc.clock.now < at(60):
+        sc.tick(advance=5)
+    sc.cams["a"].push(person(at(60)))
+    sc.tick(advance=5)
+    sc.tick(advance=5)                           # 65
+    sc.cams["a"].push(person(at(70)))
+    sc.tick(advance=5)
+    _until_follow_ups_done(sc)
+
+    assert sc.notifier.send_paths == ["live"]
+
+
+@pytest.mark.parametrize("tamper_score", [0.1, None])
+def test_open_burst_a_delivered_photo_of_nobody_leaves_the_follow_up_queued(
+        monkeypatch, tmp_path, caplog, tamper_score):
+    # The cooldown is cleared by hand so a tamper photo of the passage (0.1, or unscored
+    # with the scorer down) reaches the phone live: it showed no person, so it does not
+    # finish the open burst. The card is then read and decided by the ordinary 10.6 rule
+    # (a confirmed alert inside the cooldown), not dropped unread as this passage.
+    caplog.set_level(logging.INFO)
+    sc, reads = _open_burst_story(monkeypatch, tmp_path, keep=True,
+                                  scores={30: tamper_score})
+    sc.cams["a"].push(person(at(10)))
+    sc.tick(advance=5)
+    sc.run(15)
+    sc.state.last_alert.clear()
+    sc.state.last_event_start.clear()
+    sc.cams["a"].push({"start_time": at(30), "event_type": "tamperDetection"})
+    sc.tick(advance=5)
+    assert sc.notifier.send_paths == ["live"]
+    [entry] = sc.state.pending_sd
+    assert not entry.get("passage_delivered")
+    _until_follow_ups_done(sc)
+
+    assert reads == [at(10)]
+    [skipped] = [line for line in _audit(caplog, "person")
+                 if "path=sd" in line and "action=cooldown" in line]
+    assert "reason=sd_within_cooldown" in skipped
+
+
+def test_open_burst_exception_ends_when_the_switch_is_turned_off(monkeypatch, tmp_path):
+    # The queued entry keeps its keep_sampling stamp (it persists), but with the camera's
+    # switch off neither the sampler frame at 20 nor the live frame at 60 may pass the
+    # cooldown: the card brings the person, as with the switch never on.
+    sc, reads = _open_burst_story(monkeypatch, tmp_path, keep=True,
+                                  scores={20: 0.55, 60: 0.8})
+    sc.cams["a"].push(person(at(10)))
+    sc.tick(advance=5)
+    assert sc.state.pending_sd[0]["keep_sampling"]
+    sc.app.cameras[0].sampler.keep_sampling_on_defer = False
+    while sc.clock.now < at(60):
+        sc.tick(advance=5)
+    sc.cams["a"].push(person(at(60)))
+    sc.tick(advance=5)
+    assert sc.actions("send") == []
+    _until_follow_ups_done(sc)
+
+    assert sc.notifier.send_paths == ["sd"]
+
+
+def test_legacy_defer_keeps_a_later_good_live_frame_under_the_cooldown(
+        monkeypatch, tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+    sc, reads = _open_burst_story(monkeypatch, tmp_path, keep=False, scores={60: 0.8})
+    sc.cams["a"].push(person(at(10)))
+    sc.tick(advance=5)
+    while sc.clock.now < at(60):
+        sc.tick(advance=5)
+    sc.cams["a"].push(person(at(60)))
+    sc.tick(advance=5)
+    assert sc.actions("send") == []
+    _until_follow_ups_done(sc)
+
+    assert sc.notifier.send_paths == ["sd"]
+
+
+def test_open_burst_restart_before_any_delivery_still_sends_the_card(
+        monkeypatch, tmp_path):
+    # The sampler's group lives in memory only; the queued follow-up and its switch
+    # survive. After a restart nothing samples the old burst, so the card sends as today.
+    sc, reads = _open_burst_story(monkeypatch, tmp_path, keep=True, scores={20: 0.55})
+    sc.cams["a"].push(person(at(10)))
+    sc.tick(advance=5)                           # 10: queued; group due at 20
+    sc.restart()
+    assert [e.get("keep_sampling") for e in sc.state.pending_sd] == [True]
+    assert sc.state.groups == {}
+    _until_follow_ups_done(sc)
+
+    assert sc.notifier.send_paths == ["sd"]
+    assert reads == [at(10)]
+
+
+def test_open_burst_restart_after_the_sampler_delivered_still_skips_the_card(
+        monkeypatch, tmp_path):
+    sc, reads = _open_burst_story(monkeypatch, tmp_path, keep=True, scores={20: 0.55})
+    sc.cams["a"].push(person(at(10)))
+    sc.tick(advance=5)
+    sc.run(10)                                   # 20: the sampler's photo
+    sc.restart()
+    assert [e.get("passage_delivered") for e in sc.state.pending_sd] == [True]
+    _until_follow_ups_done(sc)
+
+    assert sc.notifier.send_paths == ["sampler"]
+    assert reads == []
 
 
 # ── dual-lens C545D ──────────────────────────────────────────────────────────

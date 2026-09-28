@@ -9,6 +9,16 @@ All notable changes to this project are documented here.
   static person-shaped object that "confirms" every event nearby. The scoring service now
   returns `person_boxes`, one box per entry of `person_scores`; the daemon removes the
   people at least 80 % inside a zone and scores the best remaining one.
+- `sampler.keep_sampling_on_defer` (off by default): a camera-confirmed person whose live
+  frame is below the threshold is still queued for the SD/recording follow-up and still
+  arms the cooldown, but the burst stays open: the sampler keeps sampling it, and a
+  sampler or later live frame whose person score reaches the threshold may pass the
+  cooldown, so the person arrives within seconds instead of with the follow-up minutes
+  later. Any other frame (nobody in it, a tamper/pet photo of nobody, the scorer down)
+  stays under the cooldown as before. Once a person photo of the passage is delivered the
+  queued follow-up is dropped (`reason=passage_already_alerted`); when none is, it sends
+  as before. Needs a local scorer. A replay of three cameras' journals traced lost bit-19
+  people to that defer silencing the rest of the burst.
 - `scorer.person_bit_skips_hold` (off by default): a live motion frame whose event carries
   `events_1` bit 5 skips the corroboration hold and sends at `>= threshold`, as the
   sampler already did for such a burst. Bit 5 is the camera's person class (alarm code 6),

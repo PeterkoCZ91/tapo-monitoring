@@ -67,6 +67,28 @@ def _on_alert(on_alert, etype, event, score=None, threshold=None):
         on_alert(etype)
 
 
+def _keeps_sampling(cfg):
+    """Whether an empty-live person defer leaves the burst open (see run_monitor)."""
+    scfg = getattr(cfg, "sampler", None)
+    return bool(getattr(scfg, "enabled", False)
+                and getattr(scfg, "keep_sampling_on_defer", False))
+
+
+def _defer(defer, event, etype, live_sent, **kw):
+    """Queue a follow-up; False only when ``defer`` says it queued nothing (a duplicate).
+
+    A ``defer`` that takes no keywords gets the plain call; one that returns nothing
+    counts as queued, as every defer did before it could answer.
+    """
+    try:
+        queued = defer(event, etype, live_sent, **kw)
+    except TypeError:
+        if not kw:
+            raise
+        queued = defer(event, etype, live_sent)
+    return queued is not False
+
+
 def sample_drop(cfg, image, etype, score, path, event=None):
     """Offer one below-threshold frame to the review log's random drop sample.
 
@@ -219,7 +241,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 ignore_known=False,
                 defer=None, score=None, observe=None, poll_observe=None,
                 media_observe=None, latency_observe=None, mute=False, corroborate=None,
-                burst_sent=None,
+                burst_sent=None, open_burst=None,
                 send_alert=None, scene_alert=None, hold_archive=None,
                 trigger_whitelamp=camera.trigger_whitelamp, event_seen=None):
     """Poll one camera once and alert on new detections. Returns the new watermark.
@@ -237,6 +259,10 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         follow-up. ``live_sent`` says whether a live photo already went out (True) or the
         live grab failed (False). Confirmed detections defer when the live frame was empty
         or failed; PIR-backed bare motion may defer only when ``cfg.sd_motion`` is enabled.
+        With ``sampler.keep_sampling_on_defer`` an empty (scored) live person frame calls
+        it with ``keep_sampling=True``: the cooldown is armed as always, but the sampler
+        group stays open. It may return False when it queued nothing (a follow-up of the
+        same passage is already pending).
       score(image_path) -> float|None — local scorer subject confidence; when passed it
         replaces Groq as the send/drop arbiter (Groq only captions what already passed)
         and None (scorer unreachable) degrades to raw passthrough, never a drop.
@@ -258,6 +284,10 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         frame, replacing the inline review-log write. The daemon passes one that also
         remembers the archived path on the sampler group, so an expiring hold broken by
         a pan-limit recall can still send its evidence.
+      open_burst(event) -> bool — True while a follow-up of this event's passage is queued
+        with ``sampler.keep_sampling_on_defer`` and nothing of it was delivered yet. A
+        cooldown-blocked event is then scored first: a frame showing a person at the
+        threshold may still go out; any other frame stays under the cooldown.
       event_seen(event) -> sees every fresh (normalized) event, muted or not, before any
         gate; the daemon uses it to know when a dual-lens camera's firmware is moving its
         pan/tilt lens (see detection.EventProfile.pt_channel).
@@ -330,12 +360,18 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             log.info("skip %s: known face present (ignored: %s)", etype, label)
             audit_event(cfg, event, etype, "live", "ignore_known", reason="known_face")
             continue
+        cooled_open = False
         if not _can_alert(can_alert, etype, event):
             if etype != "motion" and has_known_face(event, face_names):
                 # A known face is new information, not a burst duplicate — the cooldown
                 # must not eat it. Unknown face IDs are too noisy for this exception and
                 # stay cooldown-gated.
                 log.info("cooldown override %s: recognized face present", etype)
+            elif open_burst is not None and open_burst(event):
+                # The cooldown was armed by this passage's own empty-frame defer, and
+                # nothing has reached the phone. Only a frame that shows the person may
+                # pass it (decided once the frame is scored, below).
+                cooled_open = True
             else:
                 log.info("skip %s: cooldown active", etype)
                 # Only this event is cooled down; a later event in the same poll may be new.
@@ -393,6 +429,18 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 # Groq disabled = raw mode: there is no arbiter to declare a scene
                 # empty, so nothing is — every live frame goes straight out.
                 empty = False
+            if cooled_open and (s is None or s < cfg.scorer.threshold):
+                # Not a person photo (or the scorer could not tell): the cooldown the
+                # defer armed holds, as it does with keep_sampling_on_defer off.
+                log.info("skip %s: cooldown active (open burst, no person in frame)", etype)
+                audit_event(cfg, event, etype, "live", "cooldown", score=s,
+                            threshold=cfg.scorer.threshold if s is not None else None,
+                            reason="open_burst_no_person")
+                _observe(observe, event, etype, False)
+                continue
+            if cooled_open:
+                log.info("cooldown override %s: person in frame, follow-up still queued",
+                         etype)
             if etype == "tamper":
                 # Tamper events indicate camera blinding or covering; visual person scorer must not drop them.
                 empty = False
@@ -465,6 +513,34 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                     audit_event(cfg, event, etype, "live", "drop", score=s,
                                 threshold=cfg.scorer.threshold if score is not None else None,
                                 reason="burst_already_sent")
+                    _observe(observe, event, etype, False)
+                    continue
+                if _keeps_sampling(cfg) and score is not None:
+                    # sampler.keep_sampling_on_defer: queue the follow-up and arm the
+                    # cooldown as always, but leave the burst open. A group marked sent
+                    # stops the sampler that often photographs the person seconds later,
+                    # and the cooldown would skip the next live person frames of this
+                    # very passage; the person then arrives minutes late from the card,
+                    # or not at all. So the sampler keeps sampling, and a sampler or live
+                    # frame showing the person at the threshold may pass the cooldown
+                    # while this follow-up is queued (open_burst). Once one is delivered
+                    # the follow-up is dropped; when none is it sends as before. Only
+                    # with a scorer: without one nothing can tell a person photo.
+                    _on_alert(on_alert, etype, event)
+                    if not _defer(defer, event, etype, False, keep_sampling=True):
+                        log.info("drop %s: live empty, follow-up of this passage already "
+                                 "queued", etype)
+                        audit_event(cfg, event, etype, "live", "drop", score=s,
+                                    threshold=cfg.scorer.threshold,
+                                    reason="followup_pending",
+                                    extra={"keep_sampling": "true"})
+                        _observe(observe, event, etype, False)
+                        continue
+                    log.info("defer %s: live empty, SD follow-up queued, burst kept open",
+                             etype)
+                    audit_event(cfg, event, etype, "live", "defer", score=s,
+                                threshold=cfg.scorer.threshold, reason="below_threshold",
+                                extra={"keep_sampling": "true"})
                     _observe(observe, event, etype, False)
                     continue
                 # Camera confirmed a person but the frame shows nothing — hand it to

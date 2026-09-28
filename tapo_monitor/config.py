@@ -105,6 +105,12 @@ class SamplerConfig:
     # Least held score the expiry policy acts on; None = the camera's scorer threshold
     # in force at expiry (night_threshold during its night).
     hold_expiry_min_score: float | None = None
+    # A camera-confirmed person whose live frame scores below the threshold is queued for
+    # the SD/recording follow-up and arms the confirmed cooldown. False (legacy): the
+    # defer also closes this burst for the sampler. True: the sampler keeps sampling and
+    # a person photo of the passage may pass the cooldown; the follow-up is skipped once
+    # one was delivered. Needs a scorer.
+    keep_sampling_on_defer: bool = False
 
 
 @dataclass
@@ -689,6 +695,8 @@ def _sampler(data, where):
         low_score=low_score,
         hold_expiry=hold_expiry,
         hold_expiry_min_score=hold_expiry_min_score,
+        keep_sampling_on_defer=_check_bool(d.get("keep_sampling_on_defer", False),
+                                           "sampler.keep_sampling_on_defer", where),
     )
 
 
