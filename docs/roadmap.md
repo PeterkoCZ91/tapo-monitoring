@@ -749,6 +749,28 @@ reached over the same uplink, so the frames of that window also went out unscore
 - [ ] Decide whether a host needs a small local fallback scorer for the time the shared
   one is unreachable, so an outage stops meaning unscored motion alerts.
 
+### 10.10 — A person the live frame missed is not lost to the follow-up
+
+A replay of three cameras' journals found where confirmed people were lost or alerted
+late: an event whose live frame came back empty was handed to the card or recording
+follow-up, which stood the sampler down and armed the cooldown, although the sampler is
+often what photographs the person seconds later.
+
+- [x] `sampler.keep_sampling_on_defer`: the sampler keeps sampling such a burst, and while
+  its follow-up is pending a frame that shows a person may pass the cooldown; its delivery
+  drops the follow-up, so one visit stays one message.
+- [x] `scorer.person_bit_skips_hold`: a live frame of an `events_1` bit-5 event (the
+  camera's person class) skips the corroboration hold. Routing every bit-5 event as a
+  person was replayed and rejected (it lost more alerted passages than it rescued).
+- [ ] Trial both on the busiest recording-source camera after its `hold_expiry` trial is
+  read (the replay estimates 6 rescued people and 49 alerts a median 73 s earlier there,
+  no measured losses); archive the frames the kept sampler takes, then re-run the replay
+  on that week before enabling it elsewhere.
+- [x] `scorer.ignore_zones`: a static person-shaped object (sacks, a planter) confirmed
+  every nearby event on one camera; zones drop people inside them (the scoring service
+  returns `person_boxes`). On that camera 15 of 113 sent photos, all without a person,
+  would have scored below the threshold.
+
 ### 10.7 — A public reference for the local API
 
 - [x] Publish what the fleet and the dual-lens probe established beyond pytapo as
