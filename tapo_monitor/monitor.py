@@ -499,7 +499,8 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 light=light, lens=frame_lens(image),
             )
             incident = incident_id(cfg.name, event)
-            ok = (send_alert(image, caption, s, incident=incident, send_path="live")
+            ok = (send_alert(image, caption, s, incident=incident, send_path="live",
+                             etype=etype)
                   if send_alert is not None
                   else notify.send_photo(telegram_token, telegram_chat, image, caption,
                                          incident=incident, send_path="live"))

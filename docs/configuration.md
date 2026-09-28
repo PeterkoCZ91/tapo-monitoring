@@ -87,6 +87,7 @@ instead of restarting the daemon in a tight loop.
 | `loop` | Fast event and slow control cadence. | 4 s events, 60 s control. |
 | `observability` | Digital Twin and Shadow Auditor switches. | Entirely off. |
 | `mqtt` | Outbound MQTT bridge with Home Assistant discovery. | Absent: off, nothing imported. |
+| `outbox` | Keep alerts Telegram did not take and deliver them late. | Absent: off; a failed send is retried in memory for ~10 min, then lost. |
 | `cameras` | Non-empty list of camera definitions. | Required. |
 
 ### Location
@@ -916,6 +917,55 @@ mqtt:
   `_`; two cameras that collide that way are refused.
 
 See [MQTT and Home Assistant](mqtt.md) for entities, topics and delivery guarantees.
+
+## Outbox (late delivery after an outage)
+
+```yaml
+outbox:
+  enabled: true
+  # dir: /private/path/outbox   # default: outbox/ beside health.json
+  max_age: 86400                # seconds; older entries are dropped unsent
+  max_entries: 300              # oldest dropped beyond this
+  max_photos: 10                # late photos per camera per drain
+  summary: true                 # one outage text before the late photos
+```
+
+- Off unless `enabled: true`. Without it a failed Telegram send is retried in memory
+  (SD follow-up, hub retry) for about ten minutes and then lost, as before.
+- Every alert path ends in the same send; when a real send fails, the frame and its
+  metadata (camera, incident, event type, caption, score) are written to the outbox
+  directory as a JPEG plus a JSON sidecar. The directory survives a restart. The
+  default is `outbox/` next to the health state file, i.e.
+  `$XDG_STATE_HOME/tapo-monitor/outbox` (`~/.local/state/tapo-monitor/outbox`), or next
+  to `TAPO_HEALTH_STATE_FILE` when that is set.
+- An incident delivered later by any path (SD follow-up, hub retry, sampler) is removed
+  from the outbox, so nothing reaches the phone twice; so is one an SD follow-up or the
+  sampler deliberately decided not to send (same passage already alerted, scene
+  duplicate, within the cooldown, no subject on the card, known face). Entries whose SD
+  follow-up or hub retry is still pending, and entries younger than two minutes, are
+  left to those retries.
+- Once Telegram answers again (a delivered alert, or a silent `getMe` probe at most once
+  a minute while it is down), each camera's batch is delivered: one summary text naming
+  the outage window and the counts, then the photos that showed a person, captioned
+  `⏳ zpožděno o X h Y min · <original caption>`, at most `max_photos` of them. The rest
+  go to the review log (`TAPO_REVIEW_LOG_DIR`, verdict `outbox`) instead of the phone;
+  without that variable they are only counted (the summary says "neodesláno") and the
+  daemon warns at startup. A later summary counts only entries no earlier one did.
+- The drain runs on the main loop, so each tick does a bounded amount: at most 5
+  rescorings, 3 photos and about 10 s; a backlog trickles out over the following ticks.
+- "Person" means a person score at the camera's threshold for the event's time (its
+  `night_threshold` at night). A frame the scorer could not score at the time is scored
+  at drain time. While the scorer is still unreachable, an unscored `person` event goes
+  out as a person, and any other unscored event waits for the scorer for up to six hours
+  after its failure; then its event type decides (the review log).
+- An entry is removed only after its send succeeded. A failed photo stops that camera
+  until the next attempt (other cameras continue); after three failed attempts the entry
+  goes to the review log. A failed summary means the link is still down and stops the
+  whole drain. When the outbox is full, the oldest non-person entries are dropped first. Late photos are recorded in the sent log with `path: outbox` and never
+  arm a cooldown, so they cannot silence a fresh live alert.
+- Collect-only cameras (`telegram_alerts: false`, silenced app notifications) are never
+  captured, and an event in a mute window never reaches the send path, so nothing muted
+  live is delivered late either.
 
 ## Reliability
 

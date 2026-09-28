@@ -51,6 +51,7 @@ from . import (
     motion,
     mqtt,
     notify,
+    outbox,
     panlimit,
     recclip,
     reliability,
@@ -1506,19 +1507,176 @@ def _reduced(src, out_dir, run=None, width=None):
 
 
 def send_alert_photo(cfg, secrets, image, caption, downscale=None, score=None,
-                     incident=None, send_path=None):
+                     incident=None, send_path=None, etype=None):
     """Deliver one alert frame (:func:`_deliver_alert_photo`) and tell the MQTT bridge.
 
     Every alert path funnels through here, so this is where the bridge learns of an alert:
     only a delivered (or, for a collect-only camera, recorded) one, and after the fact,
     so MQTT can never delay or change a Telegram send. Without the ``mqtt:`` block the
     hook is a no-op.
+
+    The same funnel feeds the opt-in outbox (:func:`_note_outbox`): a failed real send is
+    kept on disk for a late delivery, and a delivered incident clears any copy an earlier
+    failure left there. ``etype`` (the camera's event type) is only read by the outbox,
+    which falls back to it when the frame could not be scored.
     """
     ok = _deliver_alert_photo(cfg, secrets, image, caption, downscale=downscale, score=score,
                               incident=incident, send_path=send_path)
     if ok:
         mqtt.note_alert(cfg.name, image=image, score=score)
+    _note_outbox(cfg, ok, image=image, caption=caption, score=score, incident=incident,
+                 send_path=send_path, etype=etype)
     return ok
+
+
+# The opt-in outbox (``outbox:`` block), or None when off — the default. Module-level for
+# the same reason as _app_silenced: send_alert_photo sees the camera, not the daemon state.
+_outbox: outbox.Outbox | None = None
+
+
+def outbox_default_dir(env=None, home=None):
+    """``outbox/`` beside the health state file (same env/XDG resolution)."""
+    return os.path.join(os.path.dirname(health.default_state_path(env, home)), "outbox")
+
+
+def configure_outbox(app, env=None, home=None):
+    """Build :data:`_outbox` from ``app.outbox``; None (and nothing on disk) when off."""
+    global _outbox
+    cfg = app.outbox
+    if not cfg.enabled:
+        _outbox = None
+        return None
+    _outbox = outbox.Outbox(cfg.dir or outbox_default_dir(env, home),
+                            max_age=cfg.max_age, max_entries=cfg.max_entries,
+                            max_photos=cfg.max_photos, summary=cfg.summary)
+    _outbox.sweep(_time.time())
+    waiting = len(_outbox.entries())
+    log.info("outbox enabled: %s (%d undelivered alert(s) waiting)", _outbox.dir, waiting)
+    if not _review_log_configured(env):
+        log.warning("outbox: %s is unset, so late alerts that are not sent to the phone "
+                    "(no person, past the photo cap, refused) are counted and discarded",
+                    sentlog.ENV_REVIEW_DIR)
+    return _outbox
+
+
+def _review_log_configured(env=None):
+    env = os.environ if env is None else env
+    return bool((env.get(sentlog.ENV_REVIEW_DIR) or "").strip())
+
+
+def resolve_outbox(cfg, event, why):
+    """Tell the outbox a path decided this incident must not go out. Never raises.
+
+    Without it, an alert whose live send failed and whose SD follow-up then deliberately
+    dropped it (same passage already alerted, no subject on the card, ...) would be
+    revived by the outbox hours later.
+    """
+    box = _outbox
+    if box is None:
+        return
+    try:
+        box.resolve(incident.incident_id(cfg.name, event), why=why)
+    except Exception:  # noqa: BLE001 - bookkeeping must never break a decision path
+        log.debug("outbox: resolve failed for %s", cfg.name, exc_info=True)
+
+
+def _note_outbox(cfg, ok, *, image, caption, score, incident, send_path, etype):
+    """Keep a failed real send in the outbox, or clear a delivered incident. Never raises.
+
+    A collect-only or app-silenced camera is never captured: it reports success anyway,
+    and a failure there means the frame itself was unreadable.
+    """
+    box = _outbox
+    if box is None:
+        return
+    try:
+        now = _time.time()
+        app_silenced = cfg.follow_app_notifications and cfg.name in _app_silenced
+        real_send = cfg.telegram_alerts and not app_silenced
+        if ok:
+            box.resolve(incident)
+            if real_send:           # a recorded-only "success" says nothing about Telegram
+                box.note_delivered(now)
+            return
+        if not real_send:
+            return
+        box.capture(camera=cfg.name, image=image, caption=caption, failed_at=now,
+                    incident=incident, etype=etype, score=score, send_path=send_path)
+    except Exception:  # noqa: BLE001 - the outbox must never break an alert path
+        log.warning("outbox: bookkeeping failed for %s", cfg.name, exc_info=True)
+
+
+def _night_at(ts):
+    """The astral night gate at a past moment (``scheduling.is_night`` for that time)."""
+    return scheduling.is_night(datetime.fromtimestamp(ts).astimezone())
+
+
+def _entry_score(entry):
+    """An outbox entry's stored score as the SubjectScore the send path expects."""
+    if not entry.score:
+        return None
+    return scorer.SubjectScore(entry.score.get("person", 0.0), entry.score.get("animal", 0.0),
+                               entry.score.get("persons"))
+
+
+def outbox_pass(app, state, *, now, secrets, box=None, probe=None, score_for_fn=None,
+                night_at=None):
+    """Drain the opt-in outbox once Telegram answers again (:func:`outbox.drain`).
+
+    A no-op without the ``outbox:`` block, and a single directory listing while it is
+    empty. ``app`` is the configuration as loaded, not the tick's night-adjusted copy:
+    an entry is judged by the threshold of *its* event time, and a person at 02:00 does
+    not become a day-threshold question because the link came back at 10:00.
+
+    Incidents an in-memory retry (SD follow-up, hub retry) still holds are left to it,
+    and late photos go straight to :func:`_deliver_alert_photo` — the sent log gets them
+    with ``path=outbox``, but no cooldown is armed, so a late photo never silences a
+    fresh live alert. Collaborators are injectable for testing.
+    """
+    box = _outbox if box is None else box
+    if box is None or not box.has_entries():
+        return None
+    token, chat = secrets.get("telegram_token"), secrets.get("telegram_chat")
+    if not token or not chat:
+        return None
+    probe = probe or (lambda: notify.telegram_reachable(token))
+    score_for_fn = score_for_fn or score_for
+    night_at = night_at or _night_at
+    cfg_by_name = {c.name: c for c in app.cameras}
+    busy = {incident.incident_id(e.get("camera"), e.get("event")) for e in state.pending_sd}
+    busy |= {incident.incident_id(e.get("camera"), {"start_time": e.get("start_time")})
+             for e in state.pending_hub}
+    busy.discard(None)
+
+    def threshold_for(camera, ts):
+        cfg = cfg_by_name[camera]
+        return scorer_threshold(cfg, night_at(ts)) if cfg.scorer.url else None
+
+    def send_photo(entry, caption):
+        return _deliver_alert_photo(cfg_by_name[entry.camera], secrets, entry.image, caption,
+                                    score=_entry_score(entry), incident=entry.incident,
+                                    send_path="outbox")
+
+    def archive_review(entry, meta):
+        sentlog.archive_review_if_configured(entry.image, meta, now=now)
+
+    try:
+        report = outbox.drain(
+            box, now=now, known_cameras=set(cfg_by_name),
+            send_text=lambda text: notify.send_text(token, chat, text),
+            send_photo=send_photo, archive_review=archive_review,
+            score_for=lambda camera: score_for_fn(cfg_by_name[camera]),
+            threshold_for=threshold_for, probe=probe, busy=busy,
+            review_enabled=_review_log_configured())
+    except Exception:  # noqa: BLE001 - a late delivery must never cost the live tick
+        log.warning("outbox drain failed; entries kept for the next tick", exc_info=True)
+        return None
+    if report["sent"] or report["reviewed"] or report["dropped"] or report["failed"]:
+        log.info("outbox drain: %d sent, %d to the review log, %d undeliverable, "
+                 "%d dropped%s%s", report["sent"], report["reviewed"], report["failed"],
+                 report["dropped"], " (stopped on a failed send)" if report["stopped"] else "",
+                 " (tick budget used, continuing)" if report["budget"] else "")
+    return report
 
 
 def _deliver_alert_photo(cfg, secrets, image, caption, downscale=None, score=None,
@@ -1823,7 +1981,8 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
         def media_observe(ok, error=None, *, _name=name):
             state.rtsp_reachable[_name] = bool(ok)
 
-        def send_alert(image, caption, score, incident=None, send_path="live", _cfg=cfg):
+        def send_alert(image, caption, score, incident=None, send_path="live", etype=None,
+                       _cfg=cfg):
             # The live pass takes the same crop+archive route as the sampler and the SD
             # follow-up: a zoom to Telegram, the whole scene to the sent log.
             started = _time.monotonic()
@@ -1835,7 +1994,8 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                         window=_cfg.coordinator.scene_window,
                     )
                 return send_alert_photo(_cfg, secrets, image, caption, score=score,
-                                        incident=incident, send_path=send_path)
+                                        incident=incident, send_path=send_path,
+                                        etype=etype)
             finally:
                 observe_latency("telegram", _time.monotonic() - started)
 
@@ -2058,7 +2218,7 @@ def process_pending_hub(app, state, *, now, secrets):
         ok = send_alert_photo(cfg, secrets, entry["image"], entry["caption"],
                               score=entry["score"],
                               incident=incident.incident_id(cfg.name, event),
-                              send_path="hubpoll_retry")
+                              send_path="hubpoll_retry", etype=entry.get("etype", "motion"))
         monitor.audit_event(cfg, event, "motion", "hubpoll", "send", score=entry["score"],
                             threshold=cfg.scorer.threshold if entry["score"] is not None else None,
                             telegram=ok, reason="retry", extra=entry.get("audit_extra"))
@@ -2310,7 +2470,7 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
                 )
                 ok = send_alert_photo(cfg, secrets, image, caption, score=s,
                                       incident=incident.incident_id(cfg.name, event),
-                                      send_path="hubpoll")
+                                      send_path="hubpoll", etype=etype)
                 monitor.audit_event(cfg, event, etype, "hubpoll", "send", score=s,
                                     threshold=cfg.scorer.threshold if score is not None else None,
                                     telegram=ok, extra=clip_extra)
@@ -2326,7 +2486,7 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
                     # remaining copy: keep the chosen frame for a bounded retry.
                     state.pending_hub.append({
                         "camera": cfg.name, "start_time": clip["start_time"],
-                        "image": image, "caption": caption, "score": s,
+                        "image": image, "caption": caption, "score": s, "etype": etype,
                         "attempts": 1, "queued_at": now, "due_at": now + HUB_RETRY_DELAY,
                         "audit_extra": clip_extra,
                     })
@@ -2661,6 +2821,7 @@ def _sd_followup_blocked(app, cfg, state, entry, now):
         log.info("skip %s: scene duplicate [sd]", etype)
         monitor.audit_event(cfg, event, etype, "sd", "scene_duplicate",
                             reason="same_scene")
+        resolve_outbox(cfg, event, "dropped as a scene duplicate [sd]")
         return "drop"
     if etype == "motion":
         # Unconfirmed motion waits for its window while the live sampler keeps working
@@ -2678,6 +2839,7 @@ def _sd_followup_blocked(app, cfg, state, entry, now):
             log.info("drop %s: this passage already alerted [sd]", etype)
             monitor.audit_event(cfg, event, etype, "sd", "cooldown",
                                 reason="passage_already_alerted")
+            resolve_outbox(cfg, event, "dropped, passage already alerted [sd]")
             return "drop"
     return None
 
@@ -2729,6 +2891,7 @@ def _skip_sd_within_cooldown(cfg, event, etype, image, score, threshold):
     """
     reason = "sd_within_cooldown"
     log.info("skip %s: camera alerted within the cooldown [sd]", etype)
+    resolve_outbox(cfg, event, "skipped within the cooldown [sd]")
     monitor.audit_event(cfg, event, etype, "sd", "cooldown", score=score,
                         threshold=threshold, reason=reason)
     if image:
@@ -2802,6 +2965,7 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
                 # at night), so a blank photo helps nobody — drop, keep the trace.
                 log.info("drop %s: SD found no subject in %d frames%s", etype,
                          len(frames), ", live already sent" if entry.get("live_sent") else "")
+                resolve_outbox(cfg, event, "dropped, no subject on the card [sd]")
                 return False
             if entry.get("live_sent") or etype == "motion":
                 # The (empty) live frame already went out, or this is unconfirmed
@@ -2833,6 +2997,7 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
         if (app.faces or {}).get("ignore_known") and etype != "motion" and monitor.has_known_face(event, secrets.get("face_names")):
             log.info("skip %s: known face present [sd] (ignored: %s)", etype, label)
             monitor.audit_event(cfg, event, etype, "sd", "ignore_known", reason="known_face")
+            resolve_outbox(cfg, event, "skipped, known face [sd]")
             return False
         light = (camera.whitelamp_seen(cam, cfg.name, event.get("start_time"),
                                        force_time=cfg.whitelamp_force_time)
@@ -2844,7 +3009,7 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
         )
         ok = send_alert_photo(cfg, secrets, image, caption, score=selected_score,
                               incident=incident.incident_id(cfg.name, event),
-                              send_path="sd")
+                              send_path="sd", etype=etype)
         # SD follow-up is a real user-visible alert. Record it in the same gate as
         # live sends, otherwise a person rescued from SD can be followed minutes
         # later by a duplicate motion SD alert from the same passage.
@@ -2923,7 +3088,7 @@ def _send_held_frame(app, cfg, state, group, *, now, secrets, time_str, reason, 
         description=description or None, score=s, lens=group.get("hold_lens"))
     ok = send_alert_photo(cfg, secrets, path, caption, score=s,
                           incident=incident.incident_id(cfg.name, group["event"]),
-                          send_path=send_path)
+                          send_path=send_path, etype="motion")
     monitor.audit_event(cfg, group["event"], "motion", "sampler", "send", score=s,
                         threshold=threshold, telegram=ok, reason=reason)
     if ok:
@@ -3128,6 +3293,7 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                 log.info("skip %s: scene duplicate [sampler]", etype)
                 monitor.audit_event(cfg, group["event"], etype, "sampler",
                                     "scene_duplicate", reason="same_scene")
+                resolve_outbox(cfg, group["event"], "dropped as a scene duplicate [sampler]")
                 group["sent"] = True
                 continue
             description = _caption_describe(cfg, secrets["groq_key"], image)
@@ -3142,7 +3308,7 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
             )
             ok = send_alert_photo(cfg, secrets, image, caption, score=s,
                                   incident=incident.incident_id(cfg.name, group["event"]),
-                                  send_path="sampler")
+                                  send_path="sampler", etype=etype)
             monitor.audit_event(cfg, group["event"], etype, "sampler", "send", score=s,
                                 threshold=cfg.scorer.threshold if score is not None else None,
                                 telegram=ok)
@@ -3878,7 +4044,8 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
               last_control, control_interval,
               run_control=None, watchdog=None, monitor=None, drain=None, sample=None,
               connect_factory=None, is_night=None, guard=None, inspect=None, digest=None,
-              hubpoll=None, sd_worker=None, privacy_notice=None, detection_notice=None):
+              hubpoll=None, sd_worker=None, privacy_notice=None, detection_notice=None,
+              late=None):
     """One loop iteration with control decoupled from event polling.
 
     The slow, rarely-changing work (camera tracking/sensitivity/preset + the per-tick
@@ -3901,6 +4068,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     monitor = monitor or run_monitor_pass
     hubpoll = hubpoll or run_hubpoll_pass
     drain = drain or process_pending_sd
+    late = late or outbox_pass
     sample = sample or process_sampler
     guard = guard or _pan_guard_pass
     inspect = inspect or process_digital_twin
@@ -3949,6 +4117,8 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     sample(scoring, cam_clients, state, now=now, secrets=secrets, night=night)
     drain_kw = {"worker": sd_worker} if sd_worker is not None else {}
     drain(scoring, cam_clients, state, now=now, secrets=secrets, night=night, **drain_kw)
+    # After the in-memory retries, so they win whatever they can still deliver themselves.
+    late(app, state, now=now, secrets=secrets)
     guard(app, cam_clients, state, now=now, secrets=secrets, night=night)
     digest(now=now, secrets=secrets, app=app, state=state)
     _log_disk_pass(state, now=now, secrets=secrets)
@@ -4012,6 +4182,8 @@ def main(argv=None):  # pragma: no cover - thin entry point
     # Opt-in MQTT bridge (mqtt: block). Its own thread and bounded queue: a slow or absent
     # broker never reaches this loop, and a missing paho-mqtt is an error line, not a stop.
     mqtt.start(app)
+    # Opt-in outbox (outbox: block): alerts Telegram did not take survive for a late send.
+    configure_outbox(app)
     secrets = resolve_secrets(app)
     log.info("loaded %d camera(s); poll events every %ds, control every %ds; face_names=%d known",
              len(app.cameras), poll_interval, control_interval, len(secrets.get("face_names") or {}))

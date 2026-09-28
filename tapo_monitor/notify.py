@@ -140,6 +140,19 @@ def send_text(token, chat_id, text):
         return False
 
 
+def telegram_reachable(token, timeout=5):
+    """True when the Bot API answers ``getMe`` with ok. Sends nothing to any chat.
+
+    The outbox asks this before draining after an outage: a cheap, silent check, so a
+    still-dead link costs one short request rather than a failed photo upload.
+    """
+    try:
+        with urllib.request.urlopen(f"{_API}/bot{token}/getMe", timeout=timeout) as resp:
+            return resp.status < 300 and '"ok":true' in resp.read().decode(errors="replace")
+    except Exception:
+        return False
+
+
 def _post_photo(token, chat_id, image, caption):
     """POST one photo to Telegram. Returns True on success, False on any failure."""
     try:

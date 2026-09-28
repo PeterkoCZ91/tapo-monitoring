@@ -33,9 +33,10 @@ INDEX_NAME = "index.jsonl"
 # because each has its own latency: ``hubpoll_retry`` (audit ``hubpoll`` / ``retry``),
 # ``hold_rescue`` (``sampler`` / ``hold_rescue_recall``) and ``hold_expiry``
 # (``sampler`` / ``hold_expiry_send``). ``sd`` covers the SD clip and the recording
-# follow-up alike, as the audit does.
+# follow-up alike, as the audit does. ``outbox`` is a late delivery after an outage
+# (see tapo_monitor.outbox); its latency is the outage, not a pipeline's.
 SEND_PATHS = ("live", "sampler", "sd", "hubpoll", "hubpoll_retry", "hold_rescue",
-              "hold_expiry")
+              "hold_expiry", "outbox")
 
 # Review log: the frames corroboration *suppressed* (held, never sent). The sent log only
 # keeps what went out, so it can't show whether a hold correctly dropped an animal/empty

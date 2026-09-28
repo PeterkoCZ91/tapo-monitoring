@@ -374,6 +374,22 @@ class MqttConfig:
 
 
 @dataclass
+class OutboxConfig:
+    """Opt-in persistent outbox for alerts Telegram did not take (see tapo_monitor.outbox).
+
+    Off by default, so a host without the block behaves exactly as before: a failed send
+    is retried in memory for about ten minutes and then lost.
+    """
+    enabled: bool = False
+    # None = ``outbox/`` beside the daemon's state files (health.json, runtime.json).
+    dir: str | None = None
+    max_age: int = 24 * 3600            # seconds; older entries are dropped, not sent
+    max_entries: int = 300              # oldest dropped beyond this
+    max_photos: int = 10                # late photos per camera per drain
+    summary: bool = True                # one "outage" text before the late photos
+
+
+@dataclass
 class ReliabilityConfig:
     """Operational health and bounded camera self-healing policy."""
     enabled: bool = False
@@ -397,6 +413,7 @@ class AppConfig:
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     reliability: ReliabilityConfig = field(default_factory=ReliabilityConfig)
     mqtt: MqttConfig = field(default_factory=MqttConfig)
+    outbox: OutboxConfig = field(default_factory=OutboxConfig)
     cameras: list[CameraConfig] = field(default_factory=list)
 
 
@@ -1147,12 +1164,35 @@ def _check_camera_order(cameras):
                 f"(members: {', '.join(map(repr, members[group]))})")
 
 
+def _outbox(data):
+    """Parse the optional ``outbox:`` block; absent (or null) keeps it off."""
+    if data is None:
+        return OutboxConfig()
+    if not isinstance(data, dict):
+        raise ConfigError("outbox must be a mapping")
+    enabled = _check_bool(data.get("enabled", False), "enabled", "outbox")
+    summary = _check_bool(data.get("summary", True), "summary", "outbox")
+    directory = data.get("dir")
+    if directory is not None and (not isinstance(directory, str) or not directory.strip()):
+        raise ConfigError("outbox.dir must be a non-empty path (or omitted for the default)")
+    ints = {}
+    for key, default, low in (("max_age", 24 * 3600, 600), ("max_entries", 300, 1),
+                              ("max_photos", 10, 1)):
+        value = data.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < low:
+            raise ConfigError(f"outbox.{key} must be an integer >= {low}")
+        ints[key] = value
+    return OutboxConfig(enabled=enabled,
+                        dir=os.path.expanduser(directory.strip()) if directory else None,
+                        summary=summary, **ints)
+
+
 def load_config_from_dict(data) -> AppConfig:
     """Validate a parsed config mapping and return an AppConfig. Pure (no I/O)."""
     if not isinstance(data, dict):
         raise ConfigError("config root must be a mapping")
     # Dataclass-typed top-level fields are the checked sections (location, alerts, loop,
-    # observability, reliability, mqtt); telegram/groq/faces are plain dicts and stay opaque,
+    # observability, reliability, mqtt, outbox); telegram/groq/faces are plain dicts and stay opaque,
     # and the cameras list is checked entry by entry in _camera.
     data = _check_keys(data, AppConfig, "")
     raw_cameras = data.get("cameras")
@@ -1240,6 +1280,7 @@ def load_config_from_dict(data) -> AppConfig:
         reliability=reliability_config,
         observability=observability,
         mqtt=_mqtt(data.get("mqtt"), cameras),
+        outbox=_outbox(data.get("outbox")),
         cameras=cameras,
     )
 
