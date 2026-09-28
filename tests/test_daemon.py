@@ -3515,6 +3515,51 @@ def test_pending_removes_rtsp_fallback_snapshot(monkeypatch, tmp_path):
     assert not image.exists()
 
 
+def _run_scored_fallback(monkeypatch, tmp_path, person):
+    """A person follow-up whose card read returns nothing, on a camera with a scorer."""
+    sent = []
+    app = cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
+                                  "scorer": {"url": "http://127.0.0.1:1/score",
+                                             "threshold": 0.5}}]})
+    state = daemon.MonitorState()
+    image = tmp_path / "rtsp.jpg"
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, img, timeout=10, tiles=1, **kw:
+                        None if person is None else {"person": person, "animal": 0.0})
+
+    def snapshot_for(cfg_):
+        def snap(cam, ev):
+            image.write_bytes(b"jpg")
+            return str(image)
+        return snap
+
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+    _run_pending(app, state, {"a": object()}, 1080, lambda _cfg, _start, span=None, out_dir=None: [],
+                 snapshot_for, sent, monkeypatch)
+    return sent, state, image
+
+
+def test_pending_drops_an_empty_live_grab_after_a_failed_card_read(monkeypatch, tmp_path):
+    # Seen on one camera: the card read failed (-40214), and the live grab taken minutes
+    # after the event went out unscored on the camera's person bit — 8 of 8 empty yards.
+    sent, state, image = _run_scored_fallback(monkeypatch, tmp_path, person=0.01)
+    assert sent == []
+    assert state.pending_sd == []
+    assert not image.exists()
+
+
+def test_pending_sends_a_live_grab_that_shows_a_person(monkeypatch, tmp_path):
+    sent, _state, _image = _run_scored_fallback(monkeypatch, tmp_path, person=0.9)
+    assert len(sent) == 1
+
+
+def test_pending_trusts_the_camera_when_the_scorer_cannot_score_the_grab(monkeypatch, tmp_path):
+    sent, _state, _image = _run_scored_fallback(monkeypatch, tmp_path, person=None)
+    assert len(sent) == 1
+
+
 def test_pending_all_empty_with_live_sent_sends_nothing(monkeypatch):
     # Live (empty) already went out; SD finds no subject -> no duplicate empty ping.
     sent = []

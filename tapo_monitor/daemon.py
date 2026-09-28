@@ -2903,6 +2903,28 @@ def _skip_sd_within_cooldown(cfg, event, etype, image, score, threshold):
         sentlog.archive_review_if_configured(image, {**meta, "path": "sd", "reason": reason})
 
 
+def _score_fallback_grab(cfg, event, etype, image):
+    """Score the live grab that stands in for a failed card read; False drops it.
+
+    The grab is taken when the follow-up comes due, a couple of minutes after an event
+    whose own live frame already scored below the threshold, so "trust the camera" sent
+    the yard as it looks minutes later. On one camera whose card reads fail with -40214
+    every such photo in three days (8 of 8) was an empty scene. A grab that shows a person
+    still scores as one and goes out; only a scorer that cannot answer (None) keeps the
+    old trust-the-camera send.
+    """
+    s = score_for(cfg)(image)
+    if s is None or s >= cfg.scorer.threshold:
+        return s
+    log.info("drop %s: live grab after a failed card read shows nobody "
+             "(score=%.3f < %.2f) [sd]", etype, float(s), cfg.scorer.threshold)
+    monitor.audit_event(cfg, event, etype, "sd", "drop", score=s,
+                        threshold=cfg.scorer.threshold, reason="fallback_below_threshold")
+    monitor.sample_drop(cfg, image, etype, s, "sd", event)
+    resolve_outbox(cfg, event, "dropped, live grab shows nobody [sd]")
+    return False
+
+
 def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secrets,
                         snapshot_for, time_str, night):
     """Decide and send one follow-up whose job came back. Runs on the loop.
@@ -2979,6 +3001,11 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
             snap = snapshot_for(cfg)                      # SD download failed -> live RTSP
             cam = cam_clients.get(entry["camera"])
             image = fallback_image = snap(cam, event) or snap(cam, event)
+            if image and job.scored:
+                fallback_score = _score_fallback_grab(cfg, event, etype, image)
+                if fallback_score is False:
+                    return False
+                selected_score = fallback_score
         if not image:
             log.warning("skip %s: snapshot failed (after retry)", etype)
             return False                              # drop
