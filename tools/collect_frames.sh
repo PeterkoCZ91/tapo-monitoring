@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Pull every host's sent-log and review-log into one local dataset, never deleting.
 #
-# Usage: tools/collect_frames.sh DATASET_DIR SSH_HOST [SSH_HOST...]
+# Usage: tools/collect_frames.sh DATASET_DIR SOURCE [SOURCE...]
+#
+# A SOURCE is an SSH host alias, or NAME=DIR for a daemon running on this machine (DIR
+# holds sent-log/ and review-log/ directly; NAME is the dataset subdirectory). A local
+# source is copied and merged exactly like a remote one, just without SSH.
 #
 # The hosts prune their frame logs after TAPO_*_LOG_RETENTION_DAYS; the dataset keeps
 # everything it has ever seen, so labelling (`tapo-monitor label DATASET_DIR`) and later
@@ -40,15 +44,24 @@ merge_index() {
     rm -f "$new_lines"
 }
 
-for host in "$@"; do
+for source in "$@"; do
+    if [[ "$source" == *=* ]]; then
+        host="${source%%=*}"
+        src_root="${source#*=}"
+        src_prefix=""
+    else
+        host="$source"
+        src_root="$remote_root"
+        src_prefix="$host:"
+    fi
     for log in sent-log review-log; do
         dest="$dataset/$host/$log"
         mkdir -p "$dest"
         tmp_index="$(mktemp)"
-        if ! rsync -a --timeout=120 --exclude index.jsonl "$host:$remote_root/$log/" "$dest/"; then
+        if ! rsync -a --timeout=120 --exclude index.jsonl "$src_prefix$src_root/$log/" "$dest/"; then
             echo "collect_frames: $host $log: not collected (host unreachable or no log)" >&2
             failed=1
-        elif ! rsync -a --timeout=60 "$host:$remote_root/$log/index.jsonl" "$tmp_index" \
+        elif ! rsync -a --timeout=60 "$src_prefix$src_root/$log/index.jsonl" "$tmp_index" \
                 2>/dev/null; then
             # A log that has not archived its first frame has no index yet: not a failure.
             echo "collect_frames: $host $log: no index yet"

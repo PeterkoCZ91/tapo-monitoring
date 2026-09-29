@@ -105,3 +105,15 @@ add_frame() {
     assert_status 2
     assert_output_contains "Usage:"
 }
+
+@test "a NAME=DIR source is read from this machine without SSH" {
+    local_dir="$TEST_TMP/local-daemon"
+    mkdir -p "$local_dir/sent-log" "$local_dir/review-log"
+    printf 'jpeg' >"$local_dir/sent-log/20260901-000009.jpg"
+    printf '{"file": "20260901-000009.jpg", "ts": 1}\n' >"$local_dir/sent-log/index.jsonl"
+    run "$SCRIPT" "$DATASET" "site-l=$local_dir" site-a
+    assert_status 0
+    [ -f "$DATASET/site-l/sent-log/20260901-000009.jpg" ]
+    [ "$(wc -l < "$DATASET/site-l/sent-log/index.jsonl")" -eq 1 ]
+    [ -f "$DATASET/site-a/sent-log/20260901-000002.jpg" ]
+}
