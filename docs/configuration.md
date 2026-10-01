@@ -542,13 +542,18 @@ sd_fresh_guard: 60
     worse photo: a frame more than 3x blurrier than the sharpest one is skipped, and the
     largest must have at least 1.25x the sharpest frame's box area, otherwise the sharpest
     one is sent. When the scorer returns no box for one of the frames, `sharpest` is used.
+  - `tallest` (opt-in, under trial) ranks by box height instead of area, so a person
+    side-on or mid-stride does not win on width alone. It uses the same blur guard, and the
+    tallest must be at least 1.1x as tall as the sharpest frame's box. Frames whose box
+    touches the frame edge (feet or head cut off) are set aside unless every frame has one.
+    Without a box for every frame, `sharpest` is used.
   The blur score rates a small, distant subject as sharp, so with `sharpest` a person walking
   away from the camera tends to be sent when they are already far off.
 - `sd_dense_start` adds a frame every 2 s over the event's first 12 s. The event fires when
   motion starts, and a subject who walks away is largest in those first seconds, which a 6 s
   grid can skip. Frames on the normal grid are still taken. This adds 3 to 6 frames per
   follow-up, and each one costs a seek and a scorer call. Left unset, it is on for
-  `largest` and off for `sharpest`. With `sharpest`, the extra early frames can make the
+  `largest` and `tallest`, off for `sharpest`. With `sharpest`, the extra early frames can make the
   follow-up send a later, smaller subject. Only a window that starts at the event gets the
   dense frames; the rest of a window after the recorder's early look keeps the normal
   spacing.

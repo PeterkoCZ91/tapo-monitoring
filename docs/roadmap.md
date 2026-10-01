@@ -685,7 +685,9 @@ closest.
   is not scene drift. Kept on the recording-source camera.
 - [ ] `largest` ranks by box area, so part of its gain is people side-on or mid-stride
   rather than closer, and more boxes touch the frame edge (9 % → 15 %, feet cut off).
-  Try ranking by box height before recommending it further.
+  Try ranking by box height before recommending it further. Implemented as the opt-in
+  `sd_frame_pick: tallest` (box height, 1.1x gain over the sharpest, edge-touching boxes
+  set aside when another frame is clear); the trial against `largest` is still open.
 - [ ] Camera-card sites stay on `sharpest`: their card path is already the slowest, and
   their one checked clip gained 1.16× with more motion blur. Revisit with their own
   week of `box_area` after the card early look (10.4) lands.

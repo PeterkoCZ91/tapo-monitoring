@@ -245,6 +245,68 @@ def select_largest(candidates, max_blur_ratio=LARGEST_MAX_BLUR_RATIO,
     return best[0]
 
 
+# The ``tallest`` pick (config ``sd_frame_pick: tallest``): ``largest`` ranks by box area,
+# which also rewards a person side-on or mid-stride and boxes cut by the frame edge.
+# Height tracks distance better, and a box touching the edge has its feet or head cut.
+# Same blur guard as ``largest``; the tallest must beat the sharpest's height by this
+# factor (1.1x height is about 1.25x area for the same aspect).
+TALLEST_MIN_GAIN = 1.1
+EDGE_MARGIN_PX = 2
+
+
+def box_height(box):
+    """Height of an ``[x1, y1, x2, y2]`` box, or None when it is not a usable box. Pure."""
+    try:
+        _x1, y1, _x2, y2 = (float(v) for v in box)
+    except (TypeError, ValueError):
+        return None
+    height = abs(y2 - y1)
+    return height if math.isfinite(height) else None
+
+
+def _touches_edge(box, frame_size, margin=EDGE_MARGIN_PX):
+    """True when the box reaches within ``margin`` px of any edge of the frame."""
+    x1, y1, x2, y2 = (float(v) for v in box)
+    width, height = frame_size
+    return (min(x1, x2) <= margin or min(y1, y2) <= margin
+            or max(x1, x2) >= width - margin or max(y1, y2) >= height - margin)
+
+
+def select_tallest(candidates, frame_size=None, max_blur_ratio=LARGEST_MAX_BLUR_RATIO,
+                   min_gain=TALLEST_MIN_GAIN):
+    """Frame whose subject box is tallest, preferring boxes clear of the frame edge.
+
+    ``candidates`` is ``(frame_path, blur_or_None, box)`` as for :func:`select_largest`,
+    and the same blur guard applies. Among the frames left, those whose box touches the
+    frame edge are set aside when ``frame_size`` (``(width, height)``) is known and at
+    least one frame is clear of it. The tallest of those wins only when it is at least
+    ``min_gain`` times as tall as the sharpest candidate; otherwise the sharpest does.
+    When any candidate lacks a usable box the choice is :func:`select_sharpest`. Ties
+    keep the earlier (higher-scoring) candidate. Returns None for empty input.
+    """
+    if not candidates:
+        return None
+    heights = [box_height(box) if box else None for _f, _b, box in candidates]
+    if any(h is None for h in heights):
+        return select_sharpest([(f, b) for f, b, _box in candidates])
+    blurs = [b for _f, b, _box in candidates if b is not None]
+    ceiling = min(blurs) * max_blur_ratio if blurs else None
+    pool = [(f, box, h) for (f, b, box), h in zip(candidates, heights, strict=True)
+            if ceiling is None or (b is not None and b <= ceiling)]
+    if frame_size and all(frame_size):
+        clear = [c for c in pool if not _touches_edge(c[1], frame_size)]
+        pool = clear or pool
+    best = None
+    for frame, _box, height in pool:
+        if best is None or height > best[1]:
+            best = (frame, height)
+    sharpest = select_sharpest([(f, b) for f, b, _box in candidates])
+    sharpest_height = heights[[f for f, _b, _box in candidates].index(sharpest)]
+    if best is None or best[1] < sharpest_height * min_gain:
+        return sharpest
+    return best[0]
+
+
 # ── frame extraction + fetch entry point ─────────────────────────────────────
 
 def fresh_delay(span):

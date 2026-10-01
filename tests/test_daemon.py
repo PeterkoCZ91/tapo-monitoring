@@ -485,6 +485,24 @@ def test_select_recording_frame_picks_sharpest_above_threshold():
     assert s == 0.7
 
 
+def test_select_recording_frame_tallest_ranks_by_height_and_skips_cut_frames(monkeypatch):
+    cam = _cam(sd_snapshot=True, snapshot_source="recording",
+               scorer={"url": "http://x/score", "threshold": 0.4})
+    monkeypatch.setattr(daemon.snapshot, "image_size", lambda p: (1000, 600))
+    frames = ["f0.jpg", "f1.jpg", "f2.jpg"]
+    boxes = {"f0.jpg": [100, 100, 140, 200],      # 100 px tall
+             "f1.jpg": [100, 100, 220, 190],      # larger area, 90 px tall
+             "f2.jpg": [100, 400, 140, 600]}      # tallest but touches the bottom edge
+
+    def score(f):
+        return 0.9
+    score.boxes = boxes
+    kw = dict(event={"start_time": 1}, etype="person", frames=frames, score=score,
+              blur_score=lambda f, box=None: 1.0)
+    assert daemon._select_recording_frame(cam, pick="largest", **kw)[0] == "f1.jpg"
+    assert daemon._select_recording_frame(cam, pick="tallest", **kw)[0] == "f0.jpg"
+
+
 def test_score_all_scores_concurrently_and_keeps_the_order():
     # A barrier only opens when two requests are in flight at once: scored one by one,
     # the first call would wait out its timeout and raise.

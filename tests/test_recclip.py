@@ -307,3 +307,46 @@ def test_fetch_recording_frames_passes_dense_only_when_set():
             cfg=None, event_start=1000.0, span=24, out_dir="/tmp", base_dir="/r",
             segment_for=lambda *a, **k: ("/r/x.mkv", 900.0), extract=extract, dense=dense)
     assert "dense" not in seen[0] and seen[1]["dense"] == (12, 2)
+
+
+def _tbox(h, w=40, x=100, y=100):
+    return [x, y, x + w, y + h]
+
+
+def test_select_tallest_ranks_by_height_not_area():
+    # "wide" has the bigger area (side-on, mid-stride) but "tall" is the taller person.
+    cands = [("wide", 0.1, _tbox(100, w=120)), ("tall", 0.1, _tbox(130, w=40))]
+    assert recclip.select_largest(cands, min_gain=1.0) == "wide"
+    assert recclip.select_tallest(cands) == "tall"
+
+
+def test_select_tallest_prefers_boxes_not_touching_the_frame_edge():
+    size = (1000, 600)
+    cands = [("clean", 0.1, _tbox(120, y=100)), ("cut", 0.1, _tbox(200, y=400))]  # y2 == 600
+    assert recclip.select_tallest(cands, frame_size=size) == "clean"
+    assert recclip.select_tallest(cands) == "cut"          # size unknown: no edge rule
+
+
+def test_select_tallest_uses_the_cut_frames_when_all_touch_the_edge():
+    size = (1000, 600)
+    cands = [("a", 0.1, _tbox(100, y=500)), ("b", 0.1, _tbox(150, y=450))]
+    assert recclip.select_tallest(cands, frame_size=size) == "b"
+
+
+def test_select_tallest_keeps_the_sharpest_on_a_near_tie_and_honours_the_blur_guard():
+    cands = [("sharp", 0.01, _tbox(100)), ("taller", 0.015, _tbox(105))]
+    assert recclip.select_tallest(cands) == "sharp"
+    assert recclip.select_tallest(cands, min_gain=1.0) == "taller"
+    cands = [("sharp", 0.10, _tbox(100)), ("smeared", 0.50, _tbox(300))]
+    assert recclip.select_tallest(cands) == "sharp"
+
+
+def test_select_tallest_falls_back_to_sharpest_without_every_box():
+    assert recclip.select_tallest([("big", 0.5, _tbox(300)), ("sharp", 0.1, None)]) == "sharp"
+    assert recclip.select_tallest([]) is None
+
+
+def test_box_height():
+    assert recclip.box_height([10, 20, 30, 60]) == 40
+    assert recclip.box_height(None) is None
+    assert recclip.box_height(["x", 1, 2, 3]) is None

@@ -140,8 +140,10 @@ cameras:
     #                          # favours a small, far-away subject. "largest" = biggest
     #                          # person box, skipping frames >3x blurrier than the sharpest
     #                          # and keeping the sharpest unless the box is >=1.25x larger.
+    #                          # "tallest" = same by box height (>=1.1x), boxes touching
+    #                          # the frame edge only when every frame has one.
     # sd_dense_start: false    # optional; also take a frame every 2 s over the event's
-    #                          # first 12 s (+3-6 frames). Unset = on with "largest".
+    #                          # first 12 s (+3-6 frames). Unset = on with "largest"/"tallest".
     # telegram_alerts: true    # optional; false = record every alert as sent, send no photo
     # privacy_notice: false    # optional; one Telegram message when privacy mode goes on/off
     # detection_notice: false  # optional; one message when motion or person detection is

@@ -31,7 +31,7 @@ SNAPSHOT_SOURCES = {"rtsp", "sd"}
 LIGHT_TRIGGER_TYPES = {"person", "motion", "pet", "tamper", "vehicle"}
 LIGHT_TRIGGER_MODES = ("software", "firmware")
 HOLD_EXPIRY_POLICIES = {"off", "observe", "send"}
-SD_FRAME_PICKS = {"sharpest", "largest"}
+SD_FRAME_PICKS = {"sharpest", "largest", "tallest"}
 
 
 class ConfigError(ValueError):
@@ -215,8 +215,8 @@ class CameraConfig:
     # SD follow-ups for this camera per daemon loop. None drains all due work.
     sd_jobs_per_tick: int | None = None
     # How the follow-up picks among its above-threshold frames: "sharpest" (lowest subject
-    # blur) or "largest" (biggest person box among frames not much blurrier than the
-    # sharpest; sharpest again when a frame has no box).
+    # blur), "largest" (biggest person box among frames not much blurrier than the
+    # sharpest) or "tallest" (tallest box, edge-clear first); sharpest again without boxes.
     sd_frame_pick: str = "sharpest"
     # Extra frames every 2 s over the event's first 12 s of the follow-up window. Unset in
     # the YAML it follows sd_frame_pick: on for "largest", off for "sharpest".
@@ -994,7 +994,7 @@ def _camera(data, index):
                                 "sd_frame_pick", where)
     sd_dense_start = data.get("sd_dense_start")
     if sd_dense_start is None:
-        sd_dense_start = sd_frame_pick == "largest"
+        sd_dense_start = sd_frame_pick in ("largest", "tallest")
     elif not isinstance(sd_dense_start, bool):
         raise ConfigError(f"{where}: 'sd_dense_start' must be true or false")
     try:

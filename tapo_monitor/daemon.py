@@ -2657,7 +2657,8 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
 
     ``pick="largest"`` instead takes the frame with the largest subject box among
     candidates not much blurrier than the sharpest (:func:`recclip.select_largest`);
-    without a box for every candidate it stays with the sharpest.
+    without a box for every candidate it stays with the sharpest. ``pick="tallest"`` ranks
+    by box height and prefers boxes clear of the frame edge (:func:`recclip.select_tallest`).
     Missing blur measurements fall back to detection score. Frames are scored
     concurrently (:func:`_score_all`); a scorer failure ends the selection there: retain
     a confirmed candidate if available, otherwise preserve the existing unscored
@@ -2701,6 +2702,10 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
               for f, _ in above]
     if pick == "largest" and use_boxes:
         image = recclip.select_largest([(f, b, boxes[f]) for f, b in ranked])
+    elif pick == "tallest" and use_boxes:
+        size = snapshot.image_size(above[0][0])
+        image = recclip.select_tallest([(f, b, boxes[f]) for f, b in ranked],
+                                       frame_size=size)
     else:
         pick = "sharpest"
         image = recclip.select_sharpest(ranked)
