@@ -7293,3 +7293,39 @@ def test_defer_answers_whether_it_queued(monkeypatch):
     assert defer({"start_time": 1000.0}, "person", False, keep_sampling=True) is True
     assert defer({"start_time": 1010.0}, "person", False, keep_sampling=True) is False
     assert len(state.pending_sd) == 1 and state.pending_sd[0]["keep_sampling"] is True
+
+
+def test_hubpoll_records_when_the_hub_last_answered(monkeypatch, tmp_path):
+    app = _hub_app()
+    hub = _FakeHub(clips=[[]])
+    state = daemon.MonitorState()
+    daemon.run_hubpoll_pass(app, {}, state, now=1000, secrets=_hub_secrets(),
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
+    assert state.hub_last_ok["gate"] == 1000      # resolved through the held session
+    hub.connected = False
+    daemon.run_hubpoll_pass(app, {}, state, now=1100, secrets=_hub_secrets(),
+                            hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                            clip_frame_for=_clip_frames(tmp_path))
+    assert state.hub_last_ok["gate"] == 1000      # a dead session is not an answer
+
+
+def test_fleet_health_snapshot_probes_hub_cameras_from_the_last_hub_answer():
+    app = _hub_app()
+    state = daemon.MonitorState()
+    snap = daemon.fleet_health_snapshot(app, state, now=1000, fetch_metrics=lambda u: None)
+    assert snap["cameras"]["gate"]["reachable"] is None      # hub never answered yet
+    assert snap["cameras"]["gate"]["hub"] is True
+
+    state.hub_last_ok["gate"] = 820
+    state.hub_last_clip["gate"] = 400
+    snap = daemon.fleet_health_snapshot(app, state, now=1000, fetch_metrics=lambda u: None)
+    entry = snap["cameras"]["gate"]
+    assert entry["reachable"] is True
+    assert entry["hub_age"] == 180
+    assert entry["last_event_age"] == 600
+
+    stale = app.alerts.outage_threshold + 1000
+    snap = daemon.fleet_health_snapshot(app, state, now=820 + stale,
+                                        fetch_metrics=lambda u: None)
+    assert snap["cameras"]["gate"]["reachable"] is False

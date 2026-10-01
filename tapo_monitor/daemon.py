@@ -1000,6 +1000,9 @@ class MonitorState:
     hub_devices: dict = field(default_factory=dict)   # camera -> hub-side {device_id, mac}
     hub_cursor: dict = field(default_factory=dict)    # camera -> newest clip start consumed
     hub_last_poll: dict = field(default_factory=dict)
+    # camera -> time the hub last answered a query for it (the fleet digest's probe for
+    # a camera that sleeps through pings); a dead or backing-off session never sets it.
+    hub_last_ok: dict = field(default_factory=dict)
     # Hub alerts whose Telegram delivery failed, waiting for a bounded retry (the hub
     # cursor has already moved past their clip, so this queue is the only copy).
     pending_hub: list = field(default_factory=list)
@@ -2466,6 +2469,7 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
                                 cfg.name)
                 continue
             state.hub_devices[cfg.name] = device
+            state.hub_last_ok[cfg.name] = now
             log.info("hubpoll %s: resolved to hub camera %r (%s)",
                      cfg.name, device["alias"], device["model"])
             if device["record_24h"]:
@@ -2489,6 +2493,8 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
             continue
         clips = client.search_clips(device["device_id"], device["mac"], cursor, now, now=now)
         state.events_reachable[cfg.name] = bool(client.connected)
+        if client.connected:
+            state.hub_last_ok[cfg.name] = now
         if not clips:
             continue
         grab = frame_for(cfg)
@@ -4125,6 +4131,19 @@ def fleet_health_snapshot(app: AppConfig, state: MonitorState, *, now,
             if clock_offset is not None:
                 entry["clock_offset"] = clock_offset
                 entry["clock_skew"] = abs(clock_offset) > 5.0
+        if "hubpoll" in cfg.detection.sources and "getevents" not in cfg.detection.sources:
+            # No ping probe fits a battery camera, and a second hub session is out of the
+            # question (the hub kills the held one). The held session's last answer is the
+            # probe: older than the outage threshold counts as unreachable.
+            last_ok = state.hub_last_ok.get(cfg.name)
+            entry["hub"] = True
+            entry["reachable"] = (None if last_ok is None
+                                  else now - last_ok <= app.alerts.outage_threshold)
+            if last_ok is not None:
+                entry["hub_age"] = max(0.0, now - last_ok)
+            last_clip = state.hub_last_clip.get(cfg.name)
+            entry["last_event_age"] = (None if last_clip is None
+                                       else max(0.0, now - last_clip))
         cameras[cfg.name] = entry
 
     stalled = None if state.tick_fail_since is None else max(0.0,

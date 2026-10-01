@@ -747,3 +747,38 @@ def test_run_if_due_measures_the_logs_for_the_fleet_block(tmp_path):
                 "tick": {"ok": True}, "scorer": None, "recorder": None, "repairs": {}})
     line = next(x for x in texts[0].splitlines() if x.startswith("   logs review "))
     assert " MB free" in line
+
+
+def test_fleet_lines_report_hub_cameras_by_hub_answer_and_last_event():
+    lines = reviewdigest.fleet_lines({
+        "cameras": {"gate": {"reachable": True, "events": True, "hub": True,
+                             "hub_age": 180, "last_event_age": 2 * 86400},
+                    "yard": {"reachable": True, "events": True, "hub": True,
+                             "hub_age": 60, "last_event_age": None}},
+        "tick": {"ok": True}, "scorer": None, "recorder": None, "repairs": {},
+    })
+    text = "\n".join(lines)
+    assert text.startswith("\U0001f49a Fleet OK")
+    assert "not checked" not in text
+    assert "hub last answered gate 3m ago, yard 1m ago" in text
+    assert "last hub event: gate 2d ago, yard none since start" in text
+
+
+def test_fleet_lines_flag_a_hub_that_stopped_answering():
+    lines = reviewdigest.fleet_lines({
+        "cameras": {"gate": {"reachable": False, "events": False, "hub": True,
+                             "hub_age": 7200, "last_event_age": None}},
+        "tick": {"ok": True}, "scorer": None, "recorder": None, "repairs": {},
+    })
+    text = "\n".join(lines)
+    assert "Fleet OK" not in text
+    assert "gate unreachable (hub last answered 2h ago)" in text
+
+
+def test_fleet_lines_name_a_hub_that_never_answered_since_start():
+    lines = reviewdigest.fleet_lines({
+        "cameras": {"gate": {"reachable": None, "events": None, "hub": True}},
+        "tick": {"ok": True}, "scorer": None, "recorder": None, "repairs": {},
+    })
+    text = "\n".join(lines)
+    assert "not checked yet: gate (hub has not answered since start)" in text

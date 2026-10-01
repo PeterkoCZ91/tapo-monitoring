@@ -222,3 +222,11 @@ Notes from a site where a person passes only every few days:
 - Because silence is normal there, set `inactivity_alert_days` (see `docs/configuration.md`)
   to a value above the longest expected gap; it tells you when a camera has stopped
   producing clips at all.
+- The daily digest probes a hub camera without a second hub session: a battery camera
+  sleeps through pings, and the hub drops a session when another one connects. The probe is
+  the time the held session last got an answer for that camera. It is reported as reachable
+  when that is within `alerts.outage_threshold`, as unreachable (with "hub last answered
+  ... ago") when older, and as "not checked yet" only until the hub first answers after a
+  start. The digest also lists the time since the last hub event per camera (in memory,
+  so "none since start" after a restart). There is no separate outage alert for a hub
+  camera yet; `inactivity_alert_days` covers silence.

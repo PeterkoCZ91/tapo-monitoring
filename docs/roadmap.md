@@ -655,8 +655,8 @@ busiest site.
   keeps every decision and send. The entry stays queued (and persisted) while it is read.
 - [ ] Hub clips (`hubpoll`) are still downloaded on the loop: one clip per new hub event,
   each download bounded by a 10 s stall timeout, plus one retry and a live grab when it
-  yields nothing. No site runs a hub now, so there is nothing measured; move them to the
-  same worker if a hub site shows the loop waiting on them.
+  yields nothing. Only one site runs a hub poller and the wait is not measured there yet; move
+  them to the same worker if that site shows the loop waiting on them.
 - [x] Camera-card follow-ups (a median 175-200 s on the sites that use them) stay behind
   pytapo's 60 s freshness guard plus a slow download. `sd_early_look` already reads the
   first 18 s at +87 s; `sd_early_span` (6-30, default 18) makes that first window smaller

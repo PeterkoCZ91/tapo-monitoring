@@ -242,14 +242,34 @@ def fleet_lines(health):
                  if (s or {}).get("reachable") is True and (s or {}).get("events") is False]
     clock_skew = [n for n, s in sorted(cameras.items())
                   if (s or {}).get("clock_skew")]
+    def _hub_note(name):
+        entry = cameras.get(name) or {}
+        age = entry.get("hub_age")
+        if not entry.get("hub") or age is None:
+            return ""
+        return f" (hub last answered {notify.format_duration(age)} ago)"
+
     if unreachable:
-        problems.append(f"{', '.join(unreachable)} unreachable")
+        problems.append(", ".join(f"{n} unreachable{_hub_note(n)}" for n in unreachable))
     if no_events:
         problems.append(f"{', '.join(no_events)} event API down")
     if clock_skew:
         problems.append(f"{', '.join(clock_skew)} clock skew > 5s")
     if unchecked:
-        detail.append(f"not checked yet: {', '.join(unchecked)}")
+        detail.append("not checked yet: " + ", ".join(
+            f"{n} (hub has not answered since start)"
+            if (cameras.get(n) or {}).get("hub") else n for n in unchecked))
+    hubs = {n: s for n, s in sorted(cameras.items()) if (s or {}).get("hub")}
+    answered = [f"{n} {notify.format_duration(s['hub_age'])} ago"
+                for n, s in hubs.items()
+                if s.get("reachable") is True and s.get("hub_age") is not None]
+    if answered:
+        detail.append("hub last answered " + ", ".join(answered))
+    if hubs:
+        detail.append("last hub event: " + ", ".join(
+            f"{n} {notify.format_duration(s['last_event_age'])} ago"
+            if s.get("last_event_age") is not None else f"{n} none since start"
+            for n, s in hubs.items()))
 
     tick = health.get("tick") or {}
     if tick.get("ok") is False:
