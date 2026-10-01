@@ -485,6 +485,13 @@ def test_card_early_span_splits_only_a_window_with_room_for_another_frame():
     assert sdclip.card_early_span(23) is None
 
 
+def test_card_early_span_takes_a_configured_look():
+    assert sdclip.card_early_span(36, 12) == 12
+    assert sdclip.card_early_span(36, 30) == 30
+    assert sdclip.card_early_span(36, 31) is None     # no room for another frame
+    assert sdclip.card_early_span(18, 12) == 12
+
+
 def test_fresh_delay_takes_a_guard():
     assert sdclip.fresh_delay(18) == 18 + sdclip.PYTAPO_FRESH_GUARD + sdclip.FRESH_SLACK
     assert sdclip.fresh_delay(18, guard=30) == 18 + 30 + sdclip.FRESH_SLACK

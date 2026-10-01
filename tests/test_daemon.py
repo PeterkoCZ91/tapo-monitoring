@@ -3234,6 +3234,21 @@ def test_card_early_look_reads_the_first_seconds_sooner(monkeypatch):
     assert entry["due_at"] == 500 + daemon.sdclip.fresh_delay(early)   # +87, not +105
 
 
+def test_card_early_span_key_shortens_the_first_window(monkeypatch):
+    _, state, _, _ = _card_early_followup(monkeypatch, sd_early_span=12)
+    entry = state.pending_sd[0]
+    assert (entry["span"], entry["rest_span"]) == (12, 36)
+    assert entry["due_at"] == 500 + daemon.sdclip.fresh_delay(12)
+
+
+def test_card_early_span_defaults_and_is_validated():
+    base = {"name": "a", "host": "203.0.113.10"}
+    assert cfg.load_config_from_dict({"cameras": [base]}).cameras[0].sd_early_span == 18
+    for bad in (5, 31, "x", True):
+        with pytest.raises(cfg.ConfigError, match="sd_early_span"):
+            cfg.load_config_from_dict({"cameras": [{**base, "sd_early_span": bad}]})
+
+
 def test_card_early_look_skips_a_window_too_short_to_split(monkeypatch):
     # A span capped below 24 s cannot be split; 20 is below the 36 s floor anyway, so
     # force the cap through the first-span helper.

@@ -107,14 +107,15 @@ SD_FRESH_DELAY = fresh_delay()  # = 105 for the default span
 CARD_EARLY_SPAN = 18
 
 
-def card_early_span(span):
+def card_early_span(span, early=CARD_EARLY_SPAN):
     """The card's first-look window for a ``span``-second follow-up, or None. Pure.
+    ``early`` is the configured look (config ``sd_early_span``).
 
     A window that ends barely later than the look would read almost the same frames
     twice, so the split needs at least one more frame interval beyond it.
     """
-    if int(span) >= CARD_EARLY_SPAN + SD_FRAME_EVERY:
-        return CARD_EARLY_SPAN
+    if int(span) >= int(early) + SD_FRAME_EVERY:
+        return int(early)
     return None
 # Extract one candidate frame every N seconds of the downloaded span (36/6 -> 7 candidates,
 # so a mid-clip subject is caught without exploding the per-event Groq call count).

@@ -5,6 +5,8 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `sd_early_span` (camera card, 6-30, default 18): length of the `sd_early_look` first
+  window; a smaller one is due and downloaded sooner.
 - `scorer.ignore_zones`: rects (fractions of the frame) whose people do not count, for a
   static person-shaped object that "confirms" every event nearby. The scoring service now
   returns `person_boxes`, one box per entry of `person_scores`; the daemon removes the

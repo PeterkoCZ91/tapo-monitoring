@@ -657,9 +657,12 @@ busiest site.
   each download bounded by a 10 s stall timeout, plus one retry and a live grab when it
   yields nothing. No site runs a hub now, so there is nothing measured; move them to the
   same worker if a hub site shows the loop waiting on them.
-- [ ] Camera-card follow-ups (a median 175-200 s on the sites that use them) stay behind
-  pytapo's 60 s freshness guard plus a slow download; try a smaller first window there only
-  once the recording change is confirmed.
+- [x] Camera-card follow-ups (a median 175-200 s on the sites that use them) stay behind
+  pytapo's 60 s freshness guard plus a slow download. `sd_early_look` already reads the
+  first 18 s at +87 s; `sd_early_span` (6-30, default 18) makes that first window smaller
+  still (12 s is due at +81 s). Opt-in and unchanged by default.
+- [ ] Trial `sd_early_look` on a card site, then `sd_early_span: 12` once its `SD read`
+  lines show how often the sent photo lies in the first 12 s.
 
 ### 10.5 — The photo worth sending
 

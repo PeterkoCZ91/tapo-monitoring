@@ -224,6 +224,9 @@ class CameraConfig:
     # Camera card only: read the event's first 18 s as soon as they clear pytapo's
     # freshness guard, and the rest of the window only when that look shows nobody.
     sd_early_look: bool = False
+    # Seconds of the early look (needs sd_early_look); a shorter look is due no sooner but
+    # downloads faster. 18 keeps the frames at 0, 6 and 12 s.
+    sd_early_span: int = 18
     # Camera card only: seconds a window's end must be in the past before pytapo downloads
     # it (its FRESH_RECORDING_TIME_SECONDS). The due time of every card read follows it.
     sd_fresh_guard: int = 60
@@ -1000,6 +1003,11 @@ def _camera(data, index):
         raise ConfigError(f"{where}: 'sd_fresh_guard' must be an integer") from None
     if not 10 <= sd_fresh_guard <= 120:
         raise ConfigError(f"{where}: 'sd_fresh_guard' must be between 10 and 120")
+    sd_early_span = data.get("sd_early_span", 18)
+    if isinstance(sd_early_span, bool) or not isinstance(sd_early_span, int):
+        raise ConfigError(f"{where}: 'sd_early_span' must be an integer")
+    if not 6 <= sd_early_span <= 30:
+        raise ConfigError(f"{where}: 'sd_early_span' must be between 6 and 30")
     night_vision = data.get("night_vision")
     if night_vision is not None and night_vision not in ("ir", "auto"):
         raise ConfigError(f"{where}: 'night_vision' must be 'ir' or 'auto'")
@@ -1146,6 +1154,7 @@ def _camera(data, index):
                                              "follow_app_notifications", where),
         sd_dense_start=sd_dense_start,
         sd_early_look=_check_bool(data.get("sd_early_look", False), "sd_early_look", where),
+        sd_early_span=sd_early_span,
         sd_fresh_guard=sd_fresh_guard,
         person_sensitivity=int(data["person_sensitivity"]) if data.get("person_sensitivity") is not None else None,
         night_only=bool(data.get("night_only", False)),

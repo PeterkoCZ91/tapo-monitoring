@@ -490,6 +490,7 @@ sd_motion_span_cap: 48
 sd_motion: false
 sd_jobs_per_tick: 1
 sd_early_look: false
+sd_early_span: 18
 sd_fresh_guard: 60
 ```
 
@@ -519,6 +520,11 @@ sd_fresh_guard: 60
   seconds later. With the early look on, a failed segment lookup is also tried once more
   after 5 s. A card read logs one `SD read` line with its window, bytes and the
   download and extraction seconds.
+- `sd_early_span` (camera card, default 18, 6-30, only with `sd_early_look`) is the length
+  of the early look in seconds. The look is due `span + guard + 9` s after the event
+  starts, so 12 is due 6 s sooner than 18 and downloads a third shorter, but covers only
+  the frames at 0 and 6 s; a window needs at least one more 6 s frame beyond the look to
+  be split. Keep 18 unless a trial shows the photos still come from the shorter look.
 - `sd_fresh_guard` (camera card, default 60, 10–120) is the number of seconds a card
   window's end must be in the past before it is downloaded (pytapo's own guard is 60).
   Every card due time moves with it. The camera lists a segment while it is still

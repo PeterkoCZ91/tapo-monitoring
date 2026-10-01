@@ -1904,7 +1904,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             if _source == "recording":
                 early = recclip.early_span(first_span)
             elif _cfg.sd_early_look:
-                early = sdclip.card_early_span(first_span)
+                early = sdclip.card_early_span(first_span, _cfg.sd_early_span)
             else:
                 early = None
             entry = {
