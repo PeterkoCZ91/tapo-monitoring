@@ -48,16 +48,22 @@ class Frame(str):
     ``lens`` names the lens of a dual-lens camera the frame came from ("wide",
     "pan/tilt"), for the alert caption; None when the camera has one lens or the source
     is not known.
+
+    ``companion`` is the other lens's frame of the same event, kept when the pair is to go
+    out as one album (``lens_album``): a ``(path, lens, score)`` tuple, or None. Whoever
+    drops the frame drops its companion too (:func:`safe_unlink`).
     """
 
-    __slots__ = ("native", "native_width", "native_height", "lens")
+    __slots__ = ("native", "native_width", "native_height", "lens", "companion")
 
-    def __new__(cls, path, native=None, native_width=None, native_height=None, lens=None):
+    def __new__(cls, path, native=None, native_width=None, native_height=None, lens=None,
+                companion=None):
         self = super().__new__(cls, path)
         self.native = native
         self.native_width = native_width
         self.native_height = native_height
         self.lens = lens
+        self.companion = companion
         return self
 
 
@@ -70,7 +76,31 @@ def with_lens(image, lens):
         return image
     return Frame(image, native=getattr(image, "native", None),
                  native_width=getattr(image, "native_width", None),
-                 native_height=getattr(image, "native_height", None), lens=lens)
+                 native_height=getattr(image, "native_height", None), lens=lens,
+                 companion=getattr(image, "companion", None))
+
+
+def with_companion(image, other, other_lens, other_score):
+    """``image`` carrying ``other`` (the second lens's frame) to send beside it. Pure."""
+    return Frame(image, native=getattr(image, "native", None),
+                 native_width=getattr(image, "native_width", None),
+                 native_height=getattr(image, "native_height", None),
+                 lens=getattr(image, "lens", None), companion=(other, other_lens, other_score))
+
+
+def frame_companion(image):
+    """Path of the album companion frame, or None. Pure."""
+    companion = getattr(image, "companion", None)
+    return companion[0] if companion else None
+
+
+def album_lens(image):
+    """Lens label for a caption: both lens names for an album pair, else the frame's. Pure."""
+    companion = getattr(image, "companion", None)
+    first = getattr(image, "lens", None)
+    if companion and first and companion[1]:
+        return f"{first} + {companion[1]}"
+    return first
 
 
 def frame_lens(image):
@@ -132,6 +162,9 @@ def safe_unlink(path):
     twin = getattr(path, "native", None)
     if twin:
         safe_unlink(twin)
+    companion = getattr(path, "companion", None)
+    if companion:
+        safe_unlink(companion[0])
     try:
         os.unlink(path)
     except FileNotFoundError:

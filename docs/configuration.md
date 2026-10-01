@@ -270,6 +270,7 @@ Per-camera switches:
 event_profile: c545d       # default: "default"
 rtsp_stream: stream2       # wide lens, 1280x720: the fast live grab
 lens_pick_stream: stream7  # optional, default unset: also grab the pan/tilt lens
+lens_album: true           # optional, default false: send both lens frames as an album
 sampler:
   enabled: true
   stream: stream6          # follow-up grabs from the pan/tilt lens
@@ -307,6 +308,16 @@ pass grabs `rtsp_stream` and this stream, scores both and keeps the frame with t
 subject (the `sd_frame_pick: largest` rule), or the higher score when a box is missing.
 It requires an `event_profile` with a pan/tilt lens and `scorer.url`, costs a second grab
 and a second scoring on those events only, and must differ from `rtsp_stream`.
+
+`lens_album` (default `false`, needs `lens_pick_stream`) sends both lens frames as one
+Telegram album instead of the picked frame alone, when the subjects differ: both frames
+score at or above `scorer.threshold` and the scorer counts a different number of people in
+each (`persons`). Box overlap is not used, because the lenses have different fields of
+view. A scorer that reports no count never triggers an album. The album is one message
+(caption on the first photo, `· wide + pan/tilt lenses`), one cooldown and one incident
+ID; both frames go to the sent log under that incident, whole (no subject crop). If
+Telegram refuses the album, the picked frame is sent alone as before. Otherwise nothing
+changes.
 
 The alert caption of a dual-lens camera names the lens that took the photo, e.g.
 `👤 2026-09-27 12:00:00 · pan/tilt lens`. The lens follows from the stream the frame was

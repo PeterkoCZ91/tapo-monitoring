@@ -293,6 +293,10 @@ class CameraConfig:
     # next to rtsp_stream when an event fired on the profile's pan/tilt lens; the scorer
     # picks the better of the two frames. None (default) grabs one frame, as always.
     lens_pick_stream: str | None = None
+    # With lens_pick_stream: when both lens frames show a person and the scorer counts a
+    # different number of people in each, send both as one Telegram album instead of the
+    # picked frame alone. Off (default): one photo, as always.
+    lens_album: bool = False
     # ── hubpoll cameras (battery, hub-backed) ────────────────────────────────
     # A battery camera keeps no usable index of its own: its recordings — and therefore
     # its detections — live on the hub it is bound to, and the camera sleeps between
@@ -1126,6 +1130,12 @@ def _camera(data, index):
                               f"(the scorer picks between the two frames)")
         if lens_pick_stream == data.get("rtsp_stream", "stream1"):
             raise ConfigError(f"{where}: 'lens_pick_stream' must differ from rtsp_stream")
+    lens_album = data.get("lens_album", False)
+    if not isinstance(lens_album, bool):
+        raise ConfigError(f"{where}: 'lens_album' must be true or false")
+    if lens_album and lens_pick_stream is None:
+        raise ConfigError(f"{where}: 'lens_album' requires lens_pick_stream "
+                          f"(the album is made of the two grabbed lens frames)")
     return CameraConfig(
         name=name,
         host=host,
@@ -1166,6 +1176,7 @@ def _camera(data, index):
         crop_min_frac=crop_min_frac,
         event_profile=event_profile,
         lens_pick_stream=lens_pick_stream,
+        lens_album=lens_album,
         hub_host=data.get("hub_host"),
         hub_device_id=data.get("hub_device_id"),
         hub_device_mac=data.get("hub_device_mac"),

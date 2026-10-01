@@ -61,7 +61,7 @@ def build_caption(emoji, time_str, description=None, detail=None, count=None,
     count, and the caption then says nothing about it.
 
     ``lens`` names the lens of a dual-lens camera that took the photo ("wide",
-    "pan/tilt"); None — a single-lens camera, or a frame of unknown source — adds nothing.
+    "pan/tilt"; "wide + pan/tilt" for an album of both); None — a single-lens camera, or a frame of unknown source — adds nothing.
 
     This never changes *whether* an alert goes out — the threshold gates on person
     confidence alone.
@@ -76,7 +76,7 @@ def build_caption(emoji, time_str, description=None, detail=None, count=None,
     if isinstance(persons, int) and persons >= 2:
         headline = f"{headline} · {persons} people"
     if lens:
-        headline = f"{headline} · {lens} lens"
+        headline = f"{headline} · {lens} {'lenses' if ' + ' in lens else 'lens'}"
     lines = [headline]
     if description:
         lines.append(f'"{description}"')
@@ -174,6 +174,34 @@ def _post_photo(token, chat_id, image, caption):
         return False
 
 
+def _post_album(token, chat_id, images, caption):
+    """POST several photos as one Telegram album (sendMediaGroup). True on success."""
+    try:
+        boundary = "tapoMonitorBoundary"
+        media = [{"type": "photo", "media": f"attach://p{i}"} for i in range(len(images))]
+        media[0]["caption"] = caption
+        body = (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{chat_id}\r\n"
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"media\"\r\n\r\n"
+            f"{json.dumps(media, ensure_ascii=False)}\r\n"
+        ).encode()
+        for i, image in enumerate(images):
+            body += (
+                f"--{boundary}\r\nContent-Disposition: form-data; name=\"p{i}\"; "
+                f"filename=\"snap{i}.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n"
+            ).encode() + image + b"\r\n"
+        body += f"--{boundary}--\r\n".encode()
+        req = urllib.request.Request(
+            f"{_API}/bot{token}/sendMediaGroup",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status < 300 and '"ok":true' in resp.read().decode(errors="replace")
+    except Exception:
+        return False
+
+
 def _archive_bytes(archive_path, sent_image):
     """Frame to keep in the sent log: the pre-crop one when readable, else what we sent."""
     if not archive_path:
@@ -211,6 +239,38 @@ def send_photo(token, chat_id, image_path, caption, archive_path=None,
         sentlog.archive_if_configured(_archive_bytes(archive_path, image), caption,
                                       delivered=ok, camera=camera, score=score,
                                       incident=incident, send_path=send_path)
+    return ok
+
+
+def send_album(token, chat_id, image_paths, caption, camera=None, scores=None,
+               incident=None, send_path=None):
+    """Send 2-10 photos as one album, the caption on the first. Returns True on success.
+
+    One message for one visit: the lens album of a dual-lens camera. Every frame goes to
+    the sent log under the same incident, but only after Telegram accepted the album; a
+    failed album archives nothing, so the caller's fallback single photo is the only
+    record of that attempt. ``scores`` lines up with ``image_paths``.
+    """
+    try:
+        images = []
+        for path in image_paths:
+            with open(path, "rb") as f:
+                images.append(f.read())
+    except OSError:
+        return False
+    if not 2 <= len(images) <= 10:
+        return False
+    ok = _post_album(token, chat_id, images, caption)
+    if not ok:
+        time.sleep(TELEGRAM_RETRY_DELAY)
+        ok = _post_album(token, chat_id, images, caption)
+    if ok:
+        now = time.time()
+        for i, image in enumerate(images):
+            sentlog.archive_if_configured(
+                image, caption, delivered=True, now=now + i * 1e-6, camera=camera,
+                score=(scores[i] if scores and i < len(scores) else None),
+                incident=incident, send_path=send_path)
     return ok
 
 

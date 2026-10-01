@@ -14,7 +14,7 @@ from datetime import datetime
 from . import camera, detection, enrich, notify, scheduling, sentlog, snapshot
 from . import mqtt as mqtt_bridge
 from .incident import incident_id
-from .snapshot import frame_lens
+from .snapshot import album_lens
 
 log = logging.getLogger(__name__)
 
@@ -572,7 +572,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             caption = notify.build_caption(
                 TYPE_EMOJI.get(etype, "👁"), time_str(event),
                 description=description or None, detail=label or None, score=s,
-                light=light, lens=frame_lens(image),
+                light=light, lens=album_lens(image),
             )
             incident = incident_id(cfg.name, event)
             ok = (send_alert(image, caption, s, incident=incident, send_path="live",

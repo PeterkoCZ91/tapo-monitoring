@@ -499,7 +499,8 @@ turns after a person the wide lens saw (dual-cam linkage). See
   the person (wide 0.001 vs 0.40, 0.11 vs 0.95). Shipped: the scorer lists
   `person_scores` (one per person after NMS, full frame) and the caption says `· 2 people`
   at the camera's threshold; an older scorer shows no count.
-- [ ] Send both lens frames as an album when their subjects differ.
+- [x] Send both lens frames as an album when their subjects differ. Shipped as opt-in
+  `lens_album` (off by default): both lenses see a person and their person counts differ.
 
 ## Phase 9 — Detection quality from our own labelled frames
 

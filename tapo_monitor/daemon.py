@@ -1225,13 +1225,31 @@ def pick_lens_frame(cfg, first, second, score, blur_score=None):
         image = max(pool, key=lambda fs: fs[1])[0]
         pick = "score"
     chosen = next(s for f, s in zip(frames, scores, strict=True) if f == image)
-    for frame in frames:
-        if frame != image:
-            _safe_unlink(frame)
-    log.info("lens pick %s: %s (%s) scores=%s", cfg.name,
+    other, other_score = next((f, s) for f, s in zip(frames, scores, strict=True)
+                              if f != image)
+    album = (getattr(cfg, "lens_album", False) and len(above) == 2
+             and lens_subjects_differ(chosen, other_score))
+    if album:
+        image = snapshot.with_companion(image, other, snapshot.frame_lens(other), other_score)
+    else:
+        _safe_unlink(other)
+    log.info("lens pick %s: %s (%s%s) scores=%s", cfg.name,
              "second lens" if image == second else "first lens", pick,
-             "/".join(f"{s:.3f}" for s in scores))
+             ", album" if album else "", "/".join(f"{s:.3f}" for s in scores))
     return image, chosen
+
+
+def lens_subjects_differ(first, second):
+    """Whether two lens frames of one event hold a different number of people. Pure.
+
+    The scorer reports how many people it found at the camera's threshold
+    (``SubjectScore.persons``); the lenses see through different fields of view, so
+    comparing boxes across them means nothing, while a head count is lens-independent.
+    Unequal counts mean one lens sees someone the other does not. A score without a count
+    (an older scorer, a bare float) never differs: no evidence, no album.
+    """
+    a, b = getattr(first, "persons", None), getattr(second, "persons", None)
+    return isinstance(a, int) and isinstance(b, int) and a != b
 
 
 def _default_time_str(event):  # pragma: no cover - trivial formatting
@@ -1779,6 +1797,19 @@ def _deliver_alert_photo(cfg, secrets, image, caption, downscale=None, score=Non
                  "telegram_alerts off" if not cfg.telegram_alerts
                  else "Tapo app notifications off", cfg.name)
         return True
+    companion = getattr(image, "companion", None)
+    if companion:
+        # Lens album: both frames, whole (a subject crop would show one lens's person),
+        # as one message. A refused album falls back to the single photo below, so the
+        # alert is never lost to the album.
+        if notify.send_album(token, chat, [image, companion[0]], caption, camera=cfg.name,
+                             scores=[score, companion[2]], incident=incident,
+                             send_path=send_path):
+            return True
+        log.warning("lens album for %s not delivered; sending the single photo", cfg.name)
+        both, single = snapshot.album_lens(image), snapshot.frame_lens(image)
+        if both and single and f"· {both} lenses" in caption:
+            caption = caption.replace(f"· {both} lenses", f"· {single} lens")
     out_dir = os.path.dirname(image)
     cropped = crop_for_subject(cfg, image, out_dir, secrets,
                                source=getattr(image, "native", None),
