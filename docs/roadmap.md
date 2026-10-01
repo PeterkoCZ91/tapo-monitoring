@@ -387,10 +387,13 @@ the delivery sequence prescribes — observe first, promote later — and fixes 
 
 ### 8.1 — Observe-only trial of the motion arbiter
 
-- [ ] Deploy to the one camera that runs `track_hold` with `pan_limit` first. Compare a
+- [x] Deploy to the one camera that runs `track_hold` with `pan_limit` first. Compare a
   week of `hold_rescue_recall` sends, pan-limit frames and `motion_refusals` before and
   after; the arbiter is worth keeping only if the rescue stops firing in the ordinary
-  case without the lens lingering out of bounds.
+  case without the lens lingering out of bounds. Read 2026-10-01 (the 20 s `hold_grace`,
+  from journal line counts): pan-guard recalls fell from about 5.9 to 2.4 a day,
+  `hold_rescue_recall` never fired and no regression showed. Kept on that camera; no
+  other camera combines `track_hold` with `pan_limit`, so there is nothing to extend it to.
 - [x] Carry `motion_refusals` and a "runtime state restored" count in the daily digest's
   fleet block, so the trial is read from Telegram rather than from logs (detail lines,
   never a failed check).
@@ -612,7 +615,9 @@ busiest site.
 - [x] Replay the policy from recorded `hold`/`hold_expired` ledger rows so
   `replay --compare` estimates the added alerts before a camera switches it on.
 - [ ] Trial it in `observe` mode on one camera (running since 2026-09-24), label the frames
-  it would have sent, and promote to `send` from incident-level numbers (10.1).
+  it would have sent, and promote to `send` from incident-level numbers (10.1). After a
+  week: 16 holds, 7 expired, 5 would have been sent (score 0.45-0.55, 150-270 s after the
+  event, no other alert) against about 516 alerts sent; the 5 frames await labels.
 
 ### 10.3 — Telemetry that fills disks
 
