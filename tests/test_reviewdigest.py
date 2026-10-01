@@ -239,6 +239,22 @@ def test_run_if_due_sends_text_and_capped_photos_once(tmp_path):
     assert len(texts) == 1 and len(photos) == 3
 
 
+def test_run_if_due_logs_the_full_digest_text(tmp_path, caplog):
+    # The message went only to Telegram, so reading what a host said meant asking the owner
+    # to paste it. The journal now carries the same text.
+    review_dir = str(tmp_path)
+    now = _local_ts(2026, 8, 13, 21, 0)
+    _write_entry(review_dir, "e0.jpg", now - 60, "front", 0.64)
+    texts = []
+    with caplog.at_level("INFO", logger="tapo_monitor.reviewdigest"):
+        assert reviewdigest.run_if_due(
+            env=_env(tmp_path), now=now,
+            send_text=lambda t: texts.append(t) or True,
+            send_photo=lambda p, c: True) is True
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert texts[0] in logged
+
+
 def test_run_if_due_includes_the_fleet_health_and_alert_sections(tmp_path):
     # The point of the whole feature: one message a day that says the fleet is alive, not
     # only what it suppressed. Silence used to be the only "all good" signal there was.

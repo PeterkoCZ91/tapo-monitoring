@@ -530,8 +530,8 @@ def run_if_due(*, env=None, now=None, send_text, send_photo, health=None):
         # Say it out loud. Only failures used to log, so a working digest was
         # indistinguishable in the journal from one that had quietly stopped running, and
         # the only evidence either way was the state file.
-        log.info("review digest sent: %d suppressed frame(s), %d photo(s)",
-                 sum(not is_drop_sample(e) for e in entries), photos)
+        log.info("review digest sent: %d suppressed frame(s), %d photo(s)\n%s",
+                 sum(not is_drop_sample(e) for e in entries), photos, text)
         return True
     except Exception:  # noqa: BLE001 - telemetry must never break the daemon loop
         log.warning("review digest failed", exc_info=True)
