@@ -581,7 +581,9 @@ shadows. The generic detector has never seen this fleet's IR night scenes.
 
 Status: **in progress** (10.1, 10.3, 10.6 and 10.7 done; 10.2 and 10.5 in trials on one
 camera; 10.4: recording follow-ups 119 s -> 56 s and follow-ups off the main loop on the fleet,
-camera-card path and hub clips next; 10.8 done; 10.9 in a trial on one site)
+camera-card path and hub clips next; 10.8 done; 10.9 in a trial on one site; 10.10 in a
+trial on one camera since 2026-10-01; opt-in `sd_early_span`, `sd_frame_pick: tallest` and
+`lens_album` shipped, each awaiting its own trial)
 
 Frame statistics hide what matters to the person holding the phone: was each visit
 alerted, and how late. A first join of labels with deliveries showed that of 31 held
