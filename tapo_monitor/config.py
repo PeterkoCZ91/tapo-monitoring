@@ -128,6 +128,10 @@ class SamplerConfig:
 class ScorerConfig:
     """Local object-detection scoring service. Disabled when url is None."""
     url: str | None = None
+    # Opt-in failover candidates (``url:`` given as a list): ``url`` stays the first one,
+    # ``urls`` holds all of them, empty for the usual string. Which one is in use is runtime
+    # state read through ``scorer.active_url`` / ``scorer.score``.
+    urls: tuple[str, ...] = field(default=(), metadata={"runtime_only": True})
     threshold: float = 0.4  # min subject confidence to send a frame
     timeout: int = 10       # seconds per scoring request
     # Score the whole frame plus a tiles×tiles grid and keep the best. >1 rescues distant
@@ -811,8 +815,22 @@ def _check_hold_expiry(sampler, scorer, where):
                           "motion_send_threshold (a held score never reaches it)")
 
 
+def _scorer_urls(value, where):
+    """``(primary, candidates)`` from a scalar ``url`` (or None) or a list of candidates."""
+    if value is None or isinstance(value, str):
+        return value, ()
+    if (isinstance(value, list) and value
+            and all(isinstance(u, str) and u.strip() for u in value)):
+        urls = tuple(u.strip() for u in value)
+        if len(set(urls)) != len(urls):
+            raise ConfigError(f"{where}: scorer url lists the same address twice")
+        return urls[0], urls
+    raise ConfigError(f"{where}: scorer url must be an address or a non-empty list of them")
+
+
 def _scorer(data, where):
     d = data or {}
+    url, urls = _scorer_urls(d.get("url"), where)
     try:
         threshold = float(d.get("threshold", 0.4))
         timeout = int(d.get("timeout", 10))
@@ -865,7 +883,7 @@ def _scorer(data, where):
     alert_zones = _alert_zones(d.get("alert_zones"), where)
     if alert_zones_mode == "observe" and not alert_zones:
         raise ConfigError(f"{where}: scorer alert_zones_mode observe needs alert_zones")
-    return ScorerConfig(url=d.get("url"), threshold=threshold, timeout=timeout, tiles=tiles,
+    return ScorerConfig(url=url, urls=urls, threshold=threshold, timeout=timeout, tiles=tiles,
                         motion_send_threshold=motion_send_threshold,
                         person_bit_skips_hold=person_bit_skips_hold,
                         ignore_zones=ignore_zones, lens_ignore_zones=lens_ignore_zones,

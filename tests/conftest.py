@@ -27,6 +27,17 @@ import pytest  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _fresh_scorer_pools():
+    """Scorer failover state is module-level (one active URL per candidate list)."""
+    from tapo_monitor import scorer
+    if hasattr(scorer, "reset_pools"):
+        scorer.reset_pools()
+    yield
+    if hasattr(scorer, "reset_pools"):
+        scorer.reset_pools()
+
+
+@pytest.fixture(autouse=True)
 def _fresh_lamp_spans(monkeypatch):
     """Give every test its own record of when a lamp was seen lit (module-level state)."""
     from tapo_monitor import camera

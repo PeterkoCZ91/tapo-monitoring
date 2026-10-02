@@ -130,6 +130,10 @@ def load_state(path, state, logger=None):
         if isinstance(hosts, dict) and hasattr(state, "active_hosts"):
             state.active_hosts.update({k: v for k, v in hosts.items()
                                        if isinstance(k, str) and isinstance(v, str)})
+        scorers = payload.get("active_scorers")
+        if isinstance(scorers, dict) and hasattr(state, "active_scorers"):
+            state.active_scorers.update({k: v for k, v in scorers.items()
+                                         if isinstance(k, str) and isinstance(v, int)})
         return True
     except FileNotFoundError:
         return False
@@ -152,6 +156,9 @@ def save_state(path, state, logger=None):
             hosts = getattr(state, "active_hosts", None)
             if hosts:     # only a camera that failed over adds this key
                 payload["active_hosts"] = {str(k): str(v) for k, v in hosts.items()}
+            scorers = getattr(state, "active_scorers", None)
+            if scorers:   # only a scorer list that failed over adds this key
+                payload["active_scorers"] = {str(k): int(v) for k, v in scorers.items()}
             json.dump(
                 payload,
                 fh,

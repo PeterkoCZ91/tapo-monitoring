@@ -756,6 +756,40 @@ scorer:
 crop_to_subject: true
 ```
 
+#### Scorer failover (optional)
+
+`url` may be a list of candidate scoring services, for a scorer that is moved to another
+machine or has a standby; a plain string behaves exactly as before.
+
+```yaml
+scorer:
+  url: ["http://203.0.113.10:8766/score", "http://198.51.100.20:8766/score"]
+```
+
+The first entry is the primary. Scorers are interchangeable, so the monitor keeps one
+active URL per candidate list (cameras that list the same candidates share it) and every
+component reads it from one place (`scorer.active_url` / `scorer.score`): live scoring,
+the sampler and SD paths, the crop, the scene probe and the shadow scan.
+
+- Trigger: 3 consecutive request failures at the transport level (timeout, refused or
+  dropped connection, or a 502/503/504 from a proxy). An HTTP 4xx on an image, an
+  unreadable frame or a bad JSON body is not a failure of the service and never counts. A
+  success resets the streak.
+- Switch: the other candidates are tried in order with a quick `GET /health` (2 s) on the
+  same service; the first that answers becomes active. If none answers, the active URL is
+  kept and the candidates are probed again after 3 more failures.
+- Return: while a non-primary URL is active, the primary's `/health` is checked at most
+  every 5 minutes (by the next scoring request, no background thread) and the monitor
+  switches back as soon as it answers.
+- Visibility: one `scorer switch` warning per change (with both URLs, journal only) and one
+  `audit path=scorer action=scorer_switch scorer_index=N` line (index, never an address).
+  The choice is saved in the health state file (`active_scorers`, keyed by the primary URL)
+  and restored on restart if it is still in the list. The daily digest reads `/metrics`
+  from the active URL.
+- Not covered: `tapo-monitor label --scorer-url` takes one URL; `/health` only proves the
+  service is up, not that its model is the one you expect; all candidates should run the
+  same scorer version (older services without the `vehicle*` fields are tolerated).
+
 With `tiles > 1` the service also scores a tiles×tiles grid, but the grid only refines
 *localisation*: the send-decision `person` score always comes from the full frame; the
 returned `animal` score is audit telemetry only. The best tile contributes the person

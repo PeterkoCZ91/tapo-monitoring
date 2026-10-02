@@ -166,6 +166,27 @@ service would exit before the model loads — under `Restart=always` that is an 
 crash loop caused by an observability setting. Unset, blank and unparseable values all
 fall back to the built-in defaults.
 
+### Moving the scorer to another machine
+
+Because every camera shares one scorer, move it without a gap by listing both machines in
+`scorer.url` (see [Scorer failover](configuration.md#scorer-failover-optional)):
+
+1. Provision the new host with `tools/provision_scorer.sh` and check it with
+   `tools/check_scorer_rollout.sh http://NEW_HOST:8766` while the old one still serves.
+2. On each monitor host change `scorer.url` to a list, old scorer first, new one second:
+   `["http://203.0.113.10:8766/score", "http://198.51.100.20:8766/score"]`, and deploy the
+   config. Restart is needed to read it; nothing switches yet.
+3. Stop the old scorer. After 3 failed requests each monitor logs `scorer switch` and
+   continues on the new host; check `journalctl -u tapo-monitor | grep "scorer switch"` and
+   the `scorer_index=1` audit line. `health.json` remembers the choice across restarts.
+4. To make the move permanent, put the new URL first (or alone) and restart. Leave the old
+   one listed as the standby instead if it will come back: the monitors return to the first
+   entry within 5 minutes of its `/health` answering.
+
+The sites do not have to be changed together: a monitor that still has a plain string URL
+keeps using it. The daily digest reads `/metrics` from the active URL; `tools/fleet_status.sh` takes its own
+`TAPO_FLEET_SCORER_URL`, so point that at the new host after the move.
+
 ### When the scorer itself fails
 
 The unit gives up after five starts in five minutes instead of crash-looping in silence,

@@ -147,6 +147,8 @@ def summarize(lines) -> dict[str, CameraSummary]:
         rec = parse_audit_line(line)
         if not rec:
             continue
+        if rec.get("path") == "scorer":
+            continue      # a fleet-wide scorer event, not any camera's
         camera = str(rec.get("camera") or "unknown")
         summaries.setdefault(camera, CameraSummary()).observe(rec)
     return summaries

@@ -11,6 +11,10 @@ import hashlib
 import json
 import logging
 import math
+import threading
+import time
+import urllib.error
+import urllib.parse
 import urllib.request
 
 log = logging.getLogger(__name__)
@@ -33,13 +37,35 @@ def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None, ignore_
     only the people standing in them (:func:`apply_alert_zones`). With ``alert_zones_mode="observe"`` nothing is filtered:
     the answer only gains ``alert_zone_observe`` when a zone would have dropped a person
     (:func:`observe_alert_zones`).
+
+    Callers that have a camera's ``ScorerConfig`` use :func:`score`, which adds failover.
     """
+    return _score_once(url, image_path, timeout, tiles, source_id=source_id,
+                       ignore_zones=ignore_zones, alert_zones=alert_zones,
+                       alert_zones_mode=alert_zones_mode)[0]
+
+
+def _transport_failure(exc):
+    """True when ``exc`` says the service could not be reached (not that it refused a frame).
+
+    A timeout or connection error counts; so does a gateway answer (502/503/504) from a
+    proxy in front of a dead service. Any other HTTP status — the 4xx a bad image earns —
+    and any parse error mean the service is there.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in (502, 503, 504)
+    return isinstance(exc, (OSError, TimeoutError))
+
+
+def _score_once(url, image_path, timeout, tiles, *, source_id=None, ignore_zones=(),
+                alert_zones=(), alert_zones_mode="enforce"):
+    """``(result, transport_failed)`` of one scoring request; result None on any failure."""
     try:
         with open(image_path, "rb") as f:
             body = f.read()
     except OSError:
         log.warning("scorer: cannot read %s", image_path)
-        return None
+        return None, False
     if tiles and int(tiles) > 1:
         sep = "&" if "?" in url else "?"
         url = f"{url}{sep}tiles={int(tiles)}"
@@ -55,7 +81,7 @@ def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None, ignore_
             result = json.load(resp)
             if not isinstance(result, dict):
                 log.warning("scorer returned a non-object JSON response")
-                return None
+                return None, False
             if ignore_zones:
                 result = apply_ignore_zones(result, ignore_zones)
             if alert_zones and alert_zones_mode == "observe":
@@ -63,14 +89,169 @@ def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None, ignore_
             elif alert_zones:
                 result = apply_vehicle_alert_zones(apply_alert_zones(result, alert_zones),
                                                    alert_zones)
-            return result
+            return result, False
         finally:
             close = getattr(resp, "close", None)
             if close:
                 close()
     except Exception as e:  # noqa: BLE001 - any transport/parse failure means "unavailable"
         log.warning("scorer request failed: %s", e)
+        return None, _transport_failure(e)
+
+
+# -- failover between interchangeable scoring services ----------------------------------
+#
+# ``scorer.url`` may be a list of candidates. Unlike cameras, scorers are interchangeable,
+# so the monitor keeps ONE active URL per candidate list (every camera listing the same
+# candidates shares it), moves on after FAIL_THRESHOLD consecutive transport failures to the
+# first candidate whose /health answers, and goes back to the first (primary) candidate as
+# soon as its /health answers again, checked at most every PRIMARY_RECHECK_SECONDS. All of
+# it happens inside :func:`score`; nothing needs a background thread.
+
+FAIL_THRESHOLD = 3
+PRIMARY_RECHECK_SECONDS = 300
+HEALTH_TIMEOUT = 2.0
+
+_clock = time.monotonic
+_pools: dict[tuple, "ScorerPool"] = {}
+_pools_lock = threading.Lock()
+_listeners: list = []
+
+
+def health_url(url):
+    """The ``/health`` address of the service that serves scoring ``url``."""
+    parts = urllib.parse.urlsplit(url)
+    path = parts.path
+    path = (path[:-len("/score")] if path.endswith("/score") else path.rstrip("/")) + "/health"
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+
+
+def _health_ok(url, timeout=HEALTH_TIMEOUT):
+    """True when the service behind scoring ``url`` answers GET /health with 2xx."""
+    try:
+        with urllib.request.urlopen(health_url(url), timeout=timeout) as resp:
+            return 200 <= getattr(resp, "status", 200) < 300
+    except Exception:  # noqa: BLE001 - any failure means "not alive"
+        return False
+
+
+class ScorerPool:
+    """The active URL of one candidate list and the streak that decides when to move."""
+
+    def __init__(self, urls):
+        self.urls = tuple(urls)
+        self.index = 0
+        self.fails = 0
+        self.next_primary_check = 0.0
+        self.lock = threading.Lock()
+
+    @property
+    def active(self):
+        return self.urls[self.index]
+
+    def record(self, url, transport_failed):
+        """Count one request's outcome made against ``url`` (stale answers are ignored)."""
+        with self.lock:
+            if url != self.active:
+                return
+            if not transport_failed:
+                self.fails = 0
+                return
+            self.fails += 1
+            if self.fails < FAIL_THRESHOLD:
+                return
+            self.fails = 0        # a dead fleet is re-probed after N more failures, not per call
+            for step in range(1, len(self.urls)):
+                candidate = (self.index + step) % len(self.urls)
+                if _health_ok(self.urls[candidate]):
+                    self._switch(candidate, "unreachable")
+                    return
+
+    def maybe_return_to_primary(self):
+        """Back to the first candidate once its /health answers; checked every 5 minutes."""
+        if self.index == 0 or not self.lock.acquire(blocking=False):
+            return       # nothing to recover, or another request is already checking
+        try:
+            now = _clock()
+            if self.index == 0 or now < self.next_primary_check:
+                return
+            self.next_primary_check = now + PRIMARY_RECHECK_SECONDS
+            if _health_ok(self.urls[0]):
+                self._switch(0, "primary recovered")
+        finally:
+            self.lock.release()
+
+    def _switch(self, index, reason):
+        old, self.index, self.fails = self.index, index, 0
+        self.next_primary_check = _clock() + PRIMARY_RECHECK_SECONDS
+        log.warning("scorer switch: %s -> %s (%s)", self.urls[old], self.urls[index], reason)
+        log.info("audit path=scorer action=scorer_switch etype=system start=%d reason=%s "
+                 "scorer_index=%d", int(time.time()), reason.replace(" ", "_"), index)
+        for listener in list(_listeners):
+            try:
+                listener(self.urls[0], index)
+            except Exception:  # noqa: BLE001 - persistence must never break scoring
+                log.warning("scorer switch listener failed", exc_info=True)
+
+
+def pool_for(scorer_cfg):
+    """The shared :class:`ScorerPool` of a config with several candidates, else None."""
+    urls = tuple(getattr(scorer_cfg, "urls", ()) or ())
+    if len(urls) < 2:
         return None
+    with _pools_lock:
+        pool = _pools.get(urls)
+        if pool is None:
+            pool = _pools[urls] = ScorerPool(urls)
+        return pool
+
+
+def active_url(scorer_cfg):
+    """The one scoring URL to use for this config right now (None when unconfigured).
+
+    The single read point for ``scorer.url``: ``cfg.url`` is the configured primary, a
+    config whose ``url`` is a list may have failed over to another candidate at runtime.
+    """
+    pool = pool_for(scorer_cfg)
+    return pool.active if pool else scorer_cfg.url
+
+
+def score(scorer_cfg, image_path, **kwargs):
+    """:func:`score_image` against the config's active URL, with failover. None on failure.
+
+    ``kwargs`` are those of :func:`score_image` (``timeout`` defaults to the config's).
+    """
+    kwargs.setdefault("timeout", scorer_cfg.timeout)
+    kwargs.setdefault("tiles", 1)
+    pool = pool_for(scorer_cfg)
+    if pool is None:
+        return score_image(scorer_cfg.url, image_path, **kwargs)
+    pool.maybe_return_to_primary()
+    url = pool.active
+    result, transport_failed = _score_once(url, image_path, **kwargs)
+    pool.record(url, transport_failed)
+    return result
+
+
+def add_switch_listener(callback):
+    """Call ``callback(primary_url, index)`` after every switch (to persist it)."""
+    _listeners.append(callback)
+
+
+def restore_active(scorer_cfgs, active):
+    """Re-apply persisted choices ``{primary_url: index}`` that are still valid candidates."""
+    for scorer_cfg in scorer_cfgs:
+        pool = pool_for(scorer_cfg)
+        index = active.get(pool.urls[0]) if pool else None
+        if isinstance(index, int) and 0 <= index < len(pool.urls):
+            pool.index = index
+
+
+def reset_pools():
+    """Forget every pool and listener (tests; a fresh process starts on the primaries)."""
+    with _pools_lock:
+        _pools.clear()
+    _listeners.clear()
 
 
 # A person counts as inside an ignore zone when at least this share of its box is.

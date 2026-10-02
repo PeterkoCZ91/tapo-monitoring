@@ -17,6 +17,13 @@ All notable changes to this project are documented here.
   cooldown armed). Each needs its feature enabled.
 - `tapo-monitor label-stats --camera-alias OLD=NEW` (repeatable): counts the records of a
   renamed camera under its new name in the per-camera, incident and day/night tables.
+- `scorer.url` may be a list of candidate scoring services (off by default; a string works
+  as before). After 3 consecutive transport failures (timeout or connection, not an HTTP 4xx
+  on an image) the monitor tries the other candidates with `GET /health` and switches to the
+  first that answers; while on a non-primary it checks the primary's `/health` every 5
+  minutes and switches back when it recovers. One `scorer switch` warning and one audit line
+  (index only); the choice is kept in the health state file. The URL is read through a
+  single `scorer.active_url` / `scorer.score`.
 - `host` may be a list of candidate addresses (off by default; a string works as before).
   After two failed ping passes the monitor tries the other candidates with a TCP connect to
   the API port, switches to the first that answers as the same camera (MAC from

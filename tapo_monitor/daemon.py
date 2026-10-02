@@ -933,6 +933,9 @@ class MonitorState:
     # per camera, ``host_identity`` the camera's MAC (memory only) and ``failover_rejected``
     # the candidates that answered TCP but turned out to be another device.
     active_hosts: dict = field(default_factory=dict)
+    # Opt-in scorer failover (``scorer.url`` as a list): ``{primary url: active index}``,
+    # persisted in the health file next to ``active_hosts``.
+    active_scorers: dict = field(default_factory=dict)
     host_identity: dict = field(default_factory=dict)
     failover_rejected: dict = field(default_factory=dict)
     connect_fails: dict = field(default_factory=dict)
@@ -1428,7 +1431,7 @@ def score_for(cfg: CameraConfig):
     source_id = scorer.source_id_for_camera(cfg.name)
 
     def score_remote(image_path):
-        return scorer.score_image(cfg.scorer.url, image_path, timeout=cfg.scorer.timeout,
+        return scorer.score(cfg.scorer, image_path, timeout=cfg.scorer.timeout,
                                   tiles=cfg.scorer.tiles, source_id=source_id,
                                   ignore_zones=scorer.zones_for_lens(
                                       cfg.scorer, snapshot.frame_lens(image_path)),
@@ -1561,7 +1564,7 @@ def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_f
         return image
     result = score_result
     if result is None:
-        result = scorer.score_image(cfg.scorer.url, image, timeout=cfg.scorer.timeout,
+        result = scorer.score(cfg.scorer, image, timeout=cfg.scorer.timeout,
                                     tiles=cfg.scorer.tiles,
                                     source_id=scorer.source_id_for_camera(cfg.name),
                                     ignore_zones=scorer.zones_for_lens(
@@ -4575,7 +4578,7 @@ def fleet_health_snapshot(app: AppConfig, state: MonitorState, *, now,
     if urls:
         # One /metrics per distinct endpoint: the sites share a scorer, so asking per
         # camera would poll the same process twice for the same answer.
-        url = sorted(set(urls))[0]
+        url = sorted({scorer.active_url(c.scorer) for c in app.cameras if c.scorer.url})[0]
         metrics_url = url[: -len("/score")] + "/metrics" if url.endswith("/score") else url
         try:
             metrics = fetch_metrics(metrics_url) or {}
@@ -4800,6 +4803,8 @@ def main(argv=None):  # pragma: no cover - thin entry point
     state.health_path = health.default_state_path()
     restored = health.load_state(state.health_path, state, logger=log)
     apply_active_hosts(app.cameras, state)
+    apply_active_scorers(app.cameras, state)
+    watch_scorer_switches(state)
     state.runtime_path = runtime_state.default_path()
     carried = runtime_state.load(state.runtime_path, state, _time.time(), logger=log)
     state.runtime_restored = dict(carried)
@@ -5095,6 +5100,23 @@ def apply_active_hosts(cameras, state):
         host = state.active_hosts.get(cfg.name)
         if host and host in camera.candidate_hosts(cfg):
             cfg.active_host = host
+
+
+def apply_active_scorers(cameras, state):
+    """Restore the persisted active scorer URL of each candidate list, if still valid."""
+    scorer.restore_active([cfg.scorer for cfg in cameras], state.active_scorers)
+
+
+def watch_scorer_switches(state):
+    """Record every scorer failover/return in ``state`` and save it with the health file."""
+    def on_switch(primary, index):
+        if index:
+            state.active_scorers[primary] = index
+        else:
+            state.active_scorers.pop(primary, None)
+        if state.health_path:
+            health.save_state(state.health_path, state, logger=log)
+    scorer.add_switch_listener(on_switch)
 
 
 def _fail_over(cfg, state, cam_clients, now):

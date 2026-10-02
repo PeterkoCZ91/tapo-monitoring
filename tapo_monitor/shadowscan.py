@@ -335,7 +335,8 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
                     per_cam[key] += diagnostics.get(key, 0)
             scored = score_candidates(
                 candidates, cfg.scorer.url, threshold_at(app, cfg, is_night),
-                rate=rate, budget=camera_frames, score=score,
+                rate=rate, budget=camera_frames,
+                score=score or (lambda _url, path, _s=cfg.scorer, **kw: scorer.score(_s, path, **kw)),
                 source_id=scorer.source_id_for_camera(cfg.name),
             )
             per_cam["frames_scored"] = scored["scored"]

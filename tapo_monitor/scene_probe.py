@@ -162,7 +162,7 @@ def _real_score(tiles):
     def score(cfg, image_path):
         if not cfg.scorer.url:
             return None
-        return scorer.score_image(cfg.scorer.url, image_path,
+        return scorer.score(cfg.scorer, image_path,
                                   timeout=cfg.scorer.timeout, tiles=tiles,
                                   source_id=scorer.source_id_for_camera(cfg.name),
                                   ignore_zones=scorer.zones_for_lens(
