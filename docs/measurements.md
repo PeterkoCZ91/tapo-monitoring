@@ -11,8 +11,10 @@ software. [Limitations](#limitations) lists what the numbers cannot tell you.
 ## What was measured and how
 
 - **Deployment.** One owner, several sites, a Raspberry Pi per site, one shared local
-  scoring service (YOLOX, `person` class). Camera models: C560WS (pan/tilt, outdoor),
-  C545D (dual lens) and C260.
+  scoring service (YOLOX, `person` class). Camera models: C560WS (pan/tilt, outdoor-rated;
+  four cameras), C545D (dual lens; one camera) and C260 (one camera). The dataset does not
+  record a model; the model of each camera name comes from the owner's inventory, and the
+  tables below only use the three groups C560WS / C545D / C260.
 - **Period.** September to October 2026. Counts of labeled frames cover the whole period;
   latency tables use roughly the same window.
 - **Frames.** Every alert frame that was sent (the sent log) plus a sample of frames the
@@ -72,6 +74,140 @@ Per C560WS camera the false-alarm rate ranged from 1.9 % to 8.1 % (decided sent 
 from 34 to 1,064). The C545D and C260 figures come from only a few weeks of data and
 small n, and from scenes with a lot of non-person motion, so the difference to C560WS may
 be the scene, not the model.
+
+## Accuracy by time of day
+
+Frames split into day and night the way the monitor itself judges it (`label-stats
+--config`): astronomical night at the configured location, then the camera's own
+`schedule`. One location and one set of `NIGHT_*` values was used for every camera, so for
+cameras at other sites the boundary can be off by some minutes around dusk and dawn. Same
+labeled frames as above (2,563; every frame had a timestamp).
+
+| Part of day | Labeled frames (n) | False alarms (sent) | Misses (held) |
+| --- | ---: | ---: | ---: |
+| day | 1,899 | 66 of 1,525 (4.3 %) | 33 of 372 (8.9 %) |
+| night | 664 | 28 of 449 (6.2 %) | 12 of 215 (5.6 %) |
+
+| Camera model | Day: false alarms | Day: misses | Night: false alarms | Night: misses |
+| --- | ---: | ---: | ---: | ---: |
+| C560WS | 37 of 1,364 (2.7 %) | 32 of 341 (9.4 %) | 25 of 438 (5.7 %) | 12 of 201 (6.0 %) |
+| C545D | 21 of 75 (28 %) | 0 of 4 | 1 of 9 | 0 of 10 |
+| C260 | 8 of 86 (9 %) | 1 of 27 (4 %) | 2 of 2 | 0 of 4 |
+
+Reading it:
+
+- The false-alarm rate on C560WS roughly doubles at night (2.7 % to 5.7 %); the decided
+  night sample is a third of the day sample, so the gap is suggestive. Misses go the other
+  way (9.4 % to 6.0 %), mostly held frames of a person that daylight scored in the gray
+  zone: of the day misses 27 of 29 `hold` frames and 6 of 6 `cooldown` frames were persons.
+- The fewest-errors cut was `person >= 0.31` for both parts (day 32 errors in 1,860
+  decided frames, night 13 in 646), in-sample as before. The best cut is the same by day
+  and by night, so these labels do not suggest a separate night threshold.
+- C545D and C260 have 19 and 6 night frames; their night cells are not usable.
+
+## Accuracy by delivery path
+
+The sent log names how the frame was obtained (`path`): `live` (fetched at the event),
+`sampler` (event-window sampler) or `sd` (frame cut from the camera-card recording). Only
+records from the late-September window on carry the field; 798 sent and 43 held labeled
+frames from earlier records have none and are listed separately. Sent frames, false alarms:
+
+| Path | Labeled sent frames (n) | False alarms | Median person score |
+| --- | ---: | ---: | ---: |
+| live | 495 | 39 (7.9 %) | 0.85 (n = 478) |
+| sampler | 142 | 9 (6.3 %) | 0.82 (n = 139) |
+| sd | 539 | 26 (4.8 %) | 0.84 (n = 515) |
+| path not logged | 798 | 20 (2.5 %) | not shown |
+
+By camera model, sent frames with a path (false alarms of n): C560WS live 17 of 352,
+sampler 3 of 135, sd 22 of 517; C545D live 17 of 69, sd 3 of 13, sampler 2 of 2; C260 live
+5 of 74, sd 1 of 9, sampler 4 of 5.
+
+Held (review) frames labeled `person`: sampler 0 of 365, sd 7 of 154, live 0 of 25, and 38
+of 43 for records with no path (that group is the early gray-zone oversample, not a path).
+
+Reading it: the median person score of the sent frame is similar on all three paths. The `live` false-alarm rate looks highest, but 17 of its 39 false alarms are
+C545D, whose scene makes that camera's rate high on every path, so the pooled rate mixes
+cameras with the path. The paths also see different events (the sampler and `sd`
+can pick up events the live frame did not), so the rates are not a like-for-like comparison.
+
+## Accuracy by lens (dual-lens camera)
+
+The C545D caption names the lens that produced the frame (`wide` or `pan/tilt`) only since
+the lens pick was logged; most of its labeled frames predate that.
+
+| Lens named in the caption | Labeled sent frames (n) | False alarms |
+| --- | ---: | ---: |
+| wide | 5 | 0 |
+| pan/tilt | 27 | 10 (37 %) |
+| not named | 52 | 12 (23 %) |
+
+n is small (32 frames with a lens, 84 decided sent frames in all). The 10 false alarms
+from the pan/tilt lens are 37 %, against 0 of 5 for the wide lens, but five wide frames
+cannot show a difference. Treat this as "worth watching", not a finding.
+
+## What a different threshold would have done
+
+For each threshold, the labeled frames that carry a production score (2,506 of 2,563; 1,924
+of them `person`) were scored as if every frame at or above the threshold were alerted. A
+*false alarm* is a `no_person` frame at or above it, a *missed person* is a `person` frame
+below it. **In-sample**: the labels, the gray-zone oversampling and the choice of
+frames to label all come from this deployment, so it shows the trade-off, not what a
+threshold would do on your cameras.
+
+| `scorer.threshold` | Frames alerted | False alarms | Missed persons | Person recall |
+| ---: | ---: | ---: | ---: | ---: |
+| 0.30 | 1,969 | 45 | 0 | 100 % |
+| 0.35 | 1,965 | 44 | 3 | 99.8 % |
+| 0.40 | 1,963 | 44 | 5 | 99.7 % |
+| 0.45 | 1,961 | 44 | 7 | 99.6 % |
+| 0.50 | 1,956 | 44 | 12 | 99.4 % |
+| 0.55 | 1,943 | 38 | 19 | 99.0 % |
+| 0.60 | 1,896 | 23 | 51 | 97.3 % |
+| 0.65 | 1,854 | 17 | 87 | 95.5 % |
+
+Reading it:
+
+- Between 0.30 and 0.50 the threshold hardly changes either count (one false alarm and
+  twelve persons). The false alarms there are scored above 0.50, so no threshold in
+  this range removes them. Raising it to 0.60 or 0.65 removes 22 to 28 false alarms and
+ 
+  costs 51 to 87 persons.
+- Per camera model the same pattern holds. C560WS (n = 2,291): 13 false alarms and no
+  misses at 0.30, 12 and 5 at 0.40, 12 and 12 at 0.50, 4 and 86 at 0.65. C545D (n = 96):
+  20, 20, 20 and 8 false alarms, 0, 0, 0 and 1 missed. C260 (n = 119): 12, 12, 12 and 5
+  false alarms, no misses.
+- The labeled set contains persons only down to a score of about 0.30 because lower
+  frames were a random 1-in-20 draw with no person (see above). Everything a threshold below 0.30
+  would admit is invisible here.
+- Frames held by a scene gate or cooldown are counted as alerted here. This sweep is about
+  the score only.
+
+## Alert volume over time
+
+Delivered alert photos per day from the sent log, as a daily median with the number of days
+in the window. A change is shown only where the setting
+change is documented and dated; other differences are not attributed.
+
+| Camera model | Window | Days (n) | Median alerts per day | Range |
+| --- | --- | ---: | ---: | ---: |
+| C560WS (daytime detection off) | August, before | 10 | 7 | 4 to 25 |
+| same camera, daytime detection on | August, after | 8 | 32 | 23 to 47 |
+| same camera, later | September to October | 31 | 83 | 52 to 136 |
+| C560WS (night-dwell change) | August to September, before | 40 | 47 | 6 to 85 |
+| same camera, after | September to October | 15 | 44 | 0 to 84 |
+
+- On the first camera, turning on daytime detection (`night_only: false`) took the daily
+  median from 7 to 32, a factor of about four and not a defect: daytime pedestrian traffic
+  is real events. Its further rise to a median of 83 in September has no
+  single documented cause in this data: several changes shipped in those weeks and the
+  season changed too, so it is not attributed.
+- On the second camera, a longer night dwell after auto-track did not change alert volume
+  (47 to 44), as intended: the payoff is the camera-card recording, not more photos. The
+  minimum of 0 in the "after" window is one day with no record at all, cause not checked.
+- The other C560WS cameras, the C545D and the C260 have under 10 days of records and are
+  not shown. Days with no record count as zero in the second pair of rows and are left out
+  of the first pair, which understates the "before" medians there slightly.
 
 ## Incidents
 
@@ -192,7 +328,10 @@ time.
 - **Labels are mostly automatic.** About 81 % are teacher labels where two models agree.
   Both are YOLO-family detectors and share blind spots, so errors both make are not
   visible. The human labels (19 %) are biased to the hard frames.
-- **Threshold fitted on the same data.** The best-threshold result is in-sample.
+- **Threshold fitted on the same data.** The best-threshold result and the threshold
+  sweep are in-sample.
+- **Splits shrink n.** Day/night, path, lens and per-model cuts divide 2,563 frames into
+  cells that are sometimes a few dozen; read each `n` before reading a percentage.
 - **Replays use today's model.** Re-scored frames differ from the original alert-time
   scores, and replayed logs only contain what was sent or sampled.
 - **Latency mixes configurations.** The window spans several restarts and setting
@@ -206,7 +345,7 @@ time.
 Collect and label frames as described in [Labeling](labeling.md), then:
 
 ```bash
-# accuracy per band and per camera, incidents, first-alert delay per path
+# accuracy per band, camera and day/night, incidents, first-alert delay per path
 tapo-monitor label-stats ~/tapo-dataset --config cameras.yaml
 
 # the same as JSON for your own analysis
@@ -222,4 +361,6 @@ tapo-monitor replay cameras.yaml --hours 168 --compare other.yaml --summary-only
 
 Pass `--config` (with your `NIGHT_*` environment) so frames are split into day and night
 by your location rather than a clock fallback. Group cameras by model yourself in the JSON
-output.
+output. Delivery path, lens and alert volume come from the sent log (`sent-log/index.jsonl`:
+the `path` field, the lens in the caption, one record per delivered alert); the threshold
+sweep is `score >= t` over the labeled frames in the JSON/`labels.jsonl`.
