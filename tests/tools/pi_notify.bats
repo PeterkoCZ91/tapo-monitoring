@@ -87,6 +87,21 @@ assert_curl_not_called() {
     assert_file_contains "$CURL_LOG" "text=camera unreachable"
 }
 
+@test "operational credentials override the camera destination" {
+    printf 'TAPO_OPS_TELEGRAM_TOKEN=operator-bot\nTAPO_OPS_TELEGRAM_CHAT_ID=operator-chat\n' >>"$TAPO_ENV_FILE"
+    run "$SCRIPT" "service failed"
+    assert_status 0
+    assert_file_contains "$CURL_LOG" "botoperator-bot/sendMessage"
+    assert_file_contains "$CURL_LOG" "chat_id=operator-chat"
+}
+
+@test "partial operational credentials never mix destinations" {
+    printf 'TAPO_OPS_TELEGRAM_TOKEN=operator-bot\n' >>"$TAPO_ENV_FILE"
+    run "$SCRIPT" "service failed"
+    [[ "$status" -ne 0 ]]
+    assert_curl_not_called
+}
+
 @test "a confirmed send with a service name arms the cooldown" {
     run "$SCRIPT" "unit failed" "$SERVICE"
 

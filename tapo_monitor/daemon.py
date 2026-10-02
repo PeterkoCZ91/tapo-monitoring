@@ -1069,7 +1069,7 @@ def stall_watchdog(app: AppConfig, state: "MonitorState", secrets, *, ok, now):
         event, _ = update_stall(state, ok, now, app.alerts.stall_threshold)
         if event == "alert":
             down = notify.format_duration(max(0, now - (state.tick_fail_since or now)))
-            if notify.send_text(secrets["telegram_token"], secrets["telegram_chat"],
+            if notify.send_operational(secrets["telegram_token"], secrets["telegram_chat"],
                                 f"🔴 monitor stalled: no successful tick for {down}"):
                 log.info("stall alert sent")
             else:
@@ -1078,7 +1078,7 @@ def stall_watchdog(app: AppConfig, state: "MonitorState", secrets, *, ok, now):
                 state.stall_alerted = False
                 log.warning("stall notification delivery failed")
         elif event == "recovered":
-            if notify.send_text(secrets["telegram_token"], secrets["telegram_chat"],
+            if notify.send_operational(secrets["telegram_token"], secrets["telegram_chat"],
                                 "🟢 monitor recovered: ticks completing again"):
                 log.info("stall recovery sent")
     except Exception:  # noqa: BLE001 - the watchdog may never kill the loop it guards
@@ -1404,7 +1404,8 @@ def score_for(cfg: CameraConfig):
     def score_remote(image_path):
         return scorer.score_image(cfg.scorer.url, image_path, timeout=cfg.scorer.timeout,
                                   tiles=cfg.scorer.tiles, source_id=source_id,
-                                  ignore_zones=cfg.scorer.ignore_zones)
+                                  ignore_zones=cfg.scorer.ignore_zones,
+                                  alert_zones=cfg.scorer.alert_zones)
 
     def score(image_path):
         started = _time.monotonic()
@@ -1535,7 +1536,8 @@ def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_f
         result = scorer.score_image(cfg.scorer.url, image, timeout=cfg.scorer.timeout,
                                     tiles=cfg.scorer.tiles,
                                     source_id=scorer.source_id_for_camera(cfg.name),
-                                    ignore_zones=cfg.scorer.ignore_zones)
+                                    ignore_zones=cfg.scorer.ignore_zones,
+                                    alert_zones=cfg.scorer.alert_zones)
     if not result:
         return image
     box = scorer.subject_box(result)
@@ -2471,7 +2473,7 @@ def check_hub_inactivity(app, state, *, now, secrets, night, hub_for):
         text = (f"💤 camera '{cfg.name}': no hub clip for over {days} day(s)"
                 f" (last {idle} ago)" if seen else
                 f"💤 camera '{cfg.name}': no hub clip in the last 90 days")
-        if notify.send_text(secrets["telegram_token"], secrets["telegram_chat"], text):
+        if notify.send_operational(secrets["telegram_token"], secrets["telegram_chat"], text):
             state.hub_inactive_alerted[cfg.name] = now
             log.info("hub inactivity notice sent for %s", cfg.name)
         else:
@@ -3698,7 +3700,7 @@ def privacy_notice_pass(app, state, *, secrets, send_text=None):
     announced only when the lens is parked; ``privacy_announced`` is persisted, so a
     restart neither repeats nor misses a change. A failed send is retried next pass.
     """
-    send_text = send_text or (lambda text: notify.send_text(
+    send_text = send_text or (lambda text: notify.send_operational(
         secrets["telegram_token"], secrets["telegram_chat"], text))
     for cfg in app.cameras:
         if not cfg.privacy_notice:
@@ -3760,7 +3762,7 @@ def detection_notice_pass(app, state, *, secrets, now=None, send_text=None):
     persisted; a failed send is retried on the next pass.
     """
     now = _time.time() if now is None else now
-    send_text = send_text or (lambda text: notify.send_text(
+    send_text = send_text or (lambda text: notify.send_operational(
         secrets["telegram_token"], secrets["telegram_chat"], text))
     for cfg in app.cameras:
         if not cfg.detection_notice:
@@ -3914,7 +3916,7 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
                     f"{item['path']} expected={item['expected']} actual={item['actual']}"
                     for item in new_results
                 )
-                if notify.send_text(
+                if notify.send_operational(
                     secrets["telegram_token"], secrets["telegram_chat"],
                     f"⚠️ camera '{cfg.name}' configuration drift: {details}",
                 ):
@@ -3924,7 +3926,7 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
                     log.info("drift alert sent for %s: %d drift(s)",
                              cfg.name, len(new_results))
             recovered = alerted - current_keys
-            if recovered and notify.send_text(
+            if recovered and notify.send_operational(
                 secrets["telegram_token"], secrets["telegram_chat"],
                 f"✅ camera '{cfg.name}' configuration drift recovered",
             ):
@@ -4306,12 +4308,12 @@ def _log_disk_pass(state, *, now, secrets, env=None):
         token, chat = secrets.get("telegram_token"), secrets.get("telegram_chat")
         if not state.log_disk_warned and free < floor:
             names = "/".join(name for name, _ in dirs)
-            if notify.send_text(token, chat, f"💾 log disk low: {free:.0f} MB free, below "
+            if notify.send_operational(token, chat, f"💾 log disk low: {free:.0f} MB free, below "
                                              f"the {floor} MB floor ({names} logs)"):
                 state.log_disk_warned = True
                 log.warning("log disk warning sent: %.0f MB free, floor %d MB", free, floor)
         elif state.log_disk_warned and free >= floor * LOG_DISK_REARM:
-            if notify.send_text(token, chat, f"✅ log disk recovered: {free:.0f} MB free"):
+            if notify.send_operational(token, chat, f"✅ log disk recovered: {free:.0f} MB free"):
                 state.log_disk_warned = False
                 log.info("log disk recovery sent: %.0f MB free", free)
     except Exception:  # noqa: BLE001 - telemetry must never break the daemon loop
@@ -4628,7 +4630,7 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
             uptime = state.last_observed_uptime.get(cfg.name)
             detail = (f" after {notify.format_duration(uptime)} observed uptime"
                       if uptime is not None else "")
-            delivered = notify.send_text(
+            delivered = notify.send_operational(
                 token, chat, f"🔴 camera '{cfg.name}' unreachable{detail}")
             if delivered:
                 log.info("outage alert sent for %s", cfg.name)
@@ -4640,7 +4642,7 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
             duration = state.last_outage_duration.get(cfg.name)
             detail = (f" after {notify.format_duration(duration)} outage"
                       if duration is not None else "")
-            delivered = notify.send_text(
+            delivered = notify.send_operational(
                 token, chat, f"🟢 camera '{cfg.name}' back online{detail}")
             if delivered:
                 state.recovery_pending.pop(cfg.name, None)
@@ -4672,7 +4674,7 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
                 reason = state.event_error.get(name)
                 if reason:
                     detail += f" ({reason})"
-                delivered = notify.send_text(
+                delivered = notify.send_operational(
                     token, chat, f"event API unavailable for camera {name}{detail}"
                 )
                 if delivered:
@@ -4686,7 +4688,7 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
                     state.event_restart_attempted[name] = True
                     if camera_api.reboot(client):
                         log.warning("event API restart requested for %s", name)
-                        if notify.send_text(
+                        if notify.send_operational(
                             token, chat, f"event API restart requested for camera {name}"
                         ):
                             log.info("event restart notice sent for %s", name)
@@ -4695,7 +4697,7 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
         elif event_ok is True:
             if state.event_alerted.get(name):
                 age = max(0, now - state.event_fail_since.get(name, now))
-                delivered = notify.send_text(
+                delivered = notify.send_operational(
                     token, chat,
                     f"event API restored for camera {name} after "
                     f"{notify.format_duration(age)}"

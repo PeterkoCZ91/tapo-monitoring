@@ -65,12 +65,12 @@ failures=0
 # cooldown, and an unconfirmed recovery must not close an episode.
 send_telegram() {
   local response
-  response=$(curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+  response=$(curl -fsS --connect-timeout 5 --max-time 10 -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
     --data-urlencode "chat_id=${CHAT}" \
     --data-urlencode "text=$1" 2>&1) || true
   case "$response" in
     *'"ok":true'*) return 0 ;;
-    *) echo "host-watch: Telegram send failed: $response" >&2; return 1 ;;
+    *) echo "host-watch: Telegram send failed (not confirmed)" >&2; return 1 ;;
   esac
 }
 
@@ -117,6 +117,7 @@ process() {
       # Recovery is delivery-gated like the alert itself: a failed send keeps the
       # episode open so the next pass retries, instead of closing it in silence.
       if send_telegram "$up_msg (down ${mins} min)"; then
+        echo "host-watch: $slug recovery delivered"
         rm -f "$alerted_f" "$stamp_f" "$since_f"
       else
         failures=$((failures + 1))
@@ -146,6 +147,7 @@ process() {
   # The cooldown stamp is written only after Telegram confirms, mirroring pi_notify.sh:
   # an unconfirmed alert retries on the next pass instead of consuming its cooldown.
   if send_telegram "$down_msg (${mins} min)"; then
+    echo "host-watch: $slug outage delivered"
     echo "$NOW" > "$stamp_f"
     : > "$alerted_f"
   else

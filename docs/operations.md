@@ -870,3 +870,22 @@ SuccessExitStatus=143
   symlink and restarts — see [Release deploys and rollback](#release-deploys-and-rollback).
 - Scorer: restore the previous venv/model, or set `scorer.url` empty to fall back to
   raw/Groq gating.
+
+## Separate operational Telegram destination
+
+Set both `TAPO_OPS_TELEGRAM_TOKEN` and `TAPO_OPS_TELEGRAM_CHAT_ID` in the
+monitor's private environment file to route camera outages, event API failures,
+monitor stalls, disk warnings, configuration drift and camera state notices to
+an operator chat. Detection photos, their outbox summaries and daily digests keep
+the destination configured under `telegram`. With neither override set, existing
+notification routing is preserved. A partial override fails delivery rather than
+mixing credentials from different destinations. `TAPO_OPS_LABEL` optionally adds
+a site label to operational messages.
+
+For a lightweight gateway, run external reachability checks on a peer. A systemd
+timer override with `OnUnitActiveSec=30s`, `AccuracySec=1s` and `WATCH_FAILS=3`
+detects a sustained outage in approximately 60–90 seconds plus probe time.
+Keep local network measurement cadence independent from alert cadence. Configure
+`alerts.outage_threshold`, `alerts.stall_threshold` and
+`alerts.event_failure_threshold` explicitly when a shorter camera alert delay is
+needed; this does not change camera polling or reboot thresholds.

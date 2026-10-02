@@ -152,6 +152,16 @@ decision, not code — see the item)
   over the private network with the Telegram credentials they already have — consecutive
   misses to alert, one alert per cooldown, a recovery message — and can poll a peer's HTTP
   health endpoint, so the shared scorer's death is noticed from another machine.
+- [x] Route operational notices to a separate operator destination through
+  `TAPO_OPS_TELEGRAM_TOKEN` and `TAPO_OPS_TELEGRAM_CHAT_ID`, with an optional site
+  label. Camera outages, event API failures, monitor stalls, disk warnings and state
+  notices use that destination; detection photos and daily digests retain their own
+  routing. A partial override fails delivery instead of mixing destinations.
+- [x] Bound host-watch and system notifier delivery time, retry unconfirmed host alerts
+  without consuming their cooldown, and log confirmed outage/recovery delivery.
+  Document a 30-second peer-watch cadence with three consecutive misses and explicit
+  camera alert thresholds. Lightweight gateways keep independent low-rate local
+  measurement; faster peer checks do not add camera API sessions or gateway workers.
 - [x] Make the repair policy consistent: `auto_fix` and `allowed_repairs` took effect even
   when `reliability.enabled` was false, so trimming the allow-list silently disabled
   repairs that guard known regressions (person detection off, auto-track without the
@@ -853,6 +863,48 @@ often what photographs the person seconds later.
   in the `video_*` fields), event and recording searches (`channel`, `chn_events`,
   `getEvents` window), face recognition at API level, methods pytapo lacks, and the calls
   that drop the API. Draft reviewed for identifiers before it moves to `docs/`.
+
+## Planning horizons
+
+These horizons are relative to the next planning cycle, not release promises. Move an
+item forward only when its evidence is available; keep behaviour opt-in until a trial
+has an incident-level review.
+
+### Next week — close the trials already producing evidence
+
+- Finish the labelled, incident-level review of observe-only hold expiry and the
+  deferred-sampling/person-bit trial (10.1 and 10.10). Promote each policy separately;
+  keep it in observe mode when labels are inconclusive or replay shows a regression.
+- Compare the early SD window and `largest`/`tallest` frame picks on labelled clips.
+  Record first-alert delay, person size and edge clipping before extending either choice
+  to more cameras (10.4 and 10.5).
+- Exercise the opt-in outbox through a controlled send outage and a daemon restart.
+  Verify one outage summary, bounded draining, correct rescoring and review routing before
+  treating it as a general recovery path (10.9).
+
+### Next month — bound the remaining slow and disk-heavy paths
+
+- Measure hub clip wait time and its effect on the daemon tick. If clip I/O delays normal
+  camera work, move it to a bounded worker while serializing access to each hub session
+  and preserving retry state across restarts (10.4).
+- Give the outbox a total on-disk byte budget in addition to its entry-count and age
+  limits. Evict lower-priority entries first, report every eviction, and test that a full
+  filesystem cannot interrupt live alert delivery.
+- Review the first network and radio history for coverage gaps. Keep unsupported or stale
+  measurements explicit, and add a metric only when it changes a diagnosis or operator
+  decision (10.11).
+
+### Next quarter — validate resilience and broaden device evidence
+
+- Shadow-run a local fallback scorer during shared-scorer failures. Compare its decisions
+  with the shared scorer and labelled frames, and measure CPU, latency and storage cost
+  before considering any failover policy (10.9).
+- Expand the model/firmware capability fixtures from sanitized camera reports. Add
+  contract coverage for newly observed getters and event profiles before using them in
+  production decisions (Research track 5).
+- When a second overlapping camera is available, trial the existing handoff coordinator
+  against missed and duplicate incidents. Keep the feature dormant until both outcomes
+  can be measured (Phase 5).
 
 ## Research tracks
 

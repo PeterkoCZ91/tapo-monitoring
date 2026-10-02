@@ -133,6 +133,9 @@ class ScorerConfig:
     # Rects ``[x1, y1, x2, y2]`` as fractions of the frame whose people are ignored: a
     # static person-shaped object there stops counting (see scorer.apply_ignore_zones).
     ignore_zones: tuple = ()
+    # Polygons (tuples of ``(x, y)`` fractions): only people whose feet (box bottom centre)
+    # stand in one count, after ``ignore_zones``. Empty = off. Fixed-view cameras only.
+    alert_zones: tuple = ()
     # Threshold while the camera's night is on (its schedule applied to the astral night):
     # IR scenes score differently from daylight ones. None = ``threshold`` around the clock.
     night_threshold: float | None = None
@@ -768,6 +771,7 @@ def _scorer(data, where):
                         motion_send_threshold=motion_send_threshold,
                         person_bit_skips_hold=person_bit_skips_hold,
                         ignore_zones=ignore_zones,
+                        alert_zones=_alert_zones(d.get("alert_zones"), where),
                         night_threshold=night_threshold)
 
 
@@ -790,6 +794,38 @@ def _ignore_zones(value, where):
             raise ConfigError(f"{where}: scorer ignore_zones entries are fractions of the "
                               "frame with x1 < x2 and y1 < y2")
         zones.append((x1, y1, x2, y2))
+    return tuple(zones)
+
+
+def _alert_zones(value, where):
+    """``scorer.alert_zones``: a list of polygons, each >= 3 ``[x, y]`` fraction points."""
+    if value is None:
+        return ()
+    msg = f"{where}: scorer alert_zones must be a list of polygons of >= 3 [x, y] points"
+    if not isinstance(value, list):
+        raise ConfigError(msg)
+    zones = []
+    for polygon in value:
+        if not isinstance(polygon, list) or len(polygon) < 3:
+            raise ConfigError(msg)
+        points = []
+        for point in polygon:
+            try:
+                if isinstance(point, (str, bytes)) or len(point) != 2:
+                    raise ValueError
+                x, y = (float(v) for v in point)
+            except (TypeError, ValueError):
+                raise ConfigError(msg) from None
+            if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+                raise ConfigError(f"{where}: scorer alert_zones points are fractions of the "
+                                  "frame (0 to 1)")
+            points.append((x, y))
+        n = len(points)
+        area2 = sum(points[i][0] * points[(i + 1) % n][1] - points[(i + 1) % n][0] * points[i][1]
+                    for i in range(n))
+        if abs(area2) < 1e-9:
+            raise ConfigError(f"{where}: scorer alert_zones polygons must enclose an area")
+        zones.append(tuple(points))
     return tuple(zones)
 
 
@@ -1115,6 +1151,10 @@ def _camera(data, index):
     _check_hold_expiry(sampler, scorer, where)
     event_profile = _check_enum(str(data.get("event_profile", "default")).lower(),
                                 set(event_detection.EVENT_PROFILES), "event_profile", where)
+    if scorer.alert_zones and event_detection.event_profile(event_profile).pt_channel is not None:
+        # A zone is drawn on one view; a second lens or a moving pan/tilt lens has another.
+        raise ConfigError(f"{where}: scorer alert_zones need a fixed view; this event_profile "
+                          f"has a pan/tilt lens (use ignore_zones or no zones)")
     lens_pick_stream = data.get("lens_pick_stream")
     if lens_pick_stream is not None:
         if not isinstance(lens_pick_stream, str) or not lens_pick_stream.strip():

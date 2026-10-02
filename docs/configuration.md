@@ -740,6 +740,25 @@ scorer:
     - [0.0, 0.48, 0.12, 0.66]   # sacks under the woodshed, left edge
 ```
 
+`alert_zones` (default none) is the opposite of `ignore_zones`: a list of polygons, each
+at least three `[x, y]` points as fractions of the frame, and a person counts only when
+the bottom centre of its box (the feet) lies inside at least one of them. Use it to watch
+a driveway or a yard and not the street behind it. The ignore zones run first, then the
+alert zones; the score becomes the best remaining person, and a frame with nobody in a
+zone scores 0. The edge of a polygon counts as inside. It needs a scoring service that
+returns `person_boxes`; an older one is left alone, with one warning.
+
+Zones are drawn on one view, so they are refused (config error) on a camera whose
+`event_profile` has a pan/tilt lens (for example `c545d`, which also picks between two
+lenses), and they do not follow a PTZ camera that moves between presets: use them on
+fixed-view cameras, or on a PTZ parked on a single preset.
+
+```yaml
+scorer:
+  alert_zones:
+    - [[0.40, 1.00], [1.00, 1.00], [1.00, 0.55], [0.62, 0.50]]   # driveway, lower right
+```
+
 `night_threshold` replaces `threshold` while the camera's night is on — the shared astral
 night with the camera's `schedule` applied, so an `always_night` camera uses it around the
 clock and an `always_day` one never does. IR night scenes score differently from daylight

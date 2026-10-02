@@ -125,6 +125,28 @@ def should_send_alert(last_alert_ts, now, cooldown):
     return now - last_alert_ts >= cooldown
 
 
+def send_operational(token, chat_id, text):
+    """Route operational notices separately from detection photos and digests.
+
+    Both override variables are required: a partial destination must never combine
+    one site's bot with another site's chat. With no override, retain the caller's
+    existing destination. Labels are escaped because send_text uses Telegram HTML.
+    """
+    import html
+    import os
+
+    override_token = os.environ.get("TAPO_OPS_TELEGRAM_TOKEN")
+    override_chat = os.environ.get("TAPO_OPS_TELEGRAM_CHAT_ID")
+    if bool(override_token) != bool(override_chat):
+        return False
+    if override_token and override_chat:
+        token, chat_id = override_token, override_chat
+    label = os.environ.get("TAPO_OPS_LABEL")
+    if label:
+        text = f"[{html.escape(label)}] {text}"
+    return send_text(token, chat_id, text)
+
+
 def send_text(token, chat_id, text):
     """Send a plain (HTML) Telegram message. Returns True on success."""
     try:

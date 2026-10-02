@@ -6,6 +6,36 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tapo_monitor import notify, scorer
 from tests.conftest import FakeResponse as _FakeResp
 
+
+def test_operational_destination_does_not_change_detection_destination(monkeypatch):
+    calls = []
+    monkeypatch.setattr(notify, "send_text", lambda *args: calls.append(args) or True)
+    monkeypatch.setenv("TAPO_OPS_TELEGRAM_TOKEN", "ops-bot")
+    monkeypatch.setenv("TAPO_OPS_TELEGRAM_CHAT_ID", "ops-chat")
+    monkeypatch.setenv("TAPO_OPS_LABEL", "Site <A>")
+    assert notify.send_operational("camera-bot", "camera-chat", "offline")
+    assert calls == [("ops-bot", "ops-chat", "[Site &lt;A&gt;] offline")]
+    assert notify.send_text("camera-bot", "camera-chat", "digest")
+    assert calls[-1] == ("camera-bot", "camera-chat", "digest")
+
+
+def test_partial_operational_destination_fails_without_crossing_chats(monkeypatch):
+    calls = []
+    monkeypatch.setattr(notify, "send_text", lambda *args: calls.append(args) or True)
+    monkeypatch.setenv("TAPO_OPS_TELEGRAM_TOKEN", "ops-bot")
+    monkeypatch.delenv("TAPO_OPS_TELEGRAM_CHAT_ID", raising=False)
+    assert not notify.send_operational("camera-bot", "camera-chat", "offline")
+    assert calls == []
+
+
+def test_operational_destination_defaults_to_existing_chat(monkeypatch):
+    calls = []
+    monkeypatch.setattr(notify, "send_text", lambda *args: calls.append(args) or True)
+    for key in ("TAPO_OPS_TELEGRAM_TOKEN", "TAPO_OPS_TELEGRAM_CHAT_ID", "TAPO_OPS_LABEL"):
+        monkeypatch.delenv(key, raising=False)
+    assert notify.send_operational("camera-bot", "camera-chat", "offline")
+    assert calls == [("camera-bot", "camera-chat", "offline")]
+
 # ── is_empty_scene ───────────────────────────────────────────────────────────
 
 def test_empty_scene_detected():

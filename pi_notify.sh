@@ -10,8 +10,13 @@ if [ -f "$ENV_FILE" ]; then
   set +a
 fi
 
-TOKEN="${TELEGRAM_TOKEN:?TELEGRAM_TOKEN missing}"
-CHAT="${TELEGRAM_CHAT_ID:-${TELEGRAM_CHAT:?TELEGRAM_CHAT_ID missing}}"
+if [ -n "${TAPO_OPS_TELEGRAM_TOKEN:-}" ] || [ -n "${TAPO_OPS_TELEGRAM_CHAT_ID:-}" ]; then
+  auth_value="${TAPO_OPS_TELEGRAM_TOKEN:?operational token missing}"
+  CHAT="${TAPO_OPS_TELEGRAM_CHAT_ID:?operational chat missing}"
+else
+  auth_value="${TELEGRAM_TOKEN:?TELEGRAM_TOKEN missing}"
+  CHAT="${TELEGRAM_CHAT_ID:-${TELEGRAM_CHAT:?TELEGRAM_CHAT_ID missing}}"
+fi
 MSG="$1"
 SERVICE="${2:-}"
 LOCK=""
@@ -29,7 +34,7 @@ if [ -n "$SERVICE" ]; then
   fi
 fi
 
-RESPONSE=$(curl -fsS -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage"   --data-urlencode "chat_id=${CHAT}"   --data-urlencode "text=${MSG}"   --data-urlencode "parse_mode=HTML")
+RESPONSE=$(curl -fsS --connect-timeout 5 --max-time 10 -X POST "https://api.telegram.org/bot${auth_value}/sendMessage"   --data-urlencode "chat_id=${CHAT}"   --data-urlencode "text=${MSG}"   --data-urlencode "parse_mode=HTML" 2>/dev/null) || RESPONSE=""
 
 case "$RESPONSE" in
   *'"ok":true'*)
@@ -37,7 +42,7 @@ case "$RESPONSE" in
     exit 0
     ;;
   *)
-    echo "Telegram send failed: $RESPONSE" >&2
+    echo "Telegram send failed (not confirmed)" >&2
     exit 1
     ;;
 esac

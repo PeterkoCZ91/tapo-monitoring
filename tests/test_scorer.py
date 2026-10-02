@@ -188,3 +188,75 @@ def test_score_image_applies_the_zones(monkeypatch, tmp_path):
                         lambda req, timeout=10: io.BytesIO(body))
     assert scorer.score_image("http://x/score", str(img), ignore_zones=[SACKS])["person"] == 0.0
     assert scorer.score_image("http://x/score", str(img))["person"] == 0.58
+
+
+# ── alert zones ─────────────────────────────────────────────────────────────
+
+# Right half of the 1000x500 frame, as a polygon (fractions of the frame).
+RIGHT = ((0.5, 0.0), (1.0, 0.0), (1.0, 1.0), (0.5, 1.0))
+TRIANGLE = ((0.0, 1.0), (1.0, 1.0), (0.5, 0.4))
+
+
+def test_point_in_polygon():
+    assert scorer.point_in_polygon(0.75, 0.5, RIGHT)
+    assert not scorer.point_in_polygon(0.25, 0.5, RIGHT)
+    assert scorer.point_in_polygon(0.5, 0.9, TRIANGLE)
+    assert not scorer.point_in_polygon(0.1, 0.5, TRIANGLE)   # inside the bbox, outside the shape
+    assert scorer.point_in_polygon(0.5, 0.5, RIGHT)          # the edge counts as inside
+
+
+def test_alert_zone_keeps_only_people_whose_feet_are_inside():
+    # Feet (bottom centre): (275, 300) outside, (750, 300) inside.
+    result = _zoned([0.9, 0.6], [[250, 100, 300, 300], [700, 100, 800, 300]], person=0.9)
+    out = scorer.apply_alert_zones(result, [RIGHT])
+    assert out["person"] == 0.6 and out["box"] == [700, 100, 800, 300]
+    assert out["person_scores"] == [0.6] and out["outside_alert_zones"] == 1
+    assert out["classes"]["person"] == 0.6
+
+
+def test_alert_zone_uses_the_feet_not_the_box_centre():
+    # Feet at y=150 (0.3) are above the triangle apex (0.4) although the box is tall.
+    high = _zoned([0.9], [[450, 0, 550, 150]])
+    assert scorer.apply_alert_zones(high, [TRIANGLE])["person"] == 0.0
+    low = _zoned([0.9], [[450, 250, 550, 450]])
+    assert scorer.apply_alert_zones(low, [TRIANGLE]) is low
+
+
+def test_alert_zone_with_nobody_inside_scores_nobody():
+    out = scorer.apply_alert_zones(_zoned([0.9], [[10, 100, 60, 300]]), [RIGHT])
+    assert out["person"] == 0.0 and out["box"] is None
+    assert scorer.subject_score(out, threshold=0.4) < 0.4
+
+
+def test_any_of_several_alert_zones_is_enough():
+    result = _zoned([0.9], [[10, 100, 60, 300]])
+    left = ((0.0, 0.0), (0.4, 0.0), (0.4, 1.0), (0.0, 1.0))
+    assert scorer.apply_alert_zones(result, [RIGHT, left]) is result
+
+
+def test_alert_zones_leave_an_older_scorer_answer_alone():
+    result = {"person": 0.58, "animal": 0.0, "box": [5, 260, 60, 330], "w": 1000, "h": 500}
+    assert scorer.apply_alert_zones(result, [RIGHT]) is result
+
+
+def test_ignore_zones_run_before_alert_zones(monkeypatch, tmp_path):
+    img = tmp_path / "f.jpg"
+    img.write_bytes(b"jpg")
+    # Both people stand in the alert zone; the first is also a sack in the ignore zone.
+    body = json.dumps(_zoned([0.9, 0.6], [[600, 260, 640, 330], [800, 100, 880, 330]])).encode()
+    monkeypatch.setattr(scorer.urllib.request, "urlopen",
+                        lambda req, timeout=10: io.BytesIO(body))
+    out = scorer.score_image("http://x/score", str(img), ignore_zones=[(0.55, 0.5, 0.7, 0.7)],
+                             alert_zones=[RIGHT])
+    assert out["person"] == 0.6 and out["ignored_persons"] == 1
+    assert out["person_scores"] == [0.6]
+
+
+def test_score_image_applies_alert_zones_only_when_given(monkeypatch, tmp_path):
+    img = tmp_path / "f.jpg"
+    img.write_bytes(b"jpg")
+    body = json.dumps(_zoned([0.9], [[10, 100, 60, 300]])).encode()
+    monkeypatch.setattr(scorer.urllib.request, "urlopen",
+                        lambda req, timeout=10: io.BytesIO(body))
+    assert scorer.score_image("http://x/score", str(img))["person"] == 0.9
+    assert scorer.score_image("http://x/score", str(img), alert_zones=[RIGHT])["person"] == 0.0

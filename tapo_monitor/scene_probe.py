@@ -164,7 +164,8 @@ def _real_score(tiles):
         return scorer.score_image(cfg.scorer.url, image_path,
                                   timeout=cfg.scorer.timeout, tiles=tiles,
                                   source_id=scorer.source_id_for_camera(cfg.name),
-                                  ignore_zones=cfg.scorer.ignore_zones)
+                                  ignore_zones=cfg.scorer.ignore_zones,
+                                  alert_zones=cfg.scorer.alert_zones)
     return score
 
 

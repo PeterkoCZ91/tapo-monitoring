@@ -1572,6 +1572,25 @@ def test_stall_watchdog_alerts_once_then_recovers(monkeypatch):
     assert len(sent) == 2 and sent[1].startswith("🟢")
 
 
+def test_stall_watchdog_routes_outage_and_recovery_to_operator(monkeypatch):
+    app = _app_with_stall_threshold(120)
+    state = daemon.MonitorState()
+    sent = []
+    monkeypatch.setenv("TAPO_OPS_TELEGRAM_TOKEN", "dummy-operator-bot")
+    monkeypatch.setenv("TAPO_OPS_TELEGRAM_CHAT_ID", "dummy-operator-chat")
+    monkeypatch.setenv("TAPO_OPS_LABEL", "Site A")
+    monkeypatch.setattr(daemon.notify, "send_text",
+                        lambda *args: sent.append(args) or True)
+    secrets = {"telegram_token": "dummy-detection-bot", "telegram_chat": "dummy-detection-chat"}
+    daemon.stall_watchdog(app, state, secrets, ok=False, now=1000)
+    daemon.stall_watchdog(app, state, secrets, ok=False, now=1120)
+    daemon.stall_watchdog(app, state, secrets, ok=True, now=1130)
+    assert len(sent) == 2
+    assert all(args[:2] == ("dummy-operator-bot", "dummy-operator-chat") for args in sent)
+    assert sent[0][2].startswith("[Site A] 🔴")
+    assert sent[1][2].startswith("[Site A] 🟢")
+
+
 def test_tick_records_a_completed_tick(monkeypatch):
     # The status endpoint reports "last tick result/time"; the tick has to write it.
     app = _app_with_stall_threshold(900)

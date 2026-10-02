@@ -1437,3 +1437,29 @@ def test_scorer_ignore_zones_reject_bad_rects(zones):
         cfg.load_config_from_dict({"cameras": [{
             "name": "a", "host": "203.0.113.10",
             "scorer": {"url": "http://x", "ignore_zones": zones}}]})
+
+
+def _alert_cfg(zones, **camera):
+    return {"cameras": [{"name": "a", "host": "203.0.113.10",
+                         "scorer": {"url": "http://x", "alert_zones": zones}, **camera}]}
+
+
+def test_scorer_alert_zones_parse_as_polygons():
+    app = cfg.load_config_from_dict(_alert_cfg([[[0.5, 0], [1, 0], [1, 1], [0.5, 1]]]))
+    assert app.cameras[0].scorer.alert_zones == (((0.5, 0.0), (1.0, 0.0), (1.0, 1.0), (0.5, 1.0)),)
+    assert cfg.load_config_from_dict({"cameras": [{
+        "name": "a", "host": "203.0.113.10"}]}).cameras[0].scorer.alert_zones == ()
+
+
+@pytest.mark.parametrize("zones", [[[[0, 0], [1, 1]]], [[[0, 0], [1, 0], [1.5, 1]]],
+                                   [[[0, 0], [1, 0], [1]]], [[[0, 0], [1, 0], ["a", 1]]],
+                                   [[[0, 0], [0.5, 0], [1, 0]]], "0,0,1,1", [[0, 0, 1, 1]]])
+def test_scorer_alert_zones_reject_bad_polygons(zones):
+    with pytest.raises(cfg.ConfigError, match="alert_zones"):
+        cfg.load_config_from_dict(_alert_cfg(zones))
+
+
+def test_scorer_alert_zones_are_refused_on_a_rotating_lens_profile():
+    zone = [[[0.5, 0], [1, 0], [1, 1]]]
+    with pytest.raises(cfg.ConfigError, match="alert_zones need a fixed view"):
+        cfg.load_config_from_dict(_alert_cfg(zone, event_profile="c545d"))

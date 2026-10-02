@@ -22,13 +22,15 @@ def source_id_for_camera(camera_name):
     return hashlib.sha256(value).hexdigest()[:16]
 
 
-def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None, ignore_zones=()):
+def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None, ignore_zones=(),
+                alert_zones=()):
     """POST a JPEG to the scoring service; dict on success, None on ANY failure.
 
     ``tiles > 1`` asks the service to also score a tiles×tiles grid (rescues distant
     subjects) and to return a ``box`` for the winning person — see
     :func:`subject_box`. ``ignore_zones`` removes the people found inside them
-    (:func:`apply_ignore_zones`) before anyone reads the answer.
+    (:func:`apply_ignore_zones`) before anyone reads the answer; ``alert_zones`` then keeps
+    only the people standing in them (:func:`apply_alert_zones`).
     """
     try:
         with open(image_path, "rb") as f:
@@ -52,7 +54,11 @@ def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None, ignore_
             if not isinstance(result, dict):
                 log.warning("scorer returned a non-object JSON response")
                 return None
-            return apply_ignore_zones(result, ignore_zones) if ignore_zones else result
+            if ignore_zones:
+                result = apply_ignore_zones(result, ignore_zones)
+            if alert_zones:
+                result = apply_alert_zones(result, alert_zones)
+            return result
         finally:
             close = getattr(resp, "close", None)
             if close:
@@ -119,6 +125,65 @@ def apply_ignore_zones(result, zones, overlap=IGNORE_ZONE_OVERLAP):
             out["person"], out["box"] = best, best_box
     else:
         # Everything the service listed was ignored; anything left is below its floor.
+        out["person"], out["box"] = 0.0, None
+    if isinstance(out.get("classes"), dict) and "person" in out["classes"]:
+        out["classes"] = {**out["classes"], "person": out["person"]}
+    return out
+
+
+def point_in_polygon(x, y, polygon):
+    """Even-odd ray casting; a point on an edge or vertex counts as inside. Pure."""
+    n = len(polygon)
+    inside = False
+    for i in range(n):
+        x1, y1 = polygon[i]
+        x2, y2 = polygon[(i + 1) % n]
+        cross = (x2 - x1) * (y - y1) - (y2 - y1) * (x - x1)
+        if (abs(cross) < 1e-12 and min(x1, x2) - 1e-12 <= x <= max(x1, x2) + 1e-12
+                and min(y1, y2) - 1e-12 <= y <= max(y1, y2) + 1e-12):
+            return True
+        if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+            inside = not inside
+    return inside
+
+
+def apply_alert_zones(result, zones):
+    """Keep only the people standing in an alert zone. Pure-ish (warns once).
+
+    The opposite of :func:`apply_ignore_zones`: a zone is a polygon (``[(x, y), ...]``
+    as fractions of the frame) and a person counts only when the bottom centre of its
+    box (the feet) lies in at least one zone. Run it after the ignore zones. The
+    result is reshaped the same way (``person`` the best remaining one, ``box``,
+    ``person_scores``, ``person_boxes``; ``outside_alert_zones`` counts the dropped).
+    An older service without ``person_boxes`` is left as it was.
+    """
+    global _warned_no_boxes
+    scores, boxes = result.get("person_scores"), result.get("person_boxes")
+    w, h = result.get("w"), result.get("h")
+    if (not isinstance(scores, list) or not isinstance(boxes, list)
+            or len(scores) != len(boxes) or not w or not h):
+        if not _warned_no_boxes:
+            log.warning("scorer: zones need a scorer that returns person_boxes; "
+                        "update the scoring service")
+            _warned_no_boxes = True
+        return result
+    try:
+        pairs = [(float(sc), [float(v) for v in bx]) for sc, bx in zip(scores, boxes, strict=True)]
+        w, h = float(w), float(h)
+        feet = [((bx[0] + bx[2]) / 2 / w, bx[3] / h) for _, bx in pairs]
+    except (TypeError, ValueError, IndexError):
+        return result
+    kept = [pair for pair, (fx, fy) in zip(pairs, feet, strict=True)
+            if any(point_in_polygon(fx, fy, z) for z in zones)]
+    if len(kept) == len(pairs):
+        return result
+    out = dict(result)
+    out["outside_alert_zones"] = len(pairs) - len(kept)
+    out["person_scores"] = [sc for sc, _ in kept]
+    out["person_boxes"] = [bx for _, bx in kept]
+    if kept:
+        out["person"], out["box"] = kept[0]
+    else:
         out["person"], out["box"] = 0.0, None
     if isinstance(out.get("classes"), dict) and "person" in out["classes"]:
         out["classes"] = {**out["classes"], "person": out["person"]}
