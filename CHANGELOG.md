@@ -100,6 +100,8 @@ All notable changes to this project are documented here.
 ### Changed
 - The camera-card segment lookup error is printed with the read's output (the journal
   shows it when a read comes back empty); before it was swallowed.
+- Docs: `vedio_type` is the clip's trigger code (`2` motion, `6` person, `8` vehicle, `9` pet),
+  not "event clip"; added the reported `searchVideoWithUTC`/`player_id` note for newer firmware.
 
 ### Fixed
 - Fleet digest health now distinguishes fresh verified camera health from cumulative

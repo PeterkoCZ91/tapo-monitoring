@@ -287,7 +287,17 @@ Also observed on the C545D: a long event is split into consecutive events about 
 | `searchVideoWithUTC` | `search_video_with_utc: {channel, id, start_time, end_time, start_index, end_index}` | same list; on the C545D **one clip per event** with `chn_times: {"<lens>": {"event_start_time"}}` and `vedio_type` as a string |
 | `searchEventList` *(not in pytapo)* | `search_event_list: {start_time, end_time, start_index, end_index}` | `{total_event, page_event, index_order, search_event_list: [{start, end, type}]}` — every event clip on the card, no detection metadata |
 
-- `vedio_type` (sic): `1` = continuous recording segment, `2` = event clip.
+- `vedio_type` (sic): the clip's trigger, using the same codes as `alarm_type` and the
+  app's playback event types (see [the `events_1` bitmask](events1-bitmask.md)): `1` =
+  timing (a continuous or scheduled segment), `2` = motion, `6` = person, `8` = vehicle,
+  `9` = pet. So `2` is motion, **not** "person or motion": filter for `6` to get person clips.
+  The code list is reported by a community member from the app's enum
+  ([JurajNyiri/pytapo#199](https://github.com/JurajNyiri/pytapo/issues/199)); we have
+  seen only `1`, `2` and (hub) `6` ourselves. A missing value is treated as `2` by the app.
+  Cameras whose `playback` component is at version 6 reportedly answer `-71103` to
+  `searchVideoOfDay` with `id` and want `searchVideoWithUTC` with a `player_id` (any 32 hex
+  characters) instead; there the field is spelled `video_type` and is a string (reported on
+  one model, not tested here).
 - On the C545D the `channel` field of the video searches was ignored (`1` answered the same
   as `0`).
 - In one probe of a C560WS, `searchDateWithVideo` and `searchVideoOfDay` returned

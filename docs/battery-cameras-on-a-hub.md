@@ -200,8 +200,9 @@ parts worth repeating:
   triggered recording are the same thing; on a camera recording continuously (H200 firmware
   1.6.5 added 24/7 Capture for compatible models, e.g. C460 — this C410 does not support it)
   that assumption breaks, and treating every segment as motion would alert on plain footage.
-  `video_type` might eventually distinguish the two, but its values (`2`, `6` observed so
-  far) are not confirmed against any visual ground truth yet, so the daemon refuses rather
+  `video_type` might distinguish the two (it carries the trigger code: `2` motion, `6` person,
+  per the app's event list), but our observed values (`2`, `6`) are not confirmed against
+  any visual ground truth yet, so the daemon refuses rather
   than guesses: it logs once and leaves the camera resolved but idle.
 
 ## Sparse sites: what the hub does and does not tell you
@@ -211,8 +212,8 @@ Notes from a site where a person passes only every few days:
 - The hub indexes clips for roughly three months. `searchVideoWithUTC` with a 400-day window
   timed out, a 90-day window returned; keep history queries to a few tens of days.
 - Clips arrive in bursts (testing, moving a camera) and otherwise at 0-3 a day, so most
-  clips are worth reading. Hub-side `video_type` (2 vs. 6) is recorded in the audit line but
-  its meaning is not confirmed.
+  clips are worth reading. Hub-side `video_type` (2 vs. 6) is recorded in the audit line; by the app's event
+  list that is motion vs. person, which we have not confirmed on footage.
 - The hub reports alias, model, MAC, `plan_24h_record` and `hub_storage_enabled` per camera.
   It does **not** report battery, signal strength, sleep state or the camera firmware, and
   `getChildDeviceList` returns `sum: 0` because the cameras are not hub children the way
