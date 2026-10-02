@@ -77,3 +77,33 @@ jobs:
       # pyproject.toml for what the number is and is not for.
       - name: Test (pytest)
         run: pytest -q --cov
+
+  # A parallel job, so it never lengthens the test job above. Two simulated days of the real
+  # daemon (through daemon.tick: stall watchdog and status view included) against fake
+  # cameras on a fake clock, for three fixed seeds: catches memory, thread, state-file and
+  # leftover-file growth and tick exceptions that a unit test cannot see. About a minute
+  # per seed; the step fails on the first seed that exceeds a limit and names it.
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Accelerated soak (3 seeds x 2 simulated days)
+        timeout-minutes: 10
+        run: |
+          for seed in 1 2 3; do
+            echo "::group::soak seed ${seed}"
+            python tools/soak_sim.py --days 2 --seed "${seed}" --features all --wrapper || {
+              echo "::error::soak_sim failed for seed ${seed}"; exit 1; }
+            echo "::endgroup::"
+          done

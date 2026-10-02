@@ -28,6 +28,11 @@ All notable changes to this project are documented here.
   modes, `hub_clip_worker`, host failover and scorer failover. Reports RSS growth, threads, state-file
   sizes, exceptions and slow ticks, and exits non-zero past `--max-rss-growth-mb`/`--max-threads`
   and the other limits. See `docs/operations.md`, "Accelerated soak simulation".
+- `tools/soak_sim.py --wrapper` runs through `daemon.tick` (stall watchdog, injected failing
+  ticks, the `/status` view built and timed every few ticks); file counts of the sent log,
+  review log, `panlimit-log` and `sdjob_*` temp dirs are tracked with
+  `--max-files-growth-per-day`, retention is checked against simulated file times, and
+  `--inject filesleak` plants a leak. CI runs a short three-seed soak in a parallel job.
 - `tools/soak_report.sh`: one read-only report per host for a soak test (service state and
   package fingerprint, starts, error lines, alerts per camera and path, first-alert
   median/p90, drop/hold/cooldown and `would_*` counts, memory and CPU), with `--user`,

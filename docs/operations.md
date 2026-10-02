@@ -677,13 +677,15 @@ when any host has a finding or deviation. Parsing and statistics live in
 `tools/soak_sim.py` is the fast half of a soak test: it runs the real `daemon.loop_step`
 (the function every production tick runs) against the scenario harness's fake cameras on
 a fake clock, for N simulated days in seconds or minutes, and looks for what only a long
-run shows. It needs a checkout with the dev extras (it imports `tests/scenario.py`), reads
+run shows. With `--wrapper` it goes through `daemon.tick` instead, the wrapper production
+runs, so the stall watchdog and the status view are covered too. It needs a checkout with the dev extras (it imports `tests/scenario.py`), reads
 no config and touches no network, camera or host.
 
 ```bash
 python3 tools/soak_sim.py --days 7 --seed 3 --cameras 3 --features all
 python3 tools/soak_sim.py --days 1 --features zones,loiter --max-rss-growth-mb 15 --json
 nice -n 19 python3 tools/soak_sim.py --days 7 --tracemalloc    # also lists allocation growth
+python3 tools/soak_sim.py --days 2 --seed 1 --wrapper           # what CI runs, per seed
 ```
 
 The generated world: bare motion and camera-confirmed people (two thirds of them at night),
@@ -706,11 +708,45 @@ of each tick. A run that stops making progress is aborted with a stack dump
 (`--hang-timeout`). Exit status is 1 when a limit is exceeded: `--max-rss-growth-mb`
 (20), `--max-threads` (32), `--max-state-kb` (256), `--max-dir-growth-mb-per-day` (100),
 `--max-tick-seconds` (5), `--max-exceptions` (0). `--inject leak|statefile|threads` plants
-a fault on purpose; the tests use it to prove the limits fire.
+a fault on purpose (`filesleak` leaves one `sdjob_*` job dir with a file per tick); the
+tests use it to prove the limits fire.
 
-What it does not show: real network and camera timing, pytapo and ffmpeg themselves, code
-that reads the wall clock instead of the `now` the loop hands down, and the hosts' own
-retention (frames written by the simulation carry a real mtime). A clean run is a reason to
+`--wrapper` replaces the direct `loop_step` call with `daemon.tick`: `loop_step` is wrapped
+so it still gets the harness's fake collaborators, and one stretch of failing ticks per
+simulated day (longer than `alerts.stall_threshold`) is injected. The stall watchdog must
+send its alert and its recovery notice (the injected tick errors are counted separately,
+not as exceptions), and every `--status-every` ticks (6) the `/status` payload is built
+through `statusd.served_snapshot`, serialised and timed. Findings: an episode with no stall
+alert, an alert with no recovery, a status snapshot that raises or takes longer than
+`--max-status-seconds` (0.5). No port is opened: the HTTP thread itself is not simulated,
+only what it serves. A restart is never planned inside a stall.
+
+File leaks: at each sample the run counts the files in the sent log, review log and
+`panlimit-log` (the pan guard's evidence grabs) and the `sdjob_*` temp dirs (SD and hub clip
+jobs; the harness redirects the temp directory into its own and fetches hub clips through
+the real job-dir lifecycle). The growth per simulated day is judged like the directory
+sizes (median of the last 10 % minus the 10-30 % window) against
+`--max-files-growth-per-day` (1000 per directory; a normal run adds about 100 a day to the
+sent log). The oldest archived frame must not be older than its retention plus
+`--retention-slack-days` (1.1), and the summary shows how many files retention removed.
+
+How retention is exercised: the daemon's retention compares each file's mtime with the
+`now` it is handed, which in the simulation is a fake clock, while the files are written in
+real time, so nothing would ever look old. The harness therefore stamps the mtime of new
+archive files with the simulated time (hourly) and gives the sent-log module the simulated
+clock for names and index timestamps; then the daily prune and the index compaction really
+run. It needs a run longer than the retention: 2 days for the sent log and `panlimit-log`,
+7 for the review log (a shorter run shows only accumulation, no pruning). The granularity is
+one simulated hour. Orphan `sdjob_*` dirs of a killed daemon are cleaned at a real start by
+pid; the simulation keeps one pid, so that cleanup is not exercised.
+
+CI runs `--days 2 --features all --wrapper` for seeds 1, 2 and 3 in the parallel `soak`
+job (about a minute and a half in total, 15 minute timeout), so the test job is not
+delayed.
+
+What it does not show: real network and camera timing, pytapo and ffmpeg themselves, the
+HTTP server thread and its socket, code that reads the wall clock instead of the `now` the
+loop hands down, and the behaviour of a real disk (full, slow). A clean run is a reason to
 start the real soak, not a replacement for it.
 
 ## Inspecting alert frames

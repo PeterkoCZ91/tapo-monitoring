@@ -857,8 +857,10 @@ often what photographs the person seconds later.
   cameras, and never returns to the primary address by itself.
 - [x] Scorer service authentication: optional shared token (`TAPO_SCORER_TOKEN[_FILE]` on
   the service, `scorer.token_env` on the clients); `/health` stays open.
-- [ ] `soak_sim` does not cover `daemon.tick`, the stall watchdog and `statusd`, and
-  cannot see leaked frame files; extend it, and run it in CI as a short seed matrix.
+- [x] `soak_sim` covers `daemon.tick`, the stall watchdog and the `statusd` view
+  (`--wrapper`), counts leaked archive and temp files, and runs in CI as a three-seed
+  matrix. Still not covered: the HTTP server thread itself and orphan-dir cleanup at a real
+  start.
 - [ ] MAC-to-address resolution through a host on the camera's own network, for sites
   whose DHCP or router changes (ARP is invisible across a subnet route).
 

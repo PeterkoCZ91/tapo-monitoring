@@ -16,11 +16,15 @@ status is non-zero when a limit is exceeded.
     python3 tools/soak_sim.py --days 7 --seed 3 --cameras 3 --features all
     python3 tools/soak_sim.py --days 1 --max-rss-growth-mb 30 --max-threads 20 --json
 
+``--wrapper`` goes through ``daemon.tick`` (stall watchdog with injected failing ticks, the
+``/status`` view) instead of ``loop_step``; the file counts of the archives and ``sdjob_*``
+temp dirs are always tracked (``--max-files-growth-per-day``, ``--inject filesleak``).
+
 Must run from a checkout (it imports ``tests.scenario``) with the dev extras installed
 (pytest provides the monkeypatch that undoes the harness patches). What it cannot show:
 real network timing, real pytapo/ffmpeg behaviour, wall-clock-driven code that ignores the
-``now`` the loop hands down, and the host's own retention timers (frames written here keep
-a real mtime).
+``now`` the loop hands down, and the host's own retention timers (archive files are given
+the simulated time as mtime hourly, so the daily prune runs; see docs/operations.md).
 """
 
 from __future__ import annotations
@@ -50,7 +54,7 @@ if str(ROOT) not in sys.path:
 import pytest  # noqa: E402
 
 from tapo_monitor import camera as camera_api  # noqa: E402
-from tapo_monitor import daemon, ledger, scorer, sdworker, sentlog  # noqa: E402
+from tapo_monitor import daemon, ledger, notify, scorer, sdworker, sentlog, statusd  # noqa: E402
 from tests.scenario import FakeCamera, Scenario, camera_dict, motion, pan_limit, person  # noqa: E402
 
 FEATURES = ("zones", "loiter", "vehicle", "hub", "host", "scorer")
@@ -60,6 +64,15 @@ HOST_BASE, HOST_ALT = "192.0.2.{}", "198.51.100.{}"
 SCORER_URLS = ("http://203.0.113.10:8766/score", "http://203.0.113.11:8766/score")
 ZONE = [[0.75, 0.0], [1.0, 0.0], [1.0, 1.0], [0.75, 1.0]]
 STATE_FILES = ("health.json", "runtime.json", "twin.json")
+# The archives and temp dirs whose file count is tracked, and each one's retention in days
+# (the daemon's own constants) for the "oldest file" check.
+ARCHIVES = ("sent", "review", "panlimit", "tmp")
+RETENTION_DAYS = {"sent": sentlog.DEFAULT_RETENTION_DAYS,
+                  "review": sentlog.DEFAULT_REVIEW_RETENTION_DAYS,
+                  "panlimit": sentlog.PANLIMIT_RETENTION_DAYS}
+# Daily maintenance plus the hourly granularity of the simulated mtimes.
+RETENTION_SLACK_DAYS = 1.1
+STALL_MESSAGE = "injected stall"
 
 
 def parse_features(text):
@@ -159,6 +172,21 @@ class FakeHub:
         return [c for c in self.clips if since <= c["start_time"] <= until]
 
 
+class FakeTime:
+    """``time`` as the sent-log module sees it: ``time()`` is the simulated clock, the rest
+    is the real module. Frame names, index timestamps and retention then agree with the
+    ``now`` the daemon hands down instead of mixing two epochs."""
+
+    def __init__(self, clock):
+        self._clock = clock
+
+    def time(self):
+        return self._clock.now
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
 class ErrorCounter(logging.Handler):
     """Counts ERROR records (the daemon logs and swallows many failures) and keeps a few.
 
@@ -171,13 +199,20 @@ class ErrorCounter(logging.Handler):
         self.count = 0
         self.samples = []
         self.actions = {}
+        self.stall_ticks = self.stall_alerts = self.stall_recoveries = 0
 
     def emit(self, record):
         message = record.getMessage()
-        if record.levelno >= logging.ERROR:
+        if STALL_MESSAGE in message and record.levelno >= logging.ERROR:
+            self.stall_ticks += 1               # the point of the stall episode, not a finding
+        elif record.levelno >= logging.ERROR:
             self.count += 1
             if len(self.samples) < 5:
                 self.samples.append(message[:300])
+        if message == "stall alert sent":
+            self.stall_alerts += 1
+        elif message == "stall recovery sent":
+            self.stall_recoveries += 1
         if message.startswith("audit "):
             fields = dict(part.split("=", 1) for part in message.split()[1:] if "=" in part)
             if "action" in fields:
@@ -228,17 +263,35 @@ class Soak:
         for var in ("SCENARIO_ONVIF_USER", "SCENARIO_ONVIF_PASSWORD"):
             mp.setenv(var, "x")
         mp.setenv(sentlog.ENV_DROP_SAMPLE, "0")
+        # Temp dirs (the ``sdjob_*`` job dirs) land inside the run's own directory, where
+        # they can be counted and are removed with it.
+        (self.tmp / "tmp").mkdir(exist_ok=True)
+        mp.setattr(tempfile, "tempdir", str(self.tmp / "tmp"))
         self.sc = Scenario(mp, self.tmp, build_cameras(args.cameras, self.features),
                            alerts={"cooldown": 120},
                            observability={"ledger": True})
         mp.setenv("TAPO_SENT_LOG_DIR", str(self.tmp / "sent"))
         mp.setenv("TAPO_REVIEW_LOG_DIR", str(self.tmp / "review"))
         mp.setenv("TAPO_LEDGER_FILE", str(self.tmp / "ledger.db"))
+        mp.setattr(sentlog, "time", FakeTime(self.sc.clock))
+        self.stop_threads = threading.Event()
+        self.sleepers = []
+        mp.setattr(notify, "send_photo", self._send_photo)
         self.fake_scorer = FakeScorer(self.rng)
         self.hub = FakeHub()
         self._wire_world()
         self.sd_worker = sdworker.SdWorker()
         self.hub_worker = sdworker.SdWorker() if "hub" in self.features else None
+        self.stalled = False
+        self.stalls = []
+        self.status = {"snapshots": 0, "errors": 0, "max_seconds": 0.0, "samples": []}
+        self.seen = {name: set() for name in ARCHIVES}   # every file ever observed, per dir
+        self.stamped = set()
+        self.last_stamp = self.sc.clock.now
+        self.last_status = -1
+        self.started_at = self.sc.clock.now
+        if args.wrapper:
+            self._wrap_loop_step()
         self.state_files = [self.tmp / n for n in STATE_FILES]
         self.leak = []
         self.restarts = 0
@@ -288,7 +341,13 @@ class Soak:
                 return lambda: _jpeg(tmp, "hubframe")
 
             def clip_frame_for(_cfg, _device):
-                return lambda clip: _jpeg(tmp, "hubclip")
+                # The real pipeline's shape: clip and frames share one ``sdjob_*`` dir that
+                # the delivery removes with the last frame. A dir left behind is a leak.
+                def fetch(_clip):
+                    path = os.path.join(sdworker.job_dir(), "frame.jpg")
+                    Path(path).write_bytes(b"\xff\xd8soak")
+                    return path
+                return fetch
 
             sc._collaborators["hubpoll"] = functools.partial(
                 daemon.run_hubpoll_pass, hub_for=lambda _c, _s, _n: self.hub,
@@ -296,6 +355,46 @@ class Soak:
                 score_for=self.fake_scorer.score_for)
         # Real frames are never read; rotating names keep the harness from filling the disk.
         sc._snapshot_for = self._snapshot_for
+        # The pan guard's evidence grab (copied into panlimit-log, the original removed).
+        mp.setattr(daemon.snapshot, "capture_rtsp", self._grab_evidence)
+
+    def _send_photo(self, token, chat, image, caption, *a, camera=None, score=None,
+                    incident=None, send_path=None, archive=True, archive_path=None, **k):
+        """The scenario's recording notifier plus what the real ``send_photo`` does after
+        Telegram answers: keep the frame in the sent log."""
+        ok = self.sc.notifier.send_photo(token, chat, image, caption, *a, camera=camera,
+                                         send_path=send_path, **k)
+        if archive:
+            try:
+                data = Path(archive_path or image).read_bytes()
+            except OSError:
+                return ok
+            sentlog.archive_if_configured(data, caption, delivered=ok, camera=camera,
+                                          score=score, incident=incident,
+                                          send_path=send_path)
+        return ok
+
+    def _grab_evidence(self, *_a, **_k):
+        grabs = self.tmp / "grabs"
+        grabs.mkdir(exist_ok=True)
+        fd, path = tempfile.mkstemp(suffix=".jpg", dir=grabs)
+        with os.fdopen(fd, "wb") as f:
+            f.write(b"\xff\xd8soak")
+        return path
+
+    def _wrap_loop_step(self):
+        """``daemon.tick`` calls the module's ``loop_step`` with none of the harness's
+        injection points: put them back, and fail on demand to exercise the stall watchdog."""
+        real = daemon.loop_step
+        sc = self.sc
+
+        def loop_step(app, cam_clients, state, **kwargs):
+            if self.stalled:
+                raise RuntimeError(STALL_MESSAGE)
+            injected = {k: v for k, v in sc.loop_kwargs().items()
+                        if k not in ("sd_worker", "hub_worker")}
+            return real(app, cam_clients, state, **{**injected, **kwargs})
+        self.mp.setattr(daemon, "loop_step", loop_step)
 
     def _snapshot_for(self, cfg):
         cam = self.sc.cams[cfg.name]
@@ -325,6 +424,7 @@ class Soak:
         """All world events of the run as a time-sorted list of ``(time, kind, payload)``."""
         r, a = self.rng, self.args
         plan = []
+        self.stalls = []
         t0 = self.sc.clock.now
         names = [c.name for c in self.sc.app.cameras if c.name != "hubcam"]
         for day in range(math.ceil(a.days)):
@@ -353,6 +453,12 @@ class Soak:
             if "hub" in self.features:
                 for _ in range(a.events_per_day // 2):
                     plan.append((base + r.uniform(0, DAY), "hub_clip", None))
+            if a.wrapper:
+                # One stretch of failing ticks a day, longer than the stall threshold.
+                length = self.sc.app.alerts.stall_threshold * r.uniform(1.3, 2.0)
+                at = base + r.uniform(0, DAY - length - 3600)
+                plan.append((at, "stall_on", length))
+                self.stalls.append((at, at + length))
             # A lens swinging out of its span now and then exercises the pan guard.
             for _ in range(_poisson(r, 2.0)):
                 plan.append((base + r.uniform(0, DAY), "pan_swing", r.choice(names)))
@@ -369,10 +475,14 @@ class Soak:
                 out += [(t, "net_down", None), (t + payload, "net_up", None)]
             elif kind == "rain":
                 out += [(t, "rain_on", None), (t + payload, "rain_off", None)]
+            elif kind == "stall_on":
+                out += [(t, "stall_on", None), (t + payload, "stall_off", None)]
             else:
                 out.append((t, kind, payload))
         out.sort(key=lambda e: e[0])
-        return out
+        # A restart inside a stall would reset the watchdog's clock; keep the two apart.
+        return [e for e in out if e[1] != "restart"
+                or not any(lo - 60 <= e[0] <= hi + 60 for lo, hi in self.stalls)]
 
     # applying world events -------------------------------------------------------
     def apply(self, kind, payload, now):
@@ -404,6 +514,10 @@ class Soak:
             sc.raining = True
         elif kind == "rain_off":
             sc.raining = False
+        elif kind == "stall_on":
+            self.stalled = True
+        elif kind == "stall_off":
+            self.stalled = False
         elif kind == "restart":
             self.restart(now)
         elif kind == "ip_change":
@@ -435,14 +549,100 @@ class Soak:
         if self.hub_worker is not None:
             kwargs["hub_worker"] = self.hub_worker
         sc._collaborators.update(kwargs)
-        sc.tick()
-        if self.args.inject == "leak":
-            self.leak.append(bytearray(self.args.inject_rate))
-        elif self.args.inject == "statefile":
+        if self.args.wrapper:
+            sc.last_control = daemon.tick(
+                sc.app, sc.cam_clients, sc.state, now=now, secrets=sc.secrets,
+                last_control=sc.last_control, control_interval=sc.control_interval,
+                sd_worker=self.sd_worker, hub_worker=self.hub_worker)
+            self.read_status(now)
+        else:
+            sc.tick()
+        self.inject()
+        if now - self.last_stamp >= 3600:
+            self.stamp_mtimes(now)
+
+    def read_status(self, now):
+        """What the endpoint thread does per request, every ``--status-every`` ticks."""
+        self.last_status += 1
+        if self.last_status % self.args.status_every:
+            return
+        began = time.perf_counter()
+        try:
+            json.dumps(statusd.served_snapshot(self.sc.app, self.sc.state,
+                                               started_at=self.started_at, now=now))
+        except Exception as exc:  # noqa: BLE001 - the endpoint must survive anything
+            self.status["errors"] += 1
+            if len(self.status["samples"]) < 3:
+                self.status["samples"].append(f"{type(exc).__name__}: {exc}"[:200])
+        took = time.perf_counter() - began
+        self.status["snapshots"] += 1
+        self.status["max_seconds"] = max(self.status["max_seconds"], took)
+
+    def inject(self):
+        a = self.args
+        if a.inject == "leak":
+            self.leak.append(bytearray(a.inject_rate))
+        elif a.inject == "statefile":
             with open(self.tmp / "runtime.json", "ab") as f:
-                f.write(b"x" * self.args.inject_rate)
-        elif self.args.inject == "threads":
-            threading.Thread(target=time.sleep, args=(3600,), daemon=True).start()
+                f.write(b"x" * a.inject_rate)
+        elif a.inject == "threads":
+            t = threading.Thread(target=self.stop_threads.wait, args=(3600,), daemon=True)
+            t.start()
+            self.sleepers.append(t)
+        elif a.inject == "filesleak":
+            # What a killed download leaves: a job dir with a segment in it, never removed.
+            job = Path(sdworker.job_dir())
+            (job / "clip.ts").write_bytes(b"x")
+
+    # files -----------------------------------------------------------------------
+    def archive_dirs(self):
+        return {"sent": self.tmp / "sent", "review": self.tmp / "review",
+                "panlimit": self.tmp / sentlog.PANLIMIT_DIR_NAME}
+
+    def stamp_mtimes(self, now):
+        """Give files written since the last pass the simulated time as their mtime.
+
+        Retention compares a file's mtime with the ``now`` the daemon hands down, which
+        here is a clock in the harness's 2026 epoch while the files are written in real
+        time: without this nothing would ever look old and the daily prune would never be
+        exercised. Hourly granularity is far below the retention windows (days). Names
+        stay in ``seen`` so deletions can be counted.
+        """
+        self.last_stamp = now
+        for name, path in self.archive_dirs().items():
+            try:
+                names = os.listdir(path)
+            except OSError:
+                continue
+            for n in names:
+                if not n.endswith(".jpg"):
+                    continue
+                full = os.path.join(path, n)
+                self.seen[name].add(full)
+                if full not in self.stamped:
+                    self.stamped.add(full)
+                    try:
+                        os.utime(full, (now, now))
+                    except OSError:
+                        pass
+
+    def count_files(self):
+        out = {name: count_tree(path, suffix=".jpg") for name, path in self.archive_dirs().items()}
+        out["tmp"] = sum(count_tree(p) + 1 for p in (self.tmp / "tmp").glob(
+            sdworker.JOB_DIR_PREFIX + "*"))
+        return out
+
+    def oldest_age_days(self, now):
+        """Age of the oldest archived jpeg by simulated mtime (the stamped ones)."""
+        out = {}
+        for name, path in self.archive_dirs().items():
+            ages = []
+            for n in (os.listdir(path) if path.exists() else ()):
+                full = os.path.join(path, n)
+                if n.endswith(".jpg") and full in self.stamped:
+                    ages.append(now - os.path.getmtime(full))
+            out[name] = round(max(ages, default=0.0) / DAY, 2)
+        return out
 
     def measure(self):
         files = {p.name: p.stat().st_size if p.exists() else 0 for p in self.state_files}
@@ -450,6 +650,7 @@ class Soak:
                 "files": files,
                 "dirs": {n: dir_size(self.tmp / n) for n in ("sent", "review")},
                 "ledger": file_size(self.tmp / "ledger.db"),
+                "counts": self.count_files(),
                 "tracemalloc_mb": (tracemalloc.get_traced_memory()[0] / 1e6
                                    if tracemalloc.is_tracing() else None)}
 
@@ -485,6 +686,11 @@ def file_size(path):
         return Path(path).stat().st_size
     except OSError:
         return 0
+
+
+def count_tree(path, suffix=""):
+    """Files below ``path`` (ending in ``suffix``); 0 when it does not exist."""
+    return sum(1 for _r, _d, names in os.walk(path) for n in names if n.endswith(suffix))
 
 
 def dir_size(path):
@@ -548,6 +754,13 @@ def run(args):
                    f"{d.size_diff / 1e3:+.0f} KB" for d in diff]
         if args.tracemalloc:
             tracemalloc.stop()
+        soak.stop_threads.set()              # let the injected sleepers go
+        for t in soak.sleepers:
+            t.join(5)
+        soak.stamp_mtimes(sc.clock.now)
+        oldest = soak.oldest_age_days(sc.clock.now)
+        seen = {name: len(files) for name, files in soak.seen.items()}
+        final_counts = soak.count_files()
         shutdown_ok = True
         worker = getattr(sc.state.retention_maintenance, "_worker", None)
         if worker is not None:
@@ -563,6 +776,11 @@ def run(args):
             "scorer_requests": soak.fake_scorer.requests,
             "scorer_failures": soak.fake_scorer.failures,
             "world_events": idx}
+        episodes = sum(1 for lo, hi in soak.stalls if lo < end)
+        stall = {"episodes": episodes, "ticks": errors.stall_ticks,
+                 "alerts": errors.stall_alerts, "recoveries": errors.stall_recoveries}
+        status = {k: soak.status[k] for k in ("snapshots", "errors", "samples")}
+        status["max_seconds"] = round(soak.status["max_seconds"], 4)
         package_log.removeHandler(errors)
         package_log.setLevel(saved_log[0])
         package_log.propagate = saved_log[1]
@@ -573,6 +791,8 @@ def run(args):
             "samples": samples, "tick_seconds": tick_stats(durations),
             "exceptions": soak.exceptions + errors.count,
             "exception_samples": soak.tracebacks + errors.samples,
+            "wrapper": bool(args.wrapper), "stall": stall, "status": status,
+            "seen": seen, "final_counts": final_counts, "oldest_age_days": oldest,
             "shutdown_ok": shutdown_ok, "tracemalloc_top": top, "audit_actions": dict(
                 sorted(errors.actions.items())), **soak_summary}
 
@@ -613,11 +833,20 @@ def evaluate(summary, args):
                               for name in STATE_FILES},
         "dir_growth_mb_per_day": {}, "ledger_kb": round(samples[-1]["ledger"] / 1024, 1)
         if samples else 0,
+        "files_final": {}, "files_growth_per_day": {}, "files_pruned": {},
     }
     days = max(summary["days"], 1e-9)
     for name in ("sent", "review"):
         metrics["dir_growth_mb_per_day"][name] = round(
             growth([s["dirs"][name] for s in samples]) / 1e6 / (days * 0.7), 2)
+    final = summary.get("final_counts") or (samples[-1]["counts"] if samples else {})
+    for name in ARCHIVES:
+        series = [s["counts"][name] for s in samples]
+        metrics["files_final"][name] = final.get(name, 0)
+        metrics["files_growth_per_day"][name] = round(growth(series) / (days * 0.7), 1)
+        # Files that existed once and are gone: retention (or the pipeline) removed them.
+        metrics["files_pruned"][name] = max(summary.get("seen", {}).get(name, 0)
+                                            - final.get(name, 0), 0) if name != "tmp" else 0
     findings = []
     if metrics["rss_growth_mb"] > args.max_rss_growth_mb:
         findings.append(f"RSS grew {metrics['rss_growth_mb']} MB (limit {args.max_rss_growth_mb})")
@@ -629,6 +858,27 @@ def evaluate(summary, args):
     for name, mb in metrics["dir_growth_mb_per_day"].items():
         if mb > args.max_dir_growth_mb_per_day:
             findings.append(f"{name} dir grows {mb} MB/day (limit {args.max_dir_growth_mb_per_day})")
+    for name, per_day in metrics["files_growth_per_day"].items():
+        if per_day > args.max_files_growth_per_day:
+            findings.append(f"{name} file count grows {per_day} files/day "
+                            f"(limit {args.max_files_growth_per_day})")
+    for name, age in summary.get("oldest_age_days", {}).items():
+        limit = RETENTION_DAYS.get(name)
+        if limit is not None and age > limit + args.retention_slack_days:
+            findings.append(f"{name} keeps a {age}-day-old file (retention {limit:g} days "
+                            f"+ {args.retention_slack_days:g} slack): retention is not deleting")
+    if summary.get("wrapper"):
+        stall, status = summary["stall"], summary["status"]
+        if stall["episodes"] and not stall["alerts"]:
+            findings.append(f"stall watchdog: {stall['episodes']} stalled stretch(es), no alert")
+        if stall["alerts"] and not stall["recoveries"]:
+            findings.append("stall watchdog: alerts sent but never a recovery notice")
+        if status["errors"]:
+            findings.append(f"status snapshot raised {status['errors']} time(s): "
+                            f"{status['samples'][:2]}")
+        if status["max_seconds"] > args.max_status_seconds:
+            findings.append(f"slowest status snapshot {status['max_seconds']} s "
+                            f"(limit {args.max_status_seconds})")
     if summary["tick_seconds"]["max"] > args.max_tick_seconds:
         findings.append(f"slowest tick {summary['tick_seconds']['max']} s "
                         f"(limit {args.max_tick_seconds})")
@@ -654,20 +904,31 @@ def make_parser():
     p.add_argument("--restarts-per-day", type=float, default=1.5)
     p.add_argument("--samples", type=int, default=100, help="measurements over the run")
     p.add_argument("--tracemalloc", action="store_true", help="also list top allocation growth")
+    p.add_argument("--wrapper", action="store_true",
+                   help="run through daemon.tick (stall watchdog, status view, injected "
+                        "failing ticks) instead of calling loop_step directly")
+    p.add_argument("--status-every", type=int, default=6,
+                   help="with --wrapper, build the /status payload every N ticks (default 6)")
     p.add_argument("--json", action="store_true")
     g = p.add_argument_group("limits (non-zero exit when exceeded)")
     g.add_argument("--max-rss-growth-mb", type=float, default=20.0)
     g.add_argument("--max-threads", type=int, default=32)
     g.add_argument("--max-state-kb", type=float, default=256.0, help="health/runtime/twin json")
     g.add_argument("--max-dir-growth-mb-per-day", type=float, default=100.0)
+    g.add_argument("--max-files-growth-per-day", type=float, default=1000.0,
+                   help="per archive/temp dir: sent, review, panlimit, tmp (sdjob_*)")
+    g.add_argument("--retention-slack-days", type=float, default=RETENTION_SLACK_DAYS,
+                   help="how far past its retention the oldest archived file may be")
+    g.add_argument("--max-status-seconds", type=float, default=0.5,
+                   help="with --wrapper: slowest status snapshot")
     g.add_argument("--max-tick-seconds", type=float, default=5.0)
     g.add_argument("--max-exceptions", type=int, default=0)
     g.add_argument("--hang-timeout", type=float, default=600.0,
                    help="abort with a stack dump when no 1%% of the run completes in this long")
     d = p.add_argument_group("self-test")
-    d.add_argument("--inject", choices=("leak", "statefile", "threads"),
+    d.add_argument("--inject", choices=("leak", "statefile", "threads", "filesleak"),
                    help="deliberately misbehave, to prove the limits fire")
-    d.add_argument("--inject-rate", type=int, default=65536, help="bytes per tick")
+    d.add_argument("--inject-rate", type=int, default=65536, help="bytes per tick (leak, statefile)")
     return p
 
 
@@ -684,6 +945,11 @@ def render(summary, metrics, findings):
              f"  alerts sent {s['alerts_sent']} (refused {s['alerts_failed']}), texts {s['texts']}, "
              f"restarts {s['restarts']}, scorer requests {s['scorer_requests']} "
              f"(failed {s['scorer_failures']}), exceptions {s['exceptions']}"]
+    lines.append(f"  files final {metrics['files_final']}, growth/day "
+                 f"{metrics['files_growth_per_day']}, pruned {metrics['files_pruned']}")
+    if s["wrapper"]:
+        lines.append(f"  wrapper: stall {s['stall']}, status snapshots {s['status']['snapshots']} "
+                     f"(errors {s['status']['errors']}, slowest {s['status']['max_seconds']} s)")
     lines.append("  paths exercised: " + ", ".join(f"{k}={v}" for k, v in s["audit_actions"].items()))
     if s["tracemalloc_top"]:
         lines.append("  tracemalloc growth: " + "; ".join(s["tracemalloc_top"]))

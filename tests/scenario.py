@@ -414,13 +414,10 @@ class Scenario:
         return grab
 
     # ── running ──────────────────────────────────────────────────────────────
-    def tick(self, advance=0.0):
-        """Run one ``loop_step`` at the current time, then move the clock by ``advance``.
-
-        Calls ``loop_step`` directly (not the daemon's ``tick`` wrapper, which swallows
-        exceptions), so a pass that raises fails the scenario instead of hiding in a log.
-        """
-        now = self.clock.now
+    def loop_kwargs(self):
+        """The injection points ``loop_step`` is called with: control, monitor, sampler,
+        night and the collaborator overrides. Also what a caller going through
+        ``daemon.tick`` (which passes none of them) wraps ``loop_step`` with."""
         def night():
             return self.night
 
@@ -432,12 +429,20 @@ class Scenario:
                                     time_str=lambda _e: "scenario")
         sample = functools.partial(daemon.process_sampler, snapshot_for=self._snapshot_for,
                                    time_str=lambda _e: "scenario")
-        kwargs = {"run_control": control, "monitor": monitor, "sample": sample,
-                  "is_night": night, **self._collaborators}
+        return {"run_control": control, "monitor": monitor, "sample": sample,
+                "is_night": night, **self._collaborators}
+
+    def tick(self, advance=0.0):
+        """Run one ``loop_step`` at the current time, then move the clock by ``advance``.
+
+        Calls ``loop_step`` directly (not the daemon's ``tick`` wrapper, which swallows
+        exceptions), so a pass that raises fails the scenario instead of hiding in a log.
+        """
+        now = self.clock.now
         self.last_control = daemon.loop_step(
             self.app, self.cam_clients, self.state, now=now, secrets=self.secrets,
             last_control=self.last_control, control_interval=self.control_interval,
-            **kwargs)
+            **self.loop_kwargs())
         self.clock.advance(advance)
         return now
 
