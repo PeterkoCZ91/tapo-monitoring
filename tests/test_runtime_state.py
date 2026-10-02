@@ -27,7 +27,8 @@ def test_round_trip_restores_queues_and_cooldowns(tmp_path):
     assert runtime_state.save(path, runtime_state.snapshot(before), now=1000)
     after = daemon.MonitorState()
     counts = runtime_state.load(path, after, now=1010)
-    assert counts == {"pending_hub": 1, "pending_sd": 1, "cooldowns": 2}
+    assert counts == {"pending_hub": 1, "pending_sd": 1, "pending_hub_clips": 0,
+                      "cooldowns": 2}
     assert after.pending_hub == before.pending_hub
     assert after.pending_sd == before.pending_sd
     assert after.last_alert == before.last_alert
@@ -65,7 +66,8 @@ def test_stale_file_is_discarded_whole(tmp_path):
     runtime_state.save(path, runtime_state.snapshot(_state_with_work(tmp_path)), now=1000)
     after = daemon.MonitorState()
     counts = runtime_state.load(path, after, now=1000 + runtime_state.MAX_AGE + 1)
-    assert counts == {"pending_hub": 0, "pending_sd": 0, "cooldowns": 0}
+    assert counts == {"pending_hub": 0, "pending_sd": 0,
+                      "pending_hub_clips": 0, "cooldowns": 0}
     assert after.pending_hub == [] and after.last_alert == {}
 
 

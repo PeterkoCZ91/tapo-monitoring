@@ -324,6 +324,8 @@ class CameraConfig:
     hub_device_mac: str | None = None
     go2rtc_src: str | None = None       # go2rtc stream name for the snapshot
     hub_poll_interval: int = 20         # seconds between hub polls
+    # Download hub clips and cut their frames on a background thread instead of the loop.
+    hub_clip_worker: bool = False
     # Days without a hub clip after which one Telegram notice is sent; None = off.
     inactivity_alert_days: int | None = None
     # The hub authenticates against the Tapo *account* (e-mail + account password), not a
@@ -1135,6 +1137,7 @@ def _camera(data, index):
         raise ConfigError(f"{where}: 'hub_poll_interval' must be an integer") from None
     if hub_poll_interval < 1:
         raise ConfigError(f"{where}: 'hub_poll_interval' must be >= 1")
+    hub_clip_worker = _check_bool(data.get("hub_clip_worker", False), "hub_clip_worker", where)
     inactivity_alert_days = data.get("inactivity_alert_days")
     if inactivity_alert_days is not None:
         if (isinstance(inactivity_alert_days, bool)
@@ -1276,6 +1279,7 @@ def _camera(data, index):
         hub_device_mac=data.get("hub_device_mac"),
         go2rtc_src=data.get("go2rtc_src"),
         hub_poll_interval=hub_poll_interval,
+        hub_clip_worker=hub_clip_worker,
         inactivity_alert_days=inactivity_alert_days,
         hub_user_env=data.get("hub_user_env"),
         hub_password_env=data.get("hub_password_env"),

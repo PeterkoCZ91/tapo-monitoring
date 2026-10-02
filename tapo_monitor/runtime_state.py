@@ -79,6 +79,8 @@ def snapshot(state, logger=None):
     return {
         "pending_hub": _serializable(state.pending_hub, "hub retry", logger),
         "pending_sd": _serializable(state.pending_sd, "SD follow-up", logger),
+        "pending_hub_clips": _serializable(getattr(state, "pending_hub_clips", []),
+                                           "hub clip", logger),
         "last_alert": _cooldowns(state.last_alert),
         "last_event_start": _cooldowns(state.last_event_start),
         "privacy_announced": {str(k): bool(v)
@@ -151,7 +153,7 @@ def load(path, state, now, logger=None, max_age=MAX_AGE):
     fresh start always did. A queued hub alert whose frame file is gone cannot be sent
     and is dropped with a log line rather than kept as a retry that can only fail.
     """
-    empty = {"pending_hub": 0, "pending_sd": 0, "cooldowns": 0}
+    empty = {"pending_hub": 0, "pending_sd": 0, "pending_hub_clips": 0, "cooldowns": 0}
     try:
         with open(path, encoding="utf-8") as fh:
             payload = json.load(fh)
@@ -166,7 +168,8 @@ def load(path, state, now, logger=None, max_age=MAX_AGE):
             return empty
         hub = payload.get("pending_hub") or []
         sd = payload.get("pending_sd") or []
-        if not isinstance(hub, list) or not isinstance(sd, list):
+        clips = payload.get("pending_hub_clips") or []
+        if not isinstance(hub, list) or not isinstance(sd, list) or not isinstance(clips, list):
             raise ValueError("bad runtime queues")
         last_alert, last_event_start = {}, {}
         _restore_cooldowns(payload.get("last_alert") or [], last_alert)
@@ -186,7 +189,12 @@ def load(path, state, now, logger=None, max_age=MAX_AGE):
             continue
         kept_hub.append(entry)
     kept_sd = [entry for entry in sd if isinstance(entry, dict)]
+    kept_clips = [entry for entry in clips if isinstance(entry, dict)
+                  and isinstance(entry.get("camera"), str)
+                  and isinstance(entry.get("start_time"), (int, float))
+                  and not isinstance(entry.get("start_time"), bool)]
     state.pending_hub.extend(kept_hub)
+    state.pending_hub_clips.extend(kept_clips)
     state.pending_sd.extend(kept_sd)
     state.last_alert.update(last_alert)
     state.last_event_start.update(last_event_start)
@@ -199,4 +207,5 @@ def load(path, state, now, logger=None, max_age=MAX_AGE):
         state.detection_announced.update(_detection_announced(detection))
     state.runtime_saved = snapshot(state, logger)
     return {"pending_hub": len(kept_hub), "pending_sd": len(kept_sd),
+            "pending_hub_clips": len(kept_clips),
             "cooldowns": len(last_alert) + len(last_event_start)}

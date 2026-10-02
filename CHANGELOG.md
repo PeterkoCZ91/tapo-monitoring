@@ -5,6 +5,10 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `hub_clip_worker` (off by default): download hub clips and cut their frames on a
+  background thread per hub instead of the main loop. Queued clips are saved with the
+  runtime state before the hub cursor moves past them, survive a restart, and fall back to
+  a live frame when a job fails or overruns.
 - `scorer.alert_zones`: polygons (fractions of the frame) inside which a person must
   stand, by the bottom centre of its box, to count. Refused on pan/tilt-lens profiles; a
   camera that tracks or has a pan limit loads with a warning, because its framing moves.

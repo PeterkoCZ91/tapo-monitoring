@@ -344,7 +344,19 @@ hub_poll_interval: 20           # seconds between hub polls
 hub_device_mac: null            # optional: pin the hub-side addressing
 hub_device_id: null
 inactivity_alert_days: null     # optional, 1-90: one Telegram notice after this many days without a clip
+hub_clip_worker: false          # optional: download hub clips on a background thread
 ```
+
+`hub_clip_worker: true` moves the clip download and frame extraction off the main loop.
+By default each new clip is fetched on the loop (a 10 s stall timeout per download, one
+retry, then a live frame), so while it runs no other camera on the host is polled. With
+the option, a new clip is queued and saved with the runtime state before the hub cursor
+moves past it, and one worker thread per hub downloads it (a hub tolerates a single
+session, so downloads never overlap); the loop then scores, gates and sends exactly as
+before. A job that fails, returns no frame or runs past 150 s is replaced by a live
+frame, a queued clip is read again after a restart, and one older than ten minutes is
+dropped. Scoring and the Telegram send stay on the loop. Off by default and unchanged
+when off.
 
 A battery camera with no usable SD keeps no event index of its own: its recordings — and
 therefore its detections — live on the hub it is bound to, and it sleeps between events.

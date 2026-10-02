@@ -89,6 +89,12 @@ PENDING_MAX_AGE = 600
 HUB_RETRY_MAX_ATTEMPTS = 4
 HUB_RETRY_DELAY = 60
 HUB_PENDING_TTL = PENDING_MAX_AGE
+# ``hub_clip_worker``: a clip job that has not come back this long after it was handed to
+# the worker is given up on and the alert is built from a live frame instead. The download
+# and the decoder have their own, shorter timeouts; this bounds a stuck thread.
+HUB_CLIP_JOB_TIMEOUT = 150
+# A queued clip whose deciding step raised on the loop is tried this many times in all.
+HUB_CLIP_FINISH_ATTEMPTS = 2
 # A persisted hub cursor older than this is clamped forward on restore, so a long outage
 # costs at most this much replayed history rather than a flood of stale alerts.
 HUB_CURSOR_MAX_AGE = 4 * 3600
@@ -1008,6 +1014,10 @@ class MonitorState:
     # Hub alerts whose Telegram delivery failed, waiting for a bounded retry (the hub
     # cursor has already moved past their clip, so this queue is the only copy).
     pending_hub: list = field(default_factory=list)
+    # ``hub_clip_worker``: clips noticed on the hub whose download runs on the worker. The
+    # cursor is already past them, so this list (persisted) is the only copy of the alert.
+    pending_hub_clips: list = field(default_factory=list)
+    hub_clip_started: dict = field(default_factory=dict)   # (camera, start) -> submit time
     hub_cursor_path: str | None = None
     # Inactivity watchdog: newest clip start seen this process, next allowed hub query and
     # when the last notice went out (persisted beside the cursor so a restart cannot repeat it).
@@ -2204,23 +2214,59 @@ def _default_hub_client(cfg: CameraConfig, state: MonitorState, now):  # pragma:
     return client
 
 
+def fetch_hub_clip_frames(cfg, device, clip, password, *, download=None, extract=None,
+                          tmp=None):
+    """Download one hub clip and cut its frame(s) into a pid-named job dir.
+
+    Clip and frames share one ``sdjob_<pid>_*`` dir, so a daemon killed mid-job leaves
+    something :func:`sdworker.clean_orphan_job_dirs` clears at the next start. The clip
+    is always removed; the dir goes too unless frames came out (the caller owns those and
+    :func:`_deliver_hub_frames` drops the dir with the last one). Returns one path, a
+    list, or an empty result.
+    """
+    download = download or hubclient.download_clip
+    end = clip.get("end_time") or clip["start_time"] + 15
+    job = sdworker.job_dir(tmp)
+    keep = False
+    try:
+        clip_path = os.path.join(job, "clip.ts")
+        got = download(cfg.hub_host, password, device["device_id"], device["mac"],
+                       clip["start_time"], end, clip_path)
+        if not got:
+            return []
+        if extract is not None:
+            result = extract(got, job, end - clip["start_time"])
+        elif not cfg.scorer.url:
+            result = snapshot.frame_from_clip(got, out_dir=job, rotate=cfg.rotate)
+        else:
+            result = snapshot.frames_from_clip(
+                got, duration=end - clip["start_time"], out_dir=job, rotate=cfg.rotate)
+        keep = bool(result)
+        return result
+    finally:
+        if keep:
+            _safe_unlink(os.path.join(job, "clip.ts"))
+        else:
+            shutil.rmtree(job, ignore_errors=True)
+
+
+def _drop_job_dirs(paths):
+    """Remove the (now empty) ``sdjob_*`` dirs the given frames lived in. Never raises."""
+    for path in paths:
+        parent = os.path.dirname(str(path))
+        if os.path.basename(parent).startswith(sdworker.JOB_DIR_PREFIX):
+            try:
+                os.rmdir(parent)
+            except OSError:
+                pass          # not empty (a frame kept for a retry) or already gone
+
+
 def _default_clip_frame(cfg: CameraConfig, device):  # pragma: no cover
     """Download once and extract candidates spanning the recorded event."""
     _, password = resolve_hub_credentials(cfg)
 
     def fetch(clip):
-        end = clip.get("end_time") or clip["start_time"] + 15
-        with tempfile.TemporaryDirectory(prefix="hubclip_") as job_dir:
-            clip_path = os.path.join(job_dir, "clip.ts")
-            got = hubclient.download_clip(
-                cfg.hub_host, password, device["device_id"], device["mac"],
-                clip["start_time"], end, clip_path)
-            if not got:
-                return []
-            if not cfg.scorer.url:
-                return snapshot.frame_from_clip(got, rotate=cfg.rotate)
-            return snapshot.frames_from_clip(
-                got, duration=end - clip["start_time"], rotate=cfg.rotate)
+        return fetch_hub_clip_frames(cfg, device, clip, password)
     return fetch
 
 
@@ -2392,7 +2438,7 @@ def process_pending_hub(app, state, *, now, secrets):
 
 def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
                      night=True, hub_for=None, frame_for=None, time_str=None,
-                     score_for=None, clip_frame_for=None):
+                     score_for=None, clip_frame_for=None, hub_worker=None):
     """Turn clips indexed on the hub into scored alerts, for cameras that use ``hubpoll``.
 
     A standalone pass on purpose: the sampler only advances groups the getEvents path
@@ -2408,6 +2454,12 @@ def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
     A camera the hub reports as recording 24/7 is resolved but never polled for clips:
     every clip on such a camera would look identical to a triggered one, and hubpoll has no
     confirmed way to tell them apart yet (see ``docs/battery-cameras-on-a-hub.md``).
+
+    A camera with ``hub_clip_worker`` (and a ``hub_worker``, :class:`sdworker.SdWorker`)
+    does not wait for the download: a new clip is queued in ``state.pending_hub_clips``,
+    saved with the runtime state before the cursor moves past it, and a worker thread
+    (one per hub) downloads it and cuts the frames. A later pass collects the frames and
+    scores, gates and sends exactly as the inline path does (:func:`_deliver_hub_frames`).
     """
     hub_for = hub_for or _default_hub_client
     frame_for = frame_for or _default_hub_frame
@@ -2421,12 +2473,22 @@ def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
         _run_hubpoll_cameras(app, cam_clients, state, now=now, secrets=secrets,
                              night=night, hub_for=hub_for, frame_for=frame_for,
                              time_str=time_str, score_for=score_for,
-                             clip_frame_for=clip_frame_for, cooldown=cooldown)
+                             clip_frame_for=clip_frame_for, cooldown=cooldown,
+                             hub_worker=hub_worker)
+        if hub_worker is not None:
+            process_hub_clip_queue(app, state, hub_worker, now=now, secrets=secrets,
+                                   frame_for=frame_for, score_for=score_for,
+                                   time_str=time_str, clip_frame_for=clip_frame_for,
+                                   cooldown=cooldown)
         check_hub_inactivity(app, state, now=now, secrets=secrets, night=night,
                              hub_for=hub_for)
     finally:
         if state.pending_hub:
             process_pending_hub(app, state, now=now, secrets=secrets)
+        if state.hub_cursor != cursor_before:
+            # The queue first: a crash between the two writes replays a clip (it is queued
+            # once anyway); the other order would lose it.
+            runtime_state.save_if_changed(state, now, logger=log)
         if state.hub_cursor_path and state.hub_cursor != cursor_before:
             save_hub_cursor(state.hub_cursor_path, state.hub_cursor, logger=log)
         if state.hub_inactive_path and state.hub_inactive_alerted != alerted_before:
@@ -2489,7 +2551,8 @@ def check_hub_inactivity(app, state, *, now, secrets, night, hub_for):
 
 
 def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_for,
-                         frame_for, time_str, score_for, clip_frame_for, cooldown):
+                         frame_for, time_str, score_for, clip_frame_for, cooldown,
+                         hub_worker=None):
     for cfg in app.cameras:
         if "hubpoll" not in cfg.detection.sources:
             continue
@@ -2559,6 +2622,9 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
                 clip["start_time"], state.hub_last_clip.get(cfg.name, 0))
             if muted:
                 continue
+            if cfg.hub_clip_worker and hub_worker is not None:
+                _queue_hub_clip(state, cfg, clip, now)
+                continue
             # A hub clip is a triggered recording, not a classified detection: the camera
             # does not tell us what it saw, so it is gated as bare motion and the scorer
             # decides.
@@ -2593,63 +2659,212 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
                 monitor.audit_event(cfg, event, etype, "hubpoll", "drop", reason="no_frame",
                                     extra=clip_extra)
                 continue
-            frames = image if isinstance(image, list) else [image]
-            queued_image = None
-            try:
-                image, s = (frames[0], None) if score is None else _select_recording_frame(
-                    cfg, event, etype, frames, score, path="hubpoll", keep_below=True,
-                    audit_extra=clip_extra)
-                if score is not None and s is None:
-                    log.warning("scorer unavailable; hubpoll passes %s frame through", cfg.name)
-                elif s is not None and s < cfg.scorer.threshold:
-                    log.info("drop hub clip: score %.2f below threshold %.2f",
-                             s, cfg.scorer.threshold)
-                    monitor.audit_event(cfg, event, etype, "hubpoll", "drop", score=s,
-                                        threshold=cfg.scorer.threshold,
-                                        reason="below_threshold", extra=clip_extra)
-                    # Same review-log the sampler's hold uses (no-op unless TAPO_REVIEW_LOG_DIR).
-                    sentlog.archive_review_if_configured(
-                        image, {**sentlog.review_meta(cfg.name, "drop", etype, s, event),
-                                **{k: v for k, v in clip_extra.items() if v is not None}})
-                    continue
-                if not can_alert(etype, event):
-                    log.info("skip hub clip: cooldown active [hubpoll]")
-                    monitor.audit_event(cfg, event, etype, "hubpoll", "cooldown", score=s,
-                                        threshold=cfg.scorer.threshold if s is not None else None,
-                                        extra=clip_extra)
-                    continue
-                description = _caption_describe(cfg, secrets["groq_key"], image)
-                caption = notify.build_caption(
-                    monitor.TYPE_EMOJI.get(etype, "👁"), time_str(clip),
-                    description=description or None, score=s,
-                )
-                ok = send_alert_photo(cfg, secrets, image, caption, score=s,
-                                      incident=incident.incident_id(cfg.name, event),
-                                      send_path="hubpoll", etype=etype)
-                monitor.audit_event(cfg, event, etype, "hubpoll", "send", score=s,
-                                    threshold=cfg.scorer.threshold if score is not None else None,
-                                    telegram=ok, extra=clip_extra)
-                if ok:
-                    log.info("alert hub clip sent for %s (score=%s) [hubpoll]",
-                             cfg.name, f"{s:.2f}" if s is not None else "n/a")
-                    on_alert(etype, event, score=s,
-                             threshold=cfg.scorer.threshold if score is not None else None)
-                else:
-                    log.warning("hub clip Telegram delivery failed for %s; retry queued",
-                                cfg.name)
-                    # The cursor is already past this clip, so this queue is the only
-                    # remaining copy: keep the chosen frame for a bounded retry.
-                    state.pending_hub.append({
-                        "camera": cfg.name, "start_time": clip["start_time"],
-                        "image": image, "caption": caption, "score": s, "etype": etype,
-                        "attempts": 1, "queued_at": now, "due_at": now + HUB_RETRY_DELAY,
-                        "audit_extra": clip_extra,
-                    })
-                    queued_image = image
-            finally:
-                for frame in frames:
-                    if frame != queued_image:
-                        _safe_unlink(frame)
+            _deliver_hub_frames(cfg, state, clip, event, etype, image, clip_extra,
+                                score=score, can_alert=can_alert, on_alert=on_alert,
+                                secrets=secrets, time_str=time_str, now=now)
+
+
+def _deliver_hub_frames(cfg, state, clip, event, etype, image, clip_extra, *, score,
+                       can_alert, on_alert, secrets, time_str, now):
+    """Score, gate and send the frame(s) a hub clip produced; queue a failed send for retry.
+
+    Shared by the inline path and the clip worker, so a clip decided on either is judged
+    identically. ``image`` is one path or a list; every frame not queued for a retry is
+    deleted on the way out.
+    """
+    frames = image if isinstance(image, list) else [image]
+    queued_image = None
+    try:
+        image, s = (frames[0], None) if score is None else _select_recording_frame(
+            cfg, event, etype, frames, score, path="hubpoll", keep_below=True,
+            audit_extra=clip_extra)
+        if score is not None and s is None:
+            log.warning("scorer unavailable; hubpoll passes %s frame through", cfg.name)
+        elif s is not None and s < cfg.scorer.threshold:
+            log.info("drop hub clip: score %.2f below threshold %.2f",
+                     s, cfg.scorer.threshold)
+            monitor.audit_event(cfg, event, etype, "hubpoll", "drop", score=s,
+                                threshold=cfg.scorer.threshold,
+                                reason="below_threshold", extra=clip_extra)
+            # Same review-log the sampler's hold uses (no-op unless TAPO_REVIEW_LOG_DIR).
+            sentlog.archive_review_if_configured(
+                image, {**sentlog.review_meta(cfg.name, "drop", etype, s, event),
+                        **{k: v for k, v in clip_extra.items() if v is not None}})
+            return
+        if not can_alert(etype, event):
+            log.info("skip hub clip: cooldown active [hubpoll]")
+            monitor.audit_event(cfg, event, etype, "hubpoll", "cooldown", score=s,
+                                threshold=cfg.scorer.threshold if s is not None else None,
+                                extra=clip_extra)
+            return
+        description = _caption_describe(cfg, secrets["groq_key"], image)
+        caption = notify.build_caption(
+            monitor.TYPE_EMOJI.get(etype, "👁"), time_str(clip),
+            description=description or None, score=s,
+        )
+        ok = send_alert_photo(cfg, secrets, image, caption, score=s,
+                              incident=incident.incident_id(cfg.name, event),
+                              send_path="hubpoll", etype=etype)
+        monitor.audit_event(cfg, event, etype, "hubpoll", "send", score=s,
+                            threshold=cfg.scorer.threshold if score is not None else None,
+                            telegram=ok, extra=clip_extra)
+        if ok:
+            log.info("alert hub clip sent for %s (score=%s) [hubpoll]",
+                     cfg.name, f"{s:.2f}" if s is not None else "n/a")
+            on_alert(etype, event, score=s,
+                     threshold=cfg.scorer.threshold if score is not None else None)
+        else:
+            log.warning("hub clip Telegram delivery failed for %s; retry queued",
+                        cfg.name)
+            # The cursor is already past this clip, so this queue is the only
+            # remaining copy: keep the chosen frame for a bounded retry.
+            state.pending_hub.append({
+                "camera": cfg.name, "start_time": clip["start_time"],
+                "image": image, "caption": caption, "score": s, "etype": etype,
+                "attempts": 1, "queued_at": now, "due_at": now + HUB_RETRY_DELAY,
+                "audit_extra": clip_extra,
+            })
+            queued_image = image
+    finally:
+        for frame in frames:
+            if frame != queued_image:
+                _safe_unlink(frame)
+        _drop_job_dirs(frames)
+
+
+def _queue_hub_clip(state, cfg, clip, now):
+    """Remember a new hub clip for the worker; a clip already queued is not added twice."""
+    start = clip["start_time"]
+    if any(e["camera"] == cfg.name and e["start_time"] == start
+           for e in state.pending_hub_clips):
+        return
+    state.pending_hub_clips.append({
+        "camera": cfg.name, "start_time": start, "end_time": clip.get("end_time"),
+        "video_type": clip.get("video_type"), "queued_at": now})
+    log.info("hubpoll %s: clip at %s queued for the worker", cfg.name, int(start))
+
+
+def _hub_clip_job(fetch, clip, name):
+    """The worker's half: download the clip and cut its frames, one retry. Never touches
+    daemon state. Returns a list of frame paths (empty when the clip yielded nothing)."""
+    image = fetch(clip)
+    if not image:
+        log.info("hubpoll %s: no frame from the clip at %s; retrying once",
+                 name, int(clip["start_time"]))
+        image = fetch(clip)
+    if not image:
+        return []
+    return list(image) if isinstance(image, list) else [image]
+
+
+def _finish_hub_clip(state, cfg, entry, frames, *, now, secrets, frame_for, score_for,
+                     time_str, cooldown):
+    """Decide and send one queued clip, given the frames its job returned (maybe none)."""
+    clip = {k: entry.get(k) for k in ("start_time", "end_time", "video_type")}
+    event = detection.normalize_event({"start_time": clip["start_time"]},
+                                      getattr(cfg, "event_profile", None))
+    clip_extra = _hub_clip_audit(clip)
+    image = frames
+    if not image:
+        log.info("hubpoll %s: clip unavailable for %s; trying a live frame",
+                 cfg.name, int(clip["start_time"]))
+        image = frame_for(cfg)()
+    if not image:
+        log.info("hubpoll %s: no frame for the clip at %s; skipping",
+                 cfg.name, int(clip["start_time"]))
+        monitor.audit_event(cfg, event, "motion", "hubpoll", "drop", reason="no_frame",
+                            extra=clip_extra)
+        return
+    can_alert, on_alert = alert_gate(state, cfg.name, cooldown, now)
+    _deliver_hub_frames(cfg, state, clip, event, "motion", image, clip_extra,
+                        score=score_for(cfg), can_alert=can_alert, on_alert=on_alert,
+                        secrets=secrets, time_str=time_str, now=now)
+
+
+def process_hub_clip_queue(app, state, worker, *, now, secrets, frame_for, score_for,
+                           time_str, clip_frame_for, cooldown):
+    """Hand queued hub clips to ``worker`` and decide the ones that came back.
+
+    One download per hub at a time (the worker is keyed by hub host, and a hub tolerates a
+    single session). Nothing is lost to a failing worker: a job that raised, returned no
+    frame or overran :data:`HUB_CLIP_JOB_TIMEOUT` is replaced by a live frame, like the
+    inline path's last resort. An entry stays queued (and saved) until its alert is decided,
+    so a restart resubmits it; one older than :data:`HUB_PENDING_TTL` is dropped. A result
+    arriving for an entry already given up on is deleted, never sent.
+    """
+    cfg_by_name = {c.name: c for c in app.cameras}
+    queue = state.pending_hub_clips
+    decided = []                          # entries to leave the queue (by identity)
+
+    def key(entry):
+        return (entry["camera"], entry["start_time"])
+
+    def finish(entry, frames):
+        """Settle the entry (it joins ``decided``) unless deciding raised and a try is left."""
+        cfg = cfg_by_name[entry["camera"]]
+        state.hub_clip_started.pop(key(entry), None)
+        try:
+            _finish_hub_clip(state, cfg, entry, frames, now=now, secrets=secrets,
+                             frame_for=frame_for, score_for=score_for, time_str=time_str,
+                             cooldown=cooldown)
+        except Exception:  # noqa: BLE001 - one bad clip must not end the pass
+            entry["finish_attempts"] = entry.get("finish_attempts", 0) + 1
+            log.exception("hubpoll %s: deciding the clip at %s failed (attempt %d)",
+                          cfg.name, int(entry["start_time"]), entry["finish_attempts"])
+            if entry["finish_attempts"] >= HUB_CLIP_FINISH_ATTEMPTS:
+                decided.append(entry)
+            return
+        decided.append(entry)
+
+    def collect():
+        for result in worker.poll():
+            entry = result.context
+            if not any(e is entry for e in queue) or any(e is entry for e in decided):
+                for frame in result.value or []:
+                    _safe_unlink(frame)   # given up on while it ran: never send it late
+                continue
+            if result.error is not None:
+                log.warning("hubpoll %s: clip job failed: %s", entry["camera"],
+                            type(result.error).__name__)
+            finish(entry, [] if result.error is not None else list(result.value or []))
+
+    collect()
+    for entry in list(queue):
+        if any(e is entry for e in decided):
+            continue
+        cfg = cfg_by_name.get(entry["camera"])
+        age = now - entry.get("queued_at", now)
+        if cfg is None or age > HUB_PENDING_TTL:
+            log.info("drop hub clip for %s: too old or camera gone (age=%ds)",
+                     entry["camera"], int(age))
+            state.hub_clip_started.pop(key(entry), None)
+            decided.append(entry)
+            continue
+        if worker.pending(key(entry)):
+            started = state.hub_clip_started.get(key(entry), now)
+            if now - started > HUB_CLIP_JOB_TIMEOUT:
+                log.warning("hubpoll %s: clip job for %s overran %ds; using a live frame",
+                            cfg.name, int(entry["start_time"]), HUB_CLIP_JOB_TIMEOUT)
+                finish(entry, [])           # the stuck job's late result is deleted
+            continue
+        device = state.hub_devices.get(cfg.name)
+        if device is None or worker.busy(cfg.hub_host):
+            if age > HUB_CLIP_JOB_TIMEOUT:
+                # Stuck behind a download that never returned (or a hub that is gone):
+                # a late live frame beats no alert.
+                log.warning("hubpoll %s: clip at %s waited %ds for the worker; "
+                            "using a live frame", cfg.name, int(entry["start_time"]), int(age))
+                finish(entry, [])
+            continue                        # not resolved after a restart / hub in use
+        state.hub_clip_started[key(entry)] = now
+        clip = {"start_time": entry["start_time"], "end_time": entry.get("end_time"),
+                "video_type": entry.get("video_type")}
+        worker.submit(cfg.hub_host, key(entry),
+                      functools.partial(_hub_clip_job, clip_frame_for(cfg, device), clip,
+                                        cfg.name),
+                      context=entry)
+        collect()                           # an inline worker has the answer already
+    state.pending_hub_clips[:] = [e for e in queue if not any(e is d for d in decided)]
 
 
 def _score_all(score, frames):
@@ -4435,7 +4650,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
               last_control, control_interval,
               run_control=None, watchdog=None, monitor=None, drain=None, sample=None,
               connect_factory=None, is_night=None, guard=None, inspect=None, digest=None,
-              hubpoll=None, sd_worker=None, privacy_notice=None, detection_notice=None,
+              hubpoll=None, sd_worker=None, hub_worker=None, privacy_notice=None, detection_notice=None,
               late=None):
     """One loop iteration with control decoupled from event polling.
 
@@ -4453,6 +4668,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     ``sd_worker`` (:class:`sdworker.SdWorker`) reads SD/recording follow-ups in the
     background, so a slow camera-card download no longer holds up the other passes; it
     lives as long as the daemon. Without one the drain reads inline, as it always did.
+    ``hub_worker`` does the same for the hub clips of cameras with ``hub_clip_worker``.
     """
     run_control = run_control or run_once
     watchdog = watchdog or _watchdog_pass
@@ -4508,7 +4724,8 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     monitor(scoring, cam_clients, state, now=now, secrets=secrets, night=night)
     if state.health_path and state.last_seen != previous_watermark:
         health.save_state(state.health_path, state, logger=log)
-    hubpoll(scoring, cam_clients, state, now=now, secrets=secrets, night=night)
+    hub_kw = {"hub_worker": hub_worker} if hub_worker is not None else {}
+    hubpoll(scoring, cam_clients, state, now=now, secrets=secrets, night=night, **hub_kw)
     sample(scoring, cam_clients, state, now=now, secrets=secrets, night=night)
     drain_kw = {"worker": sd_worker} if sd_worker is not None else {}
     drain(scoring, cam_clients, state, now=now, secrets=secrets, night=night, **drain_kw)
@@ -4552,9 +4769,10 @@ def main(argv=None):  # pragma: no cover - thin entry point
     carried = runtime_state.load(state.runtime_path, state, _time.time(), logger=log)
     state.runtime_restored = dict(carried)
     if any(carried.values()):
-        log.info("runtime state restored: %d hub retr%s, %d SD follow-up(s), %d cooldown(s)",
+        log.info("runtime state restored: %d hub retr%s, %d SD follow-up(s), "
+                 "%d hub clip(s), %d cooldown(s)",
                  carried["pending_hub"], "y" if carried["pending_hub"] == 1 else "ies",
-                 carried["pending_sd"], carried["cooldowns"])
+                 carried["pending_sd"], carried["pending_hub_clips"], carried["cooldowns"])
     state.twin_path = twin.default_state_path()
     state.twin_fleet = twin.load_state(state.twin_path, logger=log)
     state.twin_alerted = {
@@ -4599,6 +4817,8 @@ def main(argv=None):  # pragma: no cover - thin entry point
         log.warning("%s", expiry_warning)
     sdworker.clean_orphan_job_dirs(logger=log)
     sd_worker = sdworker.SdWorker()
+    hub_worker = (sdworker.SdWorker()
+                  if any(c.hub_clip_worker for c in app.cameras) else None)
     cam_clients = {}
     last_control = None
 
@@ -4613,12 +4833,12 @@ def main(argv=None):  # pragma: no cover - thin entry point
                 last_control = tick(app, cam_clients, state, now=_time.time(),
                                     secrets=secrets, last_control=last_control,
                                     control_interval=control_interval,
-                                    sd_worker=sd_worker)
+                                    sd_worker=sd_worker, hub_worker=hub_worker)
             if stop.requested:
                 break
             _time.sleep(poll_interval)
     finally:
-        shutdown(state, now=_time.time(), sd_worker=sd_worker)
+        shutdown(state, now=_time.time(), sd_worker=sd_worker, hub_worker=hub_worker)
 
 
 class GracefulStop:
@@ -4656,7 +4876,7 @@ class GracefulStop:
 SHUTDOWN_LEDGER_TIMEOUT = 5.0
 
 
-def shutdown(state: MonitorState, *, now, sd_worker=None):
+def shutdown(state: MonitorState, *, now, sd_worker=None, hub_worker=None):
     """Leave nothing behind a stop that the next start would pay for. Never raises.
 
     A hub tolerates one session, and a dangling one makes the next start be accepted and
@@ -4673,6 +4893,11 @@ def shutdown(state: MonitorState, *, now, sd_worker=None):
             log.info("stopping with %d SD follow-up(s) being read; queued for the restart",
                      sd_worker.in_flight())
         sd_worker.shutdown(wait=False)
+    if hub_worker is not None:
+        if hub_worker.in_flight():
+            log.info("stopping with %d hub clip(s) downloading; queued for the restart",
+                     hub_worker.in_flight())
+        hub_worker.shutdown(wait=False)
     close_hub_clients(state)
     runtime_state.save_if_changed(state, now, logger=log)
     mqtt.stop()                       # says "offline" itself; bounded, never raises
@@ -4683,7 +4908,7 @@ def shutdown(state: MonitorState, *, now, sd_worker=None):
 
 
 def tick(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
-         last_control, control_interval, sd_worker=None):
+         last_control, control_interval, sd_worker=None, hub_worker=None):
     """Run one loop iteration and report its outcome to the stall watchdog.
 
     Deliberately outside ``loop_step``: when the tick itself is what breaks, this is the
@@ -4694,7 +4919,7 @@ def tick(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
         last_control = loop_step(
             app, cam_clients, state, now=now, secrets=secrets,
             last_control=last_control, control_interval=control_interval,
-            sd_worker=sd_worker,
+            sd_worker=sd_worker, hub_worker=hub_worker,
         )
         tick_ok = True
     except Exception as e:  # noqa: BLE001 - one bad tick must not end the daemon

@@ -702,10 +702,13 @@ busiest site.
   frame grabbed and no pan guard run. The read, scoring and frame pick now run on a thread
   per camera; the loop re-asks the scene and alert gates when the result is back and
   keeps every decision and send. The entry stays queued (and persisted) while it is read.
-- [ ] Hub clips (`hubpoll`) are still downloaded on the loop: one clip per new hub event,
+- [x] Hub clips (`hubpoll`) were downloaded on the loop: one clip per new hub event,
   each download bounded by a 10 s stall timeout, plus one retry and a live grab when it
-  yields nothing. Only one site runs a hub poller and the wait is not measured there yet; move
-  them to the same worker if that site shows the loop waiting on them.
+  yields nothing. The opt-in `hub_clip_worker` queues the clip (persisted before the hub
+  cursor moves), downloads it and cuts the frames on one thread per hub, and replaces a
+  failed or overrunning job with a live frame; scoring and the send stay on the loop.
+- [ ] Trial `hub_clip_worker` on the one site with a hub poller (nothing has run against a
+  real hub yet) and measure the loop wait it removes before making it the default.
 - [x] Camera-card follow-ups (a median 175-200 s on the sites that use them) stay behind
   pytapo's 60 s freshness guard plus a slow download. `sd_early_look` already reads the
   first 18 s at +87 s; `sd_early_span` (6-30, default 18) makes that first window smaller
