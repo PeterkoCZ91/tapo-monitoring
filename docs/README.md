@@ -15,6 +15,8 @@ camera names, addresses, credentials, coordinates and observations do not belong
    firmware-specific behavior.
 4. [Docker](docker.md) — run the monitor and the optional scorer from the container
    images, with Compose, instead of a venv and systemd.
+5. [Network measurements](network-watch.md) — compare packet loss, RTT and jitter at
+   the router and cameras with a bounded history and a fleet summary.
 
 ### I want to understand or extend it
 
@@ -48,6 +50,7 @@ camera names, addresses, credentials, coordinates and observations do not belong
 | Local HTTP scorer and subject crop | Operational, optional | Fails open if unavailable. |
 | Weather, day/night and PTZ control | Operational | Model/firmware behavior can differ. |
 | Network uptime and outage alerts | Operational | State persists across restarts. |
+| ICMP network measurements | Operational, opt-in standalone tool | Router/camera loss, RTT and jitter; bounded daily history. Sleeping battery cameras are not ping targets. |
 | Camera Digital Twin | Operational, opt-in | Read-only probes, layered health, drift and allow-listed self-healing. |
 | Shadow Detection Auditor | Operational, opt-in | Ledger/reporting complete; the nightly `shadow-scan` batch is the independent watcher (v1). |
 | Battery/hub cameras (`hubpoll`) | Operational, opt-in | Detections polled from the hub, frames from a go2rtc sidecar. |

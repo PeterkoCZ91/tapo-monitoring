@@ -1,0 +1,12 @@
+[Unit]
+Description=Low-rate camera network measurements
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.local/share/tapo-network-watch/network_watch.py sample
+TimeoutStartSec=100
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
+StandardOutput=null
+StandardError=journal

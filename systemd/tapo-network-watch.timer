@@ -1,0 +1,11 @@
+[Unit]
+Description=Measure camera packet loss and latency every two minutes
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=2min
+RandomizedDelaySec=15s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

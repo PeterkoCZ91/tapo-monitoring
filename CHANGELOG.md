@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Standalone network watcher (`tools/network_watch.py`): five ICMP samples per target
+  about every two minutes, with packet loss, mean/p95/max RTT and jitter summaries.
+  Each host measures its default router separately from configured cameras or hubs;
+  sleeping battery cameras are excluded from the ping target list. Daily history is
+  bounded by 30 days and 64 MiB, and a private SSH inventory provides a fleet summary.
+  Probe failures, missing history and old measurements remain visible. Includes
+  optional systemd user units and a cron-compatible quiet mode; no camera login is
+  needed. See [network measurements](docs/network-watch.md).
 - `sd_early_span` (camera card, 6-30, default 18): length of the `sd_early_look` first
   window; a smaller one is due and downloaded sooner.
 - `scorer.ignore_zones`: rects (fractions of the frame) whose people do not count, for a
