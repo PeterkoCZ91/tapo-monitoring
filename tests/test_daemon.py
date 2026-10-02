@@ -7411,3 +7411,19 @@ def test_new_control_refusal_invalidates_an_earlier_healthy_observation():
                      connect_factory=lambda *a: None, is_night=lambda: True)
     assert state.repair_last_failure_at == 1000
     assert daemon.fleet_health_snapshot(app, state, now=1000)['cameras']['a']['control_health'] is None
+
+
+def test_review_digest_pass_uses_the_active_ledger_path(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    seen = {}
+    monkeypatch.setattr(daemon.reviewdigest, 'run_if_due', lambda **kwargs: seen.update(kwargs))
+    state = daemon.MonitorState()
+    actual = str(tmp_path / 'active-ledger.sqlite3')
+    state.event_ledger = SimpleNamespace(path=actual)
+    daemon._review_digest_pass(now=1000, state=state,
+                               secrets={'telegram_token': 't', 'telegram_chat': 'c'})
+    assert seen['ledger_path'] == actual
+    state.event_ledger = None
+    daemon._review_digest_pass(now=1000, state=state,
+                               secrets={'telegram_token': 't', 'telegram_chat': 'c'})
+    assert seen['ledger_path'] is None

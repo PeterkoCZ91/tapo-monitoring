@@ -4273,6 +4273,8 @@ def _review_digest_pass(*, now, secrets, app=None, state=None):
     reviewdigest.run_if_due(
         now=now,
         health=health,
+        ledger_path=(getattr(state.event_ledger, "path", None)
+                     if state is not None else None),
         send_text=lambda text: notify.send_text(token, chat, text),
         # Digest photos are re-sent evidence, not alerts: keep them out of the sent log.
         send_photo=lambda path, caption: notify.send_photo(

@@ -364,3 +364,37 @@ def test_bounded_cleanup_removes_expired_rows_over_multiple_batches(tmp_path):
     assert events.cleanup_bounded(5, now=30, batch_size=2) == 3
     assert [event.event_at for event in events.observations(
         camera="front", start=0, end=100)] == [30]
+
+
+def test_storage_usage_is_passive_and_distinguishes_absent_files(tmp_path):
+    path = tmp_path / "events.sqlite3"
+    missing = ledger.storage_usage(path)
+    assert missing["db"] == {"status": "missing", "bytes": None, "files": 0}
+    assert not path.exists()
+    path.write_bytes(b"d" * 2048)
+    wal = tmp_path / "events.sqlite3-wal"
+    wal.write_bytes(b"w" * 1024)
+    before = (path.stat().st_mtime_ns, wal.stat().st_mtime_ns)
+    found = ledger.storage_usage(path)
+    assert found["db"] == {"status": "present", "bytes": 2048, "files": 1}
+    assert found["wal"] == {"status": "present", "bytes": 1024, "files": 1}
+    assert before == (path.stat().st_mtime_ns, wal.stat().st_mtime_ns)
+    wal.unlink()
+    assert ledger.storage_usage(path)["wal"]["status"] == "missing"
+    assert ledger.storage_usage(None) is None
+
+
+def test_storage_usage_unreadable_files_are_unknown_not_zero(tmp_path, monkeypatch):
+    path = tmp_path / "events.sqlite3"
+    original = ledger.os.stat
+
+    def inaccessible(at, *args, **kwargs):
+        if ledger.os.fspath(at) in (str(path), str(path) + "-wal"):
+            raise PermissionError("denied")
+        return original(at, *args, **kwargs)
+
+    monkeypatch.setattr(ledger.os, "stat", inaccessible)
+    assert ledger.storage_usage(path) == {
+        name: {"status": "unreadable", "bytes": None, "files": None}
+        for name in ("db", "wal")}
+    assert ledger.storage_usage("bad\x00path")["db"]["status"] == "unreadable"

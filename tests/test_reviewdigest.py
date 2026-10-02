@@ -928,3 +928,79 @@ def test_run_if_due_uses_configured_gateway_cache(tmp_path):
         now=now, send_text=lambda text: texts.append(text) or True,
         send_photo=lambda *args: True)
     assert 'ICMP 24h camera: loss 11.1%' in texts[0]
+
+
+def test_ledger_digest_reports_sizes_without_changing_health():
+    lines = reviewdigest.fleet_lines({
+        "cameras": {"front": {"reachable": True, "events": True}},
+        "tick": {"ok": True}, "ledger_storage": {
+            "db": {"status": "present", "bytes": 2 * 1024 * 1024, "files": 1},
+            "wal": {"status": "present", "bytes": 1024 * 1024, "files": 1}}})
+    assert lines[0].startswith("💚 Fleet OK")
+    assert "   ledger DB 2.0 MB / 1 file, WAL 1.0 MB / 1 file" in lines
+    assert reviewdigest.ledger_usage_line(None) is None
+    assert reviewdigest.ledger_usage_line({
+        "db": {"status": "missing", "bytes": None, "files": 0},
+        "wal": {"status": "unreadable", "bytes": None, "files": None}
+    }) == "ledger DB missing, WAL unreadable"
+
+
+def test_digest_reads_ledger_only_when_due_and_uses_actual_enabled_path(tmp_path, monkeypatch):
+    review_dir = tmp_path / "review"
+    review_dir.mkdir()
+    now = _local_ts(2026, 8, 13, 21, 0)
+    path = tmp_path / "custom.sqlite3"
+    path.write_bytes(b"d" * 1024 * 1024)
+    reads = []
+    original = reviewdigest.ledger.storage_usage
+
+    def read(at):
+        reads.append(at)
+        return original(at)
+
+    monkeypatch.setattr(reviewdigest.ledger, "storage_usage", read)
+    env = {"TAPO_REVIEW_DIGEST_TIME": "20:45", sentlog.ENV_REVIEW_DIR: str(review_dir),
+           "TAPO_LEDGER_FILE": str(tmp_path / "unused.sqlite3")}
+    texts = []
+    kwargs = dict(env=env, send_text=lambda t: texts.append(t) or True,
+                  send_photo=lambda p, c: True, ledger_path=path,
+                  health={"cameras": {"front": {"reachable": True, "events": True}},
+                          "tick": {"ok": True}})
+    assert reviewdigest.run_if_due(now=now, **kwargs)
+    assert "ledger DB 1.0 MB / 1 file, WAL absent" in texts[0]
+    assert reads == [path]
+    assert not (tmp_path / "unused.sqlite3").exists()
+    assert not reviewdigest.run_if_due(now=now + 60, **kwargs)
+    assert reads == [path]
+
+
+def test_radio_digest_is_host_specific_and_preserves_icmp_on_invalid_radio(tmp_path):
+    path = tmp_path / 'summary.json'
+    data = _network_summary(1000)
+    data['measurement_origin'] = 'gateway'
+    data['host_radio'] = {'at': 1000, 'status': 'available', 'interfaces': [
+        {'interface': 'wlan0', 'signal_dbm': -55, 'bitrate_mbps': 130,
+         'power_save': True, 'delta_interval_s': 120,
+         'counter_deltas': {'tx_retries': 2, 'tx_excessive_retries': 1},
+         'ssid': 'never-display-this'}]}
+    path.write_text(json.dumps(data))
+    text = '\n'.join(reviewdigest.network_context_lines(1030, path=path))
+    assert 'Wi-Fi gateway wlan0: signal -55dBm, link 130Mb/s, power save on' in text
+    assert 'retries +2, excessive retries +1 over 120s' in text
+    assert 'never-display-this' not in text
+    assert 'ICMP 24h camera: loss 11.1%' in text
+    data['host_radio']['interfaces'] = 'invalid'
+    path.write_text(json.dumps(data))
+    text = '\n'.join(reviewdigest.network_context_lines(1030, path=path))
+    assert 'ICMP 24h camera: loss 11.1%' in text
+    assert 'Wi-Fi gateway: observation unavailable' in text
+
+
+def test_radio_digest_labels_stale_unsupported_and_unknown_fields():
+    assert reviewdigest.radio_context_lines(None, 1000) == []
+    assert reviewdigest.radio_context_lines({'at': 0}, 1000) == ['Wi-Fi watcher host: stale observation']
+    assert reviewdigest.radio_context_lines({'at': 1000, 'interfaces': [], 'status': 'unavailable'}, 1000) == ['Wi-Fi watcher host: unavailable']
+    text = ' '.join(reviewdigest.radio_context_lines(
+        {'at': 1000, 'interfaces': [{'interface': 'wlan0', 'signal_dbm': -256,
+                                    'power_save': None}]}, 1030))
+    assert 'signal unknown, link unknown, power save unknown' in text

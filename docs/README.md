@@ -17,6 +17,8 @@ camera names, addresses, credentials, coordinates and observations do not belong
    images, with Compose, instead of a venv and systemd.
 5. [Network measurements](network-watch.md) — compare packet loss, RTT and jitter at
    the router and cameras with a bounded history and a fleet summary.
+6. [Log retention](log-retention.md) — archive and ledger cleanup, database sizes,
+   and explicit journal/syslog storage policies.
 
 ### I want to understand or extend it
 

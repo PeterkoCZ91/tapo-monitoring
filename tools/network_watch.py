@@ -13,6 +13,7 @@ import json
 import math
 import os
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -73,6 +74,117 @@ def probe(target, *, run=subprocess.run):
         metrics = {"sent": None, "received": None, "rtt_ms": [], "jitter_ms": [],
                    "error": type(exc).__name__}
     return {"at": started, "name": target["name"], "host": target["host"], **metrics}
+
+
+RADIO_COUNTERS = ("tx_retries", "tx_failed", "tx_excessive_retries")
+
+
+def parse_radio(output, source):
+    """Allow-list radio fields: never retain SSID, AP addresses or raw output."""
+    fields = {"signal_dbm": None, "bitrate_mbps": None, "power_save": None,
+              **dict.fromkeys(RADIO_COUNTERS)}
+    patterns = {
+        "signal_dbm": r"(?:signal:|Signal level[=:])\s*(-?\d+(?:\.\d+)?)\s*dBm",
+        "bitrate_mbps": r"(?:tx bitrate:|Bit Rate[=:])\s*(\d+(?:\.\d+)?)\s*(?:MBit/s|Mb/s)",
+        "tx_retries": r"tx retries:\s*(\d+)",
+        "tx_failed": r"tx failed:\s*(\d+)",
+        "tx_excessive_retries": r"Tx excessive retries:\s*(\d+)",
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, output)
+        if match:
+            value = float(match[1]) if key not in RADIO_COUNTERS else int(match[1])
+            if key == "signal_dbm" and not -150 <= value <= 0:
+                continue
+            fields[key] = value
+    power = re.search(r"(?:Power save:|Power Management:)\s*(on|off)", output)
+    if power:
+        fields["power_save"] = power[1] == "on"
+    fields["source"] = source
+    return fields
+
+
+def radio_deltas(current, previous):
+    """Unknown after resets, source changes or an unobserved previous counter."""
+    result = dict.fromkeys(RADIO_COUNTERS)
+    if not previous or any(current.get(k) != previous.get(k) for k in
+                           ("interface", "source", "ifindex", "carrier_changes")):
+        return result
+    for key in RADIO_COUNTERS:
+        old, new = previous.get(key), current.get(key)
+        if isinstance(old, int) and isinstance(new, int) and 0 <= old <= new:
+            result[key] = new - old
+    return result
+
+
+def host_radio(*, previous=None, sysnet=Path("/sys/class/net"),
+               proc=Path("/proc/net/wireless"), run=subprocess.run):
+    """Passive local queries only; unsupported data cannot become packet loss."""
+    at = time.time()
+    result = {"at": at, "origin": "monitoring_host", "interfaces": [], "status": "unavailable"}
+    try:
+        interfaces = [p.name for p in sysnet.iterdir() if (p / "wireless").exists()][:4]
+    except OSError:
+        interfaces = []
+    try:
+        proc_text = proc.read_text()[:16384]
+    except OSError:
+        proc_text = ""
+    previous = previous if isinstance(previous, dict) else {}
+    old_rows = previous.get("interfaces", [])
+    old_rows = old_rows if isinstance(old_rows, list) else []
+    old = {r.get("interface"): r for r in old_rows if isinstance(r, dict)}
+    for interface in interfaces:
+        row = {"interface": interface, **parse_radio("", "unavailable")}
+        # Link generation detects reconnects even when a reset counter has already
+        # exceeded the previous reading. These integers identify no access point.
+        for key in ("ifindex", "carrier_changes"):
+            try:
+                value = int((sysnet / interface / key).read_text().strip())
+                row[key] = value if value >= 0 else None
+            except (OSError, ValueError):
+                row[key] = None
+        match = re.search(r"^\s*" + re.escape(interface) + r":\s*\S+\s+\S+\s+(-?\d+)",
+                          proc_text, re.MULTILINE)
+        if match and -150 <= int(match[1]) <= 0:
+            row.update(signal_dbm=int(match[1]), source="proc")
+        for tool in ("iw", "iwconfig"):
+            binary = shutil.which(tool)
+            if binary is None:
+                binary = next((str(p) for p in (Path("/usr/sbin") / tool, Path("/sbin") / tool)
+                               if p.is_file() and os.access(p, os.X_OK)), tool)
+            commands = ([['dev', interface, 'link'], ['dev', interface, 'get', 'power_save'],
+                         ['dev', interface, 'station', 'dump']] if tool == "iw" else [[interface]])
+            output = []
+            for arguments in commands:
+                try:
+                    completed = run([binary, *arguments], capture_output=True, text=True,
+                                    timeout=2, check=False, env={**os.environ, "LC_ALL": "C"})
+                    if completed.returncode == 0:
+                        output.append(completed.stdout[:16384])
+                except (OSError, subprocess.SubprocessError):
+                    break
+            parsed = parse_radio("\n".join(output), tool)
+            if any(parsed[k] is not None for k in ("signal_dbm", "bitrate_mbps", "power_save", *RADIO_COUNTERS)):
+                row.update({k: v for k, v in parsed.items() if v is not None})
+                break
+        row["status"] = ("available" if all(row[k] is not None for k in
+                         ("signal_dbm", "bitrate_mbps", "power_save")) else
+                         "partial" if any(row[k] is not None for k in
+                         ("signal_dbm", "bitrate_mbps", "power_save", *RADIO_COUNTERS))
+                         else "unavailable")
+        row["counter_deltas"] = radio_deltas(row, old.get(interface))
+        prior_at = previous.get("at")
+        row["delta_interval_s"] = (at - prior_at if isinstance(prior_at, (int, float))
+                                   and math.isfinite(prior_at) and 0 < at - prior_at <= 600
+                                   else None)
+        if row["delta_interval_s"] is None:
+            row["counter_deltas"] = dict.fromkeys(RADIO_COUNTERS)
+        result["interfaces"].append(row)
+    if interfaces:
+        result["status"] = "available" if any(r["status"] != "unavailable"
+                                              for r in result["interfaces"]) else "unavailable"
+    return result
 
 
 def validate_targets(targets):
@@ -190,7 +302,9 @@ def append_records(directory, records, *, now):
     with os.fdopen(fd, "a") as handle:
         for record in records:
             handle.write(json.dumps(record, allow_nan=False, separators=(",", ":")) + "\n")
-    write_latest(directory, {"at": now, "targets": records})
+    write_latest(directory, {"at": now, "targets": records,
+                             "host_radio": next((r["host_radio"] for r in records
+                                                 if "host_radio" in r), None)})
     prune_history(directory, date=date)
 
 
@@ -204,10 +318,18 @@ def sample(config, directory, *, quiet=False):
             print("network-watch: previous measurement is still running", file=sys.stderr)
             return 0
         targets, gateway_error = load_targets(config)
+        previous = None
+        try:
+            previous = json.loads((directory / "latest.json").read_text()).get("host_radio")
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+        radio = host_radio(previous=previous)
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             records = list(pool.map(probe, targets))
         if gateway_error is not None:
             records.append(gateway_error)
+        for record in records:
+            record["host_radio"] = radio
         append_records(directory, records, now=time.time())
         write_latest(directory, summary(directory, 24), filename="summary.json")
     for record in records:
@@ -226,7 +348,7 @@ def summary(directory, hours, *, now=None):
     now = time.time() if now is None else now
     since = now - hours * 3600
     start_date = dt.datetime.fromtimestamp(since, dt.timezone.utc).date()
-    buckets, skipped = {}, 0
+    buckets, skipped, radio = {}, 0, None
     for date, path in history_files(directory):
         if date < start_date:
             continue
@@ -261,6 +383,10 @@ def summary(directory, hours, *, now=None):
                     "latest_error": None, "last_measurement_at": None,
                     "slots": set(), "hourly": {},
                 })
+                candidate = record.get("host_radio")
+                if isinstance(candidate, dict) and isinstance(candidate.get("at"), (int, float)):
+                    if math.isfinite(candidate["at"]) and (radio is None or candidate["at"] > radio["at"]):
+                        radio = candidate
                 bucket["probes"] += 1
                 bucket["slots"].add(int(at // 120))
                 bucket["first_at"] = min(bucket["first_at"], at)
@@ -306,7 +432,8 @@ def summary(directory, hours, *, now=None):
                                   else max(0, now - bucket["last_measurement_at"])),
         })
         rows.append(bucket)
-    return {"window_hours": hours, "at": now, "targets": rows, "skipped_records": skipped}
+    return {"window_hours": hours, "at": now, "targets": rows, "skipped_records": skipped,
+            "host_radio": radio}
 
 
 def fleet_summary(inventory, hours):

@@ -248,3 +248,89 @@ def test_sample_writes_private_digest_cache_without_extra_probes(tmp_path, monke
     assert data['window_hours'] == 24
     assert data['targets'][0]['sent'] == 5
     assert len(calls) == 1
+
+
+def test_host_radio_parsers_keep_distinct_counters_and_no_identity():
+    iw = watch.parse_radio('signal: -55 dBm\ntx bitrate: 130.0 MBit/s\n'
+                           'tx retries: 7\ntx failed: 2\nPower save: on', 'iw')
+    assert iw['signal_dbm'] == -55 and iw['bitrate_mbps'] == 130
+    assert iw['tx_retries'] == 7 and iw['tx_failed'] == 2
+    assert iw['power_save'] is True and iw['tx_excessive_retries'] is None
+    legacy = watch.parse_radio('ESSID:"private" Access Point: AA:BB:CC:DD:EE:FF\n'
+                               'Bit Rate=65 Mb/s Signal level=-60 dBm\n'
+                               'Power Management:off Tx excessive retries:9', 'iwconfig')
+    assert legacy['tx_excessive_retries'] == 9 and legacy['tx_retries'] is None
+    assert legacy['power_save'] is False
+    assert 'private' not in json.dumps(legacy) and 'AA:BB' not in json.dumps(legacy)
+
+
+def test_host_radio_counter_reset_is_unknown_delta():
+    previous = {'interface': 'wlan0', 'source': 'iw', 'tx_retries': 12, 'tx_failed': 2}
+    current = {**previous, 'tx_retries': 15, 'tx_failed': 1}
+    result = watch.radio_deltas(current, previous)
+    assert result['tx_retries'] == 3 and result['tx_failed'] is None
+    assert all(value is None for value in watch.radio_deltas(current, None).values())
+
+
+def test_host_radio_reconnect_invalidates_increasing_counter_delta():
+    previous = {'interface': 'wlan0', 'source': 'iw', 'ifindex': 3,
+                'carrier_changes': 2, 'tx_retries': 12}
+    current = {**previous, 'carrier_changes': 4, 'tx_retries': 15}
+    assert watch.radio_deltas(current, previous)['tx_retries'] is None
+    current = {**previous, 'ifindex': 4, 'tx_retries': 15}
+    assert watch.radio_deltas(current, previous)['tx_retries'] is None
+
+
+def test_host_radio_missing_tools_uses_passive_proc_signal(tmp_path):
+    sysnet = tmp_path / 'net'
+    (sysnet / 'wlan0' / 'wireless').mkdir(parents=True)
+    (sysnet / 'wlan0' / 'ifindex').write_text('3\n')
+    (sysnet / 'wlan0' / 'carrier_changes').write_text('4\n')
+    proc = tmp_path / 'wireless'
+    proc.write_text('wlan0: 0000 55. -55. -256 0 0 0 0 99 0\n')
+    def missing(*args, **kwargs):
+        raise FileNotFoundError()
+    result = watch.host_radio(sysnet=sysnet, proc=proc, run=missing)
+    row = result['interfaces'][0]
+    assert result['origin'] == 'monitoring_host'
+    assert row['signal_dbm'] == -55 and row['bitrate_mbps'] is None
+    assert row['source'] == 'proc' and row['status'] == 'partial'
+    assert row['tx_retries'] is None
+    assert row['ifindex'] == 3 and row['carrier_changes'] == 4
+
+
+def test_host_radio_history_does_not_change_icmp_loss(tmp_path):
+    radio = {'at': 1000, 'origin': 'monitoring_host', 'interfaces': []}
+    row = {**record(1000, received=4), 'host_radio': radio}
+    watch.append_records(tmp_path, [row], now=1000)
+    result = watch.summary(tmp_path, 24, now=1001)
+    assert result['host_radio'] == radio
+    assert result['targets'][0]['loss_pct'] == pytest.approx(20)
+
+
+def test_host_radio_queries_only_local_read_commands_and_handles_denial(tmp_path):
+    sysnet = tmp_path / 'net'
+    (sysnet / 'wlan0' / 'wireless').mkdir(parents=True)
+    calls = []
+    def denied(command, **kwargs):
+        calls.append(command)
+        assert kwargs['timeout'] == 2
+        return subprocess.CompletedProcess(command, 1, '', 'not permitted')
+    data = watch.host_radio(sysnet=sysnet, proc=tmp_path / 'missing', run=denied)
+    assert data['interfaces'][0]['status'] == 'unavailable'
+    assert data['interfaces'][0]['tx_retries'] is None
+    assert all('scan' not in c and 'set' not in c for c in calls)
+    assert len(calls) == 4
+
+
+def test_host_radio_old_counter_baseline_does_not_create_recent_delta(tmp_path):
+    sysnet = tmp_path / 'net'
+    (sysnet / 'wlan0' / 'wireless').mkdir(parents=True)
+    def output(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, 'tx retries: 15\nsignal: -60 dBm')
+    previous = {'at': 1, 'interfaces': [{'interface': 'wlan0', 'source': 'iw',
+                                        'tx_retries': 10}]}
+    row = watch.host_radio(previous=previous, sysnet=sysnet,
+                           proc=tmp_path / 'missing', run=output)['interfaces'][0]
+    assert row['counter_deltas']['tx_retries'] is None
+    assert row['delta_interval_s'] is None

@@ -5,6 +5,11 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Passive monitoring-host Wi-Fi snapshots alongside network probes: signal, link
+  rate, power saving and available retry/failure counters with reset-aware deltas.
+  The digest labels the watcher or gateway radio and unsupported observations.
+- Enabled ledger DB/WAL sizes in the daily digest, measured without SQLite operations.
+- Generic journal and syslog size/age policy guidance in [log retention](docs/log-retention.md).
 - Daily background retention compacts expired archive metadata, cleans media even
   without new events, and prunes the event ledger in bounded transactions.
 - Network history now caches a 24-hour digest summary with measurement coverage and

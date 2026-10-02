@@ -77,3 +77,28 @@ cache locally and set `TAPO_NETWORK_SUMMARY_FILE` in that daemon's environment t
 mirrored file. Preserve its original timestamp so failed transfers become stale data.
 These probes describe the gateway's path to the cameras, not the monitoring host's
 end-to-end path.
+
+## Passive Wi-Fi evidence
+
+Each existing measurement pass also reads the collecting host's local wireless
+interfaces. It retains signal in dBm, negotiated transmit link rate, power-save
+state and available transmit retry/failure counters. It reads sysfs and
+`/proc/net/wireless`, then uses an already installed `iw` or `iwconfig` with bounded
+local queries. It does not scan, install packages, change power-save, contact camera
+APIs or add network probes. Battery cameras stay excluded.
+
+`host_radio` in daily history, `latest.json` and `summary.json` describes the host
+running this watcher. When a gateway's summary is mirrored elsewhere, its radio
+snapshot still describes that gateway, not the daemon host or any camera. Missing
+tools, permission denials, disconnected interfaces and unsupported metrics are
+explicitly partial or unavailable; they never become ICMP loss or probe errors.
+SSID, access-point addresses and raw command output are not retained.
+
+The counters `tx_retries`, `tx_failed` and `tx_excessive_retries` remain separate:
+`iwconfig` excessive retries means retry-limit failures and does not substitute for
+`iw`'s retry count. Deltas have their observed interval attached and are unknown
+on first observation, source changes, decreased counters, changed local interface
+index or carrier-change count, or a baseline older than ten minutes. Counters are
+driver dependent; when local link-generation counters are unavailable, an unobserved
+reset followed by a higher value cannot be identified reliably. Link rate is not measured transfer throughput,
+and host signal says nothing directly about the camera's radio.

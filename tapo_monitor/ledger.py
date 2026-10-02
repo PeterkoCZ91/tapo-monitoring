@@ -22,6 +22,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from stat import S_ISREG
 
 from . import audit
 
@@ -149,6 +150,34 @@ def default_ledger_path(env=None, home=None) -> str:
         home = home or env.get("HOME") or os.path.expanduser("~")
         state_home = os.path.join(home, ".local", "state")
     return os.path.join(state_home, "tapo-monitor", "events.sqlite3")
+
+
+def storage_usage(path):
+    """Passive DB/WAL file sizes for a configured ledger; never open SQLite.
+
+    ``None`` means ledger disabled. Missing and unreadable files remain explicit
+    unknown measurements rather than becoming zero-byte healthy databases. Returned
+    data deliberately excludes the operator's path.
+    """
+    if path is None:
+        return None
+    try:
+        path = os.path.expanduser(os.fspath(path))
+    except (TypeError, ValueError):
+        return {name: {"status": "unreadable", "bytes": None, "files": None}
+                for name in ("db", "wal")}
+    usage = {}
+    for name, suffix in (("db", ""), ("wal", "-wal")):
+        try:
+            stat = os.stat(path + suffix)
+            if not S_ISREG(stat.st_mode):
+                raise OSError("not a regular file")
+            usage[name] = {"status": "present", "bytes": stat.st_size, "files": 1}
+        except FileNotFoundError:
+            usage[name] = {"status": "missing", "bytes": None, "files": 0}
+        except (OSError, ValueError, TypeError):
+            usage[name] = {"status": "unreadable", "bytes": None, "files": None}
+    return usage
 
 
 def _safe_number(value):

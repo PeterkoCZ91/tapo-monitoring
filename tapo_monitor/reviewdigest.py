@@ -17,10 +17,11 @@ import json
 import logging
 import math
 import os
+import re
 import time
 from pathlib import Path
 
-from . import notify, sentlog
+from . import ledger, notify, sentlog
 from .shadowscan import SUMMARY_MAX_AGE, SUMMARY_NAME
 
 log = logging.getLogger(__name__)
@@ -349,6 +350,9 @@ def fleet_lines(health):
     logs = log_usage_line(health.get("logs"))
     if logs:
         detail.append(logs)
+    ledger_storage = ledger_usage_line(health.get("ledger_storage"))
+    if ledger_storage:
+        detail.append(ledger_storage)
 
     # Which code the host runs. Deploys are rsync copies, so this fingerprint is the only
     # version statement a host can make \u2014 and silent drift has twice been found only by
@@ -371,6 +375,55 @@ def fleet_lines(health):
     else:
         head = "\U0001f49a Fleet OK — " + ", ".join(reachable) + " reachable"
     return [head] + [f"   {line}" for line in detail]
+
+
+def radio_context_lines(snapshot, now, *, gateway=False):
+    """Latest passive watcher-radio observation, independently of ICMP health."""
+    if snapshot is None:
+        return []
+    label = "Wi-Fi gateway" if gateway else "Wi-Fi watcher host"
+    try:
+        at = snapshot["at"]
+        if (isinstance(at, bool) or not isinstance(at, (int, float))
+                or not math.isfinite(at) or at > now):
+            raise ValueError("invalid radio timestamp")
+        if now - at > 600:
+            return [f"{label}: stale observation"]
+        rows = snapshot["interfaces"]
+        if not isinstance(rows, list) or len(rows) > 4:
+            raise ValueError("invalid radio interfaces")
+        if not rows or snapshot.get("status") == "unavailable":
+            return [f"{label}: unavailable"]
+        lines = []
+        for row in rows:
+            interface = row["interface"]
+            if not isinstance(interface, str) or not re.fullmatch(r"[\w.:-]{1,32}", interface):
+                raise ValueError("invalid interface")
+            signal, rate, power = (row.get(k) for k in ("signal_dbm", "bitrate_mbps", "power_save"))
+            def numeric(value, minimum=0, maximum=None):
+                return (not isinstance(value, bool) and isinstance(value, (int, float))
+                        and math.isfinite(value) and value >= minimum
+                        and (maximum is None or value <= maximum))
+            signal_text = f"{signal:g}dBm" if numeric(signal, -150, 0) else "unknown"
+            rate_text = f"{rate:g}Mb/s" if numeric(rate) else "unknown"
+            power_text = "on" if power is True else "off" if power is False else "unknown"
+            line = (f"{label} {interface}: signal {signal_text}, link {rate_text}, "
+                    f"power save {power_text}")
+            interval = row.get("delta_interval_s")
+            deltas = row.get("counter_deltas")
+            if numeric(interval, 0, 600) and interval > 0 and isinstance(deltas, dict):
+                counts = []
+                for key, short in (("tx_retries", "retries"), ("tx_failed", "failed"),
+                                   ("tx_excessive_retries", "excessive retries")):
+                    value = deltas.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                        counts.append(f"{short} +{value}")
+                if counts:
+                    line += f"; {', '.join(counts)} over {interval:.0f}s"
+            lines.append(line)
+        return lines
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return [f"{label}: observation unavailable"]
 
 
 def network_context_lines(now, *, path=None):
@@ -443,6 +496,8 @@ def network_context_lines(now, *, path=None):
             raise ValueError("invalid skipped records")
         if skipped:
             lines.append(f"ICMP: {skipped} invalid history records omitted")
+        lines.extend(radio_context_lines(data.get("host_radio"), now,
+                                         gateway=bool(data.get("measurement_origin"))))
         # Leave room for the review and fleet sections in Telegram's text limit.
         shown, size = [], 0
         for line in lines:
@@ -456,6 +511,28 @@ def network_context_lines(now, *, path=None):
         return []
     except (OSError, ValueError, TypeError, KeyError, UnicodeError):
         return ["ICMP 24h: summary unavailable; current measurements unknown"]
+
+
+def ledger_usage_line(usage):
+    """DB/WAL storage detail; missing measurements never imply healthy storage."""
+    if not isinstance(usage, dict):
+        return None
+    parts = []
+    for key, label in (("db", "DB"), ("wal", "WAL")):
+        row = usage.get(key)
+        if not isinstance(row, dict):
+            parts.append(f"{label} unknown")
+            continue
+        size = row.get("bytes")
+        if (row.get("status") == "present" and isinstance(size, (int, float))
+                and not isinstance(size, bool) and math.isfinite(size) and size >= 0):
+            parts.append(f"{label} {size / (1024 * 1024):.1f} MB / 1 file")
+        else:
+            status = row.get("status")
+            if key == "wal" and status == "missing":
+                status = "absent"
+            parts.append(f"{label} {status if status in ('missing', 'absent', 'unreadable') else 'unknown'}")
+    return "ledger " + ", ".join(parts)
 
 
 def log_usage_line(logs):
@@ -611,7 +688,7 @@ def _save_scorer_baseline(review_dir, scorer):
         log.warning("could not save scorer digest baseline", exc_info=True)
 
 
-def run_if_due(*, env=None, now=None, send_text, send_photo, health=None):
+def run_if_due(*, env=None, now=None, send_text, send_photo, health=None, ledger_path=None):
     """Send the daily digest when configured and due. Returns True when it went out.
 
     A failed text send leaves the day unmarked so the next tick retries; photos are
@@ -621,6 +698,10 @@ def run_if_due(*, env=None, now=None, send_text, send_photo, health=None):
     day is also the only positive "everything is alive" signal the fleet sends: every
     other Telegram message is a transition, so without it a dead host and a quiet night
     look identical. Omitting it keeps the previous message shape exactly.
+
+    ``ledger_path`` is the actual enabled ledger's path from the daemon. ``None``
+    disables this measurement; the digest never discovers or creates a default DB.
+    Sizes are sampled only when due, without opening SQLite or checkpointing WAL.
     """
     env = os.environ if env is None else env
     hhmm = digest_time_from_env(env)
@@ -642,7 +723,8 @@ def run_if_due(*, env=None, now=None, send_text, send_photo, health=None):
             # archives every few seconds would be telemetry eating the loop.
             health = {**health,
                       "scorer": scorer_daily_delta(raw_scorer, _scorer_baseline(review_dir)),
-                      "logs": sentlog.log_usage(env)}
+                      "logs": sentlog.log_usage(env),
+                      "ledger_storage": ledger.storage_usage(ledger_path)}
         fleet = fleet_lines(health)
         cache_path = env.get("TAPO_NETWORK_SUMMARY_FILE")
         network = (network_context_lines(now, path=cache_path) if cache_path

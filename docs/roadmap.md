@@ -645,13 +645,18 @@ busiest site.
   Acceptance: expired observations are removed daily without restart, recent observations
   remain queryable, and database/WAL disk use is measured before choosing any compaction
   policy; maintenance cannot stall alert delivery.
-- [ ] Document explicit operator journal size, free-space and age policies, and optional
-  size-triggered rotation for duplicate syslog files. **Planned operations improvement:**
+- [x] Document explicit operator journal size, free-space and age policies, and optional
+  size-triggered rotation for duplicate syslog files. See [log retention](log-retention.md).
+  **Documented operations policy:**
   existing distro defaults already rotate journals; explicit caps make fleet storage
   predictable. Acceptance: journal/syslog disk growth stays within the configured policy
   including active files, restart history remains readable, and unrelated services keep
   their existing logging. Do not present an age limit as a guaranteed number of retained
   days when a size limit can evict history sooner.
+
+- [x] Report the enabled event ledger's DB and WAL disk sizes in the daily digest using
+  file metadata only. Missing, absent and unreadable files stay distinct; no checkpoint
+  or vacuum runs as part of telemetry.
 
 ### 10.4 — Alert latency
 
@@ -815,8 +820,10 @@ often what photographs the person seconds later.
 - [x] Add independent, low-rate network history with 30-day retention and a 64 MiB
   disk limit. The watcher measures always-on network targets without opening another
   camera API session; sleeping battery cameras are excluded from active probes.
-- [ ] Optionally retain local Wi-Fi signal, link rate and retry counters alongside
-  network probes. Acceptance: distinguish the monitoring host's radio from the camera's
+- [x] Optionally retain local Wi-Fi signal, link rate and retry counters alongside
+  network probes. Passive host-radio snapshots include power saving and reset-aware
+  counter deltas; unsupported fields are unknown. Camera-radio observations remain a
+  future extension where an existing probe supplies them. Acceptance: distinguish the monitoring host's radio from the camera's
   radio, label unavailable counters, and use existing camera observations if available
   rather than creating extra authenticated sessions for telemetry.
 - [x] Add an optional 24-hour digest summary of probe loss, RTT and jitter, with
