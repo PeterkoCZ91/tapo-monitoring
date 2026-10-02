@@ -1,0 +1,21 @@
+@@show
+LoadState=loaded
+ActiveState=activating
+SubState=auto-restart
+Result=exit-code
+NRestarts=7
+MemoryCurrent=[not set]
+CPUUsageNSec=18446744073709551615
+ActiveEnterTimestampMonotonic=0
+@@uptime
+500.00 900.00
+@@link
+@@version
+@@journal
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: Traceback (most recent call last):
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: ERROR camera 12 failed
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: ERROR camera 99 failed
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: CRITICAL stall watchdog
+2026-10-02T07:00:00+0000 host-a systemd[1]: Failed with result 'exit-code'.
+@@total 40
+@@end

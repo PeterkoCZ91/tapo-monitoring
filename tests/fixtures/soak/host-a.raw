@@ -1,0 +1,38 @@
+@@show
+LoadState=loaded
+ActiveState=active
+SubState=running
+Result=success
+NRestarts=1
+MemoryCurrent=134217728
+CPUUsageNSec=720000000000
+ActiveEnterTimestampMonotonic=1000000000
+@@uptime
+11200.50 40000.00
+@@link
+/opt/tapo-monitor/releases/20261001T060000Z-abc123def456
+@@version
+tapo-monitor 0.8.1
+package abc123def456
+python 3.12.3
+@@journal
+2026-10-02T07:00:00+0000 host-a systemd[1]: Started tapo-monitor.service - Tapo monitor.
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: INFO audit camera=cam-a path=live action=send etype=person start=1000.0 event_age_s=30.000 score=0.80 telegram=true
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: INFO audit camera=cam-a path=live action=send etype=person start=1000.0 event_age_s=45.000 score=0.82 telegram=true
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: INFO audit camera=cam-a path=sd action=send etype=person start=2000.0 event_age_s=190.000 score=0.70 telegram=true
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: INFO audit camera=cam-a path=live action=send etype=person start=3000.0 event_age_s=100.000 score=0.60 telegram=true
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: INFO audit camera=cam-b path=sampler action=send etype=motion start=4000.0 event_age_s=70.000 score=0.50 telegram=true
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: INFO audit camera=cam-b path=sampler action=send etype=motion start=5000.0 event_age_s=none score=0.50 telegram=false
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: INFO audit camera=cam-a path=live action=drop etype=person start=6000.0 reason=below_threshold score=0.10
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: INFO audit camera=cam-a path=sampler action=hold etype=motion start=6100.0 score=0.30
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: INFO audit camera=cam-b path=live action=cooldown etype=person start=6200.0
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: INFO audit camera=cam-b path=live action=drop etype=person start=6300.0 reason=below_threshold
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: INFO audit camera=cam-a path=sampler action=would_send etype=motion start=7000.0 score=0.50
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: INFO audit camera=cam-a path=sampler action=would_send etype=motion start=7100.0 score=0.52
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: INFO audit camera=cam-b path=live action=would_loiter etype=person start=7200.0
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: INFO audit camera=cam-a path=network action=host_switch etype=system start=7300.0
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: INFO outbox: kept undelivered person alert for cam-a (telegram down)
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: INFO hub clip download failed
+2026-10-02T08:00:00+0000 host-a tapo-monitor[100]: INFO hub poll failed (#2): TimeoutError; retrying in 10s
+@@total 5400
+@@end

@@ -500,6 +500,38 @@ For rotating night cameras, parked cars should show up as motion/PIR events foll
 low scorer scores and no Telegram send. If they produce sends, inspect the frame before
 touching thresholds.
 
+## Soak report
+
+`tools/soak_report.sh` answers the questions of a soak test before a release in one
+command, from the workstation and read-only (one ssh login per host, nothing restarted or
+written on it). Hosts are ssh aliases from the arguments or `SOAK_HOSTS`; no host is named
+in the repository.
+
+```bash
+SOAK_HOSTS="host-a host-b" tools/soak_report.sh --since 24
+tools/soak_report.sh --user --since 12 host-c          # host with a systemd user unit
+tools/soak_report.sh --baseline soak.json host-a        # first run saves, later runs compare
+tools/soak_report.sh --json host-a                      # machine-readable
+```
+
+Per host it prints the service state and package fingerprint (`tapo-monitor version`, the
+`current` release), starts in the window, `Traceback|ERROR|CRITICAL` lines (grepped from the
+journal text, not `journalctl -p`), alerts sent per camera and path, the median and p90 of
+the first delivered alert per event (`event_age_s` of the audit `send` rows), `drop`, `hold`
+and `cooldown` counts, `would_*` observe rows per camera, `host_switch`, outbox and hub
+lines, and service memory and CPU from `systemctl show`.
+
+A check never reads a missing thing as a clean one: a unit that is not loaded is judged by
+`LoadState` (`systemctl show` on a nonexistent unit still says `Result=success`), a probe
+without its end marker, an unreadable journal and an empty journal turn the counts into
+`unknown` plus a finding, and a counter with accounting off shows `n/a`. `--baseline FILE`
+stores the run as JSON when the file does not exist and otherwise marks deviations (alert
+volume beyond `--tolerance`, default 30 %, and at least five alerts of difference; new or
+growing errors, starts, hub/outbox problems and `host_switch`; a changed package or a service
+that was healthy before). `--update-baseline` rewrites it after comparing. Exit status is 1
+when any host has a finding or deviation. Parsing and statistics live in
+`tools/soak_report.py` and are tested on fixtures in `tests/fixtures/soak`.
+
 ## Inspecting alert frames
 
 Threshold tuning is easier when you can see the exact frame behind a score. Two opt-in aids

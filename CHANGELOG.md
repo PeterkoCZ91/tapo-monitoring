@@ -5,6 +5,10 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `tools/soak_report.sh`: one read-only report per host for a soak test (service state and
+  package fingerprint, starts, error lines, alerts per camera and path, first-alert
+  median/p90, drop/hold/cooldown and `would_*` counts, memory and CPU), with `--user`,
+  `--json` and `--baseline` deviation marking. See `docs/operations.md`, "Soak report".
 - `tapo-monitor label-stats --camera-alias OLD=NEW` (repeatable): counts the records of a
   renamed camera under its new name in the per-camera, incident and day/night tables.
 - `host` may be a list of candidate addresses (off by default; a string works as before).

@@ -1,0 +1,16 @@
+@@show
+LoadState=not-found
+ActiveState=inactive
+SubState=dead
+Result=success
+NRestarts=0
+MemoryCurrent=[not set]
+CPUUsageNSec=[not set]
+ActiveEnterTimestampMonotonic=0
+@@uptime
+500.00 900.00
+@@link
+@@version
+@@journal
+@@total 0
+@@end

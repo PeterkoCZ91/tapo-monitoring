@@ -1,0 +1,10 @@
+@@show
+LoadState=loaded
+ActiveState=active
+SubState=running
+Result=success
+NRestarts=0
+@@journal
+No journal files were opened due to insufficient permissions.
+@@total 1
+@@end
