@@ -12,7 +12,7 @@ software. [Limitations](#limitations) lists what the numbers cannot tell you.
 
 - **Deployment.** One owner, several sites, a Raspberry Pi per site, one shared local
   scoring service (YOLOX, `person` class). Camera models: C560WS (pan/tilt, outdoor-rated;
-  four cameras), C545D (dual lens; one camera) and C260 (one camera). The dataset does not
+  three cameras in the labeled data, a fourth has no labels), C545D (dual lens; one camera) and C260 (one camera). The dataset does not
   record a model; the model of each camera name comes from the owner's inventory, and the
   tables below only use the three groups C560WS / C545D / C260.
 - **Period.** September to October 2026. Counts of labeled frames cover the whole period;
@@ -66,7 +66,7 @@ Reading it:
 
 | Camera model | Labeled frames (n) | False alarms (sent) | Misses (held) |
 | --- | ---: | ---: | ---: |
-| C560WS (four cameras) | 2,345 | 62 of 1,802 (3.4 %) | 44 of 542 (8.1 %) |
+| C560WS (three cameras) | 2,345 | 62 of 1,802 (3.4 %) | 44 of 542 (8.1 %) |
 | C545D | 98 | 22 of 84 (26 %) | 0 of 14 |
 | C260 | 120 | 10 of 88 (11 %) | 1 of 31 (3 %) |
 
@@ -240,7 +240,7 @@ the cameras it covers.
 | SD recording follow-up | 830 | 63 s | 202 s |
 | older records, path not logged | 9,081 | 116 s | 185 s |
 
-| Path | C560WS (four cameras) | C545D | C260 |
+| Path | C560WS (three cameras) | C545D | C260 |
 | --- | --- | --- | --- |
 | live | median 24 to 28 s (n = 422) | 25 s / p90 42 s (n = 83) | 24 s / p90 42 s (n = 77) |
 | sampler | median 56 to 81 s (n = 181) | 87 s (n = 2) | 62 s (n = 8) |
