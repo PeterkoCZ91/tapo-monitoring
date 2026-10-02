@@ -111,6 +111,13 @@ class SamplerConfig:
     # a person photo of the passage may pass the cooldown; the follow-up is skipped once
     # one was delivered. Needs a scorer.
     keep_sampling_on_defer: bool = False
+    # Loitering: a person on this many consecutive follow-up frames of one group sends a
+    # single "lingering" notice for that group (0 = off). With interval 30 s, 4 = ~2 min.
+    # A sent group keeps sampling for it. Needs a scorer and loiter_frames <= max_frames.
+    loiter_frames: int = 0
+    # Frames without a person the streak survives (a PTZ move or a missed detection);
+    # 0 = strictly consecutive.
+    loiter_miss_tolerance: int = 0
 
 
 @dataclass
@@ -695,6 +702,15 @@ def _sampler(data, where):
                 f"{where}: sampler hold_expiry_min_score must be a number") from None
         if not 0.0 <= hold_expiry_min_score <= 1.0:
             raise ConfigError(f"{where}: sampler hold_expiry_min_score must be between 0 and 1")
+    loiter_frames = _check_int(d.get("loiter_frames", 0), "sampler.loiter_frames", where)
+    loiter_miss_tolerance = _check_int(d.get("loiter_miss_tolerance", 0),
+                                       "sampler.loiter_miss_tolerance", where)
+    if loiter_frames < 0 or loiter_miss_tolerance < 0:
+        raise ConfigError(f"{where}: sampler loiter_frames/loiter_miss_tolerance "
+                          "must be >= 0")
+    if loiter_frames > max_frames:
+        raise ConfigError(f"{where}: sampler loiter_frames must be <= max_frames "
+                          "(the group never samples more frames than that)")
     return SamplerConfig(
         enabled=bool(d.get("enabled", False)),
         interval=interval,
@@ -707,7 +723,22 @@ def _sampler(data, where):
         hold_expiry_min_score=hold_expiry_min_score,
         keep_sampling_on_defer=_check_bool(d.get("keep_sampling_on_defer", False),
                                            "sampler.keep_sampling_on_defer", where),
+        loiter_frames=loiter_frames,
+        loiter_miss_tolerance=loiter_miss_tolerance,
     )
+
+
+def _check_int(value, key, where):
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"{where}: {key} must be an integer")
+    return value
+
+
+def _check_loiter(sampler, scorer, where):
+    """Loitering judges person frames, so it cannot run without a scorer."""
+    if sampler.loiter_frames and not scorer.url:
+        raise ConfigError(f"{where}: sampler loiter_frames needs scorer url "
+                          "(it counts scored person frames)")
 
 
 def _check_hold_expiry(sampler, scorer, where):
@@ -1149,6 +1180,7 @@ def _camera(data, index):
     sampler = _sampler(data.get("sampler"), where)
     scorer = _scorer(data.get("scorer"), where)
     _check_hold_expiry(sampler, scorer, where)
+    _check_loiter(sampler, scorer, where)
     event_profile = _check_enum(str(data.get("event_profile", "default")).lower(),
                                 set(event_detection.EVENT_PROFILES), "event_profile", where)
     if scorer.alert_zones and event_detection.event_profile(event_profile).pt_channel is not None:

@@ -609,6 +609,8 @@ sampler:
   hold_expiry: observe
   hold_expiry_min_score: 0.35
   keep_sampling_on_defer: false
+  loiter_frames: 0
+  loiter_miss_tolerance: 0
 ```
 
 The sampler takes additional live frames across a long event. Nearby events are grouped;
@@ -646,6 +648,16 @@ it the daemon warns once at startup and every expiry stays `hold_expired` with
 `tapo-monitor replay --compare` before switching a camera on (see
 [observability](observability.md#replaying-a-night)). Write `off` bare or quoted; YAML
 reads a bare `off` as false, which is accepted as `off`.
+
+`loiter_frames: K` (off at `0`) sends one separate "lingering ~N min" photo when a person
+is on `K` consecutive follow-up frames of one group (`interval: 30`, `K: 4` is about two
+minutes). It fires at most once per group, however long the person stays, and a sent group
+keeps sampling until it has. It needs a scorer and `K <= max_frames`. Only follow-up
+frames count, so a person gone from the picture breaks the streak: a PTZ move or
+pan-limit recall that turns the lens away interrupts the count, which
+`loiter_miss_tolerance: N` bridges for up to `N` frames (default 0, strictly consecutive).
+Alert zones are not part of this yet; `process_sampler(loiter_zone=...)` is the hook a
+zone check attaches to.
 
 `keep_sampling_on_defer` (off by default) changes what a camera-confirmed person whose
 live frame scores below the threshold does to the rest of its burst. The frame is still

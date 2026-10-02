@@ -7446,3 +7446,79 @@ def test_review_digest_pass_uses_the_active_ledger_path(monkeypatch, tmp_path):
     daemon._review_digest_pass(now=1000, state=state,
                                secrets={'telegram_token': 't', 'telegram_chat': 'c'})
     assert seen['ledger_path'] is None
+
+
+def _loiter_app(frames=3, tolerance=0, with_scorer=True):
+    camera = {
+        "name": "a", "host": "203.0.113.10",
+        "sampler": {"enabled": True, "interval": 30, "max_frames": 6, "group_gap": 90,
+                    "loiter_frames": frames, "loiter_miss_tolerance": tolerance},
+    }
+    if with_scorer:
+        camera["scorer"] = {"url": "http://127.0.0.1:1/score", "threshold": 0.3}
+    return cfg.load_config_from_dict({"groq": {}, "cameras": [camera]})
+
+
+def _run_loiter_ticks(monkeypatch, scores, *, sent=True, zone=None, **app_kw):
+    """Run one sampler tick per score on a group; return (captions, state)."""
+    from tapo_monitor import monitor as mon
+    captions = []
+
+    def send_photo(token, chat, path, caption, *a, **k):
+        captions.append(caption)
+        return True
+    monkeypatch.setattr(mon.notify, "send_photo", send_photo)
+    monkeypatch.setattr(mon.enrich, "groq_describe", lambda *a, **k: "x")
+    seq = iter(scores)
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, img, timeout=10, tiles=1, **kw:
+                        {"person": next(seq), "animal": 0.0})
+    monkeypatch.setattr(daemon, "_safe_unlink", lambda p: None)
+    app = _loiter_app(**app_kw)
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": "k", "face_names": {}}
+    state.groups["a"] = {
+        "camera": "a", "etype": "person", "event": {"start_time": 1000},
+        "started": 1000, "last_event_at": 1000, "frames": 0, "next_due": 1030,
+        "sent": sent, "delivered": sent, "pir_backed": True,
+    }
+    for i in range(len(scores)):
+        state.groups["a"]["last_event_at"] = 1000 + 30 * (i + 1)   # camera keeps firing
+        daemon.process_sampler(app, {"a": object()}, state, now=1030 + 30 * i,
+                               secrets=secrets,
+                               snapshot_for=lambda c: (lambda cam_, ev: "/tmp/x.jpg"),
+                               time_str=lambda e: "t", loiter_zone=zone)
+    return captions, state
+
+
+def test_loiter_sends_one_notice_for_a_lingering_person_in_a_sent_group(monkeypatch):
+    captions, state = _run_loiter_ticks(monkeypatch, [0.9] * 6)
+    assert len(captions) == 1                    # six person frames, one notice
+    assert "lingering" in captions[0] and "~2 min" in captions[0]
+    assert state.groups["a"]["loiter_sent"] is True
+
+
+def test_loiter_does_not_fire_when_the_person_leaves(monkeypatch):
+    captions, _ = _run_loiter_ticks(monkeypatch, [0.9, 0.9, 0.0, 0.9, 0.9, 0.0])
+    assert captions == []
+
+
+def test_loiter_zone_hook_rejecting_the_person_blocks_the_notice(monkeypatch):
+    captions, _ = _run_loiter_ticks(monkeypatch, [0.9] * 6, zone=lambda c, img: False)
+    assert captions == []
+
+
+def test_loiter_unsent_group_still_sends_its_alert_and_counts_that_frame(monkeypatch):
+    captions, state = _run_loiter_ticks(monkeypatch, [0.9, 0.9, 0.9], sent=False)
+    assert len(captions) == 2                    # the alert photo + one loiter notice
+    assert sum("lingering" in c for c in captions) == 1
+
+
+def test_loiter_requires_a_scorer():
+    with pytest.raises(cfg.ConfigError, match="loiter_frames"):
+        _loiter_app(with_scorer=False)
+
+
+def test_loiter_frames_cannot_exceed_max_frames():
+    with pytest.raises(cfg.ConfigError, match="loiter_frames"):
+        _loiter_app(frames=7)

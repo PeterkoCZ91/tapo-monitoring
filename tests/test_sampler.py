@@ -241,3 +241,89 @@ def test_ensure_group_creates_then_returns_same():
     g2 = sampler.ensure_group(groups, "a", _ev(1020), "motion", 1030, CFG)
     assert g1 is g2
     assert g1["started"] == 1000 and g1["sent"] is False
+
+
+# --- V3 loitering -----------------------------------------------------------------
+
+LOITER = replace(CFG, loiter_frames=4)
+
+
+def _loiter_group():
+    groups = {}
+    return sampler.ensure_group(groups, "a", _ev(1000), "person", 1000, LOITER)
+
+
+def _feed(group, presences, scfg=LOITER, start=1030):
+    """Feed presence flags one interval apart; return the list of fire decisions."""
+    return [sampler.note_loiter(group, p, start + i * scfg.interval, scfg)
+            for i, p in enumerate(presences)]
+
+
+def test_loiter_off_by_default_never_fires():
+    g = _loiter_group()
+    assert sampler.loiter_enabled(CFG) is False
+    assert _feed(g, [True] * 10, scfg=CFG) == [False] * 10
+    assert "loiter_streak" not in g
+
+
+def test_loiter_fires_exactly_on_the_kth_consecutive_person_frame():
+    g = _loiter_group()
+    assert _feed(g, [True] * 4) == [False, False, False, True]
+
+
+def test_loiter_repeated_frames_of_the_same_group_send_once():
+    # Zero spam: a person who stays for a dozen frames yields exactly one notice.
+    g = _loiter_group()
+    assert sum(_feed(g, [True] * 12)) == 1
+
+
+def test_loiter_gap_resets_the_streak():
+    g = _loiter_group()
+    assert sum(_feed(g, [True, True, True, False, True, True, True])) == 0
+    assert sum(_feed(g, [True], start=1300)) == 1       # fourth in the new streak
+
+
+def test_loiter_does_not_refire_after_a_gap_in_the_same_group():
+    g = _loiter_group()
+    assert sum(_feed(g, [True] * 4 + [False] + [True] * 6)) == 1
+
+
+def test_loiter_miss_tolerance_bridges_a_ptz_hiccup():
+    scfg = replace(LOITER, loiter_miss_tolerance=1)
+    g = _loiter_group()
+    fired = _feed(g, [True, True, False, True, True], scfg=scfg)
+    assert fired == [False, False, False, False, True]   # the miss is not a frame
+    g2 = _loiter_group()
+    assert sum(_feed(g2, [True, False, False, True, True, True], scfg=scfg)) == 0
+
+
+def test_loiter_out_of_zone_person_does_not_count():
+    g = _loiter_group()
+    fired = [sampler.note_loiter(g, True, 1030 + 30 * i, LOITER, in_zone=False)
+             for i in range(6)]
+    assert fired == [False] * 6
+
+
+def test_loiter_minutes_rounds_half_up_and_is_at_least_one():
+    g = _loiter_group()
+    _feed(g, [True] * 4)
+    assert sampler.loiter_minutes(g, 1030 + 90, LOITER) == 2   # 4 frames x 30 s = 2 min
+    g2 = _loiter_group()
+    sampler.note_loiter(g2, True, 1030, LOITER)
+    assert sampler.loiter_minutes(g2, 1030, LOITER) == 1
+
+
+def test_sent_group_keeps_sampling_while_loiter_watch_is_open():
+    g = _loiter_group()
+    g["sent"] = True
+    assert sampler.due(g, 1040, LOITER) is True
+    assert sampler.due(g, 1040, CFG) is False            # legacy: a sent group stops
+    _feed(g, [True] * 4)
+    assert sampler.due(g, 5000, LOITER) is False         # notice sent: watch is over
+
+
+def test_loiter_watch_still_honours_the_frame_budget():
+    g = _loiter_group()
+    g["sent"] = True
+    g["frames"] = LOITER.max_frames
+    assert sampler.due(g, 5000, LOITER) is False

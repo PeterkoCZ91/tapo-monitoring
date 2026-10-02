@@ -82,9 +82,65 @@ def observe_event(groups, name, event, etype, sent, now, scfg, delivered=False):
         g.pop("low_streak", None)
 
 
+def loiter_enabled(scfg):
+    """True when ``scfg`` asks for loitering notices (``loiter_frames`` > 0)."""
+    return getattr(scfg, "loiter_frames", 0) > 0
+
+
+def loiter_watching(group, scfg):
+    """True while a group still owes a loitering verdict: enabled and no notice sent yet."""
+    return loiter_enabled(scfg) and not group.get("loiter_sent")
+
+
+def note_loiter(group, present, now, scfg, *, in_zone=True):
+    """Fold one scored follow-up frame into the group's loitering streak. Mutates the group.
+
+    ``present`` is whether the frame holds a person at or above the scorer threshold.
+    ``in_zone`` is the hook the alert zones attach to later (V1): a person outside the
+    zone is treated as absent. Returns True exactly once per group, on the frame that
+    makes ``scfg.loiter_frames`` consecutive person frames; every later frame of the
+    group returns False whatever it shows, so a person who stays cannot spam.
+
+    A frame without a person breaks the streak unless it fits ``loiter_miss_tolerance``
+    (a PTZ move away from the subject or one missed detection); a tolerated miss is not
+    counted as a frame. After a break the streak restarts from zero.
+    """
+    if not loiter_enabled(scfg) or group.get("loiter_sent"):
+        return False
+    if present and in_zone:
+        if not group.get("loiter_streak"):
+            group["loiter_first_at"] = now
+        group["loiter_streak"] = group.get("loiter_streak", 0) + 1
+        group["loiter_misses"] = 0
+        if group["loiter_streak"] >= scfg.loiter_frames:
+            group["loiter_sent"] = True
+            return True
+        return False
+    misses = group.get("loiter_misses", 0) + 1
+    if misses > scfg.loiter_miss_tolerance:
+        group["loiter_streak"] = 0
+        group["loiter_misses"] = 0
+        group.pop("loiter_first_at", None)
+    else:
+        group["loiter_misses"] = misses
+    return False
+
+
+def loiter_minutes(group, now, scfg):
+    """Whole minutes (at least 1, half rounds up) the current streak covers. Pure.
+
+    Each frame stands for one ``interval``, so K frames cover K intervals (4 x 30 s = 2 min).
+    """
+    first = group.get("loiter_first_at", now)
+    return max(1, int((now - first + scfg.interval) / 60 + 0.5))
+
+
 def due(group, now, scfg):
-    """True when a follow-up grab should happen now. Pure."""
-    return (not group["sent"]
+    """True when a follow-up grab should happen now. Pure.
+
+    A sent group stops sampling, except while a loitering verdict is still owed.
+    """
+    return ((not group["sent"] or loiter_watching(group, scfg))
             and not group.get("early_exit")
             and group["frames"] < scfg.max_frames
             and now >= group["next_due"])
@@ -179,11 +235,13 @@ def expired(group, now, scfg):
 
     An unsent group must survive its whole sampling window (started +
     interval*max_frames) even with no further events — that window is the entire
-    point. A sent or exhausted group only lingers group_gap past the last event so
+    point (a sent group is kept the same while a loitering verdict is still owed: a
+    person standing still raises no new events). A sent or exhausted group only lingers group_gap past the last event so
     the tail of the burst still folds in instead of spawning a new group.
     """
     activity_end = group["last_event_at"] + scfg.group_gap
-    if group["sent"] or group.get("early_exit") or group["frames"] >= scfg.max_frames:
+    owed = loiter_watching(group, scfg) and not group.get("early_exit")
+    if (group["sent"] and not owed) or group.get("early_exit") or group["frames"] >= scfg.max_frames:
         return now > activity_end
     sample_end = group["started"] + scfg.interval * scfg.max_frames
     # Unsent groups survive the sample window plus group_gap to fold in trailing events

@@ -3455,8 +3455,22 @@ def hold_expiry_archive_warning(app: AppConfig, env=None):
             "expiring hold has nothing to send and stays hold_expired")
 
 
+def _loiter_notice(cfg, group, image, s, minutes, *, secrets, time_str):
+    """Send the one "lingering" notice for a sampler group. Returns the delivery result."""
+    caption = notify.build_caption(
+        "🧍", time_str(group["event"]), description=f"lingering here for ~{minutes} min",
+        score=s, lens=snapshot.frame_lens(image))
+    ok = send_alert_photo(cfg, secrets, image, caption, score=s,
+                          incident=incident.incident_id(cfg.name, group["event"]),
+                          send_path="sampler", etype="person")
+    monitor.audit_event(cfg, group["event"], "person", "sampler", "loiter", score=s,
+                        threshold=cfg.scorer.threshold, telegram=ok,
+                        extra={"minutes": minutes})
+    return ok
+
+
 def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
-                    time_str=None, night=True):
+                    time_str=None, night=True, loiter_zone=None):
     """Advance sampler groups: follow-up grabs across each open event window.
 
     A group exists because its burst never produced a subject-bearing alert. Every
@@ -3464,6 +3478,11 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
     stream) and let the scorer decide; the first frame above threshold is sent and
     closes the group. A scorer failure sends the frame through unfiltered but still
     closes the group — degraded mode is bounded spam (one ping), never a silent miss.
+
+    With ``sampler.loiter_frames`` every scored frame also feeds the group's loitering
+    streak (:func:`sampler.note_loiter`) and a sent group keeps sampling until the one
+    notice went out. ``loiter_zone(cfg, image) -> bool`` is the hook alert zones attach
+    to: a person it rejects does not count; None accepts the whole frame.
     """
     time_str = time_str or _default_time_str
     for cfg in app.cameras:
@@ -3501,6 +3520,18 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
             s = score(image) if score is not None else None
             motion_corr = (cfg.scorer.motion_send_threshold is not None
                            and etype == "motion" and not group.get("pir_backed"))
+            if sampler.loiter_enabled(scfg) and s is not None:
+                present = s >= cfg.scorer.threshold
+                in_zone = (not present or loiter_zone is None or bool(loiter_zone(cfg, image)))
+                if sampler.note_loiter(group, present, now, scfg, in_zone=in_zone):
+                    minutes = sampler.loiter_minutes(group, now, scfg)
+                    log.info("loitering %s: person on %d consecutive frames (~%d min)",
+                             cfg.name, scfg.loiter_frames, minutes)
+                    if not _loiter_notice(cfg, group, image, s, minutes, secrets=secrets,
+                                          time_str=time_str):
+                        log.warning("loiter notice for %s not delivered", cfg.name)
+            if group["sent"]:
+                continue                  # only here for the loitering watch: no new alert
             verdict = "send"
             if score is not None and s is not None:
                 verdict = (sampler.corroborate_motion(

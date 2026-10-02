@@ -256,6 +256,10 @@ cameras:
                              # follow-up leaves the burst open: the sampler keeps
                              # looking and a person photo may pass the cooldown;
                              # the follow-up is skipped once one was delivered
+      loiter_frames: 0       # a person on this many consecutive follow-up frames of one
+                             # group sends ONE "lingering" notice (0 = off; 4 at
+                             # interval 30 = ~2 min); needs a scorer, <= max_frames
+      loiter_miss_tolerance: 0  # frames without a person the streak survives
 
     scorer:
       url:                   # e.g. http://127.0.0.1:8766/score; empty = Groq arbiter
