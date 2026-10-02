@@ -249,3 +249,13 @@ def test_a_failed_album_falls_back_to_the_single_photo(monkeypatch, tmp_path):
     photos, albums, _ = _run(monkeypatch, tmp_path, album_ok=False)
     assert len(albums) == 1
     assert photos == [("wide.jpg", "👤 12:00:00 · wide lens", f"front-{PERSON['start_time']}")]
+
+
+def test_archive_sent_never_overwrites_a_frame_stamped_in_the_same_microsecond(tmp_path):
+    from tapo_monitor import sentlog
+    now = 1_700_000_000.000411
+    assert sentlog._stamp(now) == sentlog._stamp(now + 1e-6)  # float rounding collides
+    for data in (b"AAA", b"BBB"):
+        assert sentlog.archive_sent(str(tmp_path), data, "cap", now=now)
+        assert sentlog.archive_sent(str(tmp_path), data + b"2", "cap", now=now + 1e-6)
+    assert len(list(tmp_path.glob("*.jpg"))) == 4

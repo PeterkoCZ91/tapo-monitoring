@@ -240,6 +240,24 @@ class RetentionMaintenance:
                 log.warning("retention: ledger cleanup failed", exc_info=True)
 
 
+def _write_unique(archive_dir, now, image_bytes):
+    """Write ``image_bytes`` under a microsecond stamp, never over an existing frame.
+
+    Two frames of one alert (an album) can land in the same microsecond once float
+    rounding is involved; exclusive create bumps the stamp by 1 us until a name is free.
+    """
+    for bump in range(1000):
+        name = f"{_stamp(now + bump * 1e-6)}.jpg"
+        path = os.path.join(archive_dir, name)
+        try:
+            with open(path, "xb") as f:
+                f.write(image_bytes)
+        except FileExistsError:
+            continue
+        return name, path
+    raise OSError("sentlog: no free archive name")
+
+
 def archive_sent(archive_dir, image_bytes, caption, *, now,
                  retention_days=DEFAULT_RETENTION_DAYS, delivered=True,
                  camera=None, score=None, incident=None, send_path=None):
@@ -257,10 +275,7 @@ def archive_sent(archive_dir, image_bytes, caption, *, now,
     """
     try:
         os.makedirs(archive_dir, exist_ok=True)
-        name = f"{_stamp(now)}.jpg"
-        path = os.path.join(archive_dir, name)
-        with open(path, "wb") as f:
-            f.write(image_bytes)
+        name, path = _write_unique(archive_dir, now, image_bytes)
         record = {"ts": now, "file": name, "caption": caption, "delivered": bool(delivered)}
         if camera:
             record["camera"] = camera
