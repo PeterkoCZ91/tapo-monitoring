@@ -89,8 +89,9 @@ zone too.
 
 Limits:
 
-- Live poll frames and sampler frames only. SD-card follow-ups and the shadow scan do not
-  raise vehicle alerts.
+- Live poll frames, sampler frames and SD/recording follow-ups raise vehicle alerts; the
+  shadow scan does not. A follow-up only alerts a vehicle when no frame of its window
+  shows a person, and at most once per follow-up and event.
 - `0.5` is a starting estimate, not a tuned value. Check it against your own frames
   before relying on it; parked cars in view will alert whenever they are scored, so
   pair it with a zone that excludes them.

@@ -7685,3 +7685,112 @@ def test_sampler_vehicle_outside_the_alert_zone_is_ignored(monkeypatch, tmp_path
                            snapshot_for=lambda c: (lambda cam, ev: str(frame)),
                            time_str=lambda ev: "T")
     assert sent == []
+
+
+# ── vehicle alerts on the SD follow-up path ───────────────────────────────────
+
+def _vehicle_sd(frames, *, enabled=True, entry=None, zones=None):
+    scorer_cfg = {"url": "http://127.0.0.1:1/score", "threshold": 0.5,
+                  "alert_vehicles": enabled, "vehicle_threshold": 0.5}
+    if zones:
+        scorer_cfg["alert_zones"] = zones
+    app = cfg.load_config_from_dict({
+        "groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
+                                   "scorer": scorer_cfg}]})
+    state = daemon.MonitorState()
+    state.pending_sd.append({"camera": "a", "etype": "person", "event": {"start_time": 1000},
+                             "span": 30, "full_span": 30, "due_at": 0, "live_sent": True,
+                             **(entry or {})})
+    return app, state, lambda cfg_, start_time, span=None, out_dir=None: list(frames)
+
+
+def _vehicle_scores(monkeypatch, by_frame):
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, path, **k: by_frame[path])
+
+
+CAR = {"person": 0.0, "animal": 0.0, "vehicle": 0.8}
+PERSON = {"person": 0.9, "animal": 0.0, "vehicle": 0.0}
+
+
+def _run_vehicle_sd(app, state, fetch, sent, monkeypatch, now=1300):
+    return _run_pending(app, state, {"a": object()}, now, fetch,
+                        lambda cfg_: (lambda cam, ev: None), sent, monkeypatch)
+
+
+def test_sd_followup_alerts_a_vehicle_without_closing_or_delivering(monkeypatch):
+    sent = []
+    app, state, fetch = _vehicle_sd(["/tmp/sdf_1000_1_00.jpg"])
+    _vehicle_scores(monkeypatch, {"/tmp/sdf_1000_1_00.jpg": CAR})
+    _run_vehicle_sd(app, state, fetch, sent, monkeypatch)
+    assert len(sent) == 1 and "🚗" in sent[0][1] and sent[0][0] == "/tmp/sdf_1000_1_00.jpg"
+    assert state.last_alert[("a", "vehicle")] == 1300
+    assert ("a", "confirmed") not in state.last_alert
+
+
+def test_sd_followup_vehicle_is_off_unless_opted_in(monkeypatch):
+    sent = []
+    app, state, fetch = _vehicle_sd(["/tmp/sdf_1000_1_00.jpg"], enabled=False)
+    _vehicle_scores(monkeypatch, {"/tmp/sdf_1000_1_00.jpg": CAR})
+    _run_vehicle_sd(app, state, fetch, sent, monkeypatch)
+    assert sent == []
+
+
+def test_sd_followup_person_wins_over_a_vehicle_frame(monkeypatch):
+    sent = []
+    frames = ["/tmp/sdf_1000_1_00.jpg", "/tmp/sdf_1000_1_05.jpg"]
+    app, state, fetch = _vehicle_sd(frames, entry={"live_sent": False})
+    _vehicle_scores(monkeypatch, {frames[0]: CAR, frames[1]: PERSON})
+    _run_vehicle_sd(app, state, fetch, sent, monkeypatch)
+    assert [img for img, _ in sent] == [frames[1]] and "🚗" not in sent[0][1]
+    assert ("a", "vehicle") not in state.last_alert
+
+
+def test_sd_followup_vehicle_waits_while_a_person_alert_cools_down(monkeypatch):
+    sent = []
+    app, state, fetch = _vehicle_sd(["/tmp/sdf_1000_1_00.jpg"])
+    _vehicle_scores(monkeypatch, {"/tmp/sdf_1000_1_00.jpg": CAR})
+    _, on_alert = daemon.alert_gate(state, "a", app.alerts.cooldown, 1290)
+    on_alert("person")
+    _run_vehicle_sd(app, state, fetch, sent, monkeypatch)
+    assert sent == []
+
+
+def test_sd_followup_vehicle_dedups_against_the_live_alert_of_the_same_event(monkeypatch):
+    sent = []
+    app, state, fetch = _vehicle_sd(["/tmp/sdf_1000_1_00.jpg"])
+    _vehicle_scores(monkeypatch, {"/tmp/sdf_1000_1_00.jpg": CAR})
+    _, on_alert = daemon.alert_gate(state, "a", app.alerts.cooldown, 1010)
+    on_alert("vehicle", {"start_time": 1000})   # sent long before this read
+    _run_vehicle_sd(app, state, fetch, sent, monkeypatch, now=5000)
+    assert sent == []
+
+
+def test_sd_followup_vehicle_is_sent_once_over_retried_reads(monkeypatch):
+    sent = []
+    app, state, fetch = _vehicle_sd(["/tmp/sdf_1000_1_00.jpg"],
+                                    entry={"rest_span": 60, "live_sent": True})
+    _vehicle_scores(monkeypatch, {"/tmp/sdf_1000_1_00.jpg": CAR})
+    remaining = _run_vehicle_sd(app, state, fetch, sent, monkeypatch)
+    assert remaining and remaining[0]["vehicle_sent"] is True     # window goes on being read
+    state.last_alert.clear()
+    state.last_event_start.clear()                                 # even without the gate
+    remaining[0]["due_at"] = 0
+    _run_vehicle_sd(app, state, fetch, sent, monkeypatch, now=1400)
+    assert len(sent) == 1
+
+
+def test_sd_followup_vehicle_outside_the_alert_zone_is_ignored(monkeypatch, tmp_path):
+    import io
+    zones = [[[0.5, 0.0], [1.0, 0.0], [1.0, 1.0], [0.5, 1.0]]]
+    body = json.dumps({"person": 0.0, "animal": 0.0, "vehicle": 0.9, "w": 1000, "h": 500,
+                       "person_scores": [], "person_boxes": [], "vehicle_scores": [0.9],
+                       "vehicle_boxes": [[100, 100, 300, 300]]}).encode()
+    monkeypatch.setattr(daemon.scorer.urllib.request, "urlopen",
+                        lambda req, timeout=10: io.BytesIO(body))
+    sent = []
+    frame = tmp_path / "sdf_1000_1_00.jpg"
+    frame.write_bytes(b"jpg")
+    app, state, fetch = _vehicle_sd([str(frame)], zones=zones)
+    _run_vehicle_sd(app, state, fetch, sent, monkeypatch)
+    assert sent == []

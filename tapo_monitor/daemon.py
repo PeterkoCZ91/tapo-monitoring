@@ -2695,7 +2695,7 @@ class _Prescorer:
 
 def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
                             *, path="sd", keep_below=False, audit_extra=None,
-                            pick="sharpest"):
+                            pick="sharpest", vehicle_out=None):
     """Pick the sharpest subject from an already-extracted, bounded frame sequence.
 
     ``pick="largest"`` instead takes the frame with the largest subject box among
@@ -2707,6 +2707,10 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
     a confirmed candidate if available, otherwise preserve the existing unscored
     passthrough. Hub callers keep the best rejected candidate
     so their normal threshold gate can audit the rejected clip once.
+
+    ``vehicle_out``, when a list, collects ``(frame, vehicle_score)`` for every frame that
+    :func:`monitor.vehicle_verdict` calls a vehicle (no person, vehicle opted in); the
+    selection itself is unchanged.
     """
     blur_score = blur_score or recclip.blur_score
     above, below = [], []
@@ -2717,6 +2721,8 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
             if above:
                 break
             return frame, s
+        if vehicle_out is not None and monitor.vehicle_verdict(cfg, s):
+            vehicle_out.append((frame, s.vehicle))
         if s >= cfg.scorer.threshold:
             above.append((frame, s))
         else:
@@ -2781,6 +2787,8 @@ class _SdPick:
     description: str = ""
     score: float | None = None
     fetch_seconds: float | None = None
+    vehicle_image: str | None = None      # best vehicle-only frame (scorer.alert_vehicles)
+    vehicle_score: float | None = None
 
 
 def _sd_followup_job(cfg, event, etype, fetch, start, span, out_dir, score, *,
@@ -2820,8 +2828,12 @@ def _sd_followup_job(cfg, event, etype, fetch, start, span, out_dir, score, *,
             else:
                 eligible_frames.append(frame)
         if score is not None:
+            vehicles = []
             pick.image, pick.score = _select_recording_frame(
-                cfg, event, etype, eligible_frames, score, pick=cfg.sd_frame_pick)
+                cfg, event, etype, eligible_frames, score, pick=cfg.sd_frame_pick,
+                vehicle_out=vehicles)
+            if vehicles:
+                pick.vehicle_image, pick.vehicle_score = max(vehicles, key=lambda fv: fv[1])
             return pick
         # Without a local scorer, retain the caption-based/raw selection.
         for frame in eligible_frames:
@@ -3104,6 +3116,35 @@ def _score_fallback_grab(cfg, event, etype, image):
     return False
 
 
+def _sd_vehicle_alert(app, cfg, state, entry, pick, *, now, secrets, time_str):
+    """Opt-in vehicle photo from an SD follow-up window that shows a vehicle and no person.
+
+    Called only when no frame of the window reached the person threshold, so a person
+    always has precedence. A side alert like the live and sampler ones: its own cooldown
+    and audit type (:func:`alert_gate`, which also dedups against a vehicle alert the live
+    pass or the sampler already sent for this event), and it neither closes the follow-up
+    nor counts as its delivery. ``entry["vehicle_sent"]`` keeps the retried reads of one
+    window (early look, extended span, failed delivery) from alerting twice.
+    """
+    event = entry["event"]
+    can_alert, on_alert = alert_gate(state, cfg.name, app.alerts.cooldown, now)
+    if not can_alert("vehicle", event):
+        log.info("skip vehicle: cooldown active [sd]")
+        monitor.audit_event(cfg, event, "vehicle", "sd", "cooldown")
+        return
+    caption = notify.build_caption(monitor.TYPE_EMOJI["vehicle"], time_str(event),
+                                   lens=snapshot.frame_lens(pick.vehicle_image))
+    ok = send_alert_photo(cfg, secrets, pick.vehicle_image, caption, score=None,
+                          incident=incident.incident_id(cfg.name, event),
+                          send_path="sd", etype="vehicle")
+    monitor.audit_event(cfg, event, "vehicle", "sd", "send", score=pick.vehicle_score,
+                        threshold=cfg.scorer.vehicle_threshold, telegram=ok)
+    if ok:
+        log.info("alert vehicle sent (score=%.2f) [sd]", pick.vehicle_score)
+        on_alert("vehicle", event)
+        entry["vehicle_sent"] = True
+
+
 def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secrets,
                         snapshot_for, time_str, night):
     """Decide and send one follow-up whose job came back. Runs on the loop.
@@ -3134,6 +3175,9 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
         verdict = _sd_followup_blocked(app, cfg, state, entry, now)
         if verdict:
             return verdict == "wait"
+        if image is None and pick.vehicle_image and not entry.get("vehicle_sent"):
+            _sd_vehicle_alert(app, cfg, state, entry, pick, now=now, secrets=secrets,
+                              time_str=time_str)
         card = cfg.snapshot_source != "recording"
         if image is None and entry.get("rest_span") and card and not frames:
             # The card's early look read nothing at all (download or lookup failed): the
@@ -3484,7 +3528,7 @@ def _sampler_vehicle_alert(app, cfg, state, group, image, s, *, now, secrets, ti
     person cooldown nor closes the group, so the group keeps looking for the person.
     """
     can_alert, on_alert = alert_gate(state, cfg.name, app.alerts.cooldown, now)
-    if not can_alert("vehicle"):
+    if not can_alert("vehicle", group["event"]):
         log.info("skip vehicle: cooldown active [sampler]")
         monitor.audit_event(cfg, group["event"], "vehicle", "sampler", "cooldown")
         return
@@ -3497,7 +3541,7 @@ def _sampler_vehicle_alert(app, cfg, state, group, image, s, *, now, secrets, ti
                         threshold=cfg.scorer.vehicle_threshold, telegram=ok)
     if ok:
         log.info("alert vehicle sent (score=%.2f) [sampler]", s.vehicle)
-        on_alert("vehicle")
+        on_alert("vehicle", group["event"])
 
 
 def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,

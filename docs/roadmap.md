@@ -836,7 +836,7 @@ often what photographs the person seconds later.
 - [x] `tools/replay_zones.py` to draw and check zones and loitering settings offline.
 - [ ] Trial each on one fixed camera and review the alerts it adds or drops before
   recommending a default; the vehicle threshold of 0.5 is an untested estimate.
-- [ ] Vehicle alerts on the SD-card follow-up path (not covered today).
+- [x] Vehicle alerts on the SD-card follow-up path.
 
 ### 10.11 — Network evidence for transient outages
 

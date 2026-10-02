@@ -788,8 +788,9 @@ score in `score`). It has a cooldown of its own (`alerts.cooldown`) that a perso
 neither resets nor is reset by, and it is also held back while a person alert of the same
 passage is cooling down. It does not close a sampler group, mark an event delivered or start
 SD follow-ups, so a camera-confirmed person is still handled as before. It covers the live
-poll and the sampler frames; SD-card follow-ups and the shadow scan do not raise vehicle
-alerts. With `alert_zones` set, a vehicle counts only when the bottom centre of its box lies
+poll, the sampler frames and SD-card/recording follow-ups (there only when no frame of the
+window shows a person, once per event and deduplicated against a vehicle alert the live pass
+or the sampler already sent for it); the shadow scan does not raise vehicle alerts. With `alert_zones` set, a vehicle counts only when the bottom centre of its box lies
 in a zone (the same rule as the feet of a person); a service without `vehicle_boxes`
 cannot place it, so nothing is sent.
 

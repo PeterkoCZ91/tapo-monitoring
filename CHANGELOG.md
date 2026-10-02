@@ -12,8 +12,9 @@ All notable changes to this project are documented here.
   been here for about N min" notice per group when a person is on K consecutive follow-up
   frames; with `alert_zones`, only people inside a zone count.
 - `scorer.alert_vehicles` / `vehicle_threshold` (off by default): a separate vehicle alert
-  with its own cooldown from the live poll and the sampler, zone-checked when zones are
-  set. The scoring service now returns `vehicle`, `vehicle_scores` and `vehicle_boxes`;
+  with its own cooldown from the live poll, the sampler and the SD/recording follow-ups
+  (never when the window shows a person, never twice for one event), zone-checked when
+  zones are set. The scoring service now returns `vehicle`, `vehicle_scores` and `vehicle_boxes`;
   update the service before the daemons.
 - `tools/replay_zones.py`: offline tool to see where people's feet land, test polygons
   against saved frames and replay loitering settings. See
