@@ -5,6 +5,8 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `docs/measurements.md`: anonymized accuracy, miss, first-alert latency and replay figures from
+  one real deployment, with their limits and the commands to reproduce them.
 - `tapo-monitor label --scorer-url URL` (off by default): draw the person boxes the scoring
   service finds on the frame being labeled (red from 0.45, yellow from 0.10, with scores).
   A scorer failure leaves the page working without boxes.

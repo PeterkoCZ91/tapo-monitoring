@@ -345,6 +345,7 @@ understand the session and sequential-request limitations.
 | [MQTT and Home Assistant](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/mqtt.md) | You want the cameras as Home Assistant entities. |
 | [Watch zones](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/watch-zones.md) | You want alerts only for a yard, a lingering-person notice or vehicle alerts. |
 | [Labeling](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/labeling.md) | You want ground truth for collected alert frames. |
+| [Measurements](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/measurements.md) | You want real accuracy, miss and first-alert latency figures, and how to measure your own. |
 | [Troubleshooting](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/troubleshooting.md) | You hit authentication, RTSP, SD or firmware-specific problems. |
 | [`events_1` bitmask](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/events1-bitmask.md) | Your firmware returns incomplete event types. |
 | [Local API reference](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/tapo-local-api.md) | You call the camera's local API yourself: conventions, error codes, SD card, events, calls to avoid. |
