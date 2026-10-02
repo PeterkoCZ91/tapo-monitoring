@@ -1514,3 +1514,68 @@ def test_keep_sampling_needs_a_scorer_groq_only_defers_as_before(monkeypatch, ca
     assert calls == [False]                           # the legacy defer
     assert observed == [True] and alerted == ["person"]
     assert not [a for a in audits if "keep_sampling" in a]
+
+
+# ── vehicle alerts on the live path (scorer.alert_vehicles) ───────────────────
+
+def _vehicle_cfg(enabled=True):
+    return config.load_config_from_dict({"cameras": [{
+        "name": "a", "host": "203.0.113.10",
+        "scorer": {"url": "http://127.0.0.1:1/score", "threshold": 0.4,
+                   "alert_vehicles": enabled, "vehicle_threshold": 0.5}}]}).cameras[0]
+
+
+def _run_live_vehicle(monkeypatch, cfg, result, *, can_alert=None, defer=None):
+    from tapo_monitor import scorer
+    sent, armed, audits = [], [], []
+    monkeypatch.setattr(monitor, "audit_event",
+                        lambda cfg_, ev, etype, path, action, **k: audits.append((etype, action)))
+    monkeypatch.setattr(monitor, "_safe_unlink", lambda p: None)
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    score = scorer.subject_score(result, threshold=cfg.scorer.threshold)
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=1000, groq_key="", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        score=lambda img: score, can_alert=can_alert,
+        on_alert=lambda et, ev=None, **k: armed.append(et),
+        defer=defer,
+        send_alert=lambda img, cap, s, **k: sent.append((cap, k.get("etype"))) or True)
+    return sent, armed, audits
+
+
+def test_live_alerts_a_vehicle_in_an_empty_person_frame(monkeypatch):
+    deferred = []
+    sent, armed, audits = _run_live_vehicle(
+        monkeypatch, _vehicle_cfg(), {"person": 0.05, "animal": 0.0, "vehicle": 0.8},
+        defer=lambda ev, et, live_sent, **k: deferred.append(et))
+    assert [etype for _cap, etype in sent] == ["vehicle"]
+    assert "🚗" in sent[0][0]
+    assert ("vehicle", "send") in audits
+    assert "vehicle" in armed
+    assert deferred == ["person"]       # the camera-confirmed person still gets its SD look
+
+
+def test_live_vehicle_never_replaces_a_person_alert(monkeypatch):
+    sent, armed, audits = _run_live_vehicle(
+        monkeypatch, _vehicle_cfg(), {"person": 0.9, "animal": 0.0, "vehicle": 0.9})
+    assert [etype for _cap, etype in sent] == ["person"]
+    assert "vehicle" not in armed
+
+
+def test_live_vehicle_is_off_unless_opted_in(monkeypatch):
+    sent, _armed, _audits = _run_live_vehicle(
+        monkeypatch, _vehicle_cfg(enabled=False),
+        {"person": 0.05, "animal": 0.0, "vehicle": 0.9})
+    assert "vehicle" not in [etype for _cap, etype in sent]
+
+
+def test_live_vehicle_respects_its_cooldown(monkeypatch):
+    sent, _armed, audits = _run_live_vehicle(
+        monkeypatch, _vehicle_cfg(), {"person": 0.05, "animal": 0.0, "vehicle": 0.9},
+        can_alert=lambda etype, event=None: etype != "vehicle")
+    assert "vehicle" not in [etype for _cap, etype in sent]
+    assert ("vehicle", "cooldown") in audits

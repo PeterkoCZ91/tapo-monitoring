@@ -67,6 +67,19 @@ def _on_alert(on_alert, etype, event, score=None, threshold=None):
         on_alert(etype)
 
 
+def vehicle_verdict(cfg, s):
+    """``"vehicle"`` when a scored frame shows no person but a vehicle the camera opted in to.
+
+    The person always has precedence: a frame at or above the person threshold is never a
+    vehicle alert, so a vehicle can neither replace nor duplicate a person one. ``s`` is
+    the :class:`scorer.SubjectScore` (None = scorer unavailable = no verdict). Pure.
+    """
+    if s is None or s >= cfg.scorer.threshold:
+        return ""
+    return detection.vehicle_alert(getattr(s, "vehicle", 0.0), cfg.scorer.vehicle_threshold,
+                                   cfg.scorer.alert_vehicles)
+
+
 def _keeps_sampling(cfg):
     """Whether an empty-live person defer leaves the burst open (see run_monitor)."""
     scfg = getattr(cfg, "sampler", None)
@@ -429,6 +442,29 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 # Groq disabled = raw mode: there is no arbiter to declare a scene
                 # empty, so nothing is — every live frame goes straight out.
                 empty = False
+            if vehicle_verdict(cfg, s):
+                # Opt-in vehicle alert (scorer.alert_vehicles): its own cooldown, caption
+                # and audit type. It is a side alert: the person handling below goes on
+                # exactly as without it (a confirmed person with an empty frame still gets
+                # its SD follow-up), and it never arms the person cooldown.
+                if not _can_alert(can_alert, "vehicle", event):
+                    log.info("skip vehicle: cooldown active")
+                    audit_event(cfg, event, "vehicle", "live", "cooldown")
+                else:
+                    v_caption = notify.build_caption(
+                        TYPE_EMOJI["vehicle"], time_str(event), lens=album_lens(image))
+                    v_incident = incident_id(cfg.name, event)
+                    v_ok = (send_alert(image, v_caption, None, incident=v_incident,
+                                       send_path="live", etype="vehicle")
+                            if send_alert is not None
+                            else notify.send_photo(telegram_token, telegram_chat, image,
+                                                   v_caption, incident=v_incident,
+                                                   send_path="live"))
+                    audit_event(cfg, event, "vehicle", "live", "send", score=s.vehicle,
+                                threshold=cfg.scorer.vehicle_threshold, telegram=v_ok)
+                    if v_ok:
+                        log.info("alert vehicle sent (score=%.2f)", s.vehicle)
+                        _on_alert(on_alert, "vehicle", event)
             if cooled_open and (s is None or s < cfg.scorer.threshold):
                 # Not a person photo (or the scorer could not tell): the cooldown the
                 # defer armed holds, as it does with keep_sampling_on_defer off.

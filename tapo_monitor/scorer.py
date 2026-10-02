@@ -57,7 +57,8 @@ def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None, ignore_
             if ignore_zones:
                 result = apply_ignore_zones(result, ignore_zones)
             if alert_zones:
-                result = apply_alert_zones(result, alert_zones)
+                result = apply_vehicle_alert_zones(apply_alert_zones(result, alert_zones),
+                                                   alert_zones)
             return result
         finally:
             close = getattr(resp, "close", None)
@@ -190,18 +191,59 @@ def apply_alert_zones(result, zones):
     return out
 
 
+def apply_vehicle_alert_zones(result, zones):
+    """Keep only the vehicles standing in an alert zone. Pure.
+
+    Same rule as :func:`apply_alert_zones`, for vehicles: one counts when the bottom centre
+    of its box lies in at least one zone. ``vehicle`` becomes the best remaining score
+    (0.0 when none), ``vehicle_scores``/``vehicle_boxes`` the remaining ones and
+    ``outside_alert_zones_vehicles`` counts the dropped. A vehicle alert is opt-in, so a
+    vehicle that cannot be placed (a service without ``vehicle_boxes``, malformed boxes)
+    scores 0 here rather than passing unchecked. A frame without vehicles is returned as is.
+    """
+    if vehicle_score(result) <= 0.0:
+        return result
+    scores, boxes = result.get("vehicle_scores"), result.get("vehicle_boxes")
+    w, h = result.get("w"), result.get("h")
+    kept = None
+    if (isinstance(scores, list) and isinstance(boxes, list) and len(scores) == len(boxes)
+            and w and h):
+        try:
+            pairs = [(float(sc), [float(v) for v in bx])
+                     for sc, bx in zip(scores, boxes, strict=True)]
+            w, h = float(w), float(h)
+            kept = [(sc, bx) for sc, bx in pairs
+                    if any(point_in_polygon((bx[0] + bx[2]) / 2 / w, bx[3] / h, z)
+                           for z in zones)]
+        except (TypeError, ValueError, IndexError):
+            kept = None
+    if kept is not None and len(kept) == len(pairs):
+        return result
+    out = dict(result)
+    if kept is None:
+        out["vehicle"], out["vehicle_scores"], out["vehicle_boxes"] = 0.0, [], []
+        return out
+    out["outside_alert_zones_vehicles"] = len(pairs) - len(kept)
+    out["vehicle_scores"] = [sc for sc, _ in kept]
+    out["vehicle_boxes"] = [bx for _, bx in kept]
+    out["vehicle"] = max(out["vehicle_scores"], default=0.0)
+    return out
+
+
 class SubjectScore(float):
     """Person score with animal confidence retained for audit telemetry.
 
     ``persons`` is how many people the frame holds at or above the caller's threshold
-    (see :func:`person_count`), or None when the scorer did not report it.
+    (see :func:`person_count`), or None when the scorer did not report it; ``vehicle`` is
+    the best vehicle confidence (0.0 from an older service).
     """
 
-    def __new__(cls, person, animal, persons=None):
+    def __new__(cls, person, animal, persons=None, vehicle=0.0):
         value = float.__new__(cls, person)
         value.person = person
         value.animal = animal
         value.persons = persons
+        value.vehicle = vehicle      # best vehicle confidence (0.0 = none / older service)
         return value
 
 
@@ -261,7 +303,8 @@ def subject_score(result, threshold=None):
     values = subject_scores(result)
     if values is None:
         return None
-    return SubjectScore(*values, persons=person_count(result, threshold))
+    return SubjectScore(*values, persons=person_count(result, threshold),
+                        vehicle=vehicle_score(result))
 
 
 def subject_box(result):

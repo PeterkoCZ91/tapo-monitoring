@@ -272,3 +272,57 @@ def test_vehicle_score_reads_the_field_and_tolerates_old_services():
 def test_subject_score_ignores_the_vehicle_field():
     result = {"person": 0.8, "animal": 0.1, "vehicle": 0.9}
     assert scorer.subject_scores(result) == (0.8, 0.1)
+
+
+def _with_vehicles(scores, boxes):
+    return {"person": 0.0, "animal": 0.0, "vehicle": max(scores, default=0.0),
+            "vehicle_scores": scores, "vehicle_boxes": boxes, "w": 1000, "h": 500}
+
+
+def test_vehicle_alert_zone_keeps_only_vehicles_whose_bottom_centre_is_inside():
+    # Bottom centres: (275, 300) outside, (750, 300) inside.
+    result = _with_vehicles([0.9, 0.6], [[200, 100, 350, 300], [700, 100, 800, 300]])
+    out = scorer.apply_vehicle_alert_zones(result, [RIGHT])
+    assert out["vehicle"] == 0.6 and out["vehicle_scores"] == [0.6]
+    assert out["vehicle_boxes"] == [[700, 100, 800, 300]]
+    assert out["outside_alert_zones_vehicles"] == 1
+    assert result["vehicle"] == 0.9                      # the input is not mutated
+
+
+def test_vehicle_alert_zone_with_nothing_inside_scores_no_vehicle():
+    out = scorer.apply_vehicle_alert_zones(_with_vehicles([0.9], [[10, 100, 60, 300]]), [RIGHT])
+    assert out["vehicle"] == 0.0 and scorer.vehicle_score(out) == 0.0
+
+
+def test_vehicle_alert_zone_returns_the_same_answer_when_all_are_inside():
+    result = _with_vehicles([0.9], [[700, 100, 800, 300]])
+    assert scorer.apply_vehicle_alert_zones(result, [RIGHT]) is result
+
+
+def test_vehicle_alert_zone_without_boxes_cannot_place_the_vehicle():
+    # An opt-in alert never fires on a vehicle that cannot be placed inside the zone.
+    result = {"person": 0.0, "animal": 0.0, "vehicle": 0.9, "w": 1000, "h": 500}
+    assert scorer.apply_vehicle_alert_zones(result, [RIGHT])["vehicle"] == 0.0
+
+
+def test_vehicle_alert_zone_leaves_a_frame_without_vehicles_alone():
+    result = {"person": 0.7, "animal": 0.0}
+    assert scorer.apply_vehicle_alert_zones(result, [RIGHT]) is result
+
+
+def test_subject_score_carries_the_vehicle_confidence():
+    s = scorer.subject_score({"person": 0.1, "animal": 0.0, "vehicle": 0.8}, threshold=0.4)
+    assert s.vehicle == 0.8
+    assert scorer.subject_score({"person": 0.1, "animal": 0.0}, threshold=0.4).vehicle == 0.0
+
+
+def test_score_image_applies_alert_zones_to_vehicles_too(monkeypatch, tmp_path):
+    img = tmp_path / "f.jpg"
+    img.write_bytes(b"jpg")
+    body = json.dumps({**_zoned([0.9], [[700, 100, 800, 300]]),
+                       "vehicle": 0.9, "vehicle_scores": [0.9],
+                       "vehicle_boxes": [[10, 100, 60, 300]]}).encode()
+    monkeypatch.setattr(scorer.urllib.request, "urlopen",
+                        lambda req, timeout=10: io.BytesIO(body))
+    out = scorer.score_image("http://x/score", str(img), alert_zones=[RIGHT])
+    assert out["person"] == 0.9 and out["vehicle"] == 0.0

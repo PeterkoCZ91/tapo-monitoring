@@ -277,6 +277,10 @@ cameras:
                              # on (its schedule applied to the astral night). Unset =
                              # threshold around the clock. Must stay below
                              # motion_send_threshold when that is set.
+      # alert_vehicles: true   # optional, default false; also alert on a vehicle (car,
+                             # motorcycle, bus, truck) the scoring service sees in a frame
+                             # without a person. Needs a service that reports vehicles.
+      # vehicle_threshold: 0.5 # min vehicle confidence for that alert (0 < x <= 1)
     # crop_to_subject: true   # optional padded zoom around the scorer's best person box,
                              # widened just enough that a standing figure is not a sliver;
                              # keeps the full frame if no usable box is available

@@ -1353,7 +1353,8 @@ def alert_gate(state, name, cooldown, now):
     only :func:`_sd_within_cooldown` reads. Arming for a defer passes neither.
     """
     def key_for(etype):
-        return "motion" if etype == "motion" else "confirmed"
+        # A vehicle alert has a cooldown of its own so it can never eat a person alert.
+        return etype if etype in ("motion", "vehicle") else "confirmed"
 
     def event_start(event):
         if not isinstance(event, dict):
@@ -1375,6 +1376,13 @@ def alert_gate(state, name, cooldown, now):
 
     def can_alert(etype, event=None):
         confirmed_ts = state.last_alert.get((name, "confirmed"))
+        if etype == "vehicle":
+            # Its own cooldown, and also quiet while a person alert of this passage
+            # is cooling down: one visit never sends a person and a vehicle photo.
+            vehicle_ts = state.last_alert.get((name, "vehicle"))
+            return (notify.should_send_alert(vehicle_ts, now, cooldown)
+                    and notify.should_send_alert(confirmed_ts, now, cooldown)
+                    and event_time_allowed(("vehicle", "confirmed"), event))
         if etype != "motion":
             return (notify.should_send_alert(confirmed_ts, now, cooldown)
                     and event_time_allowed(("confirmed",), event))
@@ -3469,6 +3477,29 @@ def _loiter_notice(cfg, group, image, s, minutes, *, secrets, time_str):
     return ok
 
 
+def _sampler_vehicle_alert(app, cfg, state, group, image, s, *, now, secrets, time_str):
+    """Opt-in vehicle photo from a sampler frame that shows a vehicle and no person.
+
+    A side alert: its own cooldown and audit type (:func:`alert_gate`), it never arms the
+    person cooldown nor closes the group, so the group keeps looking for the person.
+    """
+    can_alert, on_alert = alert_gate(state, cfg.name, app.alerts.cooldown, now)
+    if not can_alert("vehicle"):
+        log.info("skip vehicle: cooldown active [sampler]")
+        monitor.audit_event(cfg, group["event"], "vehicle", "sampler", "cooldown")
+        return
+    caption = notify.build_caption(monitor.TYPE_EMOJI["vehicle"], time_str(group["event"]),
+                                   lens=snapshot.frame_lens(image))
+    ok = send_alert_photo(cfg, secrets, image, caption, score=None,
+                          incident=incident.incident_id(cfg.name, group["event"]),
+                          send_path="sampler", etype="vehicle")
+    monitor.audit_event(cfg, group["event"], "vehicle", "sampler", "send", score=s.vehicle,
+                        threshold=cfg.scorer.vehicle_threshold, telegram=ok)
+    if ok:
+        log.info("alert vehicle sent (score=%.2f) [sampler]", s.vehicle)
+        on_alert("vehicle")
+
+
 def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                     time_str=None, night=True, loiter_zone=None):
     """Advance sampler groups: follow-up grabs across each open event window.
@@ -3481,8 +3512,10 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
 
     With ``sampler.loiter_frames`` every scored frame also feeds the group's loitering
     streak (:func:`sampler.note_loiter`) and a sent group keeps sampling until the one
-    notice went out. ``loiter_zone(cfg, image) -> bool`` is the hook alert zones attach
-    to: a person it rejects does not count; None accepts the whole frame.
+    notice went out. ``scorer.alert_zones`` already apply to the score (the answer holds only
+    the people standing in a zone), so a person outside them does not count. The optional
+    ``loiter_zone(cfg, image) -> bool`` is an extra per-frame veto: False discards the
+    person; None accepts the whole frame.
     """
     time_str = time_str or _default_time_str
     for cfg in app.cameras:
@@ -3530,6 +3563,9 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                     if not _loiter_notice(cfg, group, image, s, minutes, secrets=secrets,
                                           time_str=time_str):
                         log.warning("loiter notice for %s not delivered", cfg.name)
+            if monitor.vehicle_verdict(cfg, s):
+                _sampler_vehicle_alert(app, cfg, state, group, image, s, now=now,
+                                       secrets=secrets, time_str=time_str)
             if group["sent"]:
                 continue                  # only here for the loitering watch: no new alert
             verdict = "send"

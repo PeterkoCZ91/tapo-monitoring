@@ -7491,6 +7491,56 @@ def _run_loiter_ticks(monkeypatch, scores, *, sent=True, zone=None, **app_kw):
     return captions, state
 
 
+def _run_zoned_loiter(monkeypatch, tmp_path, boxes, zones):
+    """Loiter ticks through the real score path: scorer HTTP stubbed, zones in the config."""
+    import io
+    import json as _json
+
+    from tapo_monitor import monitor as mon
+    captions = []
+    monkeypatch.setattr(mon.notify, "send_photo",
+                        lambda token, chat, path, caption, *a, **k: captions.append(caption) or True)
+    monkeypatch.setattr(mon.enrich, "groq_describe", lambda *a, **k: "x")
+    body = _json.dumps({"person": 0.9, "animal": 0.0, "box": boxes[0], "w": 1000, "h": 500,
+                        "person_scores": [0.9] * len(boxes), "person_boxes": boxes}).encode()
+    monkeypatch.setattr(daemon.scorer.urllib.request, "urlopen",
+                        lambda req, timeout=10: io.BytesIO(body))
+    monkeypatch.setattr(daemon, "_safe_unlink", lambda p: None)
+    frame = tmp_path / "x.jpg"
+    frame.write_bytes(b"jpg")
+    app = cfg.load_config_from_dict({"groq": {}, "cameras": [{
+        "name": "a", "host": "203.0.113.10",
+        "sampler": {"enabled": True, "interval": 30, "max_frames": 6, "group_gap": 90,
+                    "loiter_frames": 3},
+        "scorer": {"url": "http://127.0.0.1:1/score", "threshold": 0.3, "alert_zones": zones}}]})
+    state = daemon.MonitorState()
+    secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": "k", "face_names": {}}
+    state.groups["a"] = {
+        "camera": "a", "etype": "person", "event": {"start_time": 1000},
+        "started": 1000, "last_event_at": 1000, "frames": 0, "next_due": 1030,
+        "sent": True, "delivered": True, "pir_backed": True,
+    }
+    for i in range(6):
+        state.groups["a"]["last_event_at"] = 1000 + 30 * (i + 1)
+        daemon.process_sampler(app, {"a": object()}, state, now=1030 + 30 * i,
+                               secrets=secrets,
+                               snapshot_for=lambda c: (lambda cam_, ev: str(frame)),
+                               time_str=lambda e: "t")
+    return captions
+
+
+RIGHT_HALF = [[[0.5, 0.0], [1.0, 0.0], [1.0, 1.0], [0.5, 1.0]]]
+
+
+def test_loiter_counts_only_a_person_standing_in_an_alert_zone(monkeypatch, tmp_path):
+    inside = _run_zoned_loiter(monkeypatch, tmp_path, [[700, 100, 800, 300]], RIGHT_HALF)
+    assert len(inside) == 1 and "lingering" in inside[0]
+    outside = _run_zoned_loiter(monkeypatch, tmp_path, [[100, 100, 200, 300]], RIGHT_HALF)
+    assert outside == []                      # feet left of the zone: no streak, no notice
+    no_zone = _run_zoned_loiter(monkeypatch, tmp_path, [[100, 100, 200, 300]], [])
+    assert len(no_zone) == 1                  # without zones the same frame counts as before
+
+
 def test_loiter_sends_one_notice_for_a_lingering_person_in_a_sent_group(monkeypatch):
     captions, state = _run_loiter_ticks(monkeypatch, [0.9] * 6)
     assert len(captions) == 1                    # six person frames, one notice
@@ -7522,3 +7572,116 @@ def test_loiter_requires_a_scorer():
 def test_loiter_frames_cannot_exceed_max_frames():
     with pytest.raises(cfg.ConfigError, match="loiter_frames"):
         _loiter_app(frames=7)
+
+
+# ── vehicle alerts (scorer.alert_vehicles) ────────────────────────────────────
+
+def _vehicle_app(enabled=True, zones=None):
+    scorer_cfg = {"url": "http://127.0.0.1:1/score", "threshold": 0.4,
+                  "alert_vehicles": enabled, "vehicle_threshold": 0.5}
+    if zones:
+        scorer_cfg["alert_zones"] = zones
+    return cfg.load_config_from_dict(
+        {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10",
+                                    "sampler": {"enabled": True, "interval": 30,
+                                                "max_frames": 6, "group_gap": 90},
+                                    "scorer": scorer_cfg}]})
+
+
+def _run_vehicle_sampler(app, state, sent, monkeypatch, result, now=1035):
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap, **k: sent.append(cap) or True)
+    monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "")
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, img, timeout=10, tiles=1, **kw: result)
+    monkeypatch.setattr(daemon, "_safe_unlink", lambda p: None)
+    secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
+    daemon.process_sampler(app, {"a": object()}, state, now=now, secrets=secrets,
+                           snapshot_for=lambda c: (lambda cam, ev: "/tmp/f.jpg"),
+                           time_str=lambda ev: "T")
+
+
+def test_alert_gate_vehicle_has_its_own_cooldown_and_never_arms_the_person_one():
+    state = daemon.MonitorState()
+    can, on = daemon.alert_gate(state, "a", cooldown=120, now=1000)
+    assert can("vehicle") is True
+    on("vehicle")
+    can2, _ = daemon.alert_gate(state, "a", cooldown=120, now=1050)
+    assert can2("vehicle") is False           # a second car photo waits out the cooldown
+    assert can2("person") is True             # ... but the car never eats a person alert
+    assert ("a", "confirmed") not in state.last_alert
+
+
+def test_alert_gate_vehicle_waits_while_a_person_alert_is_in_cooldown():
+    state = daemon.MonitorState()
+    can, on = daemon.alert_gate(state, "a", cooldown=120, now=1000)
+    on("person")
+    can2, _ = daemon.alert_gate(state, "a", cooldown=120, now=1050)
+    assert can2("vehicle") is False           # the person alert of this passage covers it
+
+
+def test_sampler_alerts_a_vehicle_when_opted_in_and_nobody_is_there(monkeypatch):
+    sent = []
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    _run_vehicle_sampler(_vehicle_app(), state, sent, monkeypatch,
+                         {"person": 0.0, "animal": 0.0, "vehicle": 0.8})
+    assert len(sent) == 1 and "🚗" in sent[0] and "👁" not in sent[0]
+    assert state.last_alert[("a", "vehicle")] == 1035
+    assert ("a", "confirmed") not in state.last_alert and ("a", "motion") not in state.last_alert
+    assert state.groups["a"]["sent"] is False     # the group still waits for a person
+
+
+def test_sampler_vehicle_is_off_unless_opted_in(monkeypatch):
+    sent = []
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    _run_vehicle_sampler(_vehicle_app(enabled=False), state, sent, monkeypatch,
+                         {"person": 0.0, "animal": 0.0, "vehicle": 0.9})
+    assert sent == []
+
+
+def test_sampler_person_wins_over_a_vehicle_in_the_same_frame(monkeypatch):
+    sent = []
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    _run_vehicle_sampler(_vehicle_app(), state, sent, monkeypatch,
+                         {"person": 0.9, "animal": 0.0, "vehicle": 0.9})
+    assert len(sent) == 1 and "🚗" not in sent[0]
+    assert ("a", "vehicle") not in state.last_alert
+
+
+def test_sampler_vehicle_respects_its_cooldown(monkeypatch):
+    sent = []
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    result = {"person": 0.0, "animal": 0.0, "vehicle": 0.8}
+    _run_vehicle_sampler(_vehicle_app(), state, sent, monkeypatch, result)
+    state.groups["a"]["next_due"] = 1040
+    _run_vehicle_sampler(_vehicle_app(), state, sent, monkeypatch, result, now=1070)
+    assert len(sent) == 1
+
+
+def test_sampler_vehicle_outside_the_alert_zone_is_ignored(monkeypatch, tmp_path):
+    import io
+    zones = [[[0.5, 0.0], [1.0, 0.0], [1.0, 1.0], [0.5, 1.0]]]
+    body = json.dumps({"person": 0.0, "animal": 0.0, "vehicle": 0.9, "w": 1000, "h": 500,
+                       "person_scores": [], "person_boxes": [], "vehicle_scores": [0.9],
+                       "vehicle_boxes": [[100, 100, 300, 300]]}).encode()
+    sent = []
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap, **k: sent.append(cap) or True)
+    monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "")
+    monkeypatch.setattr(daemon.scorer.urllib.request, "urlopen",
+                        lambda req, timeout=10: io.BytesIO(body))
+    monkeypatch.setattr(daemon, "_safe_unlink", lambda p: None)
+    frame = tmp_path / "f.jpg"
+    frame.write_bytes(b"jpg")
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
+    daemon.process_sampler(_vehicle_app(zones=zones), {"a": object()}, state, now=1035,
+                           secrets=secrets,
+                           snapshot_for=lambda c: (lambda cam, ev: str(frame)),
+                           time_str=lambda ev: "T")
+    assert sent == []

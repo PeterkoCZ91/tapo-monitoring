@@ -656,8 +656,9 @@ keeps sampling until it has. It needs a scorer and `K <= max_frames`. Only follo
 frames count, so a person gone from the picture breaks the streak: a PTZ move or
 pan-limit recall that turns the lens away interrupts the count, which
 `loiter_miss_tolerance: N` bridges for up to `N` frames (default 0, strictly consecutive).
-Alert zones are not part of this yet; `process_sampler(loiter_zone=...)` is the hook a
-zone check attaches to.
+With `scorer.alert_zones` set, only a person whose feet stand in a zone counts toward the
+streak: the scorer answer is already filtered by the zones before the sampler reads it, so
+a person outside them neither starts nor extends a streak. Without zones nothing changes.
 
 `keep_sampling_on_defer` (off by default) changes what a camera-confirmed person whose
 live frame scores below the threshold does to the rest of its burst. The frame is still
@@ -769,6 +770,28 @@ fixed-view cameras, or on a PTZ parked on a single preset.
 scorer:
   alert_zones:
     - [[0.40, 1.00], [1.00, 1.00], [1.00, 0.55], [0.62, 0.50]]   # driveway, lower right
+```
+
+`alert_vehicles` (default `false`) and `vehicle_threshold` (default `0.5`, `0 < x <= 1`)
+make the camera also alert on a vehicle (car, motorcycle, bus or truck) that the scoring
+service finds at or above `vehicle_threshold` in a frame it scored. It needs a service that
+reports vehicles; an older one sends none and nothing happens. The alert is a side alert:
+a frame that reaches the person threshold is only ever a person alert, so a vehicle never
+replaces or duplicates one; the caption uses a car emoji and the audit line carries
+`etype=vehicle` (`action=send`, or `action=cooldown` while it is gated, with the vehicle
+score in `score`). It has a cooldown of its own (`alerts.cooldown`) that a person alert
+neither resets nor is reset by, and it is also held back while a person alert of the same
+passage is cooling down. It does not close a sampler group, mark an event delivered or start
+SD follow-ups, so a camera-confirmed person is still handled as before. It covers the live
+poll and the sampler frames; SD-card follow-ups and the shadow scan do not raise vehicle
+alerts. With `alert_zones` set, a vehicle counts only when the bottom centre of its box lies
+in a zone (the same rule as the feet of a person); a service without `vehicle_boxes`
+cannot place it, so nothing is sent.
+
+```yaml
+scorer:
+  alert_vehicles: true
+  vehicle_threshold: 0.6
 ```
 
 `night_threshold` replaces `threshold` while the camera's night is on — the shared astral
