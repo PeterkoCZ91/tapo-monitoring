@@ -5,6 +5,11 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `tapo-monitor label --scorer-url URL` (off by default): draw the person boxes the scoring
+  service finds on the frame being labeled (red from 0.45, yellow from 0.10, with scores).
+  A scorer failure leaves the page working without boxes.
+- `tapo-monitor label --lang cs|en` (default `en`): Czech or English labeling page and
+  `/stats`; the texts are kept in one dictionary per language.
 - `hub_clip_worker` (off by default): download hub clips and cut their frames on a
   background thread per hub instead of the main loop. Queued clips are saved with the
   runtime state before the hub cursor moves past them, survive a restart, and fall back to

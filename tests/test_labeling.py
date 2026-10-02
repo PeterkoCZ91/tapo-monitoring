@@ -909,3 +909,156 @@ def test_stats_page_shows_incidents(tmp_path):
     root = _incident_dataset(tmp_path / "dataset")
     body = labeling.stats_page(labeling.compute_stats(root))
     assert "<h2>Incidents</h2>" in body and "person alerted" in body
+
+
+# ── scorer box overlay ───────────────────────────────────────────────────────
+
+def _boxes_url(url, path):
+    import urllib.parse
+    return url + "/api/boxes?path=" + urllib.parse.quote(path, safe="")
+
+
+@pytest.fixture
+def served_scorer(dataset, monkeypatch):
+    calls = []
+
+    def fake_score(url, path, **kwargs):
+        calls.append((url, path))
+        return {"person": 0.8, "person_scores": [0.8, 0.2],
+                "person_boxes": [[10, 20, 110, 220], [300, 40, 340, 120]],
+                "w": 640, "h": 360}
+
+    monkeypatch.setattr(scorer, "score_image", fake_score)
+    session = labeling.LabelSession(dataset, seed=1, scorer_url="http://scorer.invalid/score")
+    srv, url = _serve(session)
+    yield session, url, calls
+    srv.shutdown()
+    srv.server_close()
+
+
+def test_boxes_endpoint_returns_scorer_boxes_and_caches(served_scorer):
+    session, url, calls = served_scorer
+    path = session.state()["frame"]["path"]
+    _, _, body = _get(_boxes_url(url, path))
+    data = json.loads(body)
+    assert data["available"] is True
+    assert data["person_scores"] == [0.8, 0.2]
+    assert data["person_boxes"][0] == [10, 20, 110, 220]
+    assert (data["w"], data["h"]) == (640, 360)
+    _get(_boxes_url(url, path))
+    assert len(calls) == 1
+    assert calls[0][0] == "http://scorer.invalid/score"
+    assert calls[0][1].endswith(os.path.basename(path))
+
+
+def test_boxes_endpoint_rejects_paths_outside_the_dataset(served_scorer):
+    _, url, calls = served_scorer
+    for bad in ("../../etc/passwd", "/etc/passwd", "host-a/sent-log/../../../x.jpg", ""):
+        data = json.loads(_get(_boxes_url(url, bad))[2])
+        assert data["available"] is False and data["person_boxes"] == []
+    assert calls == []
+
+
+def test_boxes_off_without_scorer_url(served):
+    session, url = served
+    path = session.state()["frame"]["path"]
+    data = json.loads(_get(_boxes_url(url, path))[2])
+    assert data["available"] is False and data["person_boxes"] == []
+
+
+@pytest.mark.parametrize("answer", [None, "junk", {"person_scores": [0.5]},
+                                    {"person_scores": [0.5], "person_boxes": [[1, 2, 3, 4]]}])
+def test_scorer_failure_does_not_break_labeling(dataset, monkeypatch, answer):
+    monkeypatch.setattr(scorer, "score_image", lambda *a, **k: answer)
+    session = labeling.LabelSession(dataset, seed=1, scorer_url="http://scorer.invalid/s")
+    srv, url = _serve(session)
+    try:
+        path = session.state()["frame"]["path"]
+        data = json.loads(_get(_boxes_url(url, path))[2])
+        assert data["available"] is False
+        state = _post(url + "/api/label", {"path": path, "label": "person"})
+        assert state["remaining"] == 5
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_scorer_exception_is_swallowed_and_not_cached(dataset, monkeypatch):
+    results = [RuntimeError("boom"),
+               {"person_scores": [0.6], "person_boxes": [[1, 2, 3, 4]], "w": 10, "h": 10}]
+
+    def fake(*a, **k):
+        r = results.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    monkeypatch.setattr(scorer, "score_image", fake)
+    session = labeling.LabelSession(dataset, seed=1, scorer_url="http://scorer.invalid/s")
+    path = session.state()["frame"]["path"]
+    assert session.person_boxes(path) is None
+    assert session.person_boxes(path)["scores"] == [0.6]
+
+
+def test_label_cli_passes_scorer_url(dataset, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(labeling, "serve",
+                        lambda session, port, bind: seen.update(url=session.scorer_url) or 0)
+    assert cli.main(["label", dataset]) == 0 and seen["url"] is None
+    assert cli.main(["label", dataset, "--scorer-url", "http://scorer.invalid/s"]) == 0
+    assert seen["url"] == "http://scorer.invalid/s"
+
+
+def test_page_has_overlay_and_keeps_keys(served):
+    _, url = served
+    page = _get(url + "/")[2].decode()
+    assert 'id="boxes"' in page and "/api/boxes" in page
+    assert 'e.key === " "' in page and "map[e.key]" in page
+
+
+# ── language ─────────────────────────────────────────────────────────────────
+
+def test_every_language_has_the_same_keys_and_placeholders():
+    import string
+
+    from tapo_monitor.labeling_i18n import STRINGS
+
+    base = STRINGS["en"]
+    for code, table in STRINGS.items():
+        assert set(table) == set(base), code
+
+        def fields(text):
+            return {f for _, f, _, _ in string.Formatter().parse(text) if f}
+
+        for key in base:
+            assert fields(table[key]) == fields(base[key]), (code, key)
+
+
+def test_lang_cs_serves_czech_page_and_stats(dataset):
+    session = labeling.LabelSession(dataset, seed=1, lang="cs")
+    srv, url = _serve(session)
+    try:
+        page = _get(url + "/")[2].decode()
+        assert "Štítkování snímků" in page and "přeskočit" in page
+        assert '<kbd>1</kbd>' in page and 'e.key === " "' in page
+        assert "@@" not in page
+        stats = _get(url + "/stats")[2].decode()
+        assert "Statistiky štítků" in stats and "skupina" in stats
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_default_language_is_english_and_unknown_falls_back(dataset):
+    assert "Frame labeling" in labeling.page()
+    assert "@@" not in labeling.page()
+    assert "Label stats" in labeling.stats_page(labeling.compute_stats(dataset))
+    assert labeling.LabelSession(dataset, lang="xx").lang == "en"
+
+
+def test_label_cli_lang_option(dataset, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(labeling, "serve",
+                        lambda session, port, bind: seen.update(lang=session.lang) or 0)
+    assert cli.main(["label", dataset]) == 0 and seen["lang"] == "en"
+    assert cli.main(["label", dataset, "--lang", "cs"]) == 0 and seen["lang"] == "cs"

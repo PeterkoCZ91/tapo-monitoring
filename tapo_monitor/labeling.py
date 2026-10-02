@@ -38,7 +38,8 @@ import urllib.parse
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import incident, sentlog
+from . import incident, scorer, sentlog
+from .labeling_i18n import DEFAULT_LANG, STRINGS, tr
 
 log = logging.getLogger(__name__)
 
@@ -249,8 +250,13 @@ class LabelSession:
     Thread-safe: the HTTP server is threaded and every mutation holds one lock.
     """
 
-    def __init__(self, dataset_dir, *, seed=None, low_sample=None, night=None):
+    def __init__(self, dataset_dir, *, seed=None, low_sample=None, night=None,
+                 scorer_url=None, lang=DEFAULT_LANG):
         self.dataset_dir = dataset_dir
+        self.lang = lang if lang in STRINGS else DEFAULT_LANG
+        self.scorer_url = scorer_url   # scoring service for the person-box overlay, or None
+        self._boxes: dict[str, dict | None] = {}
+        self._boxes_lock = threading.Lock()
         self.night = night   # (camera, ts) -> bool for the /stats day/night split, or None
         self.root_real = os.path.realpath(dataset_dir)
         self.frames = {f.path: f for f in load_frames(dataset_dir)}
@@ -339,6 +345,39 @@ class LabelSession:
                 view["teacher"] = self._teacher.get(frame.sha256)
             return {"frame": view, "remaining": len(self._queue),
                     "labeled": len(self._labeled), "can_undo": bool(self._history)}
+
+    def person_boxes(self, rel):
+        """Person boxes the scorer sees in an indexed frame, cached per file.
+
+        ``{"boxes", "scores", "w", "h"}`` (boxes in pixels of a ``w``x``h`` frame), or None
+        when the overlay is off, the frame is unknown or the scorer fails. Never raises:
+        labeling must work without the boxes. Failures are not cached.
+        """
+        if not self.scorer_url:
+            return None
+        full = self.image_path(rel)
+        if full is None:
+            return None
+        with self._boxes_lock:
+            if rel in self._boxes:
+                return self._boxes[rel]
+        try:
+            result = scorer.score_image(self.scorer_url, full)
+            boxes = result.get("person_boxes") if isinstance(result, dict) else None
+            scores = result.get("person_scores") if isinstance(result, dict) else None
+            w, h = result.get("w"), result.get("h")
+            if (not isinstance(boxes, list) or not isinstance(scores, list)
+                    or len(boxes) != len(scores) or not _number(w) or not _number(h)
+                    or w <= 0 or h <= 0):
+                return None
+            out = {"boxes": [[float(v) for v in box] for box in boxes],
+                   "scores": [float(v) for v in scores], "w": w, "h": h}
+        except Exception as exc:  # noqa: BLE001 - a bad scorer answer must not break labeling
+            log.warning("scorer overlay failed for %s: %s", rel, exc)
+            return None
+        with self._boxes_lock:
+            self._boxes[rel] = out
+        return out
 
     def image_path(self, rel):
         """Absolute path of an indexed frame inside the dataset, or None."""
@@ -828,12 +867,18 @@ def _pct(value):
     return "n/a" if value is None else f"{value * 100:.1f}%"
 
 
-def _stats_rows(stats):
+def _part(name, lang):
+    """Display name of a day/night slice (``unknown`` included)."""
+    return tr(lang, "d_" + name)
+
+
+def _stats_rows(stats, lang=DEFAULT_LANG):
     """``(name, labeled, person, no_person, unsure, false alarms, misses)`` rows."""
     rows = []
-    groups = [("all", stats)]
-    groups += [(f"band {name}", stats["bands"][name]) for name in BANDS]
-    groups += [(f"camera {name}", block) for name, block in stats["cameras"].items()]
+    groups = [(tr(lang, "r_all"), stats)]
+    groups += [(tr(lang, "r_band", name=name), stats["bands"][name]) for name in BANDS]
+    groups += [(tr(lang, "r_camera", name=name), block)
+               for name, block in stats["cameras"].items()]
     for name, block in groups:
         c, fa, miss = block["counts"], block["false_alarms"], block["misses"]
         rows.append((name, str(c["total"]), str(c["person"]), str(c["no_person"]),
@@ -843,71 +888,86 @@ def _stats_rows(stats):
     return rows
 
 
-STATS_HEADERS = ("group", "labeled", "person", "no_person", "unsure",
-                 "false alarms (sent)", "misses (review)")
-DAY_NIGHT_HEADERS = ("slice", "n", "person", "no_person", "best threshold", "errors",
-                     "false alarms", "misses", "note")
-TOO_FEW = "too few labels"
+def _headers(lang, *keys):
+    return tuple(tr(lang, "h_" + key) for key in keys)
 
 
-def _threshold_line(best):
+def stats_headers(lang=DEFAULT_LANG):
+    return _headers(lang, "group", "labeled", "person", "no_person", "unsure",
+                    "false_alarms_sent", "misses_review")
+
+
+def day_night_headers(lang=DEFAULT_LANG):
+    return _headers(lang, "slice", "n", "person", "no_person", "best_threshold", "errors",
+                    "false_alarms", "misses", "note")
+
+
+def incident_headers(lang=DEFAULT_LANG):
+    return _headers(lang, "group", "incidents_col", "labeled", "person", "person_alerted",
+                    "missed", "false_alarms", "delay_median", "delay_p90")
+
+
+def first_alert_headers(lang=DEFAULT_LANG):
+    return _headers(lang, "group", "path", "first_alerts", "share", "delay_n",
+                    "delay_median", "delay_p90")
+
+
+def _threshold_line(best, lang=DEFAULT_LANG):
     if best["threshold"] is None:
-        return "best threshold: n/a (no decided frames with a score)"
-    return (f"best threshold: person >= {best['threshold']:.2f} -> "
-            f"{best['errors']} errors of {best['n']} ({best['false_alarms']} false alarms, "
-            f"{best['misses']} misses, accuracy {_pct(best['accuracy'])})")
+        return tr(lang, "threshold_na")
+    return tr(lang, "threshold_line", threshold=best["threshold"], errors=best["errors"],
+              n=best["n"], false_alarms=best["false_alarms"], misses=best["misses"],
+              accuracy=_pct(best["accuracy"]))
 
 
-def _verdict_lines(stats):
+def _verdict_lines(stats, lang=DEFAULT_LANG):
     """Misses by review verdict; nothing while every labeled review frame was a hold."""
     verdicts = stats.get("verdicts") or {}
     if not set(verdicts) - {"hold", "unknown"}:
         return []
-    out = ["misses by review verdict (person in a held frame = hold error, in a dropped "
-           "frame = real miss):"]
+    out = [tr(lang, "verdict_head")]
     for name, block in verdicts.items():
         text = f"  {name}: {block['person']}/{block['decided']} ({_pct(block['rate'])})"
         if block["sampled"]:
-            text += (f", {block['sampled']} of them sampled -> estimated "
-                     f"{block['estimated_person']:.0f} person of "
-                     f"{block['estimated_decided']:.0f} frames (count / sample_rate; an "
-                     "estimate)")
+            text += tr(lang, "verdict_sampled", sampled=block["sampled"],
+                       est_person=block["estimated_person"],
+                       est_decided=block["estimated_decided"])
         out.append(text)
     return out
 
 
-def _day_night_row(name, best):
+def _day_night_row(name, best, lang=DEFAULT_LANG):
     def cell(value):
         return "-" if value is None else str(value)
 
     return (name, str(best["n"]), str(best["person"]), str(best["no_person"]),
             "n/a" if best["threshold"] is None else f"{best['threshold']:.2f}",
             cell(best["errors"]), cell(best["false_alarms"]), cell(best["misses"]),
-            "" if best["supported"] else TOO_FEW)
+            "" if best["supported"] else tr(lang, "too_few"))
 
 
-def _day_night_rows(stats):
+def _day_night_rows(stats, lang=DEFAULT_LANG):
     parts = stats["day_night"]
-    rows = [_day_night_row("all", stats["threshold"])]
-    rows += [_day_night_row(name, parts[name]["threshold"]) for name in DAY_NIGHT
-             if name != "unknown" or parts[name]["counts"]["total"]]
+    rows = [_day_night_row(tr(lang, "r_all"), stats["threshold"], lang)]
+    rows += [_day_night_row(_part(name, lang), parts[name]["threshold"], lang)
+             for name in DAY_NIGHT if name != "unknown" or parts[name]["counts"]["total"]]
     for cam, by_part in parts["cameras"].items():
-        rows += [_day_night_row(f"camera {cam} {name}", by_part[name]["threshold"])
+        rows += [_day_night_row(tr(lang, "r_camera_part", cam=cam, name=_part(name, lang)),
+                                by_part[name]["threshold"], lang)
                  for name in ("day", "night") if by_part[name]["counts"]["total"]]
     return rows
 
 
-def _day_night_summary(stats):
+def _day_night_summary(stats, lang=DEFAULT_LANG):
     parts = stats["day_night"]
-    counts = ", ".join(f"{parts[name]['counts']['total']} {name}" for name in DAY_NIGHT)
-    return (f"day/night of the labeled frames ({counts}; night as the daemon judged it, "
-            "camera schedules applied)")
+    counts = ", ".join(f"{parts[name]['counts']['total']} {_part(name, lang)}"
+                       for name in DAY_NIGHT)
+    return tr(lang, "day_night_summary", counts=counts)
 
 
-def _day_night_note():
-    return (f"{TOO_FEW} = fewer than {MIN_SUPPORT_DECIDED} decided frames with a score or "
-            f"fewer than {MIN_SUPPORT_PER_CLASS} of either class: noise, not a threshold "
-            "to ship")
+def _day_night_note(lang=DEFAULT_LANG):
+    return tr(lang, "day_night_note", too_few=tr(lang, "too_few"),
+              decided=MIN_SUPPORT_DECIDED, per_class=MIN_SUPPORT_PER_CLASS)
 
 
 def _table(headers, rows):
@@ -917,10 +977,6 @@ def _table(headers, rows):
         return "  ".join(v.ljust(widths[i]) for i, v in enumerate(values)).rstrip()
 
     return [line(headers), line(tuple("-" * w for w in widths))] + [line(r) for r in rows]
-
-
-INCIDENT_HEADERS = ("group", "incidents", "labeled", "person", "person alerted",
-                    "missed", "false alarms", "delay median", "delay p90")
 
 
 def _seconds(value):
@@ -936,58 +992,50 @@ def _incident_row(name, block):
             _seconds(delay["median"]), _seconds(delay["p90"]))
 
 
-def _incident_rows(section):
-    rows = [_incident_row("all", section["all"])]
-    rows += [_incident_row(f"camera {cam}", block)
+def _incident_rows(section, lang=DEFAULT_LANG):
+    rows = [_incident_row(tr(lang, "r_all"), section["all"])]
+    rows += [_incident_row(tr(lang, "r_camera", name=cam), block)
              for cam, block in section["cameras"].items()]
     parts = section.get("day_night") or {}
-    rows += [_incident_row(name, parts[name]) for name in DAY_NIGHT
+    rows += [_incident_row(_part(name, lang), parts[name]) for name in DAY_NIGHT
              if name in parts and (name != "unknown" or parts[name]["total"])]
     return rows
 
 
-def _incident_summary(section):
+def _incident_summary(section, lang=DEFAULT_LANG):
     block = section["all"]
-    return (f"incidents: {block['total']} from {section['frames']} frames (one incident "
-            f"per incident ID, else frames of a camera less than {section['gap_seconds']:.0f}"
-            f" s apart), {block['labeled']} with a labeled frame")
+    return tr(lang, "incident_summary", total=block["total"], frames=section["frames"],
+              gap=section["gap_seconds"], labeled=block["labeled"])
 
 
-def _incident_notes(section):
+def _incident_notes(section, lang=DEFAULT_LANG):
     """Explanations and the verdicts of missed incidents, one line each."""
     block = section["all"]
     delay = block["delay"]
-    out = ["person = any frame labeled person; missed = person incident without a "
-           "delivered alert; false alarms = alerted incidents whose labeled frames are all "
-           "no_person, of alerted incidents with a decided label",
-           f"delay = event start to the first delivered alert, over {delay['n']} alerted "
-           f"person incidents ({delay['from_event_start']} timed from the camera's event "
-           "start or its time in the caption, the rest from their first archived frame)"]
+    out = [tr(lang, "incident_note_1"),
+           tr(lang, "incident_note_delay", n=delay["n"], timed=delay["from_event_start"])]
     verdicts = block["missed_verdicts"]
     if verdicts:
         parts = []
         for name, entry in verdicts.items():
             if name == "none":
-                parts.append(f"no review frame {entry['incidents']}")
+                parts.append(tr(lang, "missed_none", incidents=entry["incidents"]))
             else:
-                parts.append(f"{name} {entry['incidents']} (person labeled in "
-                             f"{entry['person_incidents']})")
-        out.append("missed person incidents by the verdicts of their review frames: "
-                   + ", ".join(parts))
+                parts.append(tr(lang, "missed_verdict", name=name,
+                                incidents=entry["incidents"],
+                                person=entry["person_incidents"]))
+        out.append(tr(lang, "missed_head") + ", ".join(parts))
     return out
 
 
-FIRST_ALERT_HEADERS = ("group", "path", "first alerts", "share", "delay n",
-                       "delay median", "delay p90")
-
-
-def _first_alert_rows(section):
+def _first_alert_rows(section, lang=DEFAULT_LANG):
     """``(group, path, incidents, share, n, median, p90)`` rows; groups without an alert
     are left out."""
-    groups = [("all", section["all"])]
-    groups += [(f"camera {cam}", block) for cam, block in section["cameras"].items()]
+    groups = [(tr(lang, "r_all"), section["all"])]
+    groups += [(tr(lang, "r_camera", name=cam), block)
+               for cam, block in section["cameras"].items()]
     parts = section.get("day_night") or {}
-    groups += [(name, parts[name]) for name in DAY_NIGHT if name in parts]
+    groups += [(_part(name, lang), parts[name]) for name in DAY_NIGHT if name in parts]
     rows = []
     for name, block in groups:
         for path, entry in block.get("first_alert", {}).items():
@@ -997,51 +1045,46 @@ def _first_alert_rows(section):
     return rows
 
 
-def _first_alert_summary():
-    return ("first alert by delivery path (every alerted incident, labeled or not; delay "
-            "= event start to the first delivered alert, sent by that path; unknown = a "
-            "sent-log record from before the path was recorded)")
+def _first_alert_summary(lang=DEFAULT_LANG):
+    return tr(lang, "first_alert_summary")
 
 
-def format_incidents(section):
-    out = [_incident_summary(section) + ":"]
+def format_incidents(section, lang=DEFAULT_LANG):
+    out = [_incident_summary(section, lang) + ":"]
     if not section["all"]["labeled"]:
-        out.append("no incident has a labeled frame yet: label frames to measure missed "
-                   "people per incident")
+        out.append(tr(lang, "no_incident_text"))
     else:
-        out += _table(INCIDENT_HEADERS, _incident_rows(section))
-        out += _incident_notes(section)
-    rows = _first_alert_rows(section)
+        out += _table(incident_headers(lang), _incident_rows(section, lang))
+        out += _incident_notes(section, lang)
+    rows = _first_alert_rows(section, lang)
     if rows:
-        out += ["", _first_alert_summary() + ":"]
-        out += _table(FIRST_ALERT_HEADERS, rows)
+        out += ["", _first_alert_summary(lang) + ":"]
+        out += _table(first_alert_headers(lang), rows)
     return out
 
 
-def format_stats(stats):
-    out = _table(STATS_HEADERS, _stats_rows(stats))
+def format_stats(stats, lang=DEFAULT_LANG):
+    out = _table(stats_headers(lang), _stats_rows(stats, lang))
     by = stats.get("by") or {}
-    out += ["", f"labels: {by.get('human', 0)} by a person, {by.get('auto', 0)} automatic "
-                "(both models agreed)",
-            _threshold_line(stats["threshold"]),
-            "false alarms = sent frames labeled no_person; misses = review (held) frames "
-            "labeled person; unsure excluded"]
-    out += _verdict_lines(stats)
+    out += ["", tr(lang, "labels_by", human=by.get("human", 0), auto=by.get("auto", 0)),
+            _threshold_line(stats["threshold"], lang),
+            tr(lang, "stats_footnote_text")]
+    out += _verdict_lines(stats, lang)
     if "day_night" in stats:
-        out += ["", _day_night_summary(stats) + ":"]
-        out += _table(DAY_NIGHT_HEADERS, _day_night_rows(stats))
-        out.append(_day_night_note())
+        out += ["", _day_night_summary(stats, lang) + ":"]
+        out += _table(day_night_headers(lang), _day_night_rows(stats, lang))
+        out.append(_day_night_note(lang))
     if "incidents" in stats:
-        out += [""] + format_incidents(stats["incidents"])
+        out += [""] + format_incidents(stats["incidents"], lang)
     return "\n".join(out)
 
 
 # ── HTTP ─────────────────────────────────────────────────────────────────────
 
-PAGE = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
+PAGE_TEMPLATE = """<!doctype html>
+<html lang="@@lang@@"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Frame labeling</title>
+<title>@@page_title@@</title>
 <style>
 :root{--bg:#f6f6f4;--fg:#1d1d1b;--muted:#6b6b66;--card:#fff;--line:#ddd}
 @media (prefers-color-scheme:dark){:root{--bg:#161615;--fg:#ecece8;--muted:#9a9a94;
@@ -1049,6 +1092,8 @@ PAGE = """<!doctype html>
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,sans-serif}
 main{max-width:1100px;margin:0 auto;padding:8px 16px 16px}
+#stage{position:relative}
+#boxes{position:absolute;pointer-events:none;display:none}
 #img{display:block;width:100%;max-height:72vh;object-fit:contain;background:#000;
 border-radius:6px}
 #meta{display:flex;flex-wrap:wrap;gap:4px 16px;margin:8px 0;color:var(--muted)}
@@ -1064,43 +1109,90 @@ max-width:1100px;margin:0 auto}
 a{color:inherit}
 #done{display:none;padding:48px 0;text-align:center}
 </style></head><body>
-<header><span id="progress">loading...</span><a href="/stats">stats</a></header>
+<header><span id="progress">@@loading@@</span><a href="/stats">@@stats_link@@</a></header>
 <main>
 <div id="work">
-<img id="img" alt="frame">
-<div id="meta"><span>camera <b id="camera"></b></span><span id="time"></span>
-<span>source <b id="source"></b></span><span>person <b id="score"></b> <span id="band">
-</span></span><span>teacher <b id="teacher"></b></span></div>
+<div id="stage"><img id="img" alt="@@img_alt@@">
+<svg id="boxes" xmlns="http://www.w3.org/2000/svg"></svg></div>
+<div id="meta"><span>@@camera@@ <b id="camera"></b></span><span id="time"></span>
+<span>@@source@@ <b id="source"></b></span><span>@@person@@ <b id="score"></b> <span id="band">
+</span></span><span>@@teacher@@ <b id="teacher"></b></span></div>
 <div id="buttons">
-<button data-label="person">&#9989; person <kbd>1</kbd></button>
-<button data-label="no_person">&#10060; no person <kbd>2</kbd></button>
-<button data-label="unsure">&#10067; unsure <kbd>3</kbd></button>
+<button data-label="person">@@btn_person@@ <kbd>1</kbd></button>
+<button data-label="no_person">@@btn_no_person@@ <kbd>2</kbd></button>
+<button data-label="unsure">@@btn_unsure@@ <kbd>3</kbd></button>
 </div>
 <div id="buttons2">
-<button id="skip">skip <kbd>space</kbd></button>
-<button id="undo">undo <kbd>u</kbd></button>
+<button id="skip">@@btn_skip@@ <kbd>@@key_space@@</kbd></button>
+<button id="undo">@@btn_undo@@ <kbd>u</kbd></button>
 </div>
 </div>
-<div id="done">Nothing left to label. <button id="undo2">undo last</button></div>
+<div id="done">@@done@@ <button id="undo2">@@undo_last@@</button></div>
 </main>
 <script>
+const T = @@js_strings@@;
 let current = null, busy = false;
 const $ = id => document.getElementById(id);
 function show(s) {
   current = s.frame;
-  $("progress").textContent = s.remaining + " left, " + s.labeled + " labeled";
+  $("progress").textContent = s.remaining + " " + T.left + ", " + s.labeled + " " + T.labeled_n;
   $("undo").disabled = $("undo2").disabled = !s.can_undo;
   $("work").style.display = current ? "" : "none";
   $("done").style.display = current ? "none" : "block";
   if (!current) return;
   $("img").src = "/image/" + current.path.split("/").map(encodeURIComponent).join("/");
-  $("camera").textContent = current.camera || "unknown";
+  $("camera").textContent = current.camera || T.unknown;
   $("time").textContent = current.time || "";
   $("source").textContent = current.source + (current.verdict ? " (" + current.verdict + ")" : "");
-  $("score").textContent = current.score == null ? "n/a" : current.score.toFixed(2);
-  $("teacher").textContent = current.teacher == null ? "n/a" : current.teacher.toFixed(2);
-  $("band").textContent = "(" + current.band + ")";
+  $("score").textContent = current.score == null ? T.na : current.score.toFixed(2);
+  $("teacher").textContent = current.teacher == null ? T.na : current.teacher.toFixed(2);
+  $("band").textContent = "(" + (T["band_" + current.band] || current.band) + ")";
+  loadBoxes(current.path);
 }
+let boxData = null;
+const SVGNS = "http://www.w3.org/2000/svg";
+function drawBoxes() {
+  const svg = $("boxes"), img = $("img");
+  svg.replaceChildren();
+  svg.style.display = "none";
+  const d = boxData;
+  if (!d || !d.available || !d.w || !d.h || !img.clientWidth) return;
+  // The image is letterboxed (object-fit: contain): place the overlay on the drawn picture.
+  const k = Math.min(img.clientWidth / d.w, img.clientHeight / d.h);
+  const dw = d.w * k, dh = d.h * k;
+  svg.style.left = img.offsetLeft + (img.clientWidth - dw) / 2 + "px";
+  svg.style.top = img.offsetTop + (img.clientHeight - dh) / 2 + "px";
+  svg.style.width = dw + "px"; svg.style.height = dh + "px";
+  svg.setAttribute("viewBox", "0 0 " + d.w + " " + d.h);
+  const stroke = Math.max(2, d.w / 400 * 1.5), font = Math.max(12, d.w / 50);
+  d.person_boxes.forEach((b, i) => {
+    const sc = d.person_scores[i];
+    if (sc < 0.10 || b.length < 4) return;
+    const color = sc >= 0.45 ? "#e53935" : "#fbc02d";
+    const r = document.createElementNS(SVGNS, "rect");
+    r.setAttribute("x", b[0]); r.setAttribute("y", b[1]);
+    r.setAttribute("width", b[2] - b[0]); r.setAttribute("height", b[3] - b[1]);
+    r.setAttribute("fill", "none"); r.setAttribute("stroke", color);
+    r.setAttribute("stroke-width", stroke);
+    const t = document.createElementNS(SVGNS, "text");
+    t.setAttribute("x", b[0] + stroke); t.setAttribute("y", Math.max(b[1] - stroke, font));
+    t.setAttribute("fill", color); t.setAttribute("font-size", font);
+    t.setAttribute("font-weight", "bold"); t.textContent = sc.toFixed(2);
+    svg.appendChild(r); svg.appendChild(t);
+  });
+  svg.style.display = "block";
+}
+async function loadBoxes(path) {
+  boxData = null; drawBoxes();
+  try {
+    const r = await fetch("/api/boxes?path=" + encodeURIComponent(path));
+    if (!r.ok || !current || current.path !== path) return;
+    boxData = await r.json();
+    drawBoxes();
+  } catch (e) { /* the overlay is optional */ }
+}
+$("img").addEventListener("load", drawBoxes);
+window.addEventListener("resize", drawBoxes);
 async function call(url, body) {
   if (busy) return;
   busy = true;
@@ -1129,6 +1221,21 @@ call("/api/next");
 """
 
 
+JS_KEYS = ("left", "labeled_n", "unknown", "na", "band_gray", "band_low", "band_high",
+           "band_none")
+
+
+def page(lang=DEFAULT_LANG):
+    """The labeling page in ``lang``."""
+    out = PAGE_TEMPLATE.replace("@@js_strings@@", json.dumps(
+        {key: tr(lang, key) for key in JS_KEYS}).replace("</", "<\\/"))
+    out = out.replace("@@lang@@", lang if lang in STRINGS else DEFAULT_LANG)
+    return re.sub(r"@@(\w+)@@", lambda m: tr(lang, m.group(1)), out)
+
+
+PAGE = page()
+
+
 def _html_table(headers, rows):
     head = "".join(f"<th>{html.escape(h)}</th>" for h in headers)
     body = "".join("<tr>" + "".join(f"<td>{html.escape(v)}</td>" for v in row) + "</tr>"
@@ -1136,33 +1243,40 @@ def _html_table(headers, rows):
     return f'<div class="wrap"><table><tr>{head}</tr>{body}</table></div>'
 
 
-def stats_page(stats):
+def stats_page(stats, lang=DEFAULT_LANG):
     """The ``/stats`` HTML: the same tables and lines the CLI prints."""
+    def t(key):
+        return tr(lang, key)
+
     extra = ""
-    verdicts = _verdict_lines(stats)
+    verdicts = _verdict_lines(stats, lang)
     if verdicts:
         extra += "<p>" + "<br>".join(html.escape(v.strip()) for v in verdicts) + "</p>"
     if "day_night" in stats:
-        extra += (f"<h2>Day and night</h2><p>{html.escape(_day_night_summary(stats))}</p>"
-                  f"{_html_table(DAY_NIGHT_HEADERS, _day_night_rows(stats))}"
-                  f"<p>{html.escape(_day_night_note())}</p>")
+        extra += (f"<h2>{t('h_day_night')}</h2>"
+                  f"<p>{html.escape(_day_night_summary(stats, lang))}</p>"
+                  f"{_html_table(day_night_headers(lang), _day_night_rows(stats, lang))}"
+                  f"<p>{html.escape(_day_night_note(lang))}</p>")
     section = stats.get("incidents")
     if section:
-        extra += f"<h2>Incidents</h2><p>{html.escape(_incident_summary(section))}</p>"
+        extra += (f"<h2>{t('h_incidents')}</h2>"
+                  f"<p>{html.escape(_incident_summary(section, lang))}</p>")
         if section["all"]["labeled"]:
-            extra += (_html_table(INCIDENT_HEADERS, _incident_rows(section)) + "<p>"
-                      + "<br>".join(html.escape(n) for n in _incident_notes(section))
+            extra += (_html_table(incident_headers(lang), _incident_rows(section, lang))
+                      + "<p>"
+                      + "<br>".join(html.escape(n) for n in _incident_notes(section, lang))
                       + "</p>")
         else:
-            extra += "<p>No incident has a labeled frame yet.</p>"
-        rows = _first_alert_rows(section)
+            extra += f"<p>{t('no_incident_html')}</p>"
+        rows = _first_alert_rows(section, lang)
         if rows:
-            extra += (f"<h2>First alert by path</h2><p>{html.escape(_first_alert_summary())}"
-                      f"</p>{_html_table(FIRST_ALERT_HEADERS, rows)}")
+            extra += (f"<h2>{t('h_first_alert')}</h2>"
+                      f"<p>{html.escape(_first_alert_summary(lang))}</p>"
+                      f"{_html_table(first_alert_headers(lang), rows)}")
     return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
+<html lang="{lang if lang in STRINGS else DEFAULT_LANG}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Label stats</title>
+<title>{t('stats_title')}</title>
 <style>
 :root{{--bg:#f6f6f4;--fg:#1d1d1b;--line:#ddd}}
 @media (prefers-color-scheme:dark){{:root{{--bg:#161615;--fg:#ecece8;--line:#333}}}}
@@ -1174,12 +1288,11 @@ td,th{{padding:4px 10px;border-bottom:1px solid var(--line);text-align:left;
 white-space:nowrap}}
 a{{color:inherit}}
 </style></head><body><main>
-<p><a href="/">&larr; back to labeling</a></p>
-<h1>Label stats</h1>
-{_html_table(STATS_HEADERS, _stats_rows(stats))}
-<p>{html.escape(_threshold_line(stats["threshold"]))}</p>
-<p>False alarms = sent frames labeled no_person. Misses = review (held) frames labeled
-person. Unsure is excluded from both rates.</p>
+<p><a href="/">{t('back')}</a></p>
+<h1>{t('stats_title')}</h1>
+{_html_table(stats_headers(lang), _stats_rows(stats, lang))}
+<p>{html.escape(_threshold_line(stats["threshold"], lang))}</p>
+<p>{t('stats_footnote')}</p>
 {extra}
 </main></body></html>
 """
@@ -1187,6 +1300,7 @@ person. Unsure is excluded from both rates.</p>
 
 def make_server(session, port=0, bind=DEFAULT_BIND):
     """HTTP server for one :class:`LabelSession`. Stdlib only, threaded."""
+    lang = session.lang
 
     class Handler(BaseHTTPRequestHandler):
         def _send(self, code, body, content_type):
@@ -1209,14 +1323,23 @@ def make_server(session, port=0, bind=DEFAULT_BIND):
         def do_GET(self):
             path = urllib.parse.urlsplit(self.path).path
             if path == "/":
-                self._html(PAGE)
+                self._html(page(lang))
             elif path == "/api/next":
                 self._json(200, session.state())
             elif path == "/stats":
                 self._html(stats_page(compute_stats(session.dataset_dir,
-                                                    night=session.night)))
+                                                    night=session.night), lang))
             elif path == "/api/stats":
                 self._json(200, compute_stats(session.dataset_dir, night=session.night))
+            elif path == "/api/boxes":
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                rel = (query.get("path") or [""])[0]
+                found = session.person_boxes(rel)
+                self._json(200, {"person_boxes": found["boxes"] if found else [],
+                                 "person_scores": found["scores"] if found else [],
+                                 "w": found["w"] if found else None,
+                                 "h": found["h"] if found else None,
+                                 "available": found is not None})
             elif path.startswith("/image/"):
                 self._image(urllib.parse.unquote(path[len("/image/"):]))
             else:
@@ -1322,6 +1445,11 @@ def label_main(argv):
     parser.add_argument("--low-sample", type=int, default=None,
                         help="queue at most N low-score frames (default: all, shuffled)")
     parser.add_argument("--config", help=CONFIG_HELP + " on the /stats page")
+    parser.add_argument("--lang", choices=sorted(STRINGS), default=DEFAULT_LANG,
+                        help="language of the page and /stats (default: en)")
+    parser.add_argument("--scorer-url", default=None,
+                        help="scoring service URL: draw the person boxes it finds on "
+                             "each frame (default: off)")
     args = parser.parse_args(argv)
     if not _dataset_ok(parser.prog, args.dataset_dir):
         return 2
@@ -1331,7 +1459,7 @@ def label_main(argv):
         if night is None:
             return 1
     session = LabelSession(args.dataset_dir, seed=args.seed, low_sample=args.low_sample,
-                           night=night)
+                           night=night, scorer_url=args.scorer_url, lang=args.lang)
     return serve(session, args.port, args.bind)
 
 

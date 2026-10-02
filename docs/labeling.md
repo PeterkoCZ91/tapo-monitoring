@@ -93,6 +93,15 @@ The page shows the frame, its camera, time, source (sent/review) and person scor
 four actions: ✅ person (`1`), ❌ no person (`2`), ❓ unsure (`3`) and skip (`space`).
 `u` or Backspace undoes the last action. It works on a phone.
 
+`--scorer-url URL` (off by default) asks the scoring service about each shown frame and
+draws the person boxes it finds over the picture: red for a score of 0.45 or more, yellow
+for 0.10 to 0.45, each with its score. Results are cached per file in memory; if the
+service is down or answers badly the page works as before, without boxes.
+
+`--lang cs|en` (default `en`) sets the language of the page and `/stats`. The texts live
+in one dictionary per language in `tapo_monitor/labeling_i18n.py`; keys and buttons keep
+their shortcuts.
+
 Unlabeled frames are queued in the order that pays off fastest:
 
 1. the gray zone, person score 0.30–0.65, where the threshold itself is uncertain;
