@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- The scorer service can run more than one detector family: `TAPO_SCORER_ARCH=yolox`
+  (default, behaviour unchanged) or `detr` for NMS-free DETR-style ONNX exports with
+  `logits` and `boxes` outputs (RF-DETR, D-FINE, RT-DETR), configured by
+  `TAPO_SCORER_DETR_PERSON_ID` (COCO80 or COCO91), `TAPO_SCORER_DETR_ACTIVATION`
+  (`softmax`/`sigmoid`), `TAPO_SCORER_DETR_NORMALIZE` and `TAPO_SCORER_INPUT_SIZE`; an
+  unknown value stops the service at start. `/score` is unchanged; `/health` and
+  `/metrics` gain `arch`. See `docs/operations.md`, "Swapping the detector model".
 - `tools/soak_report.sh`: one read-only report per host for a soak test (service state and
   package fingerprint, starts, error lines, alerts per camera and path, first-alert
   median/p90, drop/hold/cooldown and `would_*` counts, memory and CPU), with `--user`,

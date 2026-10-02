@@ -166,6 +166,56 @@ service would exit before the model loads — under `Restart=always` that is an 
 crash loop caused by an observability setting. Unset, blank and unparseable values all
 fall back to the built-in defaults.
 
+### Swapping the detector model
+
+The service runs one detector family, chosen by `TAPO_SCORER_ARCH` in `scorer.env`
+(`tapo_monitor/detectors.py`). Whatever the family, `/score` answers with the same fields,
+with boxes in pixels of the original frame, so callers need no change.
+
+| Variable | Values | Meaning |
+|---|---|---|
+| `TAPO_SCORER_ARCH` | `yolox` (default), `detr` | Decoder family. Any other value stops the service at start with `scorer config error`. |
+| `TAPO_SCORER_INPUT_SIZE` | positive integer | Model input side. The unit passes it as `--input-size`; unset, `yolox` uses 416 and `detr` 640. |
+| `TAPO_SCORER_DETR_PERSON_ID` | `0` (COCO80), `1` (COCO91) | Label space of the logits; also fixes the animal and vehicle classes. |
+| `TAPO_SCORER_DETR_ACTIVATION` | `softmax` (default), `sigmoid` | `softmax` for heads with a trailing "no object" column, `sigmoid` for focal-loss heads. |
+| `TAPO_SCORER_DETR_NORMALIZE` | `imagenet` (default), `none` | Input scaling: ImageNet mean/std, or plain 0-1. |
+
+`detr` covers NMS-free exports with two outputs, `logits` `[1,Q,C]` and `boxes` `[1,Q,4]`
+(normalised centre-x/centre-y/width/height), such as RF-DETR, D-FINE and RT-DETR. The
+settings come from how the model was trained and exported, so read them off the export
+rather than guessing: a wrong activation, label space or normalisation does not fail, it
+just scores badly. An export with a different output layout, or extra inputs such as a
+target-size tensor, is not supported. A DETR export whose outputs have the wrong shape makes
+every `/score` answer 500 `scoring failed` (callers then fall back as for any scorer
+failure); empty or NaN outputs score as "nothing found". `/health` and `/metrics` report
+the family as `arch` (never the model path).
+
+Check a new model **before** it replaces the running one: start a second instance on
+another port with its own env, leave the production unit alone, and send both the same
+saved frames.
+
+```bash
+TAPO_SCORER_ARCH=detr TAPO_SCORER_DETR_ACTIVATION=sigmoid TAPO_SCORER_DETR_PERSON_ID=1 \
+  TAPO_SCORER_INPUT_SIZE=640 \
+  python -m tapo_monitor.scorer_service --model /srv/tapo-scorer/candidate.onnx --port 8767
+curl -s http://127.0.0.1:8767/health        # {"ok": true, "arch": "detr"}
+for f in frames/*.jpg; do
+  curl -s --data-binary @"$f" http://127.0.0.1:8766/score > "old_$(basename "$f").json"
+  curl -s --data-binary @"$f" http://127.0.0.1:8767/score > "new_$(basename "$f").json"
+done
+```
+
+Use a set that includes the cases that matter: labelled people (day and night), the known
+false-alarm frames (static objects, rain, IR grain) and empty scenes. Compare per frame
+`person`, `person_boxes`, `vehicle` and `animal`, and the latency in the candidate's
+`/metrics` (`score_seconds_p50`/`p95`) on the same hardware and provider
+(`TAPO_SCORER_PROVIDER`). Scores of a different model are not calibrated like YOLOX's, so
+the camera thresholds need a re-check against the labelled frames. Switch only when
+recall on the labelled people holds and the false-alarm frames do not get worse. To switch,
+change `TAPO_SCORER_MODEL` and the variables above in `scorer.env`, re-run
+`tools/provision_scorer.sh` (it restarts the service because the env file changed), check
+`/health` for the new `arch`, and keep the old weights and env lines for rollback.
+
 ### Moving the scorer to another machine
 
 Because every camera shares one scorer, move it without a gap by listing both machines in

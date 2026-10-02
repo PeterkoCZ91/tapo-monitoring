@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import signal
+import sys
 import threading
 import time
 import uuid
@@ -127,6 +128,7 @@ class ScorerMetrics:
         self._request_samples = deque(maxlen=LATENCY_SAMPLE_LIMIT)
         self._score_samples = deque(maxlen=LATENCY_SAMPLE_LIMIT)
         self._sources = {}
+        self.arch = None        # detector family name, set by make_server
         self.instance_id = uuid.uuid4().hex[:16]
         self.started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         self.started = time.monotonic()
@@ -400,7 +402,7 @@ class ScorerMetrics:
 
     def snapshot(self):
         with self._lock:
-            return {
+            snapshot = {
                 "uptime_seconds": round(time.monotonic() - self.started, 3),
                 "requests": self.requests,
                 "completed": self.completed,
@@ -426,6 +428,9 @@ class ScorerMetrics:
                 "restart_count": self.restart_count,
                 "sources": self._sources_snapshot_unlocked(),
             }
+            if self.arch:
+                snapshot["arch"] = self.arch
+            return snapshot
 
 
 def scores_from_output(output, num_classes=80, floor=0.01):
@@ -699,8 +704,13 @@ def _open_session(ort, model_path):
     return ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
 
 
-def build_score_fn(model_path, input_size=416):
+def build_score_fn(model_path, input_size=416, decoder=None):
     """Load the ONNX model once and return score_fn(jpeg_bytes, tiles=1) -> dict.
+
+    ``decoder`` (see :mod:`tapo_monitor.detectors`) owns the model-specific preprocessing
+    and output decoding; the default is the YOLOX decoder at ``input_size``, i.e. the
+    behaviour from before detectors were pluggable. The returned function carries the
+    family name as ``score_fn.arch``.
 
     ``tiles > 1`` also scores a tiles×tiles grid (see :func:`tile_rects`), but the
     grid only refines localisation — see :func:`combine_rect_scores` for why the
@@ -713,13 +723,19 @@ def build_score_fn(model_path, input_size=416):
     import onnxruntime as ort
     from PIL import Image
 
+    from . import detectors
+
+    decoder = decoder or detectors.YoloxDecoder(input_size)
     session = _open_session(ort, model_path)
     input_name = session.get_inputs()[0].name
 
-    def _run(img):
-        tensor, ratio = preprocess_image(img, input_size)
-        (output,) = session.run(None, {input_name: tensor})
-        return output, ratio
+    def _run(img, full):
+        tensor, ctx = decoder.preprocess(img)
+        outputs = session.run(None, {input_name: tensor})
+        return decoder.decode(outputs, ctx, full)
+
+    def _shift(box, x0, y0):
+        return [box[0] + x0, box[1] + y0, box[2] + x0, box[3] + y0]
 
     def score_fn(jpeg_bytes, tiles=1):
         img = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
@@ -727,37 +743,39 @@ def build_score_fn(model_path, input_size=416):
         results = []
         for (x0, y0, x1, y1) in rects:
             crop = img if len(rects) == 1 else img.crop((int(x0), int(y0), int(x1), int(y1)))
-            output, ratio = _run(crop)
-            scores = scores_from_output(output)
-            box = best_person_box(output, input_size)
-            entry = {"person": scores["person"], "animal": scores["animal"],
-                     "vehicle": scores["vehicle"],
-                     "classes": scores["classes"],
-                     "box": list(scale_box(box, ratio, x0, y0)) if box else None}
-            if not results:     # full frame only, like the decision scores
-                found, found_boxes = person_scores(output, input_size, with_boxes=True)
-                entry["person_scores"] = found
+            full = not results      # full frame only, like the decision scores
+            decoded = _run(crop, full)
+            box = decoded["box"]
+            entry = {"person": decoded["person"], "animal": decoded["animal"],
+                     "vehicle": decoded["vehicle"],
+                     "classes": decoded["classes"],
+                     "box": _shift(box, x0, y0) if box else None}
+            if full:
+                entry["person_scores"] = decoded["person_scores"]
                 # Parallel to person_scores, in original pixels: lets a camera ignore a
                 # static person-shaped object (an ignore zone) without losing the others.
-                entry["person_boxes"] = [[round(v, 1) for v in scale_box(b, ratio, x0, y0)]
-                                         for b in found_boxes]
+                entry["person_boxes"] = [[round(v, 1) for v in _shift(b, x0, y0)]
+                                         for b in decoded["person_boxes"]]
                 # Same for vehicles; older clients ignore these fields.
-                v_found, v_boxes = vehicle_scores(output, input_size, with_boxes=True)
-                entry["vehicle_scores"] = v_found
-                entry["vehicle_boxes"] = [[round(v, 1) for v in scale_box(b, ratio, x0, y0)]
-                                          for b in v_boxes]
+                entry["vehicle_scores"] = decoded["vehicle_scores"]
+                entry["vehicle_boxes"] = [[round(v, 1) for v in _shift(b, x0, y0)]
+                                          for b in decoded["vehicle_boxes"]]
             results.append(entry)
         combined = combine_rect_scores(results)
         combined["w"], combined["h"] = img.width, img.height
         return combined
 
+    score_fn.arch = decoder.name
     return score_fn
 
 
 def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=60,
                 metrics_retention_days=7, metrics_retention_files=8,
-                metrics_max_journal_bytes=METRICS_MAX_JOURNAL_BYTES):
+                metrics_max_journal_bytes=METRICS_MAX_JOURNAL_BYTES, arch=None):
     """HTTP server: POST /score (JPEG body) -> JSON scores; GET /health -> ok.
+
+    ``arch`` (the detector family name, never the model path) is reported by /health and
+    /metrics; ``None`` leaves both replies exactly as they were.
 
     Threaded so /health, /metrics and slow clients never queue behind a long
     inference (a 4K tiled request can hold the CPU for seconds). Inference itself
@@ -771,6 +789,7 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
         retention_files=metrics_retention_files,
         max_journal_bytes=metrics_max_journal_bytes,
     )
+    metrics.arch = arch or getattr(score_fn, "arch", None)
     inference_lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
@@ -790,7 +809,8 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
 
         def do_GET(self):
             if self.path == "/health":
-                self._reply(200, {"ok": True})
+                self._reply(200, {"ok": True, "arch": metrics.arch} if metrics.arch
+                            else {"ok": True})
             elif self.path == "/metrics":
                 self._reply(200, metrics.snapshot())
             else:
@@ -896,9 +916,13 @@ def build_parser(env=None):
     """
     settings = metrics_settings(env)
     parser = argparse.ArgumentParser(description="tapo-monitor scoring service")
-    parser.add_argument("--model", required=True, help="path to YOLOX .onnx weights")
+    parser.add_argument("--model", required=True,
+                        help="path to .onnx weights (family: TAPO_SCORER_ARCH)")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--input-size", type=int, default=416)
+    parser.add_argument("--input-size", nargs="?", const=None,
+                        type=_blank_tolerant(int, None), default=None,
+                        help="model input side; default TAPO_SCORER_INPUT_SIZE, else the "
+                             "detector family's default (yolox 416, detr 640)")
     parser.add_argument("--metrics-file", nargs="?", const=None,
                         type=_blank_tolerant(str, None),
                         default=settings["metrics_file"],
@@ -919,9 +943,17 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    score_fn = build_score_fn(args.model, args.input_size)
+    from . import detectors
+    try:
+        config = detectors.detector_config(os.environ, args.input_size)
+    except detectors.DetectorConfigError as exc:
+        print(f"scorer config error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
+    decoder = detectors.build_decoder(config)
+    score_fn = build_score_fn(args.model, config.input_size, decoder)
     server = make_server(
         score_fn,
+        arch=decoder.name,
         port=args.port,
         metrics_file=args.metrics_file,
         metrics_persist_seconds=args.metrics_persist_seconds,
@@ -929,8 +961,8 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
         metrics_retention_files=args.metrics_retention_files,
         metrics_max_journal_bytes=args.metrics_max_journal_bytes,
     )
-    log.info("scorer listening on :%d (model=%s, input=%d)",
-             args.port, args.model, args.input_size)
+    log.info("scorer listening on :%d (model=%s, arch=%s, input=%d)",
+             args.port, args.model, decoder.name, config.input_size)
     def stop(_signum, _frame):
         raise SystemExit(0)
 
