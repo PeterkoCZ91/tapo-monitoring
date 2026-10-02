@@ -20,7 +20,7 @@ import os
 import sys
 import time
 
-from . import config, scorer, sentlog, snapshot
+from . import config, detection, scorer, sentlog, snapshot
 from .config import resolve_rtsp_credentials
 
 log = logging.getLogger(__name__)
@@ -164,7 +164,10 @@ def _real_score(tiles):
         return scorer.score_image(cfg.scorer.url, image_path,
                                   timeout=cfg.scorer.timeout, tiles=tiles,
                                   source_id=scorer.source_id_for_camera(cfg.name),
-                                  ignore_zones=cfg.scorer.ignore_zones,
+                                  ignore_zones=scorer.zones_for_lens(
+                                      cfg.scorer, detection.stream_lens(
+                                          getattr(cfg, "event_profile", None),
+                                          cfg.rtsp_stream)),
                                   alert_zones=cfg.scorer.alert_zones)
     return score
 

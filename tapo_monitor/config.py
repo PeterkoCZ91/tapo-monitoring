@@ -140,6 +140,10 @@ class ScorerConfig:
     # Rects ``[x1, y1, x2, y2]`` as fractions of the frame whose people are ignored: a
     # static person-shaped object there stops counting (see scorer.apply_ignore_zones).
     ignore_zones: tuple = ()
+    # Per-lens ``ignore_zones`` of a dual-lens camera, ``{"wide": (rects...), "pan_tilt":
+    # (rects...)}``: a frame with a known lens is scored with ``ignore_zones`` plus its
+    # lens's rects, a frame without one (SD card, recording) with ``ignore_zones`` only.
+    lens_ignore_zones: dict = field(default_factory=dict)
     # Polygons (tuples of ``(x, y)`` fractions): only people whose feet (box bottom centre)
     # stand in one count, after ``ignore_zones``. Empty = off. Fixed-view cameras only.
     alert_zones: tuple = ()
@@ -805,6 +809,7 @@ def _scorer(data, where):
     person_bit_skips_hold = _check_bool(d.get("person_bit_skips_hold", False),
                                         "person_bit_skips_hold", f"{where}: scorer")
     ignore_zones = _ignore_zones(d.get("ignore_zones"), where)
+    lens_ignore_zones = _lens_ignore_zones(d.get("lens_ignore_zones"), where)
     alert_vehicles = _check_bool(d.get("alert_vehicles", False), "alert_vehicles",
                                  f"{where}: scorer")
     try:
@@ -816,7 +821,7 @@ def _scorer(data, where):
     return ScorerConfig(url=d.get("url"), threshold=threshold, timeout=timeout, tiles=tiles,
                         motion_send_threshold=motion_send_threshold,
                         person_bit_skips_hold=person_bit_skips_hold,
-                        ignore_zones=ignore_zones,
+                        ignore_zones=ignore_zones, lens_ignore_zones=lens_ignore_zones,
                         alert_zones=_alert_zones(d.get("alert_zones"), where),
                         alert_vehicles=alert_vehicles, vehicle_threshold=vehicle_threshold,
                         night_threshold=night_threshold)
@@ -842,6 +847,23 @@ def _ignore_zones(value, where):
                               "frame with x1 < x2 and y1 < y2")
         zones.append((x1, y1, x2, y2))
     return tuple(zones)
+
+
+def _lens_ignore_zones(value, where):
+    """``scorer.lens_ignore_zones``: ``{lens: [[x1, y1, x2, y2], ...]}`` (lens names are
+    checked against the event profile by the camera parser)."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError(f"{where}: scorer lens_ignore_zones must map a lens name to a "
+                          "list of [x1, y1, x2, y2]")
+    out = {}
+    for lens, zones in value.items():
+        parsed = _ignore_zones(zones if zones is not None else [],
+                               f"{where}: lens_ignore_zones[{lens}]")
+        if parsed:
+            out[str(lens)] = parsed
+    return out
 
 
 def _alert_zones(value, where):
@@ -1204,6 +1226,17 @@ def _camera(data, index):
         # A zone is drawn on one view; a second lens or a moving pan/tilt lens has another.
         raise ConfigError(f"{where}: scorer alert_zones need a fixed view; this event_profile "
                           f"has a pan/tilt lens (use ignore_zones or no zones)")
+    if scorer.lens_ignore_zones:
+        lens_names = {lens.replace("/", "_")
+                      for lens in event_detection.event_profile(event_profile)
+                      .stream_lenses.values()}
+        if not lens_names:
+            raise ConfigError(f"{where}: scorer lens_ignore_zones need an event_profile with "
+                              f"a pan/tilt lens (e.g. c545d); use ignore_zones instead")
+        for lens in scorer.lens_ignore_zones:
+            if lens not in lens_names:
+                raise ConfigError(f"{where}: scorer lens_ignore_zones has unknown lens "
+                                  f"{lens!r} (known: {', '.join(sorted(lens_names))})")
     pan_limit = _pan_limit(data.get("pan_limit"), where)
     if scorer.alert_zones and (role != "static" or pan_limit.enabled):
         # Not an error: the zones still work while the lens is parked, but auto-track or

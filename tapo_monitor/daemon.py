@@ -1422,7 +1422,8 @@ def score_for(cfg: CameraConfig):
     def score_remote(image_path):
         return scorer.score_image(cfg.scorer.url, image_path, timeout=cfg.scorer.timeout,
                                   tiles=cfg.scorer.tiles, source_id=source_id,
-                                  ignore_zones=cfg.scorer.ignore_zones,
+                                  ignore_zones=scorer.zones_for_lens(
+                                      cfg.scorer, snapshot.frame_lens(image_path)),
                                   alert_zones=cfg.scorer.alert_zones)
 
     def score(image_path):
@@ -1554,7 +1555,8 @@ def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_f
         result = scorer.score_image(cfg.scorer.url, image, timeout=cfg.scorer.timeout,
                                     tiles=cfg.scorer.tiles,
                                     source_id=scorer.source_id_for_camera(cfg.name),
-                                    ignore_zones=cfg.scorer.ignore_zones,
+                                    ignore_zones=scorer.zones_for_lens(
+                                        cfg.scorer, snapshot.frame_lens(image)),
                                     alert_zones=cfg.scorer.alert_zones)
     if not result:
         return image

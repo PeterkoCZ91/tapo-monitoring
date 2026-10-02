@@ -7,6 +7,10 @@ All notable changes to this project are documented here.
 ### Added
 - `docs/measurements.md`: anonymized accuracy, miss, first-alert latency and replay figures from
   one real deployment, with their limits and the commands to reproduce them.
+- `scorer.lens_ignore_zones` (off by default): `ignore_zones` per lens of a dual-lens camera
+  (`wide`, `pan_tilt`; only for an `event_profile` with a pan/tilt lens). A frame with a
+  known lens is scored with the global zones plus its lens's zones, a frame without one
+  (SD card, recording) with the global zones only.
 - `tapo-monitor label --scorer-url URL` (off by default): draw the person boxes the scoring
   service finds on the frame being labeled (red from 0.45, yellow from 0.10, with scores).
   A scorer failure leaves the page working without boxes.

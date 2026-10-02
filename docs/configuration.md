@@ -765,6 +765,30 @@ scorer:
     - [0.0, 0.48, 0.12, 0.66]   # sacks under the woodshed, left edge
 ```
 
+`lens_ignore_zones` (default none) is `ignore_zones` per lens, for a camera whose
+`event_profile` has a pan/tilt lens (for example `c545d`); any other profile, or a lens
+name the profile does not know, is a config error. The keys are `wide` and `pan_tilt`,
+each a list of rects as above. A frame whose lens is known is scored with `ignore_zones`
+plus the rects of its lens; a frame without a known lens (the SD card, a recording) with
+`ignore_zones` only. The lens follows from the stream the frame was grabbed from: `stream1`,
+`stream2` and `stream8` are `wide`, `stream6` and `stream7` are `pan_tilt`. Empty = nothing
+changes.
+
+```yaml
+scorer:
+  ignore_zones:
+    - [0.0, 0.48, 0.12, 0.66]   # applies to both lenses
+  lens_ignore_zones:
+    wide:
+      - [0.70, 0.55, 0.85, 0.80]
+```
+
+Warning: a zone is tied to where the lens points. The fixed lens keeps its framing, but
+the `pan_tilt` lens is turned by the firmware after a subject, so after it moves a
+`pan_tilt` zone sits over a different part of the scene and can hide a real person.
+Prefer `wide` zones, keep every zone tight, and do not put a `pan_tilt` zone on anything
+you cannot afford to miss.
+
 `alert_zones` (default none) is the opposite of `ignore_zones`: a list of polygons, each
 at least three `[x, y]` points as fractions of the frame, and a person counts only when
 the bottom centre of its box (the feet) lies inside at least one of them. Use it to watch

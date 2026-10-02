@@ -86,6 +86,20 @@ def _inside_share(box, zone, w, h):
     return ix * iy / area
 
 
+def zones_for_lens(scorer_cfg, lens):
+    """``ignore_zones`` plus the rects of ``lens`` from ``lens_ignore_zones``. Pure.
+
+    A frame without a known lens (SD card, recording) gets the global zones only.
+    """
+    zones = scorer_cfg.ignore_zones
+    per_lens = getattr(scorer_cfg, "lens_ignore_zones", None)
+    if lens and per_lens:
+        extra = per_lens.get(str(lens).replace("/", "_"))
+        if extra:
+            return tuple(zones) + tuple(extra)
+    return zones
+
+
 def apply_ignore_zones(result, zones, overlap=IGNORE_ZONE_OVERLAP):
     """Drop the people whose box lies inside an ignore zone from a response. Pure-ish.
 
