@@ -12,6 +12,12 @@ All notable changes to this project are documented here.
   (`softmax`/`sigmoid`), `TAPO_SCORER_DETR_NORMALIZE` and `TAPO_SCORER_INPUT_SIZE`; an
   unknown value stops the service at start. `/score` is unchanged; `/health` and
   `/metrics` gain `arch`. See `docs/operations.md`, "Swapping the detector model".
+- `tools/soak_sim.py`: an accelerated soak that runs the real `daemon.loop_step` against fake
+  cameras on a fake clock for N simulated days (`--days`, `--seed`, `--cameras`) with generated
+  people, motion, rain, camera/scorer/network outages and restarts, and `--features` for the observe
+  modes, `hub_clip_worker`, host failover and scorer failover. Reports RSS growth, threads, state-file
+  sizes, exceptions and slow ticks, and exits non-zero past `--max-rss-growth-mb`/`--max-threads`
+  and the other limits. See `docs/operations.md`, "Accelerated soak simulation".
 - `tools/soak_report.sh`: one read-only report per host for a soak test (service state and
   package fingerprint, starts, error lines, alerts per camera and path, first-alert
   median/p90, drop/hold/cooldown and `would_*` counts, memory and CPU), with `--user`,

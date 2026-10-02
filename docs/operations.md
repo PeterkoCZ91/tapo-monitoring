@@ -603,6 +603,47 @@ that was healthy before). `--update-baseline` rewrites it after comparing. Exit 
 when any host has a finding or deviation. Parsing and statistics live in
 `tools/soak_report.py` and are tested on fixtures in `tests/fixtures/soak`.
 
+## Accelerated soak simulation
+
+`tools/soak_sim.py` is the fast half of a soak test: it runs the real `daemon.loop_step`
+(the function every production tick runs) against the scenario harness's fake cameras on
+a fake clock, for N simulated days in seconds or minutes, and looks for what only a long
+run shows. It needs a checkout with the dev extras (it imports `tests/scenario.py`), reads
+no config and touches no network, camera or host.
+
+```bash
+python3 tools/soak_sim.py --days 7 --seed 3 --cameras 3 --features all
+python3 tools/soak_sim.py --days 1 --features zones,loiter --max-rss-growth-mb 15 --json
+nice -n 19 python3 tools/soak_sim.py --days 7 --tracemalloc    # also lists allocation growth
+```
+
+The generated world: bare motion and camera-confirmed people (two thirds of them at night),
+rain intervals, camera outages, scorer outages (the whole service, or the primary only),
+the network dropping (cameras, scorer and Telegram at once), daemon restarts (`shutdown()`,
+then state reloaded from `runtime.json` and `health.json`), lenses swinging out of their pan
+span, and a scorer stand-in with random scores, boxes, vehicles and delays. `--features`
+(comma list, default `all`) adds the opt-in options under test: `zones`
+(`alert_zones_mode: observe`), `loiter` (`loiter_mode: observe`), `vehicle`
+(`vehicle_mode: observe`), `hub` (a hub camera with `hub_clip_worker` and a real worker
+thread), `host` (`host` candidate list with address changes) and `scorer` (`scorer.url`
+candidate list). The summary lists the audit paths the run really exercised
+(`path/action=count`): a feature that never fired proves nothing.
+
+It measures resident memory (`/proc/self/statm`; the median of the last 10 % of the run
+minus the median of the 10-30 % window, so start-up is not counted), thread count, the
+size of `health.json`, `runtime.json` and `twin.json`, the sent-log and review-log
+directories, the ledger, exceptions out of a tick plus ERROR log records, and the wall time
+of each tick. A run that stops making progress is aborted with a stack dump
+(`--hang-timeout`). Exit status is 1 when a limit is exceeded: `--max-rss-growth-mb`
+(20), `--max-threads` (32), `--max-state-kb` (256), `--max-dir-growth-mb-per-day` (100),
+`--max-tick-seconds` (5), `--max-exceptions` (0). `--inject leak|statefile|threads` plants
+a fault on purpose; the tests use it to prove the limits fire.
+
+What it does not show: real network and camera timing, pytapo and ffmpeg themselves, code
+that reads the wall clock instead of the `now` the loop hands down, and the hosts' own
+retention (frames written by the simulation carry a real mtime). A clean run is a reason to
+start the real soak, not a replacement for it.
+
 ## Inspecting alert frames
 
 Threshold tuning is easier when you can see the exact frame behind a score. Two opt-in aids
