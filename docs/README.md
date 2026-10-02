@@ -38,6 +38,8 @@ camera names, addresses, credentials, coordinates and observations do not belong
    delivery guarantees and an example automation.
 9. [Labeling](labeling.md) — label collected sent/review-log frames and measure false
    alarms, misses and the best threshold.
+10. [Watch zones, loitering and vehicle alerts](watch-zones.md) — restrict person alerts
+    to polygons, get one notice for someone who lingers, and alert on vehicles.
 10. [Roadmap](roadmap.md) — remaining product phases and research tracks.
 11. [Releasing](releasing.md) — how a GitHub release reaches PyPI, and the one-time
     Trusted Publishing setup.

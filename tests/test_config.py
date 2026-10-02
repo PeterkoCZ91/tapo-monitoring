@@ -1479,3 +1479,17 @@ def test_scorer_vehicle_options_reject_bad_values(scorer_cfg):
     with pytest.raises(cfg.ConfigError, match="vehicle"):
         cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10",
                                        "scorer": {"url": "http://x", **scorer_cfg}}]})
+
+
+def test_scorer_alert_zones_warn_when_the_camera_can_move(caplog):
+    zone = [[[0.5, 0], [1, 0], [1, 1]]]
+    moving = _load_capturing(caplog, _alert_cfg(zone))
+    assert moving.cameras[0].scorer.alert_zones
+    assert any("alert_zones" in m and "role is not static" in m
+               for m in _unknown_key_warnings(caplog))
+    caplog.clear()
+    _load_capturing(caplog, _alert_cfg(zone, role="static", pan_limit={"enabled": True}))
+    assert any("pan_limit is enabled" in m for m in _unknown_key_warnings(caplog))
+    caplog.clear()
+    _load_capturing(caplog, _alert_cfg(zone, role="static"))
+    assert not _unknown_key_warnings(caplog)

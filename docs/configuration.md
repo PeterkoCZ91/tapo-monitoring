@@ -766,6 +766,11 @@ Zones are drawn on one view, so they are refused (config error) on a camera whos
 lenses), and they do not follow a PTZ camera that moves between presets: use them on
 fixed-view cameras, or on a PTZ parked on a single preset.
 
+A camera that can move (`role` other than `static`, so auto-track at night, or
+`pan_limit.enabled`) loads with a warning when `alert_zones` is set instead of an error:
+the zones keep working while the lens is parked, but they no longer match the picture
+once it moves. See [watch zones](watch-zones.md) for when to use them.
+
 ```yaml
 scorer:
   alert_zones:

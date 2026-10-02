@@ -1201,6 +1201,14 @@ def _camera(data, index):
         # A zone is drawn on one view; a second lens or a moving pan/tilt lens has another.
         raise ConfigError(f"{where}: scorer alert_zones need a fixed view; this event_profile "
                           f"has a pan/tilt lens (use ignore_zones or no zones)")
+    pan_limit = _pan_limit(data.get("pan_limit"), where)
+    if scorer.alert_zones and (role != "static" or pan_limit.enabled):
+        # Not an error: the zones still work while the lens is parked, but auto-track or
+        # a pan-limit recall changes the framing they were drawn on.
+        log.warning("%s: scorer alert_zones are drawn on one framing, but this camera may move "
+                    "(%s); use role: static or keep it on a single preset, or the zones will "
+                    "not match the picture", where,
+                    "role is not static" if role != "static" else "pan_limit is enabled")
     lens_pick_stream = data.get("lens_pick_stream")
     if lens_pick_stream is not None:
         if not isinstance(lens_pick_stream, str) or not lens_pick_stream.strip():
@@ -1277,7 +1285,7 @@ def _camera(data, index):
         enrich=_enrich(data.get("enrich"), where),
         sampler=sampler,
         scorer=scorer,
-        pan_limit=_pan_limit(data.get("pan_limit"), where),
+        pan_limit=pan_limit,
         light_trigger=_light_trigger(data.get("light_trigger"), where),
         coordinator=CoordinatorConfig(
             group=coord.get("group"),

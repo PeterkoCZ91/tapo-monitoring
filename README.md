@@ -138,6 +138,10 @@ recorder and scorer can complement the daemon, but neither is required for the b
 - **Restart-safe, traceable alerts** — queued alerts and cooldowns survive a deploy;
   every alert carries an incident ID you can follow with `tapo-monitor incident`, and
   `tapo-monitor replay` checks a config change against a recorded night before it ships.
+- **Watch zones, loitering and vehicles (opt-in)** — count only people standing inside
+  polygons you draw, get one "someone is lingering" notice, and optionally alert on
+  vehicles the scorer sees; see the
+  [guide](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/watch-zones.md).
 - **Thresholds from your own frames, not guesswork** — a collector keeps every host's
   sent and held frames beyond their retention, a larger teacher model labels the frames
   it and the scorer agree on, and a local page shows you only the disagreements. On the
@@ -339,6 +343,7 @@ understand the session and sequential-request limitations.
 | [Capabilities](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/capabilities.md) | You need the implemented/planned feature inventory. |
 | [Observability](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/observability.md) | You are enabling Digital Twin or Shadow Auditor. |
 | [MQTT and Home Assistant](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/mqtt.md) | You want the cameras as Home Assistant entities. |
+| [Watch zones](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/watch-zones.md) | You want alerts only for a yard, a lingering-person notice or vehicle alerts. |
 | [Labeling](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/labeling.md) | You want ground truth for collected alert frames. |
 | [Troubleshooting](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/troubleshooting.md) | You hit authentication, RTSP, SD or firmware-specific problems. |
 | [`events_1` bitmask](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/events1-bitmask.md) | Your firmware returns incomplete event types. |

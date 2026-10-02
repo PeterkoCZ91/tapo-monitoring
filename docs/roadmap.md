@@ -825,6 +825,19 @@ often what photographs the person seconds later.
   returns `person_boxes`). On that camera 15 of 113 sent photos, all without a person,
   would have scored below the threshold.
 
+### 10.12 — Watch zones, loitering and vehicles
+
+- [x] `scorer.alert_zones`: only a person whose feet stand in a polygon counts (and a
+  vehicle whose box bottom does); a config warning for cameras whose framing moves.
+- [x] `sampler.loiter_frames`: one separate notice for a person who stays across
+  consecutive follow-up frames.
+- [x] `scorer.alert_vehicles`: a vehicle side alert with its own cooldown on the live and
+  sampler paths.
+- [x] `tools/replay_zones.py` to draw and check zones and loitering settings offline.
+- [ ] Trial each on one fixed camera and review the alerts it adds or drops before
+  recommending a default; the vehicle threshold of 0.5 is an untested estimate.
+- [ ] Vehicle alerts on the SD-card follow-up path (not covered today).
+
 ### 10.11 — Network evidence for transient outages
 
 - [x] Add independent, low-rate network history with 30-day retention and a 64 MiB
