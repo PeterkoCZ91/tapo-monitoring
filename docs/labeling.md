@@ -170,6 +170,14 @@ only of the part of the sample that has been labeled; the raw `person` / `decide
 counts next to them are what was actually seen. A label whose frame has no `verdict`
 (an older dataset) counts as `unknown`.
 
+### Renamed cameras
+
+A camera that was renamed (new host, new name) shows up in the index as two cameras.
+`label-stats --camera-alias camera-a=camera-b` (repeatable) counts the records of
+`camera-a` under `camera-b` in every table: per camera, per incident, day/night. Without
+the option nothing changes. It is a CLI option only; `--config` does not read aliases, and
+the night split looks the camera up in the config under its new name.
+
 ### Day and night
 
 ```bash

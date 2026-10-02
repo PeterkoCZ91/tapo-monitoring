@@ -5,6 +5,8 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `tapo-monitor label-stats --camera-alias OLD=NEW` (repeatable): counts the records of a
+  renamed camera under its new name in the per-camera, incident and day/night tables.
 - `docs/measurements.md`: anonymized accuracy, miss, first-alert latency and replay figures from
   one real deployment, with their limits and the commands to reproduce them.
 - `scorer.lens_ignore_zones` (off by default): `ignore_zones` per lens of a dual-lens camera

@@ -1062,3 +1062,39 @@ def test_label_cli_lang_option(dataset, monkeypatch):
                         lambda session, port, bind: seen.update(lang=session.lang) or 0)
     assert cli.main(["label", dataset]) == 0 and seen["lang"] == "en"
     assert cli.main(["label", dataset, "--lang", "cs"]) == 0 and seen["lang"] == "cs"
+
+
+# ── camera aliases ───────────────────────────────────────────────────────────
+def test_camera_alias_merges_renamed_camera_in_every_table(day_night_dataset):
+    night = labeling.night_classifier(_night_app(), is_night=_site_night)
+    plain = labeling.compute_stats(day_night_dataset, night=night)
+    assert "yard" in plain["cameras"]
+    stats = labeling.compute_stats(day_night_dataset, night=night, aliases={"yard": "front"})
+    assert "yard" not in stats["cameras"]
+    assert stats["cameras"]["front"]["counts"]["total"] == (
+        plain["cameras"]["front"]["counts"]["total"] + plain["cameras"]["yard"]["counts"]["total"])
+    by_part = stats["day_night"]["cameras"]
+    assert "yard" not in by_part
+    assert by_part["front"]["night"]["counts"]["total"] == 2     # front_night, yard_night
+    assert by_part["front"]["day"]["counts"]["total"] == 2       # front_day, yard_day
+    inc = stats["incidents"]["cameras"]
+    assert "yard" not in inc and "front" in inc
+    assert stats["counts"] == plain["counts"]                    # nothing lost or added
+
+
+def test_camera_alias_reaches_night_classifier_under_the_new_name(day_night_dataset):
+    # "yard" is not in the config; aliased to "porch" it follows porch's always_night.
+    night = labeling.night_classifier(_night_app(), is_night=_site_night)
+    stats = labeling.compute_stats(day_night_dataset, night=night, aliases={"yard": "porch"})
+    assert stats["day_night"]["cameras"]["porch"]["night"]["counts"]["total"] == 3
+    assert stats["day_night"]["cameras"]["porch"]["day"]["counts"]["total"] == 0
+
+
+def test_label_stats_cli_camera_alias(day_night_dataset, capsys):
+    from tapo_monitor import cli
+    assert cli.main(["label-stats", day_night_dataset, "--json",
+                     "--camera-alias", "yard=front"]) == 0
+    assert "yard" not in json.loads(capsys.readouterr().out)["cameras"]
+    assert cli.main(["label-stats", day_night_dataset, "--json"]) == 0
+    assert "yard" in json.loads(capsys.readouterr().out)["cameras"]    # unchanged without it
+    assert cli.main(["label-stats", day_night_dataset, "--camera-alias", "nonsense"]) == 2

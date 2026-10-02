@@ -522,17 +522,36 @@ def night_classifier(app, *, is_night=None):
     return night
 
 
-def compute_stats(dataset_dir, *, night=None):
+def parse_camera_aliases(items):
+    """``["OLD=NEW", ...]`` -> ``{"OLD": "NEW"}``; ValueError on a malformed item."""
+    aliases = {}
+    for item in items or ():
+        old, sep, new = str(item).partition("=")
+        old, new = old.strip(), new.strip()
+        if not sep or not old or not new:
+            raise ValueError(f"camera alias {item!r}: expected OLD=NEW")
+        aliases[old] = new
+    return aliases
+
+
+def _aliased(camera, aliases):
+    return aliases.get(camera, camera) if aliases and camera else camera
+
+
+def compute_stats(dataset_dir, *, night=None, aliases=None):
     """Label counts, false-alarm and miss estimates, per band/camera, best threshold.
 
     Review frames are also split by their index ``verdict`` (hold / drop). With
     ``night(camera, ts) -> bool`` (see :func:`night_classifier`) a ``day_night`` section
     repeats the summary and best threshold for day, night and frames without a time,
-    and per camera for day and night.
+    and per camera for day and night. ``aliases`` (``{old: new}``) counts the records of a
+    renamed camera under its new name in every table.
     """
     records = list(latest_labels(dataset_dir).values())
     meta = index_meta(dataset_dir)
     for rec in records:
+        if aliases and rec.get("camera"):
+            rec["camera"] = _aliased(str(rec["camera"]), aliases)
         rec["score"] = _number(rec.get("score"))
         # A label line carries no time or verdict; its frame's index record does.
         known = meta.get(rec.get("path"))
@@ -563,7 +582,7 @@ def compute_stats(dataset_dir, *, night=None):
         parts["min_support"] = {"decided": MIN_SUPPORT_DECIDED,
                                 "per_class": MIN_SUPPORT_PER_CLASS}
         stats["day_night"] = parts
-    stats["incidents"] = incident_stats(dataset_dir, night=night)
+    stats["incidents"] = incident_stats(dataset_dir, night=night, aliases=aliases)
     return stats
 
 
@@ -612,7 +631,7 @@ def caption_start(caption, ts):
     return start if 0 <= ts - start <= CAPTION_START_MAX_AGE else None
 
 
-def incident_frames(dataset_dir, labels=None):
+def incident_frames(dataset_dir, labels=None, aliases=None):
     """Every indexed frame as a dict for :func:`group_incidents`, labeled or not. Read-only.
 
     ``host`` is the directory holding the host's logs (``<host>/sent-log/index.jsonl``).
@@ -621,7 +640,8 @@ def incident_frames(dataset_dir, labels=None):
     no hashing, so it stays cheap enough for every ``/stats`` request. A sent record
     without ``delivered`` counts as delivered: the sent log writes False only when
     delivery failed. ``send_path`` is the delivery path a sent record names (its index
-    ``path``), else None.
+    ``path``), else None. ``aliases`` (``{old: new}``) renames cameras before the
+    host's single camera is inferred.
     """
     labels = labels or {}
     frames = []
@@ -631,7 +651,7 @@ def incident_frames(dataset_dir, labels=None):
         ts = _number(record.get("ts"))
         frames.append({
             "path": rel, "host": "/".join(rel.split("/")[:-2]),
-            "camera": str(camera) if camera else None,
+            "camera": _aliased(str(camera), aliases) if camera else None,
             "ts": ts,
             "incident": str(ident) if ident else None,
             "event_start": _number(record.get("event_start")),
@@ -835,7 +855,7 @@ def _daypart(night, inc):
     return "night" if night(inc["camera"], inc["start"]) else "day"
 
 
-def incident_stats(dataset_dir, *, night=None, gap=INCIDENT_GAP):
+def incident_stats(dataset_dir, *, night=None, gap=INCIDENT_GAP, aliases=None):
     """Quality per incident rather than per frame: the ``incidents`` stats section.
 
     Every indexed frame counts, labeled or not (a delivery matters even when nobody
@@ -844,7 +864,7 @@ def incident_stats(dataset_dir, *, night=None, gap=INCIDENT_GAP):
     the missed person incidents themselves.
     """
     labels = {rec.get("path"): rec["label"] for rec in latest_labels(dataset_dir).values()}
-    frames = incident_frames(dataset_dir, labels)
+    frames = incident_frames(dataset_dir, labels, aliases)
     incidents = [summarize_incident(inc) for inc in group_incidents(frames, gap)]
     result = {"gap_seconds": gap, "frames": len(frames), "all": _incident_block(incidents)}
     cameras = sorted({_camera(i) for i in incidents})
@@ -1471,15 +1491,23 @@ def stats_main(argv):
     parser.add_argument("dataset_dir")
     parser.add_argument("--json", action="store_true", dest="json_output")
     parser.add_argument("--config", help=CONFIG_HELP)
+    parser.add_argument("--camera-alias", action="append", default=[], metavar="OLD=NEW",
+                        help="count the records of camera OLD (renamed) under NEW in every "
+                             "table; repeatable")
     args = parser.parse_args(argv)
     if not _dataset_ok(parser.prog, args.dataset_dir):
+        return 2
+    try:
+        aliases = parse_camera_aliases(args.camera_alias)
+    except ValueError as exc:
+        print(f"{parser.prog}: {exc}", file=sys.stderr)
         return 2
     night = None
     if args.config:
         night = _night_from_config(parser.prog, args.config)
         if night is None:
             return 1
-    stats = compute_stats(args.dataset_dir, night=night)
+    stats = compute_stats(args.dataset_dir, night=night, aliases=aliases)
     if args.json_output:
         print(json.dumps(stats, sort_keys=True))
     else:
