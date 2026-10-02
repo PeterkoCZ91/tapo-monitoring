@@ -126,6 +126,10 @@ def load_state(path, state, logger=None):
         with open(path, encoding="utf-8") as fh:
             payload = json.load(fh)
         restore(state, payload)
+        hosts = payload.get("active_hosts")
+        if isinstance(hosts, dict) and hasattr(state, "active_hosts"):
+            state.active_hosts.update({k: v for k, v in hosts.items()
+                                       if isinstance(k, str) and isinstance(v, str)})
         return True
     except FileNotFoundError:
         return False
@@ -144,8 +148,12 @@ def save_state(path, state, logger=None):
         fd, temp_path = tempfile.mkstemp(prefix=".health-", dir=directory, text=True)
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            payload = {"version": SCHEMA_VERSION, "state": snapshot(state)}
+            hosts = getattr(state, "active_hosts", None)
+            if hosts:     # only a camera that failed over adds this key
+                payload["active_hosts"] = {str(k): str(v) for k, v in hosts.items()}
             json.dump(
-                {"version": SCHEMA_VERSION, "state": snapshot(state)},
+                payload,
                 fh,
                 sort_keys=True,
                 separators=(",", ":"),

@@ -157,12 +157,48 @@ authentication pressure without improving event latency.
 
 ## Camera fields
 
+### Host failover (optional)
+
+`host` may be a list of candidate addresses for a camera that can show up on another
+network (a different router or subnet); a plain string behaves exactly as before.
+
+```yaml
+cameras:
+  - name: yard
+    host: ["203.0.113.10", "198.51.100.20"]
+```
+
+The first entry is the primary. The monitor keeps one active address per camera and every
+component reads it from one place (`camera.active_host`): the pytapo session, RTSP,
+ONVIF, ping, the SD download and the scene probe.
+
+- Trigger: the existing per-pass ping. After two consecutive failed passes the other
+  candidates are tried in order with a plain TCP connect to the API port (443); no extra
+  ping loop. The first that answers becomes active.
+- The pytapo session is closed and reopened on the new address (still one session), and
+  the ONVIF pan-guard client is rebuilt.
+- Identity: the camera's MAC is learned once from `getBasicInfo` after the first login.
+  After a switch the MAC at the new address must match; a different device is refused,
+  the old address is restored and the candidate is not retried for ten minutes. If no MAC
+  could be read (nothing learned yet, e.g. the camera was never up since the start, or the
+  call failed) the switch is kept and logged as `unverified`. Limits: all candidates must
+  accept the same credentials, and TCP on 443 only proves that something answers.
+- Visibility: one `host switch` warning (with the addresses, journal only) and one
+  `audit ... action=host_switch host_index=N` line (index, never an address). `/status`
+  shows `host_index` for such cameras. The choice is saved in the health state file and
+  restored on restart if it is still in the list.
+- Not covered: the recorder paths (`RECORDING_ROOT/<host>`, outage clip preserver, shadow
+  scan) keep using the first configured `host`; the CLI commands (`report`, `twin` probes)
+  connect to the first address; MQTT and `hub_host` are separate settings. The camera
+  never switches back on its own: to go back to the primary, take the failed-over address
+  out of the list and restart (a saved choice that is still listed is restored).
+
 ### Identity and role
 
 | Field | Values | Notes |
 | --- | --- | --- |
 | `name` | short unique string | Used in logs, state and notifications. Required. |
-| `host` | LAN address/DNS name | Required; keep real values private. |
+| `host` | LAN address/DNS name, or a list of them | Required; keep real values private. A list turns on [host failover](#host-failover-optional). |
 | `role` | `tracking`, `static` | Tracking cameras follow policy; static cameras stay parked at `day_preset`, re-asserted every control tick. |
 | `schedule` | `astral`, `always_night`, `always_day` | Controls day/night plan selection. |
 | `night_only` | boolean | Drains events but suppresses all Telegram traffic during daytime. |

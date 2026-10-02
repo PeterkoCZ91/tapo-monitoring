@@ -7,6 +7,11 @@ All notable changes to this project are documented here.
 ### Added
 - `tapo-monitor label-stats --camera-alias OLD=NEW` (repeatable): counts the records of a
   renamed camera under its new name in the per-camera, incident and day/night tables.
+- `host` may be a list of candidate addresses (off by default; a string works as before).
+  After two failed ping passes the monitor tries the other candidates with a TCP connect to
+  the API port, switches to the first that answers as the same camera (MAC from
+  `getBasicInfo`, learned once), reopens the Tapo session on it, and logs the switch once
+  with an audit line. The active address is read through a single `camera.active_host`.
 - `docs/measurements.md`: anonymized accuracy, miss, first-alert latency and replay figures from
   one real deployment, with their limits and the commands to reproduce them.
 - `scorer.lens_ignore_zones` (off by default): `ignore_zones` per lens of a dual-lens camera

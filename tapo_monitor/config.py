@@ -200,6 +200,12 @@ class CoordinatorConfig:
 class CameraConfig:
     name: str
     host: str
+    # Opt-in failover candidates (``host:`` given as a list): ``host`` stays the first
+    # one, ``hosts`` holds all of them, empty for the usual scalar. ``active_host`` is the
+    # address currently in use; set only at runtime, read through ``camera.active_host``.
+    hosts: tuple[str, ...] = ()
+    active_host: str | None = field(default=None, repr=False, compare=False,
+                                    metadata={"runtime_only": True})
     role: str = "tracking"
     schedule: str = "astral"
     # Names of env vars holding the camera credentials (never the secrets themselves).
@@ -509,6 +515,23 @@ def _require(mapping, key, where):
     return mapping[key]
 
 
+def _hosts(value, where):
+    """``(primary, candidates)`` from a scalar ``host`` or a list of candidates.
+
+    A scalar gives ``(host, ())`` and behaves exactly as before; a list gives its first
+    entry as the primary and every entry as a candidate (see ``camera.active_host``).
+    """
+    if isinstance(value, str):
+        return value, ()
+    if (isinstance(value, list) and value
+            and all(isinstance(h, str) and h.strip() for h in value)):
+        hosts = tuple(h.strip() for h in value)
+        if len(set(hosts)) != len(hosts):
+            raise ConfigError(f"{where}: 'host' lists the same address twice")
+        return hosts[0], hosts
+    raise ConfigError(f"{where}: 'host' must be an address or a non-empty list of addresses")
+
+
 def _check_enum(value, allowed, key, where):
     if value not in allowed:
         opts = ", ".join(sorted(allowed))
@@ -534,7 +557,8 @@ def _check_subset(values, allowed, key, where):
 
 def _field_names(cls):
     """The set of keys a section's dataclass actually reads — never a hand-kept list."""
-    return frozenset(f.name for f in fields(cls))
+    return frozenset(f.name for f in fields(cls)
+                     if not f.metadata.get("runtime_only"))
 
 
 # Renamed keys, ``{old_path: new_path}``. Paths use ``cameras[]`` for any camera index
@@ -1063,7 +1087,7 @@ def _camera(data, index):
     data = _check_keys(data, CameraConfig, f"cameras[{index}]")
     name = _require(data, "name", f"cameras[{index}]")
     where = f"camera {name!r}"
-    host = _require(data, "host", where)
+    host, hosts = _hosts(_require(data, "host", where), where)
     role = _check_enum(data.get("role", "tracking"), ROLES, "role", where)
     schedule = _check_enum(data.get("schedule", "astral"), SCHEDULES, "schedule", where)
     coord = data.get("coordinator") or {}
@@ -1269,6 +1293,7 @@ def _camera(data, index):
     return CameraConfig(
         name=name,
         host=host,
+        hosts=hosts,
         role=role,
         schedule=schedule,
         user_env=data.get("user_env"),

@@ -20,7 +20,7 @@ import os
 import sys
 import time
 
-from . import config, detection, scorer, sentlog, snapshot
+from . import camera, config, detection, scorer, sentlog, snapshot
 from .config import resolve_rtsp_credentials
 
 log = logging.getLogger(__name__)
@@ -150,7 +150,8 @@ def run(config, names, *, capture, score, archive_dir=None, now=None,
 
 def _real_capture(cfg):
     user, password = resolve_rtsp_credentials(cfg)
-    url = snapshot.rtsp_url(cfg.host, user, password, stream=cfg.rtsp_stream, port=cfg.rtsp_port)
+    url = snapshot.rtsp_url(camera.active_host(cfg), user, password, stream=cfg.rtsp_stream,
+                            port=cfg.rtsp_port)
     # Same rotation as the detection pipeline: a probe of a mis-mounted camera must score
     # the upright frame the daemon would score, not an upside-down one.
     return (snapshot.capture_rtsp(url, timeout=cfg.rtsp_timeout, rotate=cfg.rotate)

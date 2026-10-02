@@ -15,6 +15,7 @@ tests — import without the dependency present.
 """
 
 import logging
+import socket
 import subprocess
 import time as _time
 
@@ -49,6 +50,79 @@ def ping_reachable(host, timeout=1, run=subprocess.run):
     except (OSError, subprocess.TimeoutExpired):
         return False
     return result.returncode == 0
+
+
+API_PORT = 443
+
+
+def candidate_hosts(cfg):
+    """Every address the camera may live at: the configured list, or just ``cfg.host``."""
+    return tuple(getattr(cfg, "hosts", ()) or (cfg.host,))
+
+
+def active_host(cfg):
+    """The one address to use for this camera right now.
+
+    The single read point for the camera's address (pytapo, RTSP, ONVIF, ping, the SD
+    download, the scene probe): ``cfg.host`` is the configured primary, and a camera whose
+    ``host`` is a list may have failed over to another candidate at runtime.
+    """
+    return getattr(cfg, "active_host", None) or cfg.host
+
+
+def host_index(cfg):
+    """Position of the active address among the candidates (0 = the first/configured)."""
+    try:
+        return candidate_hosts(cfg).index(active_host(cfg))
+    except (ValueError, AttributeError):
+        return 0
+
+
+def set_active_host(cfg, host):
+    """Make ``host`` (one of the candidates) the address in use. Raises ValueError else."""
+    if host not in candidate_hosts(cfg):
+        raise ValueError(f"{host!r} is not a candidate host of camera {cfg.name!r}")
+    cfg.active_host = host
+
+
+def tcp_reachable(host, port=API_PORT, timeout=2, connect=socket.create_connection):
+    """True when a TCP connection to ``host:port`` opens. No login, no payload."""
+    try:
+        sock = connect((host, port), timeout=timeout)
+    except OSError:
+        return False
+    try:
+        sock.close()
+    except OSError:
+        pass
+    return True
+
+
+def find_alternate_host(cfg, connect=socket.create_connection, skip=()):
+    """The first candidate other than the active one that accepts a TCP connection on the
+    camera API port, or None. ``skip`` lists candidates already rejected. Whether it is the
+    same camera is the caller's question (see :func:`device_identity`)."""
+    current = active_host(cfg)
+    for host in candidate_hosts(cfg):
+        if host == current or host in skip:
+            continue
+        if tcp_reachable(host, connect=connect):
+            return host
+    return None
+
+
+def device_identity(client):
+    """The camera's MAC from one ``getBasicInfo`` call, or None when it cannot be read.
+
+    Not a secret, kept in memory only. It is the only identity a TCP answer cannot fake.
+    """
+    try:
+        info = client.getBasicInfo()
+        mac = info["device_info"]["basic_info"]["mac"]
+    except Exception:  # noqa: BLE001 - any failure just means "unverified"
+        return None
+    mac = str(mac).strip().upper().replace(":", "-")
+    return mac or None
 
 
 def tapo_factory(host, user, password, cloud_password=None):

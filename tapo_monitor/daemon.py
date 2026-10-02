@@ -902,6 +902,7 @@ class MonitorState:
     ``total_observed_offline`` accumulated completed offline intervals.
     ``network_reachable`` latest unauthenticated ICMP observation per camera.
     ``network_fails``     consecutive failed ICMP observations per camera.
+    ``active_hosts``      failed-over address per camera (persisted in the health file).
     ``connect_fails``     consecutive API failures per camera (drives auth backoff).
     ``connect_backoff_until`` earliest time we may try connecting again per camera.
     ``health_path``       optional durable health-state path used by the daemon.
@@ -928,6 +929,12 @@ class MonitorState:
     total_observed_offline: dict = field(default_factory=dict)
     network_reachable: dict = field(default_factory=dict)
     network_fails: dict = field(default_factory=dict)
+    # Opt-in host failover (``host:`` as a list). ``active_hosts`` is the persisted choice
+    # per camera, ``host_identity`` the camera's MAC (memory only) and ``failover_rejected``
+    # the candidates that answered TCP but turned out to be another device.
+    active_hosts: dict = field(default_factory=dict)
+    host_identity: dict = field(default_factory=dict)
+    failover_rejected: dict = field(default_factory=dict)
     connect_fails: dict = field(default_factory=dict)
     connect_backoff_until: dict = field(default_factory=dict)
     health_path: str | None = None
@@ -1157,7 +1164,8 @@ def _default_snapshot(cfg: CameraConfig, stream=None, recorder_fallback=False):
 
     def grab():
         url = snapshot.rtsp_url(
-            cfg.host, user, password, stream=stream or cfg.rtsp_stream, port=cfg.rtsp_port
+            camera.active_host(cfg), user, password, stream=stream or cfg.rtsp_stream,
+            port=cfg.rtsp_port
         )
         native_grab = cfg.crop_to_subject and cfg.crop_from_native
         image = snapshot.capture_rtsp(url, timeout=cfg.rtsp_timeout, rotate=cfg.rotate,
@@ -4335,7 +4343,7 @@ def _archive_panlimit_frame(cfg, axis, value, *, now):
         return
     try:
         user, password = resolve_rtsp_credentials(cfg)
-        url = snapshot.rtsp_url(cfg.host, user, password,
+        url = snapshot.rtsp_url(camera.active_host(cfg), user, password,
                                 stream=cfg.rtsp_stream, port=cfg.rtsp_port)
         image = snapshot.capture_rtsp(url, timeout=cfg.rtsp_timeout, rotate=cfg.rotate)
         if not image:
@@ -4382,10 +4390,15 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
             g.pop("out_since", None)
             continue
         try:
+            if g.get("ptz_host") not in (None, camera.active_host(cfg)):
+                # The camera moved to another address: the ONVIF client points at the old one.
+                for key in ("ptz", "token", "bounds", "tilt_bounds"):
+                    g.pop(key, None)
             if "ptz" not in g:
+                g["ptz_host"] = camera.active_host(cfg)
                 user = os.getenv(pl.onvif_user_env or "", "")
                 password = os.getenv(pl.onvif_password_env or "", "")
-                g["ptz"], g["token"] = panlimit.build_ptz(cfg.host, pl.onvif_port, user, password)
+                g["ptz"], g["token"] = panlimit.build_ptz(g["ptz_host"], pl.onvif_port, user, password)
                 g["bounds"] = panlimit.read_preset_bounds(g["ptz"], g["token"])
                 log.info("pan_limit %s: preset bounds %s", cfg.name, g["bounds"])
                 if pl.tilt:
@@ -4767,6 +4780,7 @@ def main(argv=None):  # pragma: no cover - thin entry point
         state.hub_inactive_path, _time.time(), logger=log, max_age=math.inf)
     state.health_path = health.default_state_path()
     restored = health.load_state(state.health_path, state, logger=log)
+    apply_active_hosts(app.cameras, state)
     state.runtime_path = runtime_state.default_path()
     carried = runtime_state.load(state.runtime_path, state, _time.time(), logger=log)
     state.runtime_restored = dict(carried)
@@ -5050,12 +5064,84 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
         health.save_state(state.health_path, state, logger=log)
 
 
+# Consecutive failed pings (one per control pass) before another host candidate is tried.
+FAILOVER_AFTER_FAILS = 2
+# A candidate that answered TCP but is another device is not retried for this long.
+FAILOVER_REJECT_SECONDS = 600
+
+
+def apply_active_hosts(cameras, state):
+    """Restore each camera's persisted active address, if it is still a candidate."""
+    for cfg in cameras:
+        host = state.active_hosts.get(cfg.name)
+        if host and host in camera.candidate_hosts(cfg):
+            cfg.active_host = host
+
+
+def _fail_over(cfg, state, cam_clients, now):
+    """Switch ``cfg`` to another candidate that answers TCP. Returns the old host or None.
+
+    The camera stays "unreachable" for the outage logic until the login on the new address
+    succeeds and its MAC matches (see :func:`_confirm_switch`).
+    """
+    name = cfg.name
+    rejected = {h for h, until in state.failover_rejected.get(name, {}).items() if until > now}
+    new = camera.find_alternate_host(cfg, skip=rejected)
+    if new is None:
+        return None
+    old = camera.active_host(cfg)
+    camera.set_active_host(cfg, new)
+    stale = cam_clients.pop(name, None)
+    if stale is not None:
+        camera.close_client(stale)       # one pytapo session: close it before reopening
+    return old
+
+
+def _confirm_switch(cfg, state, client, old, now):
+    """After a login on a new address: keep the switch if it is the same camera.
+
+    Returns True when kept. The MAC learned from the previous address is compared with the
+    new one; if either is unknown the switch is kept and logged as unverified.
+    """
+    name = cfg.name
+    new = camera.active_host(cfg)
+    known = state.host_identity.get(name)
+    seen = camera.device_identity(client)
+    if known and seen and known != seen:
+        camera.set_active_host(cfg, old)
+        state.failover_rejected.setdefault(name, {})[new] = now + FAILOVER_REJECT_SECONDS
+        camera.close_client(client)
+        log.warning("host switch %s -> %s refused: that address is a different device",
+                    old, new)
+        return False
+    if known and seen:
+        verified = "verified by MAC"
+    else:
+        verified = "unverified (no MAC to compare)"
+        if seen:
+            state.host_identity[name] = seen
+    state.active_hosts[name] = new
+    index = camera.candidate_hosts(cfg).index(new)
+    log.warning("host switch %s: %s -> %s (%s)", name, old, new, verified)
+    log.info("audit camera=%s path=network action=host_switch etype=system start=%s "
+             "reason=unreachable host_index=%d identity=%s",
+             name, int(now), index, "mac" if known and seen else "unverified")
+    if state.health_path:
+        health.save_state(state.health_path, state, logger=log)
+    return True
+
+
 def _connect_camera(cam_clients, state=None, now=None):
     """Return a connect(cfg) that builds a pytapo client and caches it for the monitor pass.
 
     A cheap ping separates a disconnected camera from an API or authentication failure.
     Offline devices never reach the login path. Ping runs on every control pass, including
     while API login is backed off, so physical availability remains independently visible.
+
+    A camera configured with several ``host`` candidates that stays unreachable for
+    ``FAILOVER_AFTER_FAILS`` passes is moved to the first other candidate that answers on
+    the API port and proves to be the same device. Every address comes from
+    ``camera.active_host``.
     """
     from . import camera
 
@@ -5065,7 +5151,12 @@ def _connect_camera(cam_clients, state=None, now=None):
             # A hubpoll-only camera has no stok login to make and sleeps through the ping;
             # spending a control pass on both every minute buys nothing.
             return None, "hubpoll"
-        reachable = camera.ping_reachable(cfg.host)
+        reachable = camera.ping_reachable(camera.active_host(cfg))
+        switched_from = None
+        if (not reachable and state is not None and len(camera.candidate_hosts(cfg)) > 1
+                and state.network_fails.get(name, 0) + 1 >= FAILOVER_AFTER_FAILS):
+            switched_from = _fail_over(cfg, state, cam_clients, now if now is not None else 0)
+            reachable = switched_from is not None
         if state is not None:
             was_reachable = state.network_reachable.get(name)
             state.network_reachable[name] = reachable
@@ -5086,8 +5177,24 @@ def _connect_camera(cam_clients, state=None, now=None):
                 return None, "backoff"
 
         user, password, cloud = resolve_camera_credentials(cfg)
-        factory = camera.tapo_factory(cfg.host, user, password, cloud)
+        factory = camera.tapo_factory(camera.active_host(cfg), user, password, cloud)
         client, err = camera.connect(factory)
+        if client is not None and state is not None and len(camera.candidate_hosts(cfg)) > 1:
+            if switched_from is not None:
+                if not _confirm_switch(cfg, state, client, switched_from, now or 0):
+                    state.network_reachable[name] = False
+                    return None, ConnectionError("candidate host is a different device")
+            elif name not in state.host_identity:
+                identity = camera.device_identity(client)
+                if identity:
+                    state.host_identity[name] = identity
+        elif switched_from is not None and client is None:
+            # The new address answers TCP but the login failed: do not keep a half switch.
+            tried = camera.active_host(cfg)
+            camera.set_active_host(cfg, switched_from)
+            state.failover_rejected.setdefault(name, {})[tried] = (
+                (now or 0) + FAILOVER_REJECT_SECONDS)
+            state.network_reachable[name] = False
         if state is not None:
             if client is not None:
                 fails = state.connect_fails.pop(name, 0)

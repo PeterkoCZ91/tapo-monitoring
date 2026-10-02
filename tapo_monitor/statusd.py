@@ -27,6 +27,8 @@ import time
 from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import camera as camera_hosts
+
 log = logging.getLogger(__name__)
 
 
@@ -58,6 +60,9 @@ def state_view(app, state):
             "probed_at": probed_at,
             "motion_refusals": dict(state.motion_refusals.get(cfg.name, {})),
         }
+        if len(camera_hosts.candidate_hosts(cfg)) > 1:
+            # Which ``host`` candidate is in use (0 = the first); never the address itself.
+            cameras[cfg.name]["host_index"] = camera_hosts.host_index(cfg)
     return copy.deepcopy({"tick": {"ok": state.last_tick_ok, "at": state.last_tick_at},
                           "cameras": cameras})
 

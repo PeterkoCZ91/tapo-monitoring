@@ -27,7 +27,7 @@ import sys
 import threading
 import time as _time
 
-from . import apiguard, snapshot
+from . import apiguard, camera, snapshot
 
 log = logging.getLogger(__name__)
 
@@ -483,7 +483,7 @@ def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
     if timeout is None:
         timeout = download_timeout(span)
     argv = [python, "-m", "tapo_monitor.sdclip", "download",
-            cfg.host, cfg.user_env or "", cfg.password_env or "",
+            camera.active_host(cfg), cfg.user_env or "", cfg.password_env or "",
             cfg.cloud_password_env or "", str(int(start_time)), out_dir,
             str(int(span)), str(int(every)), str(int(getattr(cfg, "rotate", 0)))]
     if dense:
