@@ -782,3 +782,149 @@ def test_fleet_lines_name_a_hub_that_never_answered_since_start():
     })
     text = "\n".join(lines)
     assert "not checked yet: gate (hub has not answered since start)" in text
+
+
+def _control_snapshot(control, repairs=None):
+    return {"cameras": {"front": {"reachable": True, "events": True,
+                                   "control_health": control}},
+            "repairs": repairs or {}}
+
+
+def test_recovered_control_keeps_historic_refusals_out_of_degraded_headline():
+    health = _control_snapshot({"status": "ok", "drift": 0, "age_s": 20,
+                                "max_age_s": 600}, {"person_detection": 1})
+    lines = reviewdigest.fleet_lines(health)
+    assert "Fleet OK" in lines[0]
+    assert "self-heal refused since start: person_detection 1×" in "\n".join(lines)
+
+
+def test_current_control_failure_is_degraded_without_refusal_counter():
+    lines = reviewdigest.fleet_lines(_control_snapshot(
+        {"status": "ok", "drift": 1, "age_s": 20, "max_age_s": 600}))
+    assert "Fleet degraded" in lines[0]
+    assert "front control drift" in lines[0]
+
+
+def test_missing_or_stale_control_never_claims_fleet_ok():
+    for control in (None, {}, {"status": "ok", "drift": 0, "age_s": 601,
+                              "max_age_s": 600}):
+        lines = reviewdigest.fleet_lines(_control_snapshot(control))
+        assert "Fleet unknown" in lines[0]
+        assert "Fleet OK" not in lines[0]
+
+
+def test_legacy_refusals_are_history_with_unknown_current_control():
+    lines = reviewdigest.fleet_lines({
+        "cameras": {"front": {"reachable": True}}, "repairs": {"person_detection": 1}})
+    assert "Fleet unknown" in lines[0]
+    assert "since start" in "\n".join(lines)
+
+
+def _network_summary(now=1000):
+    return {"at": now, "window_hours": 24, "targets": [{
+        "name": "camera", "probes": 10, "probe_errors": 1, "sent": 45,
+        "received": 40, "loss_pct": 11.1, "avg_ms": 20, "p95_ms": 80,
+        "jitter_ms": 9, "coverage_pct": 1.4, "measurement_age_s": 30,
+        "worst_hour": {"at": 0, "probes": 4, "loss_pct": 25}}]}
+
+
+def test_network_digest_exposes_coverage_loss_and_worst_partial_hour(tmp_path):
+    path = tmp_path / "summary.json"
+    path.write_text(json.dumps(_network_summary()))
+    text = "\n".join(reviewdigest.network_context_lines(1030, path=path))
+    assert "ICMP 24h camera" in text
+    assert "40/45" in text and "11.1%" in text
+    assert "coverage 1.4%" in text and "10 probes" in text
+    assert "worst UTC hour 25.0% / 4 probes" in text
+    assert "1 probe errors" in text
+
+
+def test_network_digest_stale_and_invalid_cache_are_unknown(tmp_path):
+    path = tmp_path / "summary.json"
+    path.write_text(json.dumps(_network_summary()))
+    assert "stale" in " ".join(reviewdigest.network_context_lines(2000, path=path))
+    path.write_text('{"at": NaN}')
+    assert "unavailable" in " ".join(reviewdigest.network_context_lines(1030, path=path))
+    path.write_text("x" * (256 * 1024 + 1))
+    assert "unavailable" in " ".join(reviewdigest.network_context_lines(1030, path=path))
+    assert reviewdigest.network_context_lines(1030, path=tmp_path / "absent") == []
+
+
+def test_network_digest_does_not_treat_errors_as_packet_loss(tmp_path):
+    data = _network_summary()
+    data["targets"][0].update(sent=0, received=0, loss_pct=None,
+                              avg_ms=None, p95_ms=None, jitter_ms=None,
+                              worst_hour=None, measurement_age_s=None)
+    path = tmp_path / "summary.json"
+    path.write_text(json.dumps(data))
+    text = " ".join(reviewdigest.network_context_lines(1030, path=path))
+    assert "loss unknown" in text
+    assert "100.0%" not in text
+
+
+def test_fresh_control_error_and_drift_are_current_degradation():
+    for status, drift in (("failed", 0), ("unknown", 1)):
+        lines = reviewdigest.fleet_lines(_control_snapshot({
+            "status": status, "drift": drift, "age_s": 10, "max_age_s": 600}))
+        assert "Fleet degraded" in lines[0]
+
+
+def test_network_digest_fresh_cache_does_not_hide_stale_measurements(tmp_path):
+    data = _network_summary()
+    data["targets"][0]["measurement_age_s"] = 700
+    path = tmp_path / "summary.json"
+    path.write_text(json.dumps(data))
+    assert "last measurement stale" in " ".join(
+        reviewdigest.network_context_lines(1030, path=path))
+
+
+def test_network_digest_limits_text_and_rejects_invalid_counters(tmp_path):
+    path = tmp_path / "summary.json"
+    data = _network_summary()
+    data["targets"] *= 16
+    path.write_text(json.dumps(data))
+    lines = reviewdigest.network_context_lines(1030, path=path)
+    assert len("\n".join(lines)) < 1900
+    assert "omitted" in lines[-1]
+    data["targets"][0]["received"] = 100
+    path.write_text(json.dumps(data))
+    assert "unavailable" in " ".join(reviewdigest.network_context_lines(1030, path=path))
+
+
+def test_run_if_due_renders_cached_icmp_under_current_health(tmp_path, monkeypatch):
+    now = _local_ts(2026, 8, 13, 21, 0)
+    cache = tmp_path / "network.json"
+    cache.write_text(json.dumps(_network_summary(now)))
+    reader = reviewdigest.network_context_lines
+    calls = []
+    def cached(at):
+        calls.append(at)
+        return reader(at, path=cache)
+    monkeypatch.setattr(reviewdigest, "network_context_lines", cached)
+    review = tmp_path / "review"
+    review.mkdir()
+    texts = []
+    assert reviewdigest.run_if_due(
+        env={"TAPO_REVIEW_DIGEST_TIME": "20:45", sentlog.ENV_REVIEW_DIR: str(review)},
+        now=now, send_text=lambda text: texts.append(text) or True,
+        send_photo=lambda *args: True,
+        health=_control_snapshot({"status": "ok", "drift": 0, "age_s": 10,
+                                  "max_age_s": 600}))
+    assert calls == [now]
+    assert "Fleet OK" in texts[0]
+    assert "   ICMP 24h camera: loss 11.1%" in texts[0]
+
+
+def test_run_if_due_uses_configured_gateway_cache(tmp_path):
+    now = _local_ts(2026, 8, 13, 21, 0)
+    cache = tmp_path / 'gateway-summary.json'
+    cache.write_text(json.dumps(_network_summary(now)))
+    review = tmp_path / 'review'
+    review.mkdir()
+    texts = []
+    assert reviewdigest.run_if_due(
+        env={'TAPO_REVIEW_DIGEST_TIME': '20:45', sentlog.ENV_REVIEW_DIR: str(review),
+             'TAPO_NETWORK_SUMMARY_FILE': str(cache)},
+        now=now, send_text=lambda text: texts.append(text) or True,
+        send_photo=lambda *args: True)
+    assert 'ICMP 24h camera: loss 11.1%' in texts[0]

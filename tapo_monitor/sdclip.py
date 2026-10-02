@@ -495,11 +495,17 @@ def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
     if getattr(cfg, "sd_early_look", False) is True:
         argv.append("lookup_retry=1")
     started = _time.monotonic()
+    camera_name = getattr(cfg, "name", "camera")
+    log.info("SD transfer start %s: at=%.3f timeout=%ss", camera_name, _time.time(), timeout)
     try:
         proc = run(argv, capture_output=True, text=True, timeout=timeout)
     except Exception as exc:
+        log.info("SD transfer finish %s: at=%.3f elapsed=%.1fs outcome=%s",
+                 camera_name, _time.time(), _time.monotonic() - started, type(exc).__name__)
         log.warning("SD subprocess failed to run: %r", exc)
         return []
+    log.info("SD transfer finish %s: at=%.3f elapsed=%.1fs exit=%s",
+             camera_name, _time.time(), _time.monotonic() - started, proc.returncode)
     # DIAGNOSTIC (2026-06-22): the download subprocess swallowed its real failure into an
     # empty result, so the journal never showed *why* SD produced nothing. Log its exit
     # code + stderr tail whenever it yields no frames, so the next daytime person reveals

@@ -217,3 +217,34 @@ def test_summary_distinguishes_latest_attempt_from_latest_measurement(tmp_path):
     assert row["measurement_age_s"] == 100
     assert row["latest_error"] == "OSError"
     assert row["loss_pct"] == 50
+
+
+def test_worst_hour_is_weighted_and_coverage_includes_missing_history(tmp_path):
+    now = 1780002000 // 3600 * 3600
+    rows = [record(now - 7100, received=0), record(now - 6980, sent=10, received=10),
+            record(now - 3500, received=4)]
+    watch.append_records(tmp_path, rows, now=now)
+    row = watch.summary(tmp_path, 2, now=now)['targets'][0]
+    assert row['worst_hour']['sent'] == 15
+    assert row['worst_hour']['received'] == 10
+    assert row['worst_hour']['probes'] == 2
+    assert row['worst_hour']['loss_pct'] == pytest.approx(100 / 3)
+    assert row['coverage_pct'] == pytest.approx(5)
+
+
+def test_sample_writes_private_digest_cache_without_extra_probes(tmp_path, monkeypatch):
+    config = tmp_path / 'targets.json'
+    config.write_text(json.dumps({'default_gateway': False,
+                                 'targets': [{'name': 'hub', 'host': 'example.invalid'}]}))
+    calls = []
+    def probe(target):
+        calls.append(target)
+        return record(watch.time.time(), name=target['name'], host=target['host'])
+    monkeypatch.setattr(watch, 'probe', probe)
+    assert watch.sample(config, tmp_path / 'state', quiet=True) == 0
+    cache = tmp_path / 'state' / 'summary.json'
+    assert cache.stat().st_mode & 0o777 == 0o600
+    data = json.loads(cache.read_text())
+    assert data['window_hours'] == 24
+    assert data['targets'][0]['sent'] == 5
+    assert len(calls) == 1

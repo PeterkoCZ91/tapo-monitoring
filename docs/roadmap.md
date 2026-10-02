@@ -579,13 +579,13 @@ shadows. The generic detector has never seen this fleet's IR night scenes.
 
 ## Phase 10 — Incidents, not frames
 
-Status: **in progress** (10.1, 10.6 and 10.7 done; 10.3 disk telemetry shipped, retention
-follow-ups open; 10.2 and 10.5 in trials on one
+Status: **in progress** (10.1, 10.6 and 10.7 done; 10.3 disk telemetry and daily
+archive/ledger retention shipped, operator journal policies open; 10.2 and 10.5 in trials on one
 camera; 10.4: recording follow-ups 119 s -> 56 s and follow-ups off the main loop on the fleet,
 camera-card path and hub clips next; 10.8 done; 10.9 in a trial on one site; 10.10 in a
 trial on one camera since 2026-10-01; opt-in `sd_early_span`, `sd_frame_pick: tallest` and
-`lens_album` shipped, each awaiting its own trial; 10.11 network history shipped, digest
-integration planned)
+`lens_album` shipped, each awaiting its own trial; 10.11 network history and digest
+integration shipped)
 
 Frame statistics hide what matters to the person holding the phone: was each visit
 alerted, and how late. A first join of labels with deliveries showed that of 31 held
@@ -628,18 +628,20 @@ busiest site.
 - [x] Report the size and file count of the sent, review and pan-limit logs in the daily
   digest's fleet block, and warn once when free space on that filesystem falls below a
   floor: 14-day retention plus the drop sample must never be what fills a host's disk.
-- [ ] Enforce media retention daily without waiting for the next archived frame.
-  **Verified gap:** JPEG cleanup currently runs on archive writes, so a quiet camera
-  can retain expired media. Acceptance: sent, review and pan-limit archives remove
+- [x] Enforce media retention daily without waiting for the next archived frame.
+  **Shipped:** a background worker performs daily archive cleanup, including quiet days.
+  Acceptance: sent, review and pan-limit archives remove
   expired files during an event-free day without restarting the daemon; cleanup stays
   off the live alert path.
-- [ ] Bound sent, review and pan-limit metadata indexes alongside their media.
-  **Verified gap:** continuous appends keep `index.jsonl` fresh, preventing the current
-  age check from removing old records. Acceptance: after cleanup each retained image
+- [x] Bound sent, review and pan-limit metadata indexes alongside their media.
+  **Shipped:** compact expired rows by record timestamp with atomic replacement, a
+  shared append lock and an optimistic snapshot check; malformed rows are preserved.
+  Acceptance: after cleanup each retained image
   keeps its valid metadata, expired records disappear, and incident/digest readers see
   a complete index throughout replacement.
-- [ ] Enforce ledger age retention during continuous uptime.
-  **Verified gap:** the daemon applies ledger cleanup only during initialization.
+- [x] Enforce ledger age retention during continuous uptime.
+  **Shipped:** daily background cleanup uses bounded batches and short SQLite waits;
+  freed pages are reused without automatic vacuum.
   Acceptance: expired observations are removed daily without restart, recent observations
   remain queryable, and database/WAL disk use is measured before choosing any compaction
   policy; maintenance cannot stall alert delivery.
@@ -817,19 +819,24 @@ often what photographs the person seconds later.
   network probes. Acceptance: distinguish the monitoring host's radio from the camera's
   radio, label unavailable counters, and use existing camera observations if available
   rather than creating extra authenticated sessions for telemetry.
-- [ ] Add an optional 24-hour digest summary of probe loss, RTT and jitter, with
-  sample counts and missing-data coverage. **Planned integration:** compare gateway
+- [x] Add an optional 24-hour digest summary of probe loss, RTT and jitter, with
+  sample counts, missing-data coverage and the worst UTC hour. **Shipped:** the digest
+  reads a bounded local cache without additional probes; compare gateway
   and mains-powered camera results to help locate a weak network path; keep application
   error ratios separate from ICMP packet loss. Acceptance: outages and recoveries remain
   visible within the bounded history, skipped/unsupported probes never count as loss,
   and battery-camera availability comes from existing hub/API/media outcomes without
   waking cameras solely to measure them.
-- [ ] Distinguish current camera health from historical refused self-heals in the digest.
-  **Verified gap:** refusal counts accumulate since daemon start and can leave a degraded
-  headline after a successful later health check. Acceptance: a refusal followed by a
+- [x] Distinguish current camera health from historical refused self-heals in the digest.
+  **Shipped:** cumulative refusal counts are labelled since start; current health comes
+  from a fresh observation after the latest refusal. Acceptance: a refusal followed by a
   verified recovery reports current health plus clearly labelled historical refusals;
   a continuing failure still degrades health, and stale or missing health observations
   cannot produce an OK headline.
+
+- [x] Log SD transfer start and finish timestamps, elapsed time and failures for
+  comparison with network history. This supports investigation; sparse overlapping
+  probes cannot establish causality.
 
 ### 10.7 — A public reference for the local API
 

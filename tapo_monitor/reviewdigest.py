@@ -15,8 +15,10 @@ being marked done.
 
 import json
 import logging
+import math
 import os
 import time
+from pathlib import Path
 
 from . import notify, sentlog
 from .shadowscan import SUMMARY_MAX_AGE, SUMMARY_NAME
@@ -228,7 +230,7 @@ def fleet_lines(health):
     """
     if not isinstance(health, dict):
         return []
-    problems, detail = [], []
+    problems, detail, unknown = [], [], []
 
     cameras = health.get("cameras") or {}
     # Three states, not two. Before the first control pass reachability is unknown, and
@@ -242,6 +244,29 @@ def fleet_lines(health):
                  if (s or {}).get("reachable") is True and (s or {}).get("events") is False]
     clock_skew = [n for n, s in sorted(cameras.items())
                   if (s or {}).get("clock_skew")]
+    for name, entry in sorted(cameras.items()):
+        entry = entry or {}
+        if entry.get("hub"):
+            continue
+        if "control_health" not in entry:
+            if any((health.get("repairs") or {}).values()):
+                unknown.append(name)
+            continue
+        control = entry.get("control_health")
+        if not isinstance(control, dict):
+            unknown.append(name)
+            continue
+        age, limit = control.get("age_s"), control.get("max_age_s")
+        fresh = (isinstance(age, (int, float)) and isinstance(limit, (int, float))
+                 and math.isfinite(age) and math.isfinite(limit) and 0 <= age <= limit)
+        if not fresh:
+            unknown.append(name)
+        elif control.get("status") not in (None, "unknown", "ok") or control.get("drift", 0):
+            problems.append(f"{name} control drift / {control.get('status', 'unknown')}")
+        elif control.get("status") != "ok" or control.get("drift") != 0:
+            unknown.append(name)
+    if unknown:
+        detail.append("current control health unknown: " + ", ".join(unknown))
     def _hub_note(name):
         entry = cameras.get(name) or {}
         age = entry.get("hub_age")
@@ -303,7 +328,7 @@ def fleet_lines(health):
     repairs = health.get("repairs") or {}
     refused = {name: count for name, count in sorted(repairs.items()) if count}
     if refused:
-        problems.append("self-heal refused: "
+        detail.append("self-heal refused since start: "
                         + ", ".join(f"{name} {count}\u00d7" for name, count in refused.items()))
 
     # Held motor moves are the arbiter doing its job (a hold keeping the lens on a
@@ -341,9 +366,96 @@ def fleet_lines(health):
         head = "\U0001f7e0 Fleet degraded — " + "; ".join(problems)
     elif not cameras:
         return []
+    elif unknown:
+        head = "⚪ Fleet unknown — current control health not established"
     else:
         head = "\U0001f49a Fleet OK — " + ", ".join(reachable) + " reachable"
     return [head] + [f"   {line}" for line in detail]
+
+
+def network_context_lines(now, *, path=None):
+    """Read the bounded local ICMP cache; never probe or scan history in the daemon.
+
+    ICMP is context, never a verdict about event delivery. Partial clock hours retain
+    their probe counts so a single burst cannot masquerade as a full hour of evidence.
+    """
+    path = (Path.home() / ".local/state/tapo-network-watch/summary.json"
+            if path is None else Path(path))
+    try:
+        with path.open(encoding="utf-8") as stream:
+            raw = stream.read(256 * 1024 + 1)
+        if len(raw) > 256 * 1024:
+            raise ValueError("oversized network cache")
+        data = json.loads(raw)
+        at = data["at"]
+        if not isinstance(at, (int, float)) or not math.isfinite(at) or at > now:
+            raise ValueError("invalid network cache timestamp")
+        if now - at > 600:
+            return ["ICMP 24h: stale summary; current measurements unknown"]
+        rows = data["targets"]
+        if data.get("window_hours") != 24 or not isinstance(rows, list) or len(rows) > 16:
+            raise ValueError("invalid network summary")
+        lines = []
+        for row in rows:
+            name = row["name"]
+            if not isinstance(name, str) or len(name) > 128:
+                raise ValueError("invalid target label")
+            name = " ".join(name.split())
+            def number(key, source=row, *, percentage=False):
+                value = source.get(key)
+                if value is None:
+                    return "unknown"
+                if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                        or not math.isfinite(value) or value < 0
+                        or (percentage and value > 100)):
+                    raise ValueError("invalid network metric")
+                return f"{value:.1f}" + ("%" if percentage else "")
+
+            counts = [row.get(key) for key in ("sent", "received", "probes", "probe_errors")]
+            if any(not isinstance(v, int) or isinstance(v, bool) or v < 0 for v in counts):
+                raise ValueError("invalid network counters")
+            sent, received, probes, errors = counts
+            if received > sent or errors > probes:
+                raise ValueError("inconsistent network counters")
+            loss = number("loss_pct", percentage=True) if sent else "unknown"
+            line = (f"ICMP 24h {name}: loss {loss} ({received}/{sent} packets), "
+                    f"RTT avg/p95 {number('avg_ms')}/{number('p95_ms')}ms, "
+                    f"jitter {number('jitter_ms')}ms; "
+                    f"coverage {number('coverage_pct', percentage=True)} / {probes} probes, "
+                    f"{errors} probe errors")
+            age = row.get("measurement_age_s")
+            if age is None:
+                line += "; last measurement unknown"
+            elif number("measurement_age_s") != "unknown" and now - at + age > 600:
+                line += "; last measurement stale"
+            worst = row.get("worst_hour")
+            if worst is not None:
+                if not isinstance(worst, dict):
+                    raise ValueError("invalid network hour")
+                count = worst.get("probes")
+                if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+                    raise ValueError("invalid hourly probe count")
+                line += (f"; worst UTC hour {number('loss_pct', worst, percentage=True)}"
+                         f" / {count} probes")
+            lines.append(line)
+        skipped = data.get("skipped_records", 0)
+        if not isinstance(skipped, int) or skipped < 0:
+            raise ValueError("invalid skipped records")
+        if skipped:
+            lines.append(f"ICMP: {skipped} invalid history records omitted")
+        # Leave room for the review and fleet sections in Telegram's text limit.
+        shown, size = [], 0
+        for line in lines:
+            if size + len(line) > 1800:
+                shown.append(f"ICMP: {len(lines) - len(shown)} further target lines omitted")
+                break
+            shown.append(line)
+            size += len(line) + 1
+        return shown or ["ICMP 24h: no measurement history yet"]
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError):
+        return ["ICMP 24h: summary unavailable; current measurements unknown"]
 
 
 def log_usage_line(logs):
@@ -532,10 +644,14 @@ def run_if_due(*, env=None, now=None, send_text, send_photo, health=None):
                       "scorer": scorer_daily_delta(raw_scorer, _scorer_baseline(review_dir)),
                       "logs": sentlog.log_usage(env)}
         fleet = fleet_lines(health)
+        cache_path = env.get("TAPO_NETWORK_SUMMARY_FILE")
+        network = (network_context_lines(now, path=cache_path) if cache_path
+                   else network_context_lines(now))
         alerts = alert_lines(sentlog.archive_dir_from_env(env), now)
         # Alerts belong under the fleet header when there is one: the indent is what says
         # these numbers describe the fleet the header just vouched for.
-        sections = fleet + [f"   {line}" for line in alerts] if fleet else alerts
+        sections = (fleet + [f"   {line}" for line in network + alerts]
+                    if fleet else network + alerts)
         if sections:
             text = text + "\n\n" + "\n".join(sections)
         if not send_text(text):

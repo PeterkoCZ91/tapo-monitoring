@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Daily background retention compacts expired archive metadata, cleans media even
+  without new events, and prunes the event ledger in bounded transactions.
+- Network history now caches a 24-hour digest summary with measurement coverage and
+  the worst UTC hour, without extra probes. SD transfers log their start and finish,
+  including failures, so operators can compare transfer intervals with network history.
+- The review digest reads that network cache locally, including a configurable
+  gateway cache path, and marks stale or invalid measurements as unknown.
+
 - Standalone network watcher (`tools/network_watch.py`): five ICMP samples per target
   about every two minutes, with packet loss, mean/p95/max RTT and jitter summaries.
   Each host measures its default router separately from configured cameras or hubs;
@@ -71,6 +79,9 @@ All notable changes to this project are documented here.
   shows it when a read comes back empty); before it was swallowed.
 
 ### Fixed
+- Fleet digest health now distinguishes fresh verified camera health from cumulative
+  self-heal refusals since daemon start. A health observation before a new refusal or
+  a stale/missing observation cannot certify recovery.
 - One visit, one message, also behind a motion alert: a person SD/recording follow-up is
   now skipped (`reason=sd_within_cooldown`) when the camera delivered, within the
   cooldown, a photo whose person score reached the camera's threshold, whatever its

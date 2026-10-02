@@ -578,6 +578,38 @@ class EventLedger:
         now = _finite_timestamp(time.time() if now is None else now, "now")
         return self.delete_before(max(0.0, now - retention_seconds))
 
+    def cleanup_bounded(self, retention_seconds: float, *, now: float | None = None,
+                        batch_size=1000, max_seconds=10.0) -> int:
+        """Background retention with short transactions and a bounded work budget.
+
+        No vacuum: freed pages are reused by later observations. Remaining expired
+        rows are picked up by the next daily pass rather than holding a writer lock.
+        """
+        retention_seconds = _finite_timestamp(retention_seconds, "retention_seconds")
+        now = _finite_timestamp(time.time() if now is None else now, "now")
+        if batch_size <= 0 or max_seconds <= 0:
+            raise ValueError("cleanup limits must be positive")
+        cutoff = max(0.0, now - retention_seconds)
+        deadline = time.monotonic() + max_seconds
+        removed = 0
+        for table in ("observations", "decisions", "scene_events"):
+            while time.monotonic() < deadline:
+                connection = self._connect()
+                try:
+                    with connection:
+                        connection.execute("PRAGMA busy_timeout = 250")
+                        cursor = connection.execute(
+                            f"DELETE FROM {table} WHERE id IN (SELECT id FROM {table} "
+                            "WHERE event_at < ? LIMIT ?)", (cutoff, batch_size))
+                finally:
+                    connection.close()
+                removed += cursor.rowcount
+                if cursor.rowcount < batch_size:
+                    break
+                # Give foreground inserts a chance between short write transactions.
+                time.sleep(0.01)
+        return removed
+
 
 def read_camera_window(path, *, start: float, end: float, cameras=None,
                        decision_paths=("live",)):

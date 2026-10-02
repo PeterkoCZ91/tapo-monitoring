@@ -5,18 +5,24 @@ positive leaves no image to inspect. When ``TAPO_SENT_LOG_DIR`` is set, every ph
 that :func:`tapo_monitor.notify.send_photo` pushes is copied there as a timestamped
 JPEG next to an ``index.jsonl`` line (timestamp, filename, caption, delivered). Files
 older than the retention window (``TAPO_SENT_LOG_RETENTION_DAYS``, default 2) are pruned
-on each write, so the archive self-limits to roughly a couple of nights.
+on each write. Daily background maintenance also cleans quiet archives and expires
+index records using their timestamps, even when the index is still being appended.
 
 Unset ``TAPO_SENT_LOG_DIR`` disables the feature entirely. Nothing here may raise into
 the send path: archiving is best-effort telemetry, never a reason to lose an alert.
 """
 
+import fcntl
 import json
 import logging
+import math
 import os
 import random
 import shutil
+import tempfile
+import threading
 import time
+from contextlib import contextmanager
 
 from . import incident as incident_mod
 
@@ -81,7 +87,8 @@ def retention_days_from_env(env=None):
     """Retention window in days; falls back to the default on missing/garbage input."""
     env = os.environ if env is None else env
     try:
-        return float(env[ENV_RETENTION])
+        value = float(env[ENV_RETENTION])
+        return value if math.isfinite(value) and value > 0 else DEFAULT_RETENTION_DAYS
     except (KeyError, TypeError, ValueError):
         return DEFAULT_RETENTION_DAYS
 
@@ -89,6 +96,77 @@ def retention_days_from_env(env=None):
 def _stamp(now):
     whole = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
     return f"{whole}-{int((now % 1) * 1_000_000):06d}"
+
+
+@contextmanager
+def _index_lock(archive_dir):
+    # Lock a stable sidecar: replacing the index must not replace its lock inode.
+    with open(os.path.join(archive_dir, ".index.lock"), "a", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _append_index(archive_dir, record):
+    with _index_lock(archive_dir):
+        with open(os.path.join(archive_dir, INDEX_NAME), "a", encoding="utf-8") as index:
+            index.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def compact_index(archive_dir, now, retention_days):
+    """Remove expired metadata without holding the append lock during the scan.
+
+    Unknown or malformed records are preserved. If an append raced the snapshot,
+    discard the candidate and try on the next maintenance pass, never losing a row.
+    """
+    path = os.path.join(archive_dir, INDEX_NAME)
+    candidate = None
+    removed = 0
+    try:
+        with open(path, "rb") as source:
+            snapshot = os.fstat(source.fileno())
+            with tempfile.NamedTemporaryFile(dir=archive_dir, prefix=".index-",
+                                             delete=False) as output:
+                candidate = output.name
+                remaining = snapshot.st_size
+                while remaining:
+                    line = source.readline(remaining)
+                    if not line:
+                        break
+                    remaining -= len(line)
+                    expired = False
+                    try:
+                        record = json.loads(line)
+                        ts = record.get("ts") if isinstance(record, dict) else None
+                        expired = (not isinstance(ts, bool) and isinstance(ts, (int, float))
+                                   and math.isfinite(ts) and ts < now - retention_days * 86400)
+                    except (ValueError, UnicodeError):
+                        pass
+                    if expired:
+                        removed += 1
+                    else:
+                        output.write(line)
+        if removed:
+            with _index_lock(archive_dir):
+                current = os.stat(path)
+                if (current.st_ino, current.st_size, current.st_mtime_ns) != (
+                        snapshot.st_ino, snapshot.st_size, snapshot.st_mtime_ns):
+                    return 0
+                os.chmod(candidate, snapshot.st_mode & 0o777)
+                os.replace(candidate, path)
+                candidate = None
+        return removed
+    except OSError:
+        log.debug("sentlog: metadata compaction failed", exc_info=True)
+        return 0
+    finally:
+        if candidate is not None:
+            try:
+                os.unlink(candidate)
+            except OSError:
+                pass
 
 
 def prune_old(archive_dir, now, retention_days):
@@ -109,15 +187,57 @@ def prune_old(archive_dir, now, retention_days):
                 removed += 1
         except OSError:
             log.debug("sentlog: could not prune %s", path, exc_info=True)
-    index = os.path.join(archive_dir, INDEX_NAME)
-    try:
-        if os.path.exists(index) and os.path.getmtime(index) < cutoff:
-            # The index only ever grew: once it is older than the window, every line in
-            # it points at a JPEG that was pruned nights ago.
-            os.unlink(index)
-    except OSError:
-        log.debug("sentlog: could not rotate %s", index, exc_info=True)
     return removed
+
+
+class RetentionMaintenance:
+    """Daily archive and ledger retention independent of incoming camera events.
+
+    ``tick`` only schedules work. A single daemon thread scans metadata and removes
+    expired rows in small SQLite transactions, keeping maintenance off the alert loop.
+    """
+
+    def __init__(self, event_ledger=None, ledger_retention_days=30, env=None):
+        self.event_ledger = event_ledger
+        try:
+            days = float(ledger_retention_days)
+        except (TypeError, ValueError):
+            days = 30.0
+        self.ledger_retention_days = days if math.isfinite(days) and days > 0 else 30.0
+        self.env = dict(os.environ if env is None else env)
+        self._next = float("-inf")
+        self._worker = None
+
+    def tick(self, now):
+        if now < self._next or (self._worker is not None and self._worker.is_alive()):
+            return False
+        self._next = now + 86400
+        self._worker = threading.Thread(target=self._run, args=(now,),
+                                        name="tapo-retention", daemon=True)
+        self._worker.start()
+        return True
+
+    def _run(self, now):
+        retentions = {"sent": retention_days_from_env(self.env),
+                      "pan-limit": PANLIMIT_RETENTION_DAYS}
+        try:
+            retentions["review"] = float(self.env[ENV_REVIEW_RETENTION])
+            if not math.isfinite(retentions["review"]) or retentions["review"] <= 0:
+                retentions["review"] = DEFAULT_REVIEW_RETENTION_DAYS
+        except (KeyError, TypeError, ValueError):
+            retentions["review"] = DEFAULT_REVIEW_RETENTION_DAYS
+        for name, path in log_dirs_from_env(self.env):
+            try:
+                days = retentions[name]
+                prune_old(path, now, days)
+                compact_index(path, now, days)
+            except Exception:  # noqa: BLE001 - maintenance must not break alerting
+                log.warning("retention: archive cleanup failed", exc_info=True)
+        if self.event_ledger is not None:
+            try:
+                self.event_ledger.cleanup_bounded(self.ledger_retention_days * 86400, now=now)
+            except Exception:  # noqa: BLE001 - maintenance is best effort
+                log.warning("retention: ledger cleanup failed", exc_info=True)
 
 
 def archive_sent(archive_dir, image_bytes, caption, *, now,
@@ -150,8 +270,7 @@ def archive_sent(archive_dir, image_bytes, caption, *, now,
         if score is not None and hasattr(score, "person"):
             record["person"] = float(score.person)
             record["animal"] = float(score.animal)
-        with open(os.path.join(archive_dir, INDEX_NAME), "a", encoding="utf-8") as idx:
-            idx.write(json.dumps(record, ensure_ascii=False) + "\n")
+        _append_index(archive_dir, record)
         prune_old(archive_dir, now, retention_days)
         return path
     except OSError:
@@ -242,8 +361,7 @@ def archive_review_frame(archive_dir, image_bytes, meta, *, now, retention_days)
         with open(path, "wb") as f:
             f.write(image_bytes)
         record = {"ts": now, "file": name, **meta}
-        with open(os.path.join(archive_dir, INDEX_NAME), "a", encoding="utf-8") as idx:
-            idx.write(json.dumps(record, ensure_ascii=False) + "\n")
+        _append_index(archive_dir, record)
         prune_old(archive_dir, now, retention_days)
         return path
     except OSError:
@@ -269,6 +387,8 @@ def archive_review_if_configured(image_path, meta, *, now=None, env=None):
     now = time.time() if now is None else now
     try:
         retention_days = float(env[ENV_REVIEW_RETENTION])
+        if not math.isfinite(retention_days) or retention_days <= 0:
+            retention_days = DEFAULT_REVIEW_RETENTION_DAYS
     except (KeyError, TypeError, ValueError):
         retention_days = DEFAULT_REVIEW_RETENTION_DAYS
     return archive_review_frame(archive_dir, image_bytes, meta, now=now,

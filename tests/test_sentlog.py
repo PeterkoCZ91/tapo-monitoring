@@ -181,16 +181,14 @@ def test_archive_sent_omits_scores_for_a_plain_float(tmp_path):
     assert "person" not in rec
 
 
-def test_prune_old_rotates_an_index_that_outlived_its_frames(tmp_path):
-    # prune_old only ever removed .jpg files, so the index grew without bound and kept
-    # pointing at frames deleted nights ago.
+def test_compaction_rotates_an_index_that_outlived_its_frames(tmp_path):
     index = tmp_path / "index.jsonl"
     index.write_text('{"ts": 1, "file": "a.jpg"}\n' * 5)
     os.utime(index, (0, 0))
 
-    sentlog.prune_old(str(tmp_path), now=1785200000.0, retention_days=2.0)
+    sentlog.compact_index(str(tmp_path), now=1785200000.0, retention_days=2.0)
 
-    assert not index.exists()
+    assert index.read_text() == ""
 
 
 def test_prune_old_keeps_a_fresh_index(tmp_path):
@@ -431,3 +429,73 @@ def test_log_usage_reports_each_existing_dir_and_the_free_space(tmp_path, monkey
 def test_log_usage_never_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(sentlog, "dir_usage", lambda *a, **k: 1 / 0)
     assert sentlog.log_usage({sentlog.ENV_DIR: str(tmp_path)}) is None
+
+
+def test_compact_index_removes_expired_rows_from_fresh_file(tmp_path):
+    now = 1785200000.0
+    index = tmp_path / sentlog.INDEX_NAME
+    recent = json.dumps({"ts": now - 60, "file": "recent.jpg"}) + "\n"
+    uncertain = 'malformed\n' + json.dumps({"file": "unknown.jpg"}) + "\n"
+    index.write_text(json.dumps({"ts": now - 3 * 86400}) + "\n" + recent + uncertain)
+    sentlog.compact_index(str(tmp_path), now, 2)
+    assert index.read_text() == recent + uncertain
+
+
+def test_compaction_preserves_a_concurrent_append(tmp_path, monkeypatch):
+    now = 1785200000.0
+    index = tmp_path / sentlog.INDEX_NAME
+    index.write_text(json.dumps({"ts": now - 3 * 86400}) + "\n")
+    original = sentlog.json.loads
+    appended = False
+
+    def loads_with_new_alert(line):
+        nonlocal appended
+        if not appended:
+            appended = True
+            sentlog.archive_sent(str(tmp_path), b"new", "arrived while scanning", now=now)
+        return original(line)
+
+    monkeypatch.setattr(sentlog.json, "loads", loads_with_new_alert)
+    assert sentlog.compact_index(str(tmp_path), now, 2) == 0
+    rows = [original(line) for line in index.read_text().splitlines()]
+    assert len(rows) == 2
+    assert rows[-1]["caption"] == "arrived while scanning"
+
+
+def test_retention_maintenance_cleans_without_new_alerts_and_repeats_daily(tmp_path):
+    from tapo_monitor.ledger import EventLedger
+
+    now = 1785200000.0
+    archive = tmp_path / "sent"
+    archive.mkdir()
+    old = archive / "expired.jpg"
+    old.write_bytes(b"old")
+    os.utime(old, (now - 3 * 86400, now - 3 * 86400))
+    (archive / sentlog.INDEX_NAME).write_text(json.dumps({"ts": now - 3 * 86400}) + "\n")
+    events = EventLedger(tmp_path / "events.sqlite3")
+    events.record_camera_event(camera="camera", event_type="person", event_at=now - 31 * 86400)
+    maintenance = sentlog.RetentionMaintenance(events, env={sentlog.ENV_DIR: str(archive)})
+    assert maintenance.tick(now)
+    maintenance._worker.join(timeout=5)
+    assert not old.exists()
+    assert (archive / sentlog.INDEX_NAME).read_text() == ""
+    assert events.observations(camera="camera", start=0, end=now) == []
+    assert not maintenance.tick(now + 3600)
+    assert maintenance.tick(now + 86400)
+    maintenance._worker.join(timeout=5)
+
+
+def test_invalid_retention_does_not_purge_recent_evidence(tmp_path):
+    now = 1785200000.0
+    for value in ("-1", "nan", "inf", "0"):
+        archive = tmp_path / value
+        archive.mkdir()
+        image = archive / "recent.jpg"
+        image.write_bytes(b"evidence")
+        os.utime(image, (now - 86400, now - 86400))
+        maintenance = sentlog.RetentionMaintenance(env={
+            sentlog.ENV_REVIEW_DIR: str(archive), sentlog.ENV_REVIEW_RETENTION: value})
+        maintenance.tick(now)
+        maintenance._worker.join(timeout=5)
+        assert image.exists()
+        assert sentlog.retention_days_from_env({sentlog.ENV_RETENTION: value}) == 2.0

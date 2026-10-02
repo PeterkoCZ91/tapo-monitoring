@@ -66,3 +66,14 @@ python3 tools/network_watch.py fleet --inventory /path/to/private/fleet.json --h
 An unreachable monitoring host has an unavailable row; it is never reported as
 100% loss at its cameras. The sample count and age show how much of the requested
 time window was actually measured.
+
+Each sample also atomically refreshes a private `summary.json` cache for the daily
+review digest. The cache covers 24 hours without sending additional probes. Coverage
+is the percentage of two-minute slots with a recorded attempt, including failed
+attempts; probe errors are reported separately. The worst hour is a UTC clock-hour
+bucket and includes packet and probe counts, so a partial hour is identifiable.
+For a gateway collecting the probes on behalf of another monitoring host, mirror the
+cache locally and set `TAPO_NETWORK_SUMMARY_FILE` in that daemon's environment to the
+mirrored file. Preserve its original timestamp so failed transfers become stale data.
+These probes describe the gateway's path to the cameras, not the monitoring host's
+end-to-end path.

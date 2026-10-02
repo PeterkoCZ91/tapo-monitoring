@@ -934,6 +934,7 @@ class MonitorState:
     latency: dict = field(default_factory=dict)
     recorder_health: dict = field(default_factory=dict)
     repair_failures: dict = field(default_factory=dict)
+    repair_last_failure_at: float | None = None
     desired_plans: dict = field(default_factory=dict)
     twin_last_probe: dict = field(default_factory=dict)
     twin_fleet: dict = field(default_factory=dict)
@@ -947,6 +948,7 @@ class MonitorState:
     last_tick_at: float | None = None
     last_tick_ok: bool | None = None
     ledger_handler: ledger.AuditLedgerHandler | None = None
+    retention_maintenance: object | None = None
     pending_sd: list = field(default_factory=list)
     groups: dict = field(default_factory=dict)
     scene_coordinator: scene.SceneCoordinator = field(default_factory=scene.SceneCoordinator)
@@ -4162,6 +4164,24 @@ def fleet_health_snapshot(app: AppConfig, state: MonitorState, *, now,
             "reachable": state.network_reachable.get(cfg.name),
             "events": state.events_reachable.get(cfg.name),
         }
+        if "hubpoll" not in cfg.detection.sources or "getevents" in cfg.detection.sources:
+            entry["control_health"] = None
+            observed = state.twin_fleet.get(cfg.name, {})
+            if not isinstance(observed, Mapping):
+                observed = {}
+            captured = observed.get("captured_at")
+            if (isinstance(captured, (int, float)) and math.isfinite(captured) and captured <= now
+                    and (state.repair_last_failure_at is None
+                         or captured >= state.repair_last_failure_at)):
+                observed_health = observed.get("health")
+                entry["control_health"] = {
+                    "status": (observed_health.get("status", "unknown")
+                               if isinstance(observed_health, Mapping) else "unknown"),
+                    "drift": len(twin.alertable_results(observed)),
+                    "age_s": max(0.0, now - captured),
+                    "max_age_s": max(2 * app.observability.probe_interval,
+                                     app.alerts.outage_threshold),
+                }
         if hasattr(state, "scene_coordinator") and state.scene_coordinator is not None:
             clock_offset = state.scene_coordinator.clock_offset(cfg.name)
             if clock_offset is not None:
@@ -4347,12 +4367,16 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
             extra["detection_seen"] = state.detection_seen
         if any(c.follow_app_notifications for c in app.cameras):
             extra["app_push_seen"] = state.app_push_seen
+        previous_repairs = dict(state.repair_failures)
         plans = run_control(app, now=now, connect=connect_factory(cam_clients, state, now),
                             repair_failures=state.repair_failures,
                             privacy=twin.cameras_in_privacy(state.twin_fleet),
                             privacy_seen=state.privacy_seen,
                             hold=cameras_holding_recall(app, state, now),
                             motion_refusals=state.motion_refusals, **extra)
+        if any(count > previous_repairs.get(name, 0)
+               for name, count in state.repair_failures.items()):
+            state.repair_last_failure_at = now
         if isinstance(plans, Mapping):
             state.desired_plans.update(plans)
         watchdog(app, cam_clients, state, now=now, secrets=secrets, night=night)
@@ -4377,6 +4401,8 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     late(app, state, now=now, secrets=secrets)
     guard(app, cam_clients, state, now=now, secrets=secrets, night=night)
     digest(now=now, secrets=secrets, app=app, state=state)
+    if state.retention_maintenance is not None:
+        state.retention_maintenance.tick(now)
     _log_disk_pass(state, now=now, secrets=secrets)
     runtime_state.save_if_changed(state, now, logger=log)
     mqtt.observe(app, state)          # reachability/health as of this tick; cache-only
@@ -4423,15 +4449,15 @@ def main(argv=None):  # pragma: no cover - thin entry point
     if app.observability.ledger:
         try:
             state.event_ledger = ledger.EventLedger()
-            state.event_ledger.cleanup(
-                app.observability.ledger_retention_days * 86400,
-                now=_time.time(),
-            )
             state.ledger_handler = ledger.AuditLedgerHandler(state.event_ledger)
             monitor.log.addHandler(state.ledger_handler)
             log.info("event ledger initialized: %s", state.event_ledger.path)
         except Exception as exc:  # noqa: BLE001 - observability must not block startup
             log.warning("event ledger initialization failed: %s", type(exc).__name__)
+    state.retention_maintenance = sentlog.RetentionMaintenance(
+        event_ledger=state.event_ledger,
+        ledger_retention_days=app.observability.ledger_retention_days,
+    )
     # Opt-in JSON status endpoint (observability.status_port). start() contains its own
     # failures and the thread is a daemon, so the monitor loop owes it nothing.
     statusd.start(app, state, started_at=_time.time())

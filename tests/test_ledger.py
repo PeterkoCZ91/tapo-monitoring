@@ -355,3 +355,12 @@ def test_audit_handler_flush_gives_up_after_its_timeout(tmp_path):
     release.set()
     assert handler.flush(timeout=5) is True
     assert handler.pending() == 0
+
+
+def test_bounded_cleanup_removes_expired_rows_over_multiple_batches(tmp_path):
+    events = ledger.EventLedger(tmp_path / "events.sqlite3")
+    for timestamp in (10, 11, 12, 30):
+        events.record_camera_event(camera="front", event_type="person", event_at=timestamp)
+    assert events.cleanup_bounded(5, now=30, batch_size=2) == 3
+    assert [event.event_at for event in events.observations(
+        camera="front", start=0, end=100)] == [30]

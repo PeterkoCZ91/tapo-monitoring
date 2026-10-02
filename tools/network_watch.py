@@ -128,13 +128,13 @@ def load_targets(path):
     return validate_targets(targets), gateway_error
 
 
-def write_latest(directory, payload):
+def write_latest(directory, payload, filename="latest.json"):
     fd, temporary = tempfile.mkstemp(prefix=".latest-", dir=directory)
     try:
         with os.fdopen(fd, "w") as handle:
             json.dump(payload, handle, allow_nan=False)
             handle.write("\n")
-        os.replace(temporary, directory / "latest.json")
+        os.replace(temporary, directory / filename)
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(temporary)
@@ -209,6 +209,7 @@ def sample(config, directory, *, quiet=False):
         if gateway_error is not None:
             records.append(gateway_error)
         append_records(directory, records, now=time.time())
+        write_latest(directory, summary(directory, 24), filename="summary.json")
     for record in records:
         if not quiet:
             print(json.dumps(record, allow_nan=False, separators=(",", ":")))
@@ -258,8 +259,10 @@ def summary(directory, hours, *, now=None):
                     "sent": 0, "received": 0, "rtts": [], "jitters": [],
                     "first_at": at, "latest_at": at,
                     "latest_error": None, "last_measurement_at": None,
+                    "slots": set(), "hourly": {},
                 })
                 bucket["probes"] += 1
+                bucket["slots"].add(int(at // 120))
                 bucket["first_at"] = min(bucket["first_at"], at)
                 if at >= bucket["latest_at"]:
                     bucket["latest_at"] = at
@@ -271,12 +274,27 @@ def summary(directory, hours, *, now=None):
                     bucket["last_measurement_at"] = at if previous is None else max(previous, at)
                     bucket["sent"] += sent
                     bucket["received"] += received
+                    hour = bucket["hourly"].setdefault(int(at // 3600),
+                                                     {"sent": 0, "received": 0, "probes": 0})
+                    hour["sent"] += sent
+                    hour["received"] += received
+                    hour["probes"] += 1
                     bucket["rtts"].extend(rtts)
                     bucket["jitters"].extend(jitters)
     rows = []
     for _, bucket in sorted(buckets.items()):
         rtts, jitters = bucket.pop("rtts"), bucket.pop("jitters")
+        slots, hourly = bucket.pop("slots"), bucket.pop("hourly")
+        worst = max(hourly.items(), key=lambda item: 1 - item[1]["received"] / item[1]["sent"],
+                    default=None)
         bucket.update({
+            "coverage_pct": min(100.0, 100 * len(slots) /
+                                max(1, math.ceil(now / 120) - math.floor(since / 120))),
+            "worst_hour": (None if worst is None else {
+                "at": worst[0] * 3600, "probes": worst[1]["probes"],
+                "sent": worst[1]["sent"], "received": worst[1]["received"],
+                "loss_pct": 100 * (1 - worst[1]["received"] / worst[1]["sent"]),
+            }),
             "loss_pct": 100 * (1 - bucket["received"] / bucket["sent"]) if bucket["sent"] else None,
             "avg_ms": statistics.mean(rtts) if rtts else None,
             "p95_ms": percentile(rtts, 0.95), "max_ms": max(rtts) if rtts else None,

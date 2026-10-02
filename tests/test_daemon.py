@@ -1023,7 +1023,8 @@ def test_review_digest_pass_hands_the_digest_a_fleet_snapshot(monkeypatch):
     daemon._review_digest_pass(app=app, state=state, now=1000,
                                secrets={"telegram_token": "t", "telegram_chat": "c"})
 
-    assert seen["health"]["cameras"] == {"a": {"reachable": True, "events": None}}
+    assert seen["health"]["cameras"] == {
+        "a": {"reachable": True, "events": None, "control_health": None}}
 
 
 def test_fleet_health_snapshot_reads_what_the_daemon_already_knows():
@@ -1046,8 +1047,8 @@ def test_fleet_health_snapshot_reads_what_the_daemon_already_knows():
     snap = daemon.fleet_health_snapshot(app, state, now=1000,
                                         fetch_metrics=fetch_metrics)
 
-    assert snap["cameras"] == {"a": {"reachable": True, "events": True},
-                               "b": {"reachable": False, "events": False}}
+    assert snap["cameras"] == {"a": {"reachable": True, "events": True, "control_health": None},
+                               "b": {"reachable": False, "events": False, "control_health": None}}
     assert snap["tick"] == {"ok": True, "stalled_for": None}
     assert snap["scorer"] == {"ok": True, "requests": 4180, "failed": 0, "p95": 0.73}
     assert snap["recorder"] == {"status": "ok", "age_s": 47.25}
@@ -7347,3 +7348,66 @@ def test_fleet_health_snapshot_probes_hub_cameras_from_the_last_hub_answer():
     snap = daemon.fleet_health_snapshot(app, state, now=820 + stale,
                                         fetch_metrics=lambda u: None)
     assert snap["cameras"]["gate"]["reachable"] is False
+
+
+def test_fleet_snapshot_carries_current_control_health_and_missing_verification():
+    app = cfg.load_config_from_dict({'cameras': [
+        {'name': 'a', 'host': '203.0.113.10'},
+        {'name': 'b', 'host': '203.0.113.11'},
+    ]})
+    state = daemon.MonitorState()
+    state.twin_fleet['a'] = {'captured_at': 950, 'health': {'status': 'ok'},
+                             'drift': {'results': []}}
+    state.repair_failures = {'person_detection': 1}
+    snap = daemon.fleet_health_snapshot(app, state, now=1000)
+    assert snap['cameras']['a']['control_health'] == {
+        'status': 'ok', 'drift': 0, 'age_s': 50,
+        'max_age_s': max(2 * app.observability.probe_interval, app.alerts.outage_threshold),
+    }
+    assert snap['cameras']['b']['control_health'] is None
+    assert snap['repairs'] == {'person_detection': 1}
+
+
+def test_loop_step_schedules_retention_on_an_event_free_tick():
+    from types import SimpleNamespace
+    app = _app({'name': 'a'})
+    seen = []
+    state = daemon.MonitorState()
+    state.retention_maintenance = SimpleNamespace(tick=seen.append)
+    def noop(*a, **k):
+        return None
+    daemon.loop_step(app, {}, state, now=1000, secrets={},
+                     last_control=1000, control_interval=60,
+                     monitor=noop, hubpoll=noop, sample=noop, drain=noop,
+                     guard=noop, digest=noop, late=noop, is_night=lambda: True)
+    assert seen == [1000]
+
+
+def test_fleet_snapshot_cannot_certify_recovery_before_a_new_repair_refusal():
+    app = _app({'name': 'a'})
+    state = daemon.MonitorState()
+    state.twin_fleet['a'] = {'captured_at': 950, 'health': {'status': 'ok'},
+                             'drift': {'results': []}}
+    state.repair_last_failure_at = 980
+    assert daemon.fleet_health_snapshot(app, state, now=1000)['cameras']['a']['control_health'] is None
+    state.twin_fleet['a']['captured_at'] = 990
+    assert daemon.fleet_health_snapshot(app, state, now=1000)['cameras']['a']['control_health']['status'] == 'ok'
+
+
+def test_new_control_refusal_invalidates_an_earlier_healthy_observation():
+    app = _app({'name': 'a'})
+    state = daemon.MonitorState()
+    state.twin_fleet['a'] = {'captured_at': 950, 'health': {'status': 'ok'},
+                             'drift': {'results': []}}
+    def refused(*a, repair_failures, **kw):
+        repair_failures['person_detection'] = 1
+    def noop(*a, **k):
+        return None
+    daemon.loop_step(app, {}, state, now=1000, secrets={},
+                     last_control=None, control_interval=60, run_control=refused,
+                     watchdog=noop, inspect=noop, monitor=noop, hubpoll=noop,
+                     sample=noop, drain=noop, guard=noop, digest=noop, late=noop,
+                     privacy_notice=noop, detection_notice=noop,
+                     connect_factory=lambda *a: None, is_night=lambda: True)
+    assert state.repair_last_failure_at == 1000
+    assert daemon.fleet_health_snapshot(app, state, now=1000)['cameras']['a']['control_health'] is None

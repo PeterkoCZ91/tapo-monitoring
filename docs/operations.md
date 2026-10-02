@@ -613,6 +613,17 @@ check takes the headline away entirely (`🟠 Fleet degraded — …`), because 
 says OK while a camera is down is worse than no heartbeat: it turns a silence you might
 have questioned into a confirmation you will trust.
 
+Self-heal refusal totals are labelled **since daemon start**. A recent Digital Twin
+health check with no alertable drift can verify recovery without erasing those totals;
+stale or missing control-health observations cannot certify recovery. Battery cameras
+continue to use the existing hub-session observations rather than active camera probes.
+
+When the standalone [network watcher](network-watch.md) is installed for the daemon's
+user, the digest reads its local 24-hour cache: loss, p95 RTT, jitter, measurement
+coverage and the worst UTC hour with its probe count. Partial hours and missing coverage
+need context; ICMP loss is separate from detection-event loss. Reading the cache sends
+no additional packets or camera requests.
+
 ```text
 📋 Review digest: 3 suppressed frame(s) in the last 24h
 yard: 2 (max p0.61)
