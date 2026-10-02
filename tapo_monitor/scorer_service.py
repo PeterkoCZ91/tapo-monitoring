@@ -15,6 +15,7 @@ yes/no decision and is skipped entirely.
 
 import argparse
 import calendar
+import hmac
 import json
 import logging
 import os
@@ -769,13 +770,58 @@ def build_score_fn(model_path, input_size=416, decoder=None):
     return score_fn
 
 
+class TokenConfigError(ValueError):
+    """The shared-token settings are unusable; the service must not start unprotected."""
+
+
+def load_token(env=None):
+    """The shared bearer token from ``TAPO_SCORER_TOKEN_FILE`` or ``TAPO_SCORER_TOKEN``.
+
+    ``None`` when neither is set (authentication stays off). The file wins over the value
+    and must not be readable by group or others (0600); a file that is named but missing,
+    unreadable, too open or empty is an error, never a silent fall back to an open service.
+    """
+    env = os.environ if env is None else env
+    path = (env.get("TAPO_SCORER_TOKEN_FILE") or "").strip()
+    if path:
+        try:
+            mode = os.stat(path).st_mode
+            if mode & 0o077:
+                raise TokenConfigError(
+                    "TAPO_SCORER_TOKEN_FILE must be mode 0600 (not readable by group/others)")
+            with open(path, encoding="utf-8") as f:
+                token = f.read().strip()
+        except OSError as exc:
+            raise TokenConfigError(
+                f"cannot read TAPO_SCORER_TOKEN_FILE: {exc.strerror or 'error'}") from None
+        if not token:
+            raise TokenConfigError("TAPO_SCORER_TOKEN_FILE is empty")
+        return token
+    return (env.get("TAPO_SCORER_TOKEN") or "").strip() or None
+
+
+def _authorized(header, token):
+    """True when ``header`` is ``Bearer <token>``; constant-time comparison, never raises."""
+    if not isinstance(header, str):
+        return False
+    scheme, _, value = header.partition(" ")
+    if scheme.lower() != "bearer":
+        return False
+    return hmac.compare_digest(value.strip().encode("utf-8", "replace"),
+                               token.encode("utf-8", "replace"))
+
+
 def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=60,
                 metrics_retention_days=7, metrics_retention_files=8,
-                metrics_max_journal_bytes=METRICS_MAX_JOURNAL_BYTES, arch=None):
+                metrics_max_journal_bytes=METRICS_MAX_JOURNAL_BYTES, arch=None, token=None):
     """HTTP server: POST /score (JPEG body) -> JSON scores; GET /health -> ok.
 
     ``arch`` (the detector family name, never the model path) is reported by /health and
     /metrics; ``None`` leaves both replies exactly as they were.
+
+    With a ``token``, /score and /metrics need ``Authorization: Bearer <token>`` and answer
+    401 without detail otherwise; /health stays open (failover checks, systemd) and carries
+    nothing sensitive. ``None`` leaves every endpoint open, as before.
 
     Threaded so /health, /metrics and slow clients never queue behind a long
     inference (a 4K tiled request can hold the CPU for seconds). Inference itself
@@ -807,12 +853,20 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
                 # would only crash the handler a second time.
                 log.debug("client closed the connection before the reply")
 
+        def _deny(self):
+            """Answer 401 (and True) when a token is required and not presented."""
+            if token is None or _authorized(self.headers.get("Authorization"), token):
+                return False
+            self._reply(401, {"error": "unauthorized"})
+            return True
+
         def do_GET(self):
             if self.path == "/health":
                 self._reply(200, {"ok": True, "arch": metrics.arch} if metrics.arch
                             else {"ok": True})
             elif self.path == "/metrics":
-                self._reply(200, metrics.snapshot())
+                if not self._deny():
+                    self._reply(200, metrics.snapshot())
             else:
                 self._reply(404, {"error": "not found"})
 
@@ -822,6 +876,8 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
             parsed = urlparse(self.path)
             if parsed.path != "/score":
                 self._reply(404, {"error": "not found"})
+                return
+            if self._deny():
                 return
             try:
                 tiles = max(1, int(parse_qs(parsed.query).get("tiles", ["1"])[0]))
@@ -945,6 +1001,11 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     from . import detectors
     try:
+        token = load_token()
+    except TokenConfigError as exc:
+        print(f"scorer config error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
+    try:
         config = detectors.detector_config(os.environ, args.input_size)
     except detectors.DetectorConfigError as exc:
         print(f"scorer config error: {exc}", file=sys.stderr)
@@ -954,6 +1015,7 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
     server = make_server(
         score_fn,
         arch=decoder.name,
+        token=token,
         port=args.port,
         metrics_file=args.metrics_file,
         metrics_persist_seconds=args.metrics_persist_seconds,
@@ -961,8 +1023,9 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
         metrics_retention_files=args.metrics_retention_files,
         metrics_max_journal_bytes=args.metrics_max_journal_bytes,
     )
-    log.info("scorer listening on :%d (model=%s, arch=%s, input=%d)",
-             args.port, args.model, decoder.name, config.input_size)
+    log.info("scorer listening on :%d (model=%s, arch=%s, input=%d, auth=%s)",
+             args.port, args.model, decoder.name, config.input_size,
+             "token" if token else "off")
     def stop(_signum, _frame):
         raise SystemExit(0)
 

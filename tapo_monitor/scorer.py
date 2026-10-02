@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import threading
 import time
 import urllib.error
@@ -26,8 +27,34 @@ def source_id_for_camera(camera_name):
     return hashlib.sha256(value).hexdigest()[:16]
 
 
+def resolve_token(token_env, env=None):
+    """The shared scorer token named by ``token_env`` (an env var NAME), or None.
+
+    ``<token_env>_FILE``, when set, names a file holding the token and wins over the value
+    itself (a unit can then load it as a credential). Never raises and never logs the
+    token: a missing or unreadable source reads as "no token", and the service's 401 says so.
+    """
+    if not token_env:
+        return None
+    env = os.environ if env is None else env
+    path = (env.get(f"{token_env}_FILE") or "").strip()
+    if path:
+        try:
+            with open(path, encoding="utf-8") as f:
+                return f.read().strip() or None
+        except OSError:
+            log.warning("scorer: cannot read the token file named by %s_FILE", token_env)
+            return None
+    return (env.get(token_env) or "").strip() or None
+
+
+def auth_headers(token):
+    """``{"Authorization": "Bearer <token>"}`` for a token, else ``{}``."""
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None, ignore_zones=(),
-                alert_zones=(), alert_zones_mode="enforce"):
+                alert_zones=(), alert_zones_mode="enforce", token=None):
     """POST a JPEG to the scoring service; dict on success, None on ANY failure.
 
     ``tiles > 1`` asks the service to also score a tiles×tiles grid (rescues distant
@@ -38,11 +65,34 @@ def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None, ignore_
     the answer only gains ``alert_zone_observe`` when a zone would have dropped a person
     (:func:`observe_alert_zones`).
 
-    Callers that have a camera's ``ScorerConfig`` use :func:`score`, which adds failover.
+    ``token`` (the shared secret of a service that requires one) goes out as a bearer
+    header and is never logged.
+
+    Callers that have a camera's ``ScorerConfig`` use :func:`score`, which adds failover
+    and reads the token named by ``scorer.token_env``.
     """
     return _score_once(url, image_path, timeout, tiles, source_id=source_id,
                        ignore_zones=ignore_zones, alert_zones=alert_zones,
-                       alert_zones_mode=alert_zones_mode)[0]
+                       alert_zones_mode=alert_zones_mode, token=token)[0]
+
+
+_warned_unauthorized: set = set()
+
+
+def _unauthorized(exc):
+    """True when the service answered 401: a configuration error, not an outage."""
+    return isinstance(exc, urllib.error.HTTPError) and exc.code == 401
+
+
+def _warn_unauthorized(url, sent_token):
+    """Say once per endpoint that the service wants a token we lack or it refused."""
+    key = urllib.parse.urlsplit(url)._replace(path="", query="").geturl()
+    if key in _warned_unauthorized:
+        return
+    _warned_unauthorized.add(key)
+    log.error("scorer %s rejected the token (HTTP 401): %s; set scorer.token_env to the "
+              "variable holding the service's shared token", key,
+              "the configured token is wrong" if sent_token else "no token is configured")
 
 
 def _transport_failure(exc):
@@ -58,7 +108,7 @@ def _transport_failure(exc):
 
 
 def _score_once(url, image_path, timeout, tiles, *, source_id=None, ignore_zones=(),
-                alert_zones=(), alert_zones_mode="enforce"):
+                alert_zones=(), alert_zones_mode="enforce", token=None):
     """``(result, transport_failed)`` of one scoring request; result None on any failure."""
     try:
         with open(image_path, "rb") as f:
@@ -74,6 +124,7 @@ def _score_once(url, image_path, timeout, tiles, *, source_id=None, ignore_zones
         normalized_source_id = source_id.lower()
         if all(character in "0123456789abcdef" for character in normalized_source_id):
             headers["X-Tapo-Source-ID"] = normalized_source_id
+    headers.update(auth_headers(token))
     req = urllib.request.Request(url, data=body, headers=headers)
     try:
         resp = urllib.request.urlopen(req, timeout=timeout)
@@ -95,6 +146,9 @@ def _score_once(url, image_path, timeout, tiles, *, source_id=None, ignore_zones
             if close:
                 close()
     except Exception as e:  # noqa: BLE001 - any transport/parse failure means "unavailable"
+        if _unauthorized(e):
+            _warn_unauthorized(url, bool(token))
+            return None, False
         log.warning("scorer request failed: %s", e)
         return None, _transport_failure(e)
 
@@ -223,6 +277,7 @@ def score(scorer_cfg, image_path, **kwargs):
     """
     kwargs.setdefault("timeout", scorer_cfg.timeout)
     kwargs.setdefault("tiles", 1)
+    kwargs.setdefault("token", resolve_token(getattr(scorer_cfg, "token_env", None)))
     pool = pool_for(scorer_cfg)
     if pool is None:
         return score_image(scorer_cfg.url, image_path, **kwargs)

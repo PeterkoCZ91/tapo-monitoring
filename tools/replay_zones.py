@@ -46,9 +46,10 @@ def _camera(path, root):
     return rel.split(os.sep)[0]
 
 
-def _post(url, path, timeout):
+def _post(url, path, timeout, token=None):
     with open(path, "rb") as f:
-        req = urllib.request.Request(url, data=f.read(), headers={"Content-Type": "image/jpeg"})
+        headers = {"Content-Type": "image/jpeg", **scorer.auth_headers(token)}
+        req = urllib.request.Request(url, data=f.read(), headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.load(resp)
 
@@ -59,6 +60,7 @@ def cmd_score(args):
         with open(args.out) as f:
             done = {json.loads(line)["path"] for line in f if line.strip()}
     root = os.path.abspath(args.root)
+    token = scorer.resolve_token(args.token_env)
     n = 0
     with open(args.out, "a") as out:
         for path in _images(args.inputs):
@@ -66,7 +68,7 @@ def cmd_score(args):
             if rel in done:
                 continue
             try:
-                res = _post(args.url, path, args.timeout)
+                res = _post(args.url, path, args.timeout, token)
             except Exception as e:  # noqa: BLE001 - report and continue
                 print(f"skip {rel}: {e}", file=sys.stderr)
                 continue
@@ -222,6 +224,9 @@ def main(argv=None):
     p.add_argument("--out", required=True)
     p.add_argument("--root", default=".", help="paths in the cache are relative to this")
     p.add_argument("--timeout", type=float, default=30)
+    p.add_argument("--token-env", default="TAPO_SCORER_TOKEN", metavar="NAME",
+                   help="NAME of the env var with the service's shared token "
+                        "(NAME_FILE may name a file); default TAPO_SCORER_TOKEN")
     p.set_defaults(fn=cmd_score)
     p = sub.add_parser("feet")
     p.add_argument("boxes")

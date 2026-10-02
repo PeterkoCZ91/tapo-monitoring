@@ -109,6 +109,13 @@ def test_report_keeps_model_and_settings_and_withholds_identity():
     assert "review" in data["note"].lower() and "nothing is uploaded" in data["note"]
 
 
+def test_report_never_carries_the_scorer_token(monkeypatch):
+    monkeypatch.setenv("TAPO_SCORER_TOKEN", "tok-0123456789abcdef-secret")
+    text = report.render(_build(), literals=(HOST,))
+    assert "tok-0123456789abcdef-secret" not in text
+    assert "Bearer" not in text
+
+
 def test_getters_record_state_and_camera_error_code():
     built = _build()
     rows = {row["method"]: row for row in built["getters"] if row["method"]}

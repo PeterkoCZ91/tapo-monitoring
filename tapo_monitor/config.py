@@ -137,6 +137,9 @@ class ScorerConfig:
     # Score the whole frame plus a tiles×tiles grid and keep the best. >1 rescues distant
     # subjects that vanish once a wide frame is downscaled to the model input. 1 = off.
     tiles: int = 1
+    # NAME of the env var holding the scoring service's shared token (never the token
+    # itself); ``<NAME>_FILE`` may name a file with it instead. None = no authentication.
+    token_env: str | None = None
     # Bare (non-PIR) motion is not alerted on a single marginal frame: a frame >= this
     # sends immediately, a frame in [threshold, motion_send_threshold) needs a second
     # corroborating frame within the sampler window. None = feature off (legacy behaviour).
@@ -841,6 +844,11 @@ def _scorer(data, where):
         raise ConfigError(f"{where}: scorer threshold must be between 0 and 1")
     if tiles < 1:
         raise ConfigError(f"{where}: scorer tiles must be >= 1")
+    token_env = d.get("token_env")
+    if token_env is not None and not (isinstance(token_env, str)
+                                      and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token_env)):
+        raise ConfigError(f"{where}: scorer token_env must be the NAME of an environment "
+                          "variable (letters, digits, underscore), not the token")
     motion_send_threshold = d.get("motion_send_threshold")
     if motion_send_threshold is not None:
         try:
@@ -884,6 +892,7 @@ def _scorer(data, where):
     if alert_zones_mode == "observe" and not alert_zones:
         raise ConfigError(f"{where}: scorer alert_zones_mode observe needs alert_zones")
     return ScorerConfig(url=url, urls=urls, threshold=threshold, timeout=timeout, tiles=tiles,
+                        token_env=token_env,
                         motion_send_threshold=motion_send_threshold,
                         person_bit_skips_hold=person_bit_skips_hold,
                         ignore_zones=ignore_zones, lens_ignore_zones=lens_ignore_zones,

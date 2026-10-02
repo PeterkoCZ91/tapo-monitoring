@@ -251,10 +251,11 @@ class LabelSession:
     """
 
     def __init__(self, dataset_dir, *, seed=None, low_sample=None, night=None,
-                 scorer_url=None, lang=DEFAULT_LANG):
+                 scorer_url=None, lang=DEFAULT_LANG, scorer_token_env="TAPO_SCORER_TOKEN"):
         self.dataset_dir = dataset_dir
         self.lang = lang if lang in STRINGS else DEFAULT_LANG
         self.scorer_url = scorer_url   # scoring service for the person-box overlay, or None
+        self.scorer_token_env = scorer_token_env   # NAME of the env var with its token
         self._boxes: dict[str, dict | None] = {}
         self._boxes_lock = threading.Lock()
         self.night = night   # (camera, ts) -> bool for the /stats day/night split, or None
@@ -362,7 +363,8 @@ class LabelSession:
             if rel in self._boxes:
                 return self._boxes[rel]
         try:
-            result = scorer.score_image(self.scorer_url, full)
+            result = scorer.score_image(self.scorer_url, full,
+                                        token=scorer.resolve_token(self.scorer_token_env))
             boxes = result.get("person_boxes") if isinstance(result, dict) else None
             scores = result.get("person_scores") if isinstance(result, dict) else None
             w, h = result.get("w"), result.get("h")
@@ -1470,6 +1472,10 @@ def label_main(argv):
     parser.add_argument("--scorer-url", default=None,
                         help="scoring service URL: draw the person boxes it finds on "
                              "each frame (default: off)")
+    parser.add_argument("--scorer-token-env", default="TAPO_SCORER_TOKEN", metavar="NAME",
+                        help="NAME of the environment variable with the scoring service's "
+                             "shared token (NAME_FILE may name a file); default "
+                             "TAPO_SCORER_TOKEN; used only if the service requires one")
     args = parser.parse_args(argv)
     if not _dataset_ok(parser.prog, args.dataset_dir):
         return 2
@@ -1479,7 +1485,8 @@ def label_main(argv):
         if night is None:
             return 1
     session = LabelSession(args.dataset_dir, seed=args.seed, low_sample=args.low_sample,
-                           night=night, scorer_url=args.scorer_url, lang=args.lang)
+                           night=night, scorer_url=args.scorer_url, lang=args.lang,
+                           scorer_token_env=args.scorer_token_env)
     return serve(session, args.port, args.bind)
 
 

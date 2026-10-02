@@ -166,6 +166,75 @@ service would exit before the model loads — under `Restart=always` that is an 
 crash loop caused by an observability setting. Unset, blank and unparseable values all
 fall back to the built-in defaults.
 
+### Shared token (optional)
+
+The scoring service has no authentication by default, which is fine while it listens only
+for monitors on a trusted LAN. Before it moves to a machine other people or devices can
+reach, turn on a shared token. It is opt-in: with no token configured nothing changes.
+
+With a token set on the service, `POST /score` and `GET /metrics` need
+`Authorization: Bearer <token>` and otherwise answer `401 {"error": "unauthorized"}` with no
+detail (the token is compared in constant time, and a refused request is not counted in the
+metrics). `GET /health` stays open so failover checks and systemd probes keep working; it
+only says `ok` and the detector family.
+
+1. Generate a token on the scorer host and keep it in a file only the service user can read:
+
+   ```bash
+   sudo install -m 0600 -o tapo -g tapo /dev/null /etc/tapo-monitor/scorer.token
+   openssl rand -hex 32 | sudo tee /etc/tapo-monitor/scorer.token >/dev/null
+   sudo stat -c '%a %U' /etc/tapo-monitor/scorer.token   # check: 600 and the service user
+   ```
+
+2. Point the service at it in `/etc/tapo-monitor/scorer.env` and re-run
+   `tools/provision_scorer.sh` (the env file changed, so it restarts the service):
+
+   ```env
+   TAPO_SCORER_TOKEN_FILE=/etc/tapo-monitor/scorer.token
+   ```
+
+   `TAPO_SCORER_TOKEN=<value>` also works but a file is preferred and wins when both are
+   set. A file that is missing, empty or readable by group or others stops the service at
+   start (exit 2) instead of silently serving without protection; the journal line names
+   the setting, never the token. With the token on, the start-up line reads `auth=token`.
+
+3. On every monitor host put the same token in the daemon's env file (for example a
+   `chmod 600` `EnvironmentFile`) under a name of your choice and name that variable in
+   the config (the config holds the variable's name, never the token):
+
+   ```yaml
+   scorer:
+     url: http://198.51.100.20:8766/score
+     token_env: TAPO_SCORER_TOKEN
+   ```
+
+   `TAPO_SCORER_TOKEN_FILE`-style indirection works here too: if `<token_env>_FILE`
+   (`TAPO_SCORER_TOKEN_FILE` above) names a readable file, its contents are used instead of
+   the variable's value. Every URL in a failover list uses the same token.
+
+   The same variable (`TAPO_SCORER_TOKEN` or `..._FILE`) is read by
+   `tools/fleet_status.sh` and `tools/check_scorer_rollout.sh` (sent through a curl config
+   on a pipe, never on the command line), and `tapo-monitor label --scorer-url` and
+   `tools/replay_zones.py score` read the variable named by `--scorer-token-env` /
+   `--token-env` (default `TAPO_SCORER_TOKEN`). The daily digest's `/metrics` read uses
+   `scorer.token_env` too.
+
+The token is never logged and never written to audit lines, `health.json`, runtime state,
+the digest or `tapo-monitor report`. A client that is refused with 401 logs one clear
+`rejected the token` error per endpoint and keeps running as it does for any scorer outage
+(frames pass unscored); a 401 is a configuration error, so it does **not** count towards
+failover and never switches to another candidate. If the digest shows the scorer as down
+right after enabling a token, check for that line first.
+
+To rotate: write the new token to the service's file, restart `tapo-scorer`, then update
+the monitor hosts' env and restart them. Until a monitor has the new token it logs the 401
+error and sends frames unscored, so rotate a host at a time in a quiet period, or accept a
+short gap. To roll back, remove the `TAPO_SCORER_TOKEN*` lines from `scorer.env` and
+restart the service; clients that still send a header are unaffected.
+
+The token only keeps casual or accidental callers out: it travels in clear text, so over
+anything but a private network (Tailscale, a LAN) put the scorer behind TLS as well.
+
 ### Swapping the detector model
 
 The service runs one detector family, chosen by `TAPO_SCORER_ARCH` in `scorer.env`

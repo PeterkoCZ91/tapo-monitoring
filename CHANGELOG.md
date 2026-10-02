@@ -5,6 +5,16 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Optional shared token for the scorer service (default off, behaviour unchanged). With
+  `TAPO_SCORER_TOKEN_FILE` (a 0600 file, preferred) or `TAPO_SCORER_TOKEN` set on the service,
+  `/score` and `/metrics` need `Authorization: Bearer <token>` (constant-time compare, 401
+  without detail) while `/health` stays open; a bad token file stops the service at start.
+  Clients send the header when `scorer.token_env` names a variable holding the token
+  (`<NAME>_FILE` may name a file): live scoring, sampler and SD paths, scene probe, shadow scan,
+  the daily digest's `/metrics`, `label --scorer-token-env`, `tools/replay_zones.py --token-env`,
+  `tools/fleet_status.sh` and `tools/check_scorer_rollout.sh`. The token is never logged or
+  stored; a 401 is logged once as a configuration error and does not count towards scorer
+  failover. See `docs/operations.md`, "Shared token", and `docs/configuration.md`.
 - The scorer service can run more than one detector family: `TAPO_SCORER_ARCH=yolox`
   (default, behaviour unchanged) or `detr` for NMS-free DETR-style ONNX exports with
   `logits` and `boxes` outputs (RF-DETR, D-FINE, RT-DETR), configured by

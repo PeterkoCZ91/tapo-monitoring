@@ -756,6 +756,24 @@ scorer:
 crop_to_subject: true
 ```
 
+#### Scorer token (optional)
+
+A scoring service that requires a shared token (see
+[Shared token](operations.md#shared-token-optional)) is reached with
+
+```yaml
+scorer:
+  url: http://198.51.100.20:8766/score
+  token_env: TAPO_SCORER_TOKEN
+```
+
+`token_env` is the NAME of an environment variable (letters, digits and underscores, so a
+pasted token is refused at load time), not the secret. If `<token_env>_FILE` is also set and
+names a readable file, the token is read from it instead. Without `token_env` no header is
+sent. The token is never logged or stored in audit lines, state or reports. A 401 answer
+is logged once as a configuration error and does not count as a transport failure for
+failover. All candidates of a `url` list share the one token.
+
 #### Scorer failover (optional)
 
 `url` may be a list of candidate scoring services, for a scorer that is moved to another

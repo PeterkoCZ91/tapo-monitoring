@@ -17,6 +17,12 @@ User=@SCORER_USER@
 # would silently fall back to CPU.
 SupplementaryGroups=render
 EnvironmentFile=/etc/tapo-monitor/scorer.env
+# Optional shared token (see docs/operations.md, "Shared token"): put
+#   TAPO_SCORER_TOKEN_FILE=/etc/tapo-monitor/scorer.token   (mode 0600, service user)
+# in scorer.env, or hand the file over as a credential instead of reading it from disk:
+#   LoadCredential=scorer-token:/etc/tapo-monitor/scorer.token
+#   Environment=TAPO_SCORER_TOKEN_FILE=%d/scorer-token
+# Comments only; with neither line the service stays open as before.
 # With `-m`, Python imports the package from the working directory, so a host that keeps
 # the package as a copy here and one that pip-installed it into the venv both work.
 WorkingDirectory=@SCORER_HOME@

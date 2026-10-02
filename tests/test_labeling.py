@@ -951,6 +951,16 @@ def test_boxes_endpoint_returns_scorer_boxes_and_caches(served_scorer):
     assert calls[0][1].endswith(os.path.basename(path))
 
 
+def test_boxes_overlay_sends_the_scorer_token_from_the_named_env(dataset, monkeypatch):
+    seen = []
+    monkeypatch.setattr(scorer, "score_image",
+                        lambda url, path, **kw: seen.append(kw) or {})
+    monkeypatch.setenv("TAPO_SCORER_TOKEN", "tok-from-env")
+    session = labeling.LabelSession(dataset, seed=1, scorer_url="http://scorer.invalid/score")
+    session.person_boxes(session.state()["frame"]["path"])
+    assert seen and seen[0].get("token") == "tok-from-env"
+
+
 def test_boxes_endpoint_rejects_paths_outside_the_dataset(served_scorer):
     _, url, calls = served_scorer
     for bad in ("../../etc/passwd", "/etc/passwd", "host-a/sent-log/../../../x.jpg", ""):

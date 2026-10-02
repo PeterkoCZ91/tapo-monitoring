@@ -4501,11 +4501,12 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
             g.pop("out_since", None)
 
 
-def _fetch_scorer_metrics(url, timeout=5.0):  # pragma: no cover - network I/O
-    """GET the shared scorer's /metrics as a dict. Raises on any failure."""
+def _fetch_scorer_metrics(url, timeout=5.0, token=None):
+    """GET the shared scorer's /metrics as a dict (bearer ``token`` if given). Raises on failure."""
     import json as _json
     import urllib.request
-    with urllib.request.urlopen(url, timeout=timeout) as response:
+    request = urllib.request.Request(url, headers=scorer.auth_headers(token))
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         return _json.loads(response.read().decode("utf-8"))
 
 
@@ -4522,7 +4523,6 @@ def fleet_health_snapshot(app: AppConfig, state: MonitorState, *, now,
     version`` prints) and the expectation from ``TAPO_EXPECTED_FINGERPRINT``, so the
     digest can say which code the host runs and flag drift from the intended release.
     """
-    fetch_metrics = fetch_metrics or _fetch_scorer_metrics
     cameras = {}
     for cfg in app.cameras:
         entry = {
@@ -4580,6 +4580,11 @@ def fleet_health_snapshot(app: AppConfig, state: MonitorState, *, now,
         # camera would poll the same process twice for the same answer.
         url = sorted({scorer.active_url(c.scorer) for c in app.cameras if c.scorer.url})[0]
         metrics_url = url[: -len("/score")] + "/metrics" if url.endswith("/score") else url
+        if fetch_metrics is None:
+            token_env = next((c.scorer.token_env for c in app.cameras
+                              if c.scorer.url and c.scorer.token_env), None)
+            token = scorer.resolve_token(token_env)
+            fetch_metrics = lambda u: _fetch_scorer_metrics(u, token=token)  # noqa: E731
         try:
             metrics = fetch_metrics(metrics_url) or {}
             scorer_health = {

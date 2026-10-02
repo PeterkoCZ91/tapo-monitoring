@@ -855,8 +855,8 @@ often what photographs the person seconds later.
   no unexpected restart or traceback.
 - [ ] Host failover does not yet cover the recorder paths, the CLI commands, MQTT or hub
   cameras, and never returns to the primary address by itself.
-- [ ] Scorer service has no authentication: before it moves to a machine other than the
-  one that hosts the monitor, add an optional shared token (service and client side).
+- [x] Scorer service authentication: optional shared token (`TAPO_SCORER_TOKEN[_FILE]` on
+  the service, `scorer.token_env` on the clients); `/health` stays open.
 - [ ] `soak_sim` does not cover `daemon.tick`, the stall watchdog and `statusd`, and
   cannot see leaked frame files; extend it, and run it in CI as a short seed matrix.
 - [ ] MAC-to-address resolution through a host on the camera's own network, for sites

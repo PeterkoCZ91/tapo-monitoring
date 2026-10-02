@@ -505,7 +505,19 @@ done
 if ((want_scorer)); then
     scorer_line=""
     health="$(curl -fsS --max-time 10 "${scorer_url%/}/health" 2>/dev/null)"
-    metrics="$(curl -fsS --max-time 10 "${scorer_url%/}/metrics" 2>/dev/null)"
+    # The token (TAPO_SCORER_TOKEN, or TAPO_SCORER_TOKEN_FILE) goes in through a curl config
+    # on a pipe, never on the command line where `ps` would show it.
+    auth_value="${TAPO_SCORER_TOKEN:-}"
+    if [[ -n "${TAPO_SCORER_TOKEN_FILE:-}" && -r "$TAPO_SCORER_TOKEN_FILE" ]]; then
+        auth_value="$(<"$TAPO_SCORER_TOKEN_FILE")"
+    fi
+    if [[ -n "$auth_value" ]]; then
+        metrics="$(curl -fsS --max-time 10 \
+            --config <(printf 'header = "Authorization: Bearer %s"\n' "$auth_value") \
+            "${scorer_url%/}/metrics" 2>/dev/null)"
+    else
+        metrics="$(curl -fsS --max-time 10 "${scorer_url%/}/metrics" 2>/dev/null)"
+    fi
     if [[ "$health" != *'"ok": true'* && "$health" != *'"ok":true'* ]]; then
         scorer_line="/health did not answer ok"
         finding scorer "$scorer_line"

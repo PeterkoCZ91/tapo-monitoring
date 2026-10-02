@@ -14,11 +14,26 @@ health="$(curl --fail --silent --show-error --max-time "$timeout_seconds" \
     echo "scorer health check failed" >&2
     exit 1
 }
-metrics="$(curl --fail --silent --show-error --max-time "$timeout_seconds" \
-    "$base_url/metrics")" || {
-    echo "scorer metrics check failed" >&2
-    exit 1
-}
+# /metrics needs the shared token when the service has one (TAPO_SCORER_TOKEN, or
+# TAPO_SCORER_TOKEN_FILE); it goes in through a curl config on a pipe, not the command line.
+auth_value="${TAPO_SCORER_TOKEN:-}"
+if [[ -n "${TAPO_SCORER_TOKEN_FILE:-}" && -r "$TAPO_SCORER_TOKEN_FILE" ]]; then
+    auth_value="$(<"$TAPO_SCORER_TOKEN_FILE")"
+fi
+if [[ -n "$auth_value" ]]; then
+    metrics="$(curl --fail --silent --show-error --max-time "$timeout_seconds" \
+        --config <(printf 'header = "Authorization: Bearer %s"\n' "$auth_value") \
+        "$base_url/metrics")" || {
+        echo "scorer metrics check failed" >&2
+        exit 1
+    }
+else
+    metrics="$(curl --fail --silent --show-error --max-time "$timeout_seconds" \
+        "$base_url/metrics")" || {
+        echo "scorer metrics check failed (a service with a token needs TAPO_SCORER_TOKEN)" >&2
+        exit 1
+    }
+fi
 
 python3 - "$health" "$metrics" <<'PY'
 import json
