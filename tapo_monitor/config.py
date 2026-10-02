@@ -31,6 +31,7 @@ SNAPSHOT_SOURCES = {"rtsp", "sd"}
 LIGHT_TRIGGER_TYPES = {"person", "motion", "pet", "tamper", "vehicle"}
 LIGHT_TRIGGER_MODES = ("software", "firmware")
 HOLD_EXPIRY_POLICIES = {"off", "observe", "send"}
+FEATURE_MODES = {"enforce", "observe"}
 SD_FRAME_PICKS = {"sharpest", "largest", "tallest"}
 
 
@@ -118,6 +119,9 @@ class SamplerConfig:
     # Frames without a person the streak survives (a PTZ move or a missed detection);
     # 0 = strictly consecutive.
     loiter_miss_tolerance: int = 0
+    # ``observe``: the streak is counted and ``loiter_sent`` set as usual, but the notice
+    # is only audited (``would_loiter``) and nothing is sent. Needs ``loiter_frames``.
+    loiter_mode: str = "enforce"
 
 
 @dataclass
@@ -147,6 +151,12 @@ class ScorerConfig:
     # Polygons (tuples of ``(x, y)`` fractions): only people whose feet (box bottom centre)
     # stand in one count, after ``ignore_zones``. Empty = off. Fixed-view cameras only.
     alert_zones: tuple = ()
+    # ``observe``: ``alert_zones`` filter nothing; a frame whose person a zone would have
+    # dropped is audited (``would_drop_outside_alert_zone``). Needs ``alert_zones``.
+    alert_zones_mode: str = "enforce"
+    # ``observe``: a vehicle that would alert is audited (``would_send``, etype vehicle)
+    # instead; nothing is sent and no cooldown armed. Needs ``alert_vehicles``.
+    vehicle_mode: str = "enforce"
 
     # Alert on a vehicle (car/motorcycle/bus/truck) the scoring service finds at or above
     # ``vehicle_threshold``. Off by default; see detection.vehicle_alert.
@@ -760,6 +770,8 @@ def _sampler(data, where):
                                            "sampler.keep_sampling_on_defer", where),
         loiter_frames=loiter_frames,
         loiter_miss_tolerance=loiter_miss_tolerance,
+        loiter_mode=_check_enum(d.get("loiter_mode", "enforce"), FEATURE_MODES,
+                                "sampler.loiter_mode", where),
     )
 
 
@@ -774,6 +786,8 @@ def _check_loiter(sampler, scorer, where):
     if sampler.loiter_frames and not scorer.url:
         raise ConfigError(f"{where}: sampler loiter_frames needs scorer url "
                           "(it counts scored person frames)")
+    if sampler.loiter_mode == "observe" and not sampler.loiter_frames:
+        raise ConfigError(f"{where}: sampler loiter_mode observe needs loiter_frames > 0")
 
 
 def _check_hold_expiry(sampler, scorer, where):
@@ -836,17 +850,27 @@ def _scorer(data, where):
     lens_ignore_zones = _lens_ignore_zones(d.get("lens_ignore_zones"), where)
     alert_vehicles = _check_bool(d.get("alert_vehicles", False), "alert_vehicles",
                                  f"{where}: scorer")
+    alert_zones_mode = _check_enum(d.get("alert_zones_mode", "enforce"), FEATURE_MODES,
+                                   "scorer.alert_zones_mode", where)
+    vehicle_mode = _check_enum(d.get("vehicle_mode", "enforce"), FEATURE_MODES,
+                               "scorer.vehicle_mode", where)
+    if vehicle_mode == "observe" and not alert_vehicles:
+        raise ConfigError(f"{where}: scorer vehicle_mode observe needs alert_vehicles: true")
     try:
         vehicle_threshold = float(d.get("vehicle_threshold", 0.5))
     except (TypeError, ValueError):
         raise ConfigError(f"{where}: scorer vehicle_threshold must be a number") from None
     if not 0.0 < vehicle_threshold <= 1.0:
         raise ConfigError(f"{where}: scorer vehicle_threshold must be > 0 and <= 1")
+    alert_zones = _alert_zones(d.get("alert_zones"), where)
+    if alert_zones_mode == "observe" and not alert_zones:
+        raise ConfigError(f"{where}: scorer alert_zones_mode observe needs alert_zones")
     return ScorerConfig(url=d.get("url"), threshold=threshold, timeout=timeout, tiles=tiles,
                         motion_send_threshold=motion_send_threshold,
                         person_bit_skips_hold=person_bit_skips_hold,
                         ignore_zones=ignore_zones, lens_ignore_zones=lens_ignore_zones,
-                        alert_zones=_alert_zones(d.get("alert_zones"), where),
+                        alert_zones=alert_zones, alert_zones_mode=alert_zones_mode,
+                        vehicle_mode=vehicle_mode,
                         alert_vehicles=alert_vehicles, vehicle_threshold=vehicle_threshold,
                         night_threshold=night_threshold)
 

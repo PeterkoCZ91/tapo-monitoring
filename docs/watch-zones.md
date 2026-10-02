@@ -42,6 +42,21 @@ Limits:
 - The scoring service must return `person_boxes`; an older one is left alone with one
   warning.
 
+## Trying a feature first (observe mode)
+
+Each feature has a soak switch that computes it and audits the result without acting on
+it. The default is `enforce`, so nothing changes unless you set one:
+
+| Switch | `observe` does | Audit line |
+| --- | --- | --- |
+| `scorer.alert_zones_mode` | filters nothing; alerts go out as without zones | `action=would_drop_outside_alert_zone persons_inside=N persons_outside=M`, next to the `send` it concerns |
+| `sampler.loiter_mode` | counts the streak and sets the group's one-shot flag, sends no notice | `path=sampler action=would_loiter etype=person minutes=N` |
+| `scorer.vehicle_mode` | sends no vehicle alert, arms no cooldown | `action=would_send etype=vehicle` |
+
+Each needs its feature switched on (`alert_zones`, `loiter_frames`, `alert_vehicles`). The
+lines go through the normal audit log, so the review and replay tools see them. Read a few
+days of them, then switch the mode to `enforce` (or delete the key).
+
 ## Loitering (`sampler.loiter_frames`)
 
 With the sampler on, a person who stays in view produces many follow-up frames but only

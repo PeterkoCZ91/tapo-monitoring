@@ -165,6 +165,14 @@ def audit_event(cfg, event, etype, path, action, *, score=None, threshold=None,
         if value is not None and str(key).replace("_", "").isalnum():
             parts.append(f"{key}={_fmt_audit_value(value)}")
     log.info("audit %s", " ".join(parts))
+    zone_observe = getattr(score, "zone_observe", None)
+    if zone_observe and action == "send":
+        # scorer.alert_zones_mode observe: the zone would have dropped the person of the
+        # frame this alert went out on. A separate line, so the send itself stays as is.
+        audit_event(cfg, event, etype, path, "would_drop_outside_alert_zone",
+                    threshold=threshold,
+                    extra={"persons_inside": zone_observe[0],
+                           "persons_outside": zone_observe[1]})
 
 
 def audit_error(cfg, error, *, now=None):
@@ -450,6 +458,11 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 if not _can_alert(can_alert, "vehicle", event):
                     log.info("skip vehicle: cooldown active")
                     audit_event(cfg, event, "vehicle", "live", "cooldown")
+                elif cfg.scorer.vehicle_mode == "observe":
+                    log.info("observe vehicle (score=%.2f): not sent", s.vehicle)
+                    audit_event(cfg, event, "vehicle", "live", "would_send", score=s.vehicle,
+                                threshold=cfg.scorer.vehicle_threshold,
+                                reason="vehicle_observe")
                 else:
                     v_caption = notify.build_caption(
                         TYPE_EMOJI["vehicle"], time_str(event), lens=album_lens(image))

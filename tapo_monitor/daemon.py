@@ -1432,7 +1432,8 @@ def score_for(cfg: CameraConfig):
                                   tiles=cfg.scorer.tiles, source_id=source_id,
                                   ignore_zones=scorer.zones_for_lens(
                                       cfg.scorer, snapshot.frame_lens(image_path)),
-                                  alert_zones=cfg.scorer.alert_zones)
+                                  alert_zones=cfg.scorer.alert_zones,
+                                  alert_zones_mode=cfg.scorer.alert_zones_mode)
 
     def score(image_path):
         started = _time.monotonic()
@@ -1565,7 +1566,8 @@ def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_f
                                     source_id=scorer.source_id_for_camera(cfg.name),
                                     ignore_zones=scorer.zones_for_lens(
                                         cfg.scorer, snapshot.frame_lens(image)),
-                                    alert_zones=cfg.scorer.alert_zones)
+                                    alert_zones=cfg.scorer.alert_zones,
+                                    alert_zones_mode=cfg.scorer.alert_zones_mode)
     if not result:
         return image
     box = scorer.subject_box(result)
@@ -3357,6 +3359,12 @@ def _sd_vehicle_alert(app, cfg, state, entry, pick, *, now, secrets, time_str):
         log.info("skip vehicle: cooldown active [sd]")
         monitor.audit_event(cfg, event, "vehicle", "sd", "cooldown")
         return
+    if cfg.scorer.vehicle_mode == "observe":
+        log.info("observe vehicle (score=%.2f) [sd]: not sent", pick.vehicle_score)
+        monitor.audit_event(cfg, event, "vehicle", "sd", "would_send", score=pick.vehicle_score,
+                            threshold=cfg.scorer.vehicle_threshold, reason="vehicle_observe")
+        entry["vehicle_sent"] = True     # one audit per window, as one alert would be
+        return
     caption = notify.build_caption(monitor.TYPE_EMOJI["vehicle"], time_str(event),
                                    lens=snapshot.frame_lens(pick.vehicle_image))
     ok = send_alert_photo(cfg, secrets, pick.vehicle_image, caption, score=None,
@@ -3757,6 +3765,12 @@ def _sampler_vehicle_alert(app, cfg, state, group, image, s, *, now, secrets, ti
         log.info("skip vehicle: cooldown active [sampler]")
         monitor.audit_event(cfg, group["event"], "vehicle", "sampler", "cooldown")
         return
+    if cfg.scorer.vehicle_mode == "observe":
+        log.info("observe vehicle (score=%.2f) [sampler]: not sent", s.vehicle)
+        monitor.audit_event(cfg, group["event"], "vehicle", "sampler", "would_send",
+                            score=s.vehicle, threshold=cfg.scorer.vehicle_threshold,
+                            reason="vehicle_observe")
+        return
     caption = notify.build_caption(monitor.TYPE_EMOJI["vehicle"], time_str(group["event"]),
                                    lens=snapshot.frame_lens(image))
     ok = send_alert_photo(cfg, secrets, image, caption, score=None,
@@ -3829,8 +3843,13 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                     minutes = sampler.loiter_minutes(group, now, scfg)
                     log.info("loitering %s: person on %d consecutive frames (~%d min)",
                              cfg.name, scfg.loiter_frames, minutes)
-                    if not _loiter_notice(cfg, group, image, s, minutes, secrets=secrets,
-                                          time_str=time_str):
+                    if scfg.loiter_mode == "observe":
+                        monitor.audit_event(cfg, group["event"], "person", "sampler",
+                                            "would_loiter", score=s,
+                                            threshold=cfg.scorer.threshold,
+                                            extra={"minutes": minutes})
+                    elif not _loiter_notice(cfg, group, image, s, minutes, secrets=secrets,
+                                            time_str=time_str):
                         log.warning("loiter notice for %s not delivered", cfg.name)
             if monitor.vehicle_verdict(cfg, s):
                 _sampler_vehicle_alert(app, cfg, state, group, image, s, now=now,

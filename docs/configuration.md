@@ -659,6 +659,7 @@ sampler:
   keep_sampling_on_defer: false
   loiter_frames: 0
   loiter_miss_tolerance: 0
+  loiter_mode: enforce      # observe: audit would_loiter, send nothing
 ```
 
 The sampler takes additional live frames across a long event. Nearby events are grouped;
@@ -707,6 +708,12 @@ pan-limit recall that turns the lens away interrupts the count, which
 With `scorer.alert_zones` set, only a person whose feet stand in a zone counts toward the
 streak: the scorer answer is already filtered by the zones before the sampler reads it, so
 a person outside them neither starts nor extends a streak. Without zones nothing changes.
+
+`loiter_mode` (`enforce` by default, or `observe`) is a soak switch for the notice.
+`observe` runs the streak exactly as before, including setting the group's one-shot
+`loiter_sent` flag, but sends nothing: it writes one audit line per group,
+`path=sampler action=would_loiter etype=person minutes=N`, instead. It needs
+`loiter_frames > 0`.
 
 `keep_sampling_on_defer` (off by default) changes what a camera-confirmed person whose
 live frame scores below the threshold does to the rest of its burst. The frame is still
@@ -849,6 +856,14 @@ scorer:
     - [[0.40, 1.00], [1.00, 1.00], [1.00, 0.55], [0.62, 0.50]]   # driveway, lower right
 ```
 
+`alert_zones_mode` (`enforce` by default, or `observe`) lets you soak the zones before they
+filter anything. In `observe` the scorer answer is left unfiltered, so alerts go out as if
+no zone were set. When a zone would have dropped the person of a frame that was sent, the
+audit gets one extra line next to the send,
+`action=would_drop_outside_alert_zone persons_inside=N persons_outside=M`, so `label-stats`,
+`replay` and a soak report can count them. The line is written for `action=send` audits
+only, and vehicles are not looked at in `observe`. It needs `alert_zones`.
+
 `alert_vehicles` (default `false`) and `vehicle_threshold` (default `0.5`, `0 < x <= 1`)
 make the camera also alert on a vehicle (car, motorcycle, bus or truck) that the scoring
 service finds at or above `vehicle_threshold` in a frame it scored. It needs a service that
@@ -871,6 +886,11 @@ scorer:
   alert_vehicles: true
   vehicle_threshold: 0.6
 ```
+
+`vehicle_mode` (`enforce` by default, or `observe`) is the soak switch for vehicle alerts.
+In `observe` a vehicle that would alert is not sent and arms no cooldown; the audit line is
+`action=would_send etype=vehicle` (with `path=live`, `sampler` or `sd`) instead of
+`action=send`. An SD window audits it once. It needs `alert_vehicles: true`.
 
 `night_threshold` replaces `threshold` while the camera's night is on — the shared astral
 night with the camera's `schedule` applied, so an `always_night` camera uses it around the

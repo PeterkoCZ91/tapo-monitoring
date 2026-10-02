@@ -23,14 +23,16 @@ def source_id_for_camera(camera_name):
 
 
 def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None, ignore_zones=(),
-                alert_zones=()):
+                alert_zones=(), alert_zones_mode="enforce"):
     """POST a JPEG to the scoring service; dict on success, None on ANY failure.
 
     ``tiles > 1`` asks the service to also score a tiles×tiles grid (rescues distant
     subjects) and to return a ``box`` for the winning person — see
     :func:`subject_box`. ``ignore_zones`` removes the people found inside them
     (:func:`apply_ignore_zones`) before anyone reads the answer; ``alert_zones`` then keeps
-    only the people standing in them (:func:`apply_alert_zones`).
+    only the people standing in them (:func:`apply_alert_zones`). With ``alert_zones_mode="observe"`` nothing is filtered:
+    the answer only gains ``alert_zone_observe`` when a zone would have dropped a person
+    (:func:`observe_alert_zones`).
     """
     try:
         with open(image_path, "rb") as f:
@@ -56,7 +58,9 @@ def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None, ignore_
                 return None
             if ignore_zones:
                 result = apply_ignore_zones(result, ignore_zones)
-            if alert_zones:
+            if alert_zones and alert_zones_mode == "observe":
+                result = observe_alert_zones(result, alert_zones)
+            elif alert_zones:
                 result = apply_vehicle_alert_zones(apply_alert_zones(result, alert_zones),
                                                    alert_zones)
             return result
@@ -214,6 +218,23 @@ def apply_alert_zones(result, zones):
     return out
 
 
+def observe_alert_zones(result, zones):
+    """Report what :func:`apply_alert_zones` would do without doing it. Pure-ish.
+
+    The answer is returned unfiltered. When the zones would remove at least one person it
+    gains ``alert_zone_observe`` = ``{"inside", "outside", "person"}`` (people kept and
+    dropped, and the best person score left after the filter). Vehicles are not looked at.
+    """
+    filtered = apply_alert_zones(result, zones)
+    if filtered is result:
+        return result
+    out = dict(result)
+    out["alert_zone_observe"] = {"inside": len(filtered["person_scores"]),
+                                 "outside": filtered["outside_alert_zones"],
+                                 "person": filtered["person"]}
+    return out
+
+
 def apply_vehicle_alert_zones(result, zones):
     """Keep only the vehicles standing in an alert zone. Pure.
 
@@ -260,12 +281,15 @@ class SubjectScore(float):
     the best vehicle confidence (0.0 from an older service).
     """
 
-    def __new__(cls, person, animal, persons=None, vehicle=0.0):
+    def __new__(cls, person, animal, persons=None, vehicle=0.0, zone_observe=None):
         value = float.__new__(cls, person)
         value.person = person
         value.animal = animal
         value.persons = persons
         value.vehicle = vehicle      # best vehicle confidence (0.0 = none / older service)
+        # ``(inside, outside)`` people when observe-mode alert zones would have dropped
+        # this frame's person below the threshold, else None.
+        value.zone_observe = zone_observe
         return value
 
 
@@ -326,7 +350,20 @@ def subject_score(result, threshold=None):
     if values is None:
         return None
     return SubjectScore(*values, persons=person_count(result, threshold),
-                        vehicle=vehicle_score(result))
+                        vehicle=vehicle_score(result),
+                        zone_observe=_zone_observe(result, values[0], threshold))
+
+
+def _zone_observe(result, person, threshold):
+    """``(inside, outside)`` when observe zones would push a person frame under ``threshold``."""
+    info = result.get("alert_zone_observe")
+    if threshold is None or not isinstance(info, dict) or person < threshold:
+        return None
+    try:
+        inside, outside, kept = int(info["inside"]), int(info["outside"]), float(info["person"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return (inside, outside) if kept < threshold else None
 
 
 def subject_box(result):

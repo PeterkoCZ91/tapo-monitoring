@@ -9,6 +9,12 @@ All notable changes to this project are documented here.
   package fingerprint, starts, error lines, alerts per camera and path, first-alert
   median/p90, drop/hold/cooldown and `would_*` counts, memory and CPU), with `--user`,
   `--json` and `--baseline` deviation marking. See `docs/operations.md`, "Soak report".
+- Observe mode for the opt-in alert features (default `enforce`, behaviour unchanged):
+  `scorer.alert_zones_mode`, `sampler.loiter_mode` and `scorer.vehicle_mode` accept
+  `observe`, which computes the feature and writes an audit line instead of acting:
+  `would_drop_outside_alert_zone` (people inside/outside, filters nothing), `would_loiter`
+  (with `minutes`, no notice sent) and `would_send` with `etype=vehicle` (nothing sent, no
+  cooldown armed). Each needs its feature enabled.
 - `tapo-monitor label-stats --camera-alias OLD=NEW` (repeatable): counts the records of a
   renamed camera under its new name in the per-camera, incident and day/night tables.
 - `host` may be a list of candidate addresses (off by default; a string works as before).
