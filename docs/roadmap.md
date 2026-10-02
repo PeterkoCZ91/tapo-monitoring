@@ -841,6 +841,39 @@ often what photographs the person seconds later.
   recommending a default; the vehicle threshold of 0.5 is an untested estimate.
 - [x] Vehicle alerts on the SD-card follow-up path.
 
+### 10.13 — Resilience and soak tooling
+
+- [x] `host: [a, b]` candidates with failover to the same device (MAC check) and
+  `scorer.url: [a, b]` with failover and return to the primary.
+- [x] `*_mode: observe` for alert zones, loitering and vehicle alerts: compute and audit,
+  send and filter nothing.
+- [x] `tools/soak_report.sh` (read-only per-host report with a baseline) and
+  `tools/soak_sim.py` (the real loop against fake cameras on a fake clock).
+- [x] `label-stats --camera-alias`, and `label --scorer-url` / `--lang`.
+- [ ] Soak the 0.9 features for at least five days on real hosts in observe mode, then
+  decide the defaults; release gates are alert volume within 30 % of the baseline and
+  no unexpected restart or traceback.
+- [ ] Host failover does not yet cover the recorder paths, the CLI commands, MQTT or hub
+  cameras, and never returns to the primary address by itself.
+- [ ] Scorer service has no authentication: before it moves to a machine other than the
+  one that hosts the monitor, add an optional shared token (service and client side).
+- [ ] `soak_sim` does not cover `daemon.tick`, the stall watchdog and `statusd`, and
+  cannot see leaked frame files; extend it, and run it in CI as a short seed matrix.
+- [ ] MAC-to-address resolution through a host on the camera's own network, for sites
+  whose DHCP or router changes (ARP is invisible across a subnet route).
+
+### 10.14 — A better detector
+
+- [x] The scorer service accepts a DETR-style detector family next to YOLOX behind a
+  decoder interface (`TAPO_SCORER_ARCH`).
+- [ ] Compare candidate detectors on our own hand-labeled frames (not the teacher's
+  labels, which favour the YOLOX family): AUC, false alarms and misses at a matched
+  operating point, day and night, and latency on the iGPU.
+- [ ] Judge the disagreements between the best candidate and the current model by hand.
+- [ ] Try a cascade instead of a swap: keep the current model and re-score only the gray
+  score band with a heavier, more accurate one.
+- [ ] Publish the comparison and the tool in the docs so others can repeat it on their own data.
+
 ### 10.11 — Network evidence for transient outages
 
 - [x] Add independent, low-rate network history with 30-day retention and a 64 MiB
