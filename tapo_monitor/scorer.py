@@ -148,6 +148,15 @@ def point_in_polygon(x, y, polygon):
     return inside
 
 
+def _foot(box, w, h):
+    """Bottom centre of a pixel box as frame fractions, clamped to the frame. Pure.
+
+    The model can place a box edge a little past the frame (a person cut off at the bottom
+    edge); a zone cannot reach beyond 1.0, so the foot is clamped instead of falling outside.
+    """
+    return (min(max((box[0] + box[2]) / 2 / w, 0.0), 1.0), min(max(box[3] / h, 0.0), 1.0))
+
+
 def apply_alert_zones(result, zones):
     """Keep only the people standing in an alert zone. Pure-ish (warns once).
 
@@ -171,7 +180,7 @@ def apply_alert_zones(result, zones):
     try:
         pairs = [(float(sc), [float(v) for v in bx]) for sc, bx in zip(scores, boxes, strict=True)]
         w, h = float(w), float(h)
-        feet = [((bx[0] + bx[2]) / 2 / w, bx[3] / h) for _, bx in pairs]
+        feet = [_foot(bx, w, h) for _, bx in pairs]
     except (TypeError, ValueError, IndexError):
         return result
     kept = [pair for pair, (fx, fy) in zip(pairs, feet, strict=True)
@@ -213,8 +222,7 @@ def apply_vehicle_alert_zones(result, zones):
                      for sc, bx in zip(scores, boxes, strict=True)]
             w, h = float(w), float(h)
             kept = [(sc, bx) for sc, bx in pairs
-                    if any(point_in_polygon((bx[0] + bx[2]) / 2 / w, bx[3] / h, z)
-                           for z in zones)]
+                    if any(point_in_polygon(*_foot(bx, w, h), z) for z in zones)]
         except (TypeError, ValueError, IndexError):
             kept = None
     if kept is not None and len(kept) == len(pairs):

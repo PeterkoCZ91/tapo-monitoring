@@ -222,6 +222,12 @@ def test_alert_zone_uses_the_feet_not_the_box_centre():
     assert scorer.apply_alert_zones(low, [TRIANGLE]) is low
 
 
+def test_alert_zone_feet_past_the_frame_edge_count_as_on_the_edge():
+    # Frame is 500 high; the model put the box bottom at 510 (a person cut off by the edge).
+    low = _zoned([0.9], [[450, 250, 550, 510]])
+    assert scorer.apply_alert_zones(low, [TRIANGLE]) is low
+
+
 def test_alert_zone_with_nobody_inside_scores_nobody():
     out = scorer.apply_alert_zones(_zoned([0.9], [[10, 100, 60, 300]]), [RIGHT])
     assert out["person"] == 0.0 and out["box"] is None
