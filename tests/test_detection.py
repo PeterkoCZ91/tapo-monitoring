@@ -138,3 +138,21 @@ def test_decode_events_1_bit8_does_not_imply_person():
     f = detection.decode_events_1(256 | 2)
     assert f["linecrossing"] and f["motion"] and not f["person"]
     assert detection.has_person_bit(256) is False
+
+
+# ── vehicle alerts (opt-in per camera) ───────────────────────────────────────
+
+def test_vehicle_alert_off_by_default():
+    assert detection.vehicle_alert(0.95, threshold=0.5) == ""
+    assert detection.vehicle_alert(0.95, threshold=0.5, enabled=False) == ""
+
+
+def test_vehicle_alert_needs_enabled_and_threshold():
+    assert detection.vehicle_alert(0.6, threshold=0.5, enabled=True) == "vehicle"
+    assert detection.vehicle_alert(0.5, threshold=0.5, enabled=True) == "vehicle"
+    assert detection.vehicle_alert(0.49, threshold=0.5, enabled=True) == ""
+    assert detection.vehicle_alert(0.0, threshold=0.0, enabled=True) == ""
+
+
+def test_vehicle_is_a_known_event_type():
+    assert "vehicle" in detection.EVENT_TYPES

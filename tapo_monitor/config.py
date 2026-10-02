@@ -143,6 +143,11 @@ class ScorerConfig:
     # Polygons (tuples of ``(x, y)`` fractions): only people whose feet (box bottom centre)
     # stand in one count, after ``ignore_zones``. Empty = off. Fixed-view cameras only.
     alert_zones: tuple = ()
+
+    # Alert on a vehicle (car/motorcycle/bus/truck) the scoring service finds at or above
+    # ``vehicle_threshold``. Off by default; see detection.vehicle_alert.
+    alert_vehicles: bool = False
+    vehicle_threshold: float = 0.5
     # Threshold while the camera's night is on (its schedule applied to the astral night):
     # IR scenes score differently from daylight ones. None = ``threshold`` around the clock.
     night_threshold: float | None = None
@@ -798,11 +803,20 @@ def _scorer(data, where):
     person_bit_skips_hold = _check_bool(d.get("person_bit_skips_hold", False),
                                         "person_bit_skips_hold", f"{where}: scorer")
     ignore_zones = _ignore_zones(d.get("ignore_zones"), where)
+    alert_vehicles = _check_bool(d.get("alert_vehicles", False), "alert_vehicles",
+                                 f"{where}: scorer")
+    try:
+        vehicle_threshold = float(d.get("vehicle_threshold", 0.5))
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}: scorer vehicle_threshold must be a number") from None
+    if not 0.0 < vehicle_threshold <= 1.0:
+        raise ConfigError(f"{where}: scorer vehicle_threshold must be > 0 and <= 1")
     return ScorerConfig(url=d.get("url"), threshold=threshold, timeout=timeout, tiles=tiles,
                         motion_send_threshold=motion_send_threshold,
                         person_bit_skips_hold=person_bit_skips_hold,
                         ignore_zones=ignore_zones,
                         alert_zones=_alert_zones(d.get("alert_zones"), where),
+                        alert_vehicles=alert_vehicles, vehicle_threshold=vehicle_threshold,
                         night_threshold=night_threshold)
 
 

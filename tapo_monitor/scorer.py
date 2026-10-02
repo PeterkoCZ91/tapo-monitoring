@@ -221,6 +221,19 @@ def subject_scores(result):
     return scores["person"], scores["animal"]
 
 
+def vehicle_score(result):
+    """Vehicle confidence from a response, 0.0 when absent or malformed. Pure.
+
+    Older scoring services send no ``vehicle`` field; that must read as "no vehicle",
+    never as an error, and a bad value never raises.
+    """
+    try:
+        score = float(result.get("vehicle", 0.0)) if isinstance(result, dict) else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+    return score if math.isfinite(score) and 0.0 <= score <= 1.0 else 0.0
+
+
 def person_count(result, threshold):
     """People at or above ``threshold`` in a response, or None when it cannot say. Pure.
 

@@ -71,6 +71,8 @@ def _percentile(samples, fraction):
 PERSON_CLASS = 0
 # COCO ids: bird, cat, dog, horse, sheep, cow, bear
 ANIMAL_CLASSES = (14, 15, 16, 17, 18, 19, 21)
+# COCO ids: car, motorcycle, bus, truck
+VEHICLE_CLASSES = (2, 3, 5, 7)
 # ``person_scores``: every separate person over this floor, at most this many, with
 # anchors of one person merged at this IoU. The floor sits well under any configured
 # threshold, so the daemon can count at its own (day or night) value.
@@ -430,19 +432,22 @@ def scores_from_output(output, num_classes=80, floor=0.01):
     """Max person/animal and per-class confidence from a raw YOLOX head output. Pure."""
     preds = output[0]                      # (N, 5+C)
     if not len(preds):
-        return {"person": 0.0, "animal": 0.0, "classes": {}}
+        return {"person": 0.0, "animal": 0.0, "vehicle": 0.0, "classes": {}}
     obj = preds[:, 4]
     cls = preds[:, 5:5 + num_classes]
     conf = obj[:, None] * cls              # (N, C)
     per_class = conf.max(axis=0)
     person = float(per_class[PERSON_CLASS])
     animal = float(conf[:, list(ANIMAL_CLASSES)].max())
+    vehicle = float(conf[:, list(VEHICLE_CLASSES)].max()) if num_classes > max(VEHICLE_CLASSES) \
+        else 0.0
     named = {
         COCO_NAMES[i]: round(float(score), 4)
         for i, score in enumerate(per_class[:min(num_classes, len(COCO_NAMES))])
         if float(score) >= floor
     }
-    return {"person": round(person, 4), "animal": round(animal, 4), "classes": named}
+    return {"person": round(person, 4), "animal": round(animal, 4),
+            "vehicle": round(vehicle, 4), "classes": named}
 
 
 def _grids_and_strides(input_size, strides):
@@ -503,23 +508,15 @@ def _box_iou(box, boxes):
     return inter / np.maximum(area + areas - inter, 1e-9)
 
 
-def person_scores(output, input_size=640, strides=(8, 16, 32), floor=PERSON_LIST_FLOOR,
-                  iou=PERSON_NMS_IOU, limit=PERSON_LIST_LIMIT, with_boxes=False):
-    """Confidence of each separate person in a raw YOLOX head output, highest first. Pure.
+def _scores_and_boxes(output, conf, input_size, strides, floor, iou, limit, with_boxes):
+    """Anchors of ``conf`` over ``floor``, decoded and thinned by greedy NMS. Pure.
 
-    One person lights up many neighbouring anchors, so the anchors over ``floor`` are
-    decoded (as in :func:`best_person_box`) and thinned by greedy non-maximum suppression
-    at ``iou``: what survives is one entry per person. The first entry is the ``person``
-    score itself. The caller counts the entries at its own threshold; the list is capped
-    at ``limit`` so a crowd cannot bloat the response. ``with_boxes`` also returns each
-    person's ``(x1, y1, x2, y2)`` in model-input pixels, parallel to the scores.
+    Shared by :func:`person_scores` and :func:`vehicle_scores`: ``conf`` is the per-anchor
+    confidence of whichever class set the caller counts.
     """
     import numpy as np
 
     preds = output[0]
-    if not len(preds):
-        return ([], []) if with_boxes else []
-    conf = preds[:, 4] * preds[:, 5 + PERSON_CLASS]
     keep = np.flatnonzero(conf >= floor)
     if not len(keep):
         return ([], []) if with_boxes else []
@@ -542,6 +539,38 @@ def person_scores(output, input_size=640, strides=(8, 16, 32), floor=PERSON_LIST
         rest = _box_iou(boxes[0], boxes[1:]) < iou
         boxes, scores = boxes[1:][rest], scores[1:][rest]
     return (found, found_boxes) if with_boxes else found
+
+
+def person_scores(output, input_size=640, strides=(8, 16, 32), floor=PERSON_LIST_FLOOR,
+                  iou=PERSON_NMS_IOU, limit=PERSON_LIST_LIMIT, with_boxes=False):
+    """Confidence of each separate person in a raw YOLOX head output, highest first. Pure.
+
+    One person lights up many neighbouring anchors, so the anchors over ``floor`` are
+    decoded (as in :func:`best_person_box`) and thinned by greedy non-maximum suppression
+    at ``iou``: what survives is one entry per person. The first entry is the ``person``
+    score itself. The caller counts the entries at its own threshold; the list is capped
+    at ``limit`` so a crowd cannot bloat the response. ``with_boxes`` also returns each
+    person's ``(x1, y1, x2, y2)`` in model-input pixels, parallel to the scores.
+    """
+    preds = output[0]
+    if not len(preds):
+        return ([], []) if with_boxes else []
+    conf = preds[:, 4] * preds[:, 5 + PERSON_CLASS]
+    return _scores_and_boxes(output, conf, input_size, strides, floor, iou, limit, with_boxes)
+
+
+def vehicle_scores(output, input_size=640, strides=(8, 16, 32), floor=PERSON_LIST_FLOOR,
+                   iou=PERSON_NMS_IOU, limit=PERSON_LIST_LIMIT, with_boxes=False):
+    """Like :func:`person_scores`, for vehicles (car, motorcycle, bus, truck). Pure.
+
+    An anchor's vehicle confidence is its objectness times its best vehicle class, so a
+    van that is half "car", half "truck" is one vehicle, not two.
+    """
+    preds = output[0]
+    if not len(preds):
+        return ([], []) if with_boxes else []
+    conf = preds[:, 4] * preds[:, 5:][:, list(VEHICLE_CLASSES)].max(axis=1)
+    return _scores_and_boxes(output, conf, input_size, strides, floor, iou, limit, with_boxes)
 
 
 def tile_rects(width, height, tiles, overlap=0.15):
@@ -618,7 +647,8 @@ def combine_rect_scores(rect_results):
     full = rect_results[0]
     combined = {"person": full["person"], "animal": full["animal"],
                 "classes": full["classes"], "box": full["box"]}
-    for key in ("person_scores", "person_boxes"):
+    # ``vehicle*`` is optional: a rect from an older shape simply lacks it.
+    for key in ("vehicle", "vehicle_scores", "vehicle_boxes", "person_scores", "person_boxes"):
         if key in full:
             combined[key] = full[key]
     tiles = rect_results[1:]
@@ -701,6 +731,7 @@ def build_score_fn(model_path, input_size=416):
             scores = scores_from_output(output)
             box = best_person_box(output, input_size)
             entry = {"person": scores["person"], "animal": scores["animal"],
+                     "vehicle": scores["vehicle"],
                      "classes": scores["classes"],
                      "box": list(scale_box(box, ratio, x0, y0)) if box else None}
             if not results:     # full frame only, like the decision scores
@@ -710,6 +741,11 @@ def build_score_fn(model_path, input_size=416):
                 # static person-shaped object (an ignore zone) without losing the others.
                 entry["person_boxes"] = [[round(v, 1) for v in scale_box(b, ratio, x0, y0)]
                                          for b in found_boxes]
+                # Same for vehicles; older clients ignore these fields.
+                v_found, v_boxes = vehicle_scores(output, input_size, with_boxes=True)
+                entry["vehicle_scores"] = v_found
+                entry["vehicle_boxes"] = [[round(v, 1) for v in scale_box(b, ratio, x0, y0)]
+                                          for b in v_boxes]
             results.append(entry)
         combined = combine_rect_scores(results)
         combined["w"], combined["h"] = img.width, img.height

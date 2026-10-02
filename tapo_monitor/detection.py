@@ -207,6 +207,17 @@ _PERSON_WORDS = ("person", "human", "people")
 _VEHICLE_WORDS = ("vehicle", "car")
 
 
+def vehicle_alert(vehicle_score, threshold, enabled=False):
+    """``"vehicle"`` when a camera opted in and the scorer saw one at ``threshold``, else ``""``.
+
+    Vehicles are never alerted unless the camera's ``scorer.alert_vehicles`` is on; a
+    threshold of 0 would match every frame, so it never fires. Pure.
+    """
+    if not enabled or not threshold or threshold <= 0:
+        return ""
+    return "vehicle" if vehicle_score >= threshold else ""
+
+
 def has_person_bit(events_1, bit=PERSON_BIT):
     """True if the getEvents events_1 bitmask has the AI-person bit set."""
     try:

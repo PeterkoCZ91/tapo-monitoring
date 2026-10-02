@@ -384,7 +384,8 @@ def test_scores_from_output_person_and_animal():
 
 def test_scores_from_output_empty_is_zero():
     out = np.zeros((1, 10, 85), dtype=np.float32)
-    assert scorer_service.scores_from_output(out) == {"person": 0.0, "animal": 0.0, "classes": {}}
+    assert scorer_service.scores_from_output(out) == {
+        "person": 0.0, "animal": 0.0, "vehicle": 0.0, "classes": {}}
 
 def test_scores_from_output_returns_named_classes():
     out = np.zeros((1, 4, 85), dtype=np.float32)
@@ -783,3 +784,57 @@ def test_score_fn_reports_one_person_score_per_person(monkeypatch):
         assert result["person"] == pytest.approx(0.90, abs=1e-4)
         assert result["person_scores"] == pytest.approx([0.90, 0.55], abs=1e-4)
     json.dumps(result)                       # the reply must stay JSON-serialisable
+
+
+# ── vehicles (COCO car 2, motorbike 3, bus 5, truck 7) ──────────────────────
+
+def _vehicle_anchor(out, i, conf, cls=2, raw_box=(0.0, 0.0, 0.0, 0.0)):
+    out[0, i, :4] = raw_box
+    out[0, i, 4] = 1.0
+    out[0, i, 5 + cls] = conf
+
+
+@pytest.mark.parametrize("cls", [2, 3, 5, 7])
+def test_scores_from_output_reports_each_vehicle_class(cls):
+    out = np.zeros((1, 4, 85), dtype=np.float32)
+    _vehicle_anchor(out, 1, 0.6, cls=cls)
+    scores = scorer_service.scores_from_output(out)
+    assert scores["vehicle"] == pytest.approx(0.6, abs=1e-4)
+    assert scores["person"] == 0.0 and scores["animal"] == 0.0
+
+
+def test_scores_from_output_vehicle_ignores_other_classes():
+    out = np.zeros((1, 4, 85), dtype=np.float32)
+    _vehicle_anchor(out, 0, 0.9, cls=1)       # bicycle is not a vehicle here
+    _vehicle_anchor(out, 1, 0.9, cls=0)       # person
+    assert scorer_service.scores_from_output(out)["vehicle"] == 0.0
+
+
+def test_vehicle_scores_lists_each_vehicle_with_boxes():
+    out = np.zeros((1, 3, 85), dtype=np.float32)
+    _vehicle_anchor(out, 0, 0.9, cls=2, raw_box=(100, 80, 40, 60))
+    _vehicle_anchor(out, 1, 0.7, cls=7, raw_box=(102, 82, 40, 60))   # the same vehicle
+    _vehicle_anchor(out, 2, 0.6, cls=5, raw_box=(400, 80, 40, 60))
+    scores, boxes = scorer_service.vehicle_scores(out, input_size=640, with_boxes=True)
+    assert scores == pytest.approx([0.9, 0.6], abs=1e-4)
+    assert boxes[0] == pytest.approx((80.0, 50.0, 120.0, 110.0))
+    assert scorer_service.vehicle_scores(out, input_size=640) == scores
+    assert scorer_service.vehicle_scores(np.zeros((1, 3, 85), dtype=np.float32),
+                                         input_size=640, with_boxes=True) == ([], [])
+
+
+def test_person_scores_unchanged_by_vehicles_in_frame():
+    out = np.zeros((1, 3, 85), dtype=np.float32)
+    _person_anchor(out, 0, 0.9, raw_box=(100, 80, 40, 60))
+    _vehicle_anchor(out, 2, 0.8, raw_box=(400, 80, 40, 60))
+    assert scorer_service.person_scores(out, input_size=640) == pytest.approx([0.9], abs=1e-4)
+
+
+def test_combine_keeps_full_frame_vehicle_and_tolerates_missing_field():
+    full = _rect(0.0) | {"vehicle": 0.7, "vehicle_scores": [0.7], "vehicle_boxes": [[1, 2, 3, 4]]}
+    tile = _rect(0.0) | {"vehicle": 0.95}
+    combined = scorer_service.combine_rect_scores([full, tile])
+    assert combined["vehicle"] == 0.7
+    assert combined["vehicle_boxes"] == [[1, 2, 3, 4]]
+    # a rect without the field (older shape) must not break the fold
+    assert "vehicle" not in scorer_service.combine_rect_scores([_rect(0.9)])

@@ -1463,3 +1463,19 @@ def test_scorer_alert_zones_are_refused_on_a_rotating_lens_profile():
     zone = [[[0.5, 0], [1, 0], [1, 1]]]
     with pytest.raises(cfg.ConfigError, match="alert_zones need a fixed view"):
         cfg.load_config_from_dict(_alert_cfg(zone, event_profile="c545d"))
+
+def test_scorer_vehicle_alerts_default_off_and_parse():
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10", "scorer": {"url": "http://x"}}]})
+    assert app.cameras[0].scorer.alert_vehicles is False
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10", "scorer": {
+        "url": "http://x", "alert_vehicles": True, "vehicle_threshold": 0.6}}]})
+    assert app.cameras[0].scorer.alert_vehicles is True
+    assert app.cameras[0].scorer.vehicle_threshold == 0.6
+
+
+@pytest.mark.parametrize("scorer_cfg", [{"alert_vehicles": "yes"}, {"vehicle_threshold": 2},
+                                        {"vehicle_threshold": "x"}])
+def test_scorer_vehicle_options_reject_bad_values(scorer_cfg):
+    with pytest.raises(cfg.ConfigError, match="vehicle"):
+        cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10",
+                                       "scorer": {"url": "http://x", **scorer_cfg}}]})

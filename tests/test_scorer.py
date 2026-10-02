@@ -260,3 +260,15 @@ def test_score_image_applies_alert_zones_only_when_given(monkeypatch, tmp_path):
                         lambda req, timeout=10: io.BytesIO(body))
     assert scorer.score_image("http://x/score", str(img))["person"] == 0.9
     assert scorer.score_image("http://x/score", str(img), alert_zones=[RIGHT])["person"] == 0.0
+
+def test_vehicle_score_reads_the_field_and_tolerates_old_services():
+    assert scorer.vehicle_score({"person": 0.1, "vehicle": 0.66}) == 0.66
+    assert scorer.vehicle_score({"person": 0.1}) == 0.0          # older service: no field
+    assert scorer.vehicle_score({"vehicle": "bad"}) == 0.0
+    assert scorer.vehicle_score({"vehicle": 7}) == 0.0           # out of range
+    assert scorer.vehicle_score(None) == 0.0
+
+
+def test_subject_score_ignores_the_vehicle_field():
+    result = {"person": 0.8, "animal": 0.1, "vehicle": 0.9}
+    assert scorer.subject_scores(result) == (0.8, 0.1)
