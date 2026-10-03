@@ -42,8 +42,11 @@ camera names, addresses, credentials, coordinates and observations do not belong
     to polygons, get one notice for someone who lingers, and alert on vehicles.
 11. [Measurements](measurements.md) — anonymized accuracy, miss, latency and replay
     figures from a real deployment, and how to reproduce them.
-12. [Roadmap](roadmap.md) — remaining product phases and research tracks.
-13. [Releasing](releasing.md) — how a GitHub release reaches PyPI, and the one-time
+12. [Detector comparison](measurements.md#detector-comparison) — accuracy, latency and
+    hand-checked disagreements of several person detectors, and the
+    [benchmark tool](../tools/bench_detectors/README.md) to repeat it on your own frames.
+13. [Roadmap](roadmap.md) — remaining product phases and research tracks.
+14. [Releasing](releasing.md) — how a GitHub release reaches PyPI, and the one-time
     Trusted Publishing setup.
 
 ## Feature maturity

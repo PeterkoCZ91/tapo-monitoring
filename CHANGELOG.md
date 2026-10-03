@@ -9,6 +9,13 @@ All notable changes to this project are documented here.
   disagreement breakdowns by hashed source, hour and score band, Pearson/Spearman) and, with
   `--labels` and `--disagree-dir`, compares candidate decision rules on hand-labeled
   disagreements; `--lang en|cs`, `--json`. See `docs/operations.md`.
+- `tools/bench_detectors/`: a benchmark for comparing person detectors on your own hand-labeled
+  frames (`manifest.py`, `run.py` with RF-DETR, HuggingFace DETR-family, torchvision Faster R-CNN,
+  YOLOX and scoring-service adapters, `evaluate.py` with AUC, false alarms and misses at fixed
+  thresholds and at "at most 2 % of persons missed" with seeded bootstrap intervals, day/night,
+  a cascade simulation and an export of disagreement frames for labeling). Dependencies live in
+  the tool's own `requirements.txt`, not in the package extras. The first published results are in
+  `docs/measurements.md`, "Detector comparison".
 - Optional shadow run of a second detector inside the scorer service (default off, replies
   unchanged). With `TAPO_SCORER_SHADOW_URL` and `TAPO_SCORER_SHADOW_LOG` set, every scored
   frame is queued (8 deep, dropped and counted when full) after the reply and sent to another

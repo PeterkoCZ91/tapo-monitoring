@@ -316,6 +316,124 @@ time.
   2, so the data holds no information about loitering until the sampler keeps frames
   after the alert.
 
+## Detector comparison
+
+Is a newer detector worth swapping in for the YOLOX-m the scorer runs? The same labeled
+frames were scored by a dozen and a half models and variants, with the tool in
+[`tools/bench_detectors`](../tools/bench_detectors/README.md), which you can run on your own data.
+This is one sample from one deployment and it is biased in a known direction
+([how](#how-far-to-trust-it)); read it as "which models are worth trying", not as a ranking.
+
+**Setup.** 473 hand-labeled frames (425 `person`, 48 `no_person`; `unsure` excluded), 93 of
+them at night (only 8 of those empty). The score of a frame is the highest person confidence.
+Models ran on a CPU through their reference code, except YOLOX-m, which was scored by the
+production service. Latency was measured separately with OpenVINO on an Intel HD Graphics 530 iGPU.
+
+### Accuracy on hand labels
+
+AUC, and the false alarms that remain at a threshold chosen so that at most 2 % of the
+425 persons are missed (so every model has about the same recall; 95 % bootstrap interval
+in brackets for the best model).
+
+| Model | AUC | Threshold (<= 2 % persons missed) | False alarms of 48 |
+|---|---|---|---|
+| RF-DETR Large | 0.974 | 0.194 | 8 (3 to 14) |
+| RT-DETR R50 | 0.970 | 0.210 | 20 |
+| RF-DETR Medium | 0.961 | 0.201 | 11 |
+| YOLOX-x (the teacher of the automatic labels; biased) | 0.960 | - | 17 |
+| Faster R-CNN ResNet-50 v2 (torchvision) | 0.955 | - | - |
+| D-FINE L | 0.949 | - | 21 |
+| RF-DETR Base | 0.942 | - | 24 |
+| RF-DETR Small | 0.941 | - | - |
+| D-FINE M | 0.933 | - | - |
+| RT-DETR R18 | 0.910 | - | - |
+| RF-DETR Nano | 0.894 | - | - |
+| **YOLOX-m (production)** | **0.843** | 0.463 | **45** |
+| YOLOX-s | 0.795 | - | - |
+
+A dash means the figure was not tabulated. Two results are not reliable and are left out of any
+conclusion: RT-DETR v2 scored 0.81 (its adapter was not verified) and plain DETR R50
+saturated, so no threshold met the 2 % target. At fixed thresholds on the same frames, RF-DETR
+Large raised 8 false alarms and missed 12 persons at 0.30, 4 and 24 at 0.45, 2 and 47 at 0.55;
+YOLOX-m raised 45 and missed 7 at 0.45 (47 and 0 at 0.30, 17 and 86 at 0.65). Large on the
+day frames alone (n = 380) reached an AUC of 0.983; at night (n = 93, eight empty frames) the
+Large, Medium and RT-DETR R50 models scored 0.93 to 0.95, which is indicative only.
+
+### Latency
+
+Inference only, 50 frames, three repeats, three CPU threads, OpenVINO. Through the scoring
+service on the iGPU, including JPEG decoding, resizing and HTTP, a request took p50 / p95
+0.29 / 0.30 s for RF-DETR Medium and 0.45 / 0.46 s for Large (the YOLOX-m service was 0.29 s
+at p95). Service start to listening took about 2.5 s with a warm kernel cache; the first
+compile on an empty cache took 5 to 19 s.
+
+| Model | Input | CPU p50 / p95 (ms) | iGPU p50 / p95 (ms) |
+|---|---|---|---|
+| RF-DETR Nano | 384 | 250 / 304 | 100 / 103 |
+| RF-DETR Small | 512 | 505 / 540 | 184 / 192 |
+| RF-DETR Medium | 576 | 659 / 715 | 239 / 246 |
+| RF-DETR Base | 560 | 722 / 765 | 257 / 264 |
+| RF-DETR Large | 704 | 1045 / 1145 | 384 / 396 |
+| RT-DETR R50 | 640 | 1120 / 1230 | 406 / 410 |
+
+The iGPU was 2.6 to 2.8 times faster than the CPU. Exporting the RF-DETR models to ONNX first
+gave scores up to 0.19 away from the reference code; the cause was a resize with antialiasing
+in the service's preprocessing (the model is trained without it). After the fix, scores through
+the service matched the reference within 0.03 on 100 frames (about 0.0003 on a CPU; the rest is
+probably half precision on the iGPU).
+
+### Do the models disagree, and who is right?
+
+On the frames no human had judged yet, 62 had one model at 0.45 or more and the other below
+0.25 (YOLOX-m against RF-DETR Large). 60 of them were labeled by hand: 33 `no_person`, 26
+`person`, 1 `unsure`.
+
+- **RF-DETR saw, YOLOX-m did not** (11 frames): 10 were real people. YOLOX-m missed ten
+  people that the larger model found.
+- **YOLOX-m saw, RF-DETR did not** (49 frames): 32 were empty, 16 were real people.
+  YOLOX-m raised 32 false alarms on static objects (bins, bagged goods, the roof of a play
+  structure, and a handful of whole-frame boxes). The 16 real people RF-DETR scored low (0.08 to
+  0.22), within the range of its empty frames, so it is not strictly better.
+- On these 60 frames: YOLOX-m at 0.45 missed 10 of 26 persons with 32 false alarms of 33;
+  RF-DETR Large at its 2 % threshold missed 12 of 26 with 2 of 33. A rule "RF-DETR Large at
+  0.45 or more, or YOLOX-m at 0.45 or more with RF-DETR at 0.12 or more" missed 2 of 26 with 13
+  false alarms of 33, better than either alone. That is a hypothesis from a small, biased
+  sample, not a result.
+- The false alarms came from **static clusters** (the same box position on many frames), so a
+  second model helps where a hand-drawn ignore zone would also hide real passers-by.
+
+### Cascade
+
+Keeping YOLOX-m and re-scoring only the gray band (0.30 to 0.65) with RF-DETR Large re-scored
+11.7 % of all frames (24.5 % of the hand-labeled ones). It did **not** work out: AUC 0.899, at
+0.45 21 false alarms and 14 misses, against 4 and 24 for Large alone. 21 of the 48 empty
+frames score above 0.65 in YOLOX-m, outside the band, so the second model never sees them.
+This is partly the selection bias below (the negatives are frames YOLOX-m alarmed on); a
+cascade is more promising in traffic where YOLOX-m's false alarms are less confident.
+
+### How far to trust it
+
+- **Selection bias, in YOLOX-m's disfavour.** The hand-labeled empty frames are mostly frames
+  where YOLOX-m itself raised an alarm (sent and review logs), and the persons are mostly
+  frames it detected. YOLOX-m therefore looks worse than it does in service (its easy true
+  negatives are missing) and "matched to YOLOX-m at 0.45" is degenerate (45 of 48 false alarms).
+  Models of another family gain from this. The disagreement review above is the least biased
+  evidence, and even it only covers frames where the two models differ.
+- **Automatic labels favour YOLOX.** They come from YOLOX-x agreeing with YOLOX-m; on all
+  labels YOLOX-m's AUC is 0.997. Those figures are an upper bound for the YOLOX family and were
+  not used for the table.
+- **Only 48 empty frames.** Intervals are wide (8 false alarms is 3 to 14), neighbouring
+  models cannot be ranked, and the night cell has 8 empty frames.
+- **One site type.** Cameras of three models, mostly outdoors; no per-camera or per-weather cuts.
+- **Licences.** The RF-DETR and RT-DETR models were Apache-2.0 according to their projects and
+  model cards, and torchvision's are BSD; this was not independently verified here, and the
+  Ultralytics YOLO family (AGPL-3.0) was deliberately left out. Check the weights you deploy.
+- **Not measured.** Several hosts scoring at once, tiled scoring with a DETR model,
+  other cameras at night, and the first start on a cold machine.
+
+To repeat this on your own frames, follow the
+[tool's README](../tools/bench_detectors/README.md) (hand labels, one venv, one model at a time).
+
 ## Limitations
 
 - **One deployment.** One owner, a handful of cameras, one region and climate. Scenes

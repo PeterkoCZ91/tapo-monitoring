@@ -75,6 +75,8 @@ ignore = ["E501"]
 [tool.ruff.lint.per-file-ignores]
 # Tests set env vars / sys.path and use local imports before module import on purpose.
 "tests/**" = ["E402"]
+# The benchmark tool formats Markdown tables with printf-style templates.
+"tools/bench_detectors/**" = ["UP031"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,0 +1,12 @@
+# Install into a separate virtual environment, not into the monitor's (see README.md).
+# Core (evaluate.py, manifest.py, the yolox and scorer adapters):
+numpy
+Pillow
+onnxruntime
+# Adapters, install only what you use:
+#   rfdetr                            RF-DETR (check each model size's licence)
+#   torch torchvision transformers    torchvision Faster R-CNN and the HuggingFace DETR family
+rfdetr
+torch
+torchvision
+transformers

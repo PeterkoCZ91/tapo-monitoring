@@ -868,7 +868,7 @@ often what photographs the person seconds later.
 
 - [x] The scorer service accepts a DETR-style detector family next to YOLOX behind a
   decoder interface (`TAPO_SCORER_ARCH`).
-- [ ] Compare candidate detectors on our own hand-labeled frames (not the teacher's
+- [x] Compare candidate detectors on our own hand-labeled frames (not the teacher's
   labels, which favour the YOLOX family): AUC, false alarms and misses at a matched
   operating point, day and night, and latency on the iGPU.
 - [x] `tools/shadow_report.py` summarizes the shadow-run log and rates combination rules on
@@ -877,10 +877,11 @@ often what photographs the person seconds later.
   and logs both scores, optionally keeping the disagreeing frames for labelling
   (`TAPO_SCORER_SHADOW_*`), without touching the monitor hosts.
 - [ ] Run the shadow for about a week and read the log and the disagreement frames.
-- [ ] Judge the disagreements between the best candidate and the current model by hand.
-- [ ] Try a cascade instead of a swap: keep the current model and re-score only the gray
-  score band with a heavier, more accurate one.
-- [ ] Publish the comparison and the tool in the docs so others can repeat it on their own data.
+- [x] Judge the disagreements between the best candidate and the current model by hand.
+- [x] Try a cascade instead of a swap: keep the current model and re-score only the gray
+  score band with a heavier, more accurate one. Result: it did not beat the heavier model
+  alone on our sample (see Measurements, "Detector comparison").
+- [x] Publish the comparison and the tool in the docs so others can repeat it on their own data.
 
 ### 10.11 — Network evidence for transient outages
 
