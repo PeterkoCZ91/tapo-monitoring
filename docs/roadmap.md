@@ -882,6 +882,8 @@ often what photographs the person seconds later.
   score band with a heavier, more accurate one. Result: it did not beat the heavier model
   alone on our sample (see Measurements, "Detector comparison").
 - [x] Publish the comparison and the tool in the docs so others can repeat it on their own data.
+- [x] `tools/recording_audit_estimate.py` estimates misses and false alarms per rule from a
+  stratified, partly labeled score table (bootstrap intervals, day/night, completeness check).
 
 ### 10.11 — Network evidence for transient outages
 

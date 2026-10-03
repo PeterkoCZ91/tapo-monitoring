@@ -380,6 +380,46 @@ How to read it:
   only frames where the models differ strongly were saved, so use the counts to rank rules,
   not as error rates; confirm on more frames before changing a threshold.
 
+### Recording audit estimate (optional)
+
+The shadow-run frames are biased towards disagreements, so they cannot say how many persons
+a detector misses overall. To estimate that, score a day of recorded frames with both models
+and label a stratified sample. Build `scores.jsonl` with one object per frame:
+`{"frame", "window", "ts", "stratum", "yolox", "rfdetr"}` where `stratum` is `cand` (either
+model >= 0.25), `lowrand` (a random sample of the frames where both are below 0.25) or
+`lowrest` (the other low frames, unlabeled). Label `cand` and `lowrand` frames with
+`tapo-monitor label`, then:
+
+```bash
+python3 tools/recording_audit_estimate.py scores.jsonl --labels ~/dataset/labels.jsonl \
+    --night-windows night1,night2 --seed 1 --lang cs --json
+```
+
+How it works and how to read it:
+
+- Labels (`labels.jsonl`, last line per sha256 wins, `unsure` ignored) are matched to frames
+  by the label's `path` or `file` field: equal to `frame`, or else equal after stripping
+  directories when that file name is unique in the table. Unmatched labels are counted and
+  warned about.
+- Each labeled frame stands for N/n frames of its stratum (the person rate per stratum is
+  the labeled share; `lowrand` stands for `lowrand` plus `lowrest`, so it is also the rate
+  used for `lowrest`). Labeled `lowrest` frames are not a random sample and are not used.
+- Rules: `yolox>=0.45`, `rfdetr>=0.45`, `rfdetr>=0.30`, `rfdetr>=0.45 OR (yolox>=0.45 AND
+  rfdetr>=T)` for T from 0.08 to 0.25, and a low threshold 0.12 applied to either model
+  (`either`) or to both (`both`).
+- Per rule, per 1000 frames: persons, caught, missed, false alarms (an alert on a
+  non-person), and the miss rate, each with a 95 % interval from 1000 bootstrap resamples
+  of the labeled frames in `cand` and `lowrand` separately (`--seed`, `--iterations`).
+- The share of persons that no model scores >= 0.25 is the independent completeness check:
+  it comes from the `lowrand` person rate alone, not from any rule.
+- Day and night are separate groups. A window counts as night when its name contains
+  `night` or `noc`, or when listed in `--night-windows` (then every other window is day).
+- The tool warns when a stratum has fewer than 30 labels, when `lowrand` has no person
+  (the upper 95 % bound is about 3/n, which the bootstrap cannot show), and that the
+  interval covers sampling noise only: it assumes `lowrand` was drawn at random, that
+  `lowrest` resembles it and that labels are right. Label a random draw, not the frames the
+  labeling queue finds most interesting, or the estimate is biased.
+
 ### Moving the scorer to another machine
 
 Because every camera shares one scorer, move it without a gap by listing both machines in

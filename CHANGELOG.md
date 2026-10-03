@@ -5,6 +5,10 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `tools/recording_audit_estimate.py`: stratum-weighted estimate of missed persons and false
+  alarms per 1000 frames for several decision rules from a partly labeled score table, with
+  seeded bootstrap intervals, day/night split, an independent completeness check and bias
+  warnings; `--lang en|cs`, `--json`. See `docs/operations.md`.
 - `tools/shadow_report.py`: reads the shadow-run log (counts, errors, timing, 2x2 agreement and
   disagreement breakdowns by hashed source, hour and score band, Pearson/Spearman) and, with
   `--labels` and `--disagree-dir`, compares candidate decision rules on hand-labeled
