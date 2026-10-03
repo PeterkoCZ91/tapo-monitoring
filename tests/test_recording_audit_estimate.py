@@ -5,6 +5,8 @@ import json
 import random
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location(
     "recording_audit_estimate", ROOT / "tools" / "recording_audit_estimate.py")
@@ -168,3 +170,69 @@ def test_cli_json_and_text(tmp_path, capsys):
     text = capsys.readouterr().out
     assert "Upozornění" in text and "rfdetr>=0.45" in text
     assert rae.main([str(tmp_path / "missing"), "--labels", str(lab)]) == 2
+
+
+def test_label_matching_by_window_and_index_from_audit_name():
+    rows = [{"frame": "d01/00007.jpg", "window": "d01", "stratum": "cand"},
+            {"frame": "n02/00007.jpg", "window": "n02", "stratum": "cand"},
+            {"frame": "d01/00008.jpg", "window": "d01", "stratum": "cand"}]
+    labels = [
+        {"sha256": "1", "path": "audit/cand_y0.84_r0.49_d01_00007.jpg", "label": "person"},
+        {"sha256": "2", "path": "audit/lowrand_y0.01_r0.02_n02_00007.jpg", "label": "no_person"},
+        {"sha256": "3", "path": "audit/cand_y0.1_r0.3_d09_00007.jpg", "label": "person"},
+    ]
+    got, unmatched = rae.match_labels(rows, labels)
+    assert got == {"d01/00007.jpg": True, "n02/00007.jpg": False}
+    assert unmatched == 1
+
+
+def test_label_matching_prefers_frame_field_of_label():
+    rows = [{"frame": "d01/00007.jpg", "stratum": "cand"}]
+    got, unmatched = rae.match_labels(
+        rows, [{"sha256": "1", "path": "audit/x.jpg", "frame": "d01/00007.jpg",
+                "label": "person"}])
+    assert got == {"d01/00007.jpg": True} and unmatched == 0
+
+
+def _vrow(window, ts, y, r, frame=None):
+    return {"frame": frame or f"{window}/{int(ts):05d}.jpg", "window": window, "ts": float(ts),
+            "stratum": "cand", "yolox": y, "rfdetr": r}
+
+
+def test_visit_clusters_split_by_gap_and_window():
+    rows = [_vrow("d01", 0, 0.1, 0.2), _vrow("d01", 5, 0.5, 0.6), _vrow("d01", 30, 0.1, 0.1),
+            _vrow("d01", 100, 0.1, 0.1), _vrow("d02", 101, 0.1, 0.5)]
+    labels = {r["frame"]: True for r in rows}
+    visits = rae.person_visits(rows, labels, 30)
+    assert [len(v) for v in visits] == [3, 1, 1]
+    assert [len(v) for v in rae.person_visits(rows, labels, 20)] == [2, 1, 1, 1]
+
+
+def test_visit_report_counts_visit_caught_by_any_frame_and_wilson():
+    rows = [_vrow("d01", 0, 0.1, 0.2), _vrow("d01", 5, 0.5, 0.6),   # visit 1: one frame hits
+            _vrow("d01", 200, 0.1, 0.2),                             # visit 2: never hits
+            _vrow("d01", 400, 0.9, 0.1),                             # visit 3: yolox only
+            _vrow("d01", 600, 0.1, 0.1)]                             # not a person
+    labels = {r["frame"]: True for r in rows[:4]}
+    labels[rows[4]["frame"]] = False
+    rep = rae.visit_report(rows, labels, 30)
+    assert rep["visits"] == 3 and rep["person_frames"] == 4
+    assert rep["rules"]["rfdetr>=0.45"]["caught"] == 1
+    assert rep["rules"]["yolox>=0.45"]["caught"] == 2
+    assert rep["rules"]["rfdetr>=0.30"]["missed"] == 2
+    m = rep["rules"]["rfdetr>=0.45"]
+    assert 0 < m["lo"] < 1 / 3 < m["hi"] < 1
+    assert m["lo"] == pytest.approx(0.0615, abs=1e-3)
+
+
+def test_wilson_edges():
+    assert rae.wilson(0, 0) == (None, None)
+    lo, hi = rae.wilson(19, 19)
+    assert hi == pytest.approx(1.0) and 0.82 < lo < 0.84
+
+
+def test_build_report_has_visit_section_and_cli_gap(tmp_path, capsys):
+    rows = [_vrow("d01", 0, 0.1, 0.6), _vrow("d01", 5, 0.1, 0.1)]
+    rep = rae.build_report(rows, {r["frame"]: True for r in rows}, iterations=5, visit_gap=30)
+    assert rep["visit_level"]["visits"] == 1
+    assert "visit" in rae.render(rep, "en").lower()

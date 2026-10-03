@@ -212,6 +212,7 @@ def test_build_dataset_layout_caps_and_loads_in_labeler(tmp_path):
     assert max(r["yolox_m"] for r in top) == pytest.approx(0.305)      # highest candidates kept
     assert all((out / "audit" / r["file"]).is_file() for r in recs)
     assert all(r["camera"] == "cam" and "person" in r and "ts" in r for r in recs)
+    assert all(r["frame"] == f"{r['window']}/{r['file'].rsplit('_', 1)[1]}" for r in recs)
     from tapo_monitor import labeling
     assert len(labeling.load_frames(out)) == 7
 

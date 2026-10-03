@@ -19,6 +19,11 @@ All notable changes to this project are documented here.
   alarms per 1000 frames for several decision rules from a partly labeled score table, with
   seeded bootstrap intervals, day/night split, an independent completeness check and bias
   warnings; `--lang en|cs`, `--json`. See `docs/operations.md`.
+- `tools/recording_audit_estimate.py`: visit-level estimate (`--visit-gap`, default 30 s) of
+  how many labeled person visits each rule catches with at least one frame, with Wilson 95 %
+  intervals, next to the per-frame estimate. Labels of `recording_audit.py dataset` now pair
+  with the score table by window and index (and the dataset index carries `frame`), which
+  fixes the "labels matched no frame" warning.
 - Optional ensemble mode of the scorer service (`TAPO_SCORER_ENSEMBLE=gate`, default off, needs
   the shadow URL): each `/score` runs the primary inference and the shadow service in parallel
   and returns one combined `person` (shadow >= 0.45, or primary >= 0.45 confirmed by shadow

@@ -239,7 +239,7 @@ def build_dataset(rows, frames_dir, out_dir, camera="audit", max_cand=400, max_l
             name = (f"{r['stratum']}_y{(y or 0):.2f}_r{(rf or 0):.2f}_"
                     f"{r['window']}_{src.stem}.jpg")
             shutil.copyfile(src, sub / name)
-            rec = {"file": name, "camera": camera, "ts": r["ts"],
+            rec = {"file": name, "frame": r["frame"], "camera": camera, "ts": r["ts"],
                    "person": rf if rf is not None else y, "yolox_m": y, "rfdetr": rf,
                    "window": r["window"], "verdict": r["stratum"]}
             idx.write(json.dumps(rec) + "\n")

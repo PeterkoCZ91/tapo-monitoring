@@ -399,7 +399,12 @@ How it works and how to read it:
 
 - Labels (`labels.jsonl`, last line per sha256 wins, `unsure` ignored) are matched to frames
   by the label's `path` or `file` field: equal to `frame`, or else equal after stripping
-  directories when that file name is unique in the table. Unmatched labels are counted and
+  directories when that file name is unique in the table, or else by a `frame` field of the
+  label. Labels of a dataset built by `recording_audit.py dataset` are named
+  `audit/<stratum>_y.._r.._<window>_<index>.jpg` while the table has
+  `frame = <window>/<index>.jpg`; those match by `(window, index)` (regex
+  `_([dn]\d\d)_(\d+)\.jpg$`), so tables and datasets from before the change still pair up.
+  `dataset` now also writes `frame` into `index.jsonl`. Unmatched labels are counted and
   warned about.
 - Each labeled frame stands for N/n frames of its stratum (the person rate per stratum is
   the labeled share; `lowrand` stands for `lowrand` plus `lowrest`, so it is also the rate
@@ -412,6 +417,16 @@ How it works and how to read it:
   of the labeled frames in `cand` and `lowrand` separately (`--seed`, `--iterations`).
 - The share of persons that no model scores >= 0.25 is the independent completeness check:
   it comes from the `lowrand` person rate alone, not from any rule.
+- Visit level (`--visit-gap`, default 30 s): labeled persons are grouped into visits (same
+  window, consecutive labeled person frames at most the gap apart). For each rule the report
+  gives the visits with at least one alerting frame (caught), the rest (missed) and the
+  caught share with a Wilson 95 % interval. This is not weighted by stratum: it counts the
+  labeled persons only, so it says how many of the *found* visits a rule would have alerted
+  on, not how many exist. Why it differs from the frame estimate: one person stands on many
+  frames, and an alert needs only one of them, so a rule that misses most frames of a visit
+  can still catch the visit; the per-frame miss rate therefore overstates missed visits. If
+  the table is sparse in time, a larger gap merges visits; frames without numeric `ts` are
+  skipped.
 - Day and night are separate groups. A window counts as night when its name contains
   `night` or `noc`, or when listed in `--night-windows` (then every other window is day).
 - The tool warns when a stratum has fewer than 30 labels, when `lowrand` has no person
