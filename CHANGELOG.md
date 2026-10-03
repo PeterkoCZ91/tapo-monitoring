@@ -5,6 +5,10 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Scorer service: partially decoded video frames (flat grey with a few decoded blocks) are
+  recognised on a small luma copy and answered with zero scores, empty boxes and
+  `artifact: true` without inference; `/metrics` counts them as `artifact`;
+  `TAPO_SCORER_ARTIFACT_FILTER=0` turns it off. See `docs/operations.md`.
 - `tools/recording_audit_estimate.py`: stratum-weighted estimate of missed persons and false
   alarms per 1000 frames for several decision rules from a partly labeled score table, with
   seeded bootstrap intervals, day/night split, an independent completeness check and bias

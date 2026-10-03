@@ -115,7 +115,7 @@ class ScorerMetrics:
     _PERSISTED_FIELDS = (
         "requests", "completed", "failed", "inference_runs", "max_in_flight",
         "score_successes", "person_candidates", "animal_candidates",
-        "malformed_responses", "request_seconds_total", "request_seconds_max",
+        "malformed_responses", "artifact", "request_seconds_total", "request_seconds_max",
         "score_seconds_total", "score_seconds_max", "restart_count",
     )
 
@@ -142,6 +142,7 @@ class ScorerMetrics:
         self.score_successes = 0
         self.person_candidates = self.animal_candidates = 0
         self.malformed_responses = 0
+        self.artifact = 0       # frames answered as partially decoded video, not scored
         self.failure_reasons = {}
         self.request_seconds_total = self.request_seconds_max = 0.0
         self.score_seconds_total = self.score_seconds_max = 0.0
@@ -374,6 +375,7 @@ class ScorerMetrics:
                 self.score_successes += 1
                 self.person_candidates += int(_positive_score(result.get("person")))
                 self.animal_candidates += int(_positive_score(result.get("animal")))
+                self.artifact += int(result.get("artifact") is True)
             elif ok:
                 self.malformed_responses += 1
                 failure_reason = "malformed_response"
@@ -416,6 +418,7 @@ class ScorerMetrics:
                 "person_candidates": self.person_candidates,
                 "animal_candidates": self.animal_candidates,
                 "malformed_responses": self.malformed_responses,
+                "artifact": self.artifact,
                 "failure_reasons": dict(self.failure_reasons),
                 "inference_runs": self.inference_runs,
                 "in_flight": self.in_flight,
@@ -615,6 +618,51 @@ def scale_box(box, ratio, off_x, off_y):
     """
     x1, y1, x2, y2 = box
     return (x1 / ratio + off_x, y1 / ratio + off_y, x2 / ratio + off_x, y2 / ratio + off_y)
+
+
+ARTIFACT_GREY = 128
+ARTIFACT_GREY_BAND = 4          # |luma - 128| <= 4 counts as the flat grey base
+ARTIFACT_GREY_SHARE = 0.6       # share of grey pixels; real scenes in the data stay under 0.13
+ARTIFACT_MEAN_LOW, ARTIFACT_MEAN_HIGH = 120.0, 136.0
+ARTIFACT_SIZE = (160, 90)
+
+
+def artifact_filter_enabled(env=None):
+    """``TAPO_SCORER_ARTIFACT_FILTER=0`` (or off/false/no) turns the filter off; default on."""
+    env = os.environ if env is None else env
+    value = (env.get("TAPO_SCORER_ARTIFACT_FILTER") or "").strip().lower()
+    return value not in ("0", "off", "false", "no")
+
+
+def is_decode_artifact(jpeg_bytes):
+    """True for a partially decoded video frame: a flat luma-128 base with a few real blocks.
+
+    A damaged HEVC decode leaves most of the picture mid-grey and only some intra-coded
+    blocks with content; the detector then "finds" a person in those blocks. Judged on a
+    small luma copy: at least ``ARTIFACT_GREY_SHARE`` of the pixels within
+    ``ARTIFACT_GREY_BAND`` of 128 and a mean luma of 120-136. Night IR, dark and foggy
+    frames are textured or off 128 and never match. Anything undecodable is not an artifact.
+    """
+    try:
+        import io
+
+        import numpy as np
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(jpeg_bytes))
+        img.draft("L", (320, 320))
+        luma = np.asarray(img.convert("L").resize(ARTIFACT_SIZE), dtype=np.float32)
+    except Exception:  # noqa: BLE001 - the scorer itself reports undecodable input
+        return False
+    share = float(np.mean(np.abs(luma - ARTIFACT_GREY) <= ARTIFACT_GREY_BAND))
+    return share >= ARTIFACT_GREY_SHARE and ARTIFACT_MEAN_LOW <= float(luma.mean()) <= ARTIFACT_MEAN_HIGH
+
+
+def artifact_result():
+    """Reply for a decode artifact: nothing detected, flagged for newer clients."""
+    return {"person": 0, "animal": 0, "vehicle": 0, "classes": {}, "box": None,
+            "person_scores": [], "person_boxes": [], "vehicle_scores": [],
+            "vehicle_boxes": [], "artifact": True}
 
 
 def preprocess_image(img, input_size):
@@ -1187,7 +1235,7 @@ def _authorized(header, token):
 def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=60,
                 metrics_retention_days=7, metrics_retention_files=8,
                 metrics_max_journal_bytes=METRICS_MAX_JOURNAL_BYTES, arch=None, token=None,
-                shadow=None, ensemble=None):
+                shadow=None, ensemble=None, artifact_filter=None):
     """HTTP server: POST /score (JPEG body) -> JSON scores; GET /health -> ok.
 
     ``arch`` (the detector family name, never the model path) is reported by /health and
@@ -1206,6 +1254,11 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
     inference and the reply carries one combined person score; the reply waits for it at most
     ``ensemble.timeout`` seconds, after which the primary reply goes out unchanged.
 
+    With ``artifact_filter`` (default: on unless ``TAPO_SCORER_ARTIFACT_FILTER=0``) a
+    partially decoded video frame (see :func:`is_decode_artifact`) is answered with zero
+    scores, empty boxes and ``"artifact": true`` without running any inference, and counted
+    in /metrics as ``artifact``.
+
     Threaded so /health, /metrics and slow clients never queue behind a long
     inference (a 4K tiled request can hold the CPU for seconds). Inference itself
     stays serialized behind one lock: parallel CPU runs would just slow each other
@@ -1219,6 +1272,8 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
         max_journal_bytes=metrics_max_journal_bytes,
     )
     metrics.arch = arch or getattr(score_fn, "arch", None)
+    if artifact_filter is None:
+        artifact_filter = artifact_filter_enabled()
     inference_lock = threading.Lock()
     runner = ShadowRunner(shadow) if shadow is not None else None
     if ensemble is not None and shadow is None:
@@ -1284,11 +1339,15 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
             ok = False
             result = None
             failure_reason = None
-            handle = gate.start(body, tiles) if gate is not None else None
+            artifact = artifact_filter and is_decode_artifact(body)
+            handle = gate.start(body, tiles) if gate is not None and not artifact else None
             outcome = None
             try:
-                with inference_lock:
-                    result = score_fn(body, tiles)
+                if artifact:
+                    result = artifact_result()
+                else:
+                    with inference_lock:
+                        result = score_fn(body, tiles)
                 ok = True
             except Exception:  # noqa: BLE001 - report, don't kill the server
                 failure_reason = "inference_error"
@@ -1304,7 +1363,7 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
                 score_seconds = time.monotonic() - score_started
                 metrics.finish(time.monotonic() - request_started, score_seconds, ok,
                                result=result, failure_reason=failure_reason, source_id=source_id)
-                if runner is not None and ok and isinstance(result, dict):
+                if runner is not None and ok and not artifact and isinstance(result, dict):
                     runner.submit(body, tiles, source_id, result,
                                   time.monotonic() - request_started, outcome)
 

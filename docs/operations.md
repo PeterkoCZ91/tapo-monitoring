@@ -464,6 +464,19 @@ up to `TAPO_SCORER_ENSEMBLE_TIMEOUT` per request until it is back. Enabling the 
 needs a restart of the scorer. To roll back, remove `TAPO_SCORER_ENSEMBLE` and restart; the
 replies are then byte-for-byte the primary's again. A bad value (unknown mode, `LOW >= HIGH`,
 no shadow URL) stops the service at start instead of running half-configured.
+### Partially decoded frames (artifact filter)
+
+A damaged HEVC decode sometimes leaves a flat mid-grey picture (luma about 128) with only a
+few intra-coded blocks of real content, and a detector will "find" a person in those blocks.
+The scorer therefore checks every frame first, on a 160x90 luma copy: at least 60 % of the
+pixels within 4 of 128 and a mean luma of 120-136. Such a frame is answered without running
+any inference: `person`, `animal` and `vehicle` 0, empty boxes and score lists, and
+`"artifact": true` (clients ignore the unknown field). `/metrics` gains the counter
+`artifact`. On 3922 kept frames this matched 8 known artifacts and nothing else; normal, night
+IR, dark and foggy frames stay at a grey share of 0.12 or less. On by default; set
+`TAPO_SCORER_ARTIFACT_FILTER=0` and restart the scorer to turn it off. Undecodable input is not
+treated as an artifact.
+
 ### Estimating completeness from the continuous recordings
 
 The kept frames cannot show what the pipeline never flagged. If a host records RTSP
