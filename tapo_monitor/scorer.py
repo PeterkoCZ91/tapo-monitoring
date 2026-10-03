@@ -54,7 +54,7 @@ def auth_headers(token):
 
 
 def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None, ignore_zones=(),
-                alert_zones=(), alert_zones_mode="enforce", token=None):
+                alert_zones=(), alert_zones_mode="enforce", token=None, max_person_box=None):
     """POST a JPEG to the scoring service; dict on success, None on ANY failure.
 
     ``tiles > 1`` asks the service to also score a tiles×tiles grid (rescues distant
@@ -63,7 +63,9 @@ def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None, ignore_
     (:func:`apply_ignore_zones`) before anyone reads the answer; ``alert_zones`` then keeps
     only the people standing in them (:func:`apply_alert_zones`). With ``alert_zones_mode="observe"`` nothing is filtered:
     the answer only gains ``alert_zone_observe`` when a zone would have dropped a person
-    (:func:`observe_alert_zones`).
+    (:func:`observe_alert_zones`). ``max_person_box`` (a fraction, None = off) drops a
+    person whose box exceeds it in both dimensions (:func:`apply_max_person_box`), after the
+    ignore zones and before the alert zones.
 
     ``token`` (the shared secret of a service that requires one) goes out as a bearer
     header and is never logged.
@@ -73,7 +75,8 @@ def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None, ignore_
     """
     return _score_once(url, image_path, timeout, tiles, source_id=source_id,
                        ignore_zones=ignore_zones, alert_zones=alert_zones,
-                       alert_zones_mode=alert_zones_mode, token=token)[0]
+                       alert_zones_mode=alert_zones_mode, token=token,
+                       max_person_box=max_person_box)[0]
 
 
 _warned_unauthorized: set = set()
@@ -108,7 +111,7 @@ def _transport_failure(exc):
 
 
 def _score_once(url, image_path, timeout, tiles, *, source_id=None, ignore_zones=(),
-                alert_zones=(), alert_zones_mode="enforce", token=None):
+                alert_zones=(), alert_zones_mode="enforce", token=None, max_person_box=None):
     """``(result, transport_failed)`` of one scoring request; result None on any failure."""
     try:
         with open(image_path, "rb") as f:
@@ -135,6 +138,8 @@ def _score_once(url, image_path, timeout, tiles, *, source_id=None, ignore_zones
                 return None, False
             if ignore_zones:
                 result = apply_ignore_zones(result, ignore_zones)
+            if max_person_box:
+                result = apply_max_person_box(result, max_person_box)
             if alert_zones and alert_zones_mode == "observe":
                 result = observe_alert_zones(result, alert_zones)
             elif alert_zones:
@@ -312,6 +317,7 @@ def reset_pools():
 # A person counts as inside an ignore zone when at least this share of its box is.
 IGNORE_ZONE_OVERLAP = 0.8
 _warned_no_boxes = False
+_warned_no_boxes_max = False
 
 
 def _inside_share(box, zone, w, h):
@@ -370,8 +376,13 @@ def apply_ignore_zones(result, zones, overlap=IGNORE_ZONE_OVERLAP):
             if not any(_inside_share(bx, z, w, h) >= overlap for z in zones)]
     if len(kept) == len(pairs):
         return result
+    return _without_persons(result, kept, len(pairs) - len(kept), "ignored_persons")
+
+
+def _without_persons(result, kept, dropped, counter):
+    """Copy of ``result`` that lists only ``kept`` ``[(score, box)]``, ``dropped`` counted. Pure."""
     out = dict(result)
-    out["ignored_persons"] = len(pairs) - len(kept)
+    out[counter] = dropped
     out["person_scores"] = [sc for sc, _ in kept]
     out["person_boxes"] = [bx for _, bx in kept]
     if kept:
@@ -379,11 +390,43 @@ def apply_ignore_zones(result, zones, overlap=IGNORE_ZONE_OVERLAP):
         if best < float(result.get("person", 0.0)):
             out["person"], out["box"] = best, best_box
     else:
-        # Everything the service listed was ignored; anything left is below its floor.
+        # Everything the service listed was dropped; anything left is below its floor.
         out["person"], out["box"] = 0.0, None
     if isinstance(out.get("classes"), dict) and "person" in out["classes"]:
         out["classes"] = {**out["classes"], "person": out["person"]}
     return out
+
+
+def apply_max_person_box(result, fraction):
+    """Drop the people whose box is larger than ``fraction`` of the frame both ways. Pure-ish.
+
+    The model now and then boxes a whole frame (width and height >= ~95 %, score ~0.5) or
+    a huge static object as a person. Same mechanism as :func:`apply_ignore_zones`: the
+    dropped ones are counted in ``oversized_persons`` and ``person`` becomes the best one
+    left. A box must exceed ``fraction`` in width AND height; a wide-but-short or
+    tall-but-narrow box stays. Needs ``person_boxes``: an older service is left as it was
+    (logged once).
+    """
+    global _warned_no_boxes_max
+    scores, boxes = result.get("person_scores"), result.get("person_boxes")
+    w, h = result.get("w"), result.get("h")
+    if (not isinstance(scores, list) or not isinstance(boxes, list)
+            or len(scores) != len(boxes) or not w or not h):
+        if not _warned_no_boxes_max:
+            log.warning("scorer: max_person_box needs a scorer that returns person_boxes; "
+                        "update the scoring service")
+            _warned_no_boxes_max = True
+        return result
+    try:
+        pairs = [(float(sc), [float(v) for v in bx]) for sc, bx in zip(scores, boxes, strict=True)]
+        w, h, fraction = float(w), float(h), float(fraction)
+        kept = [(sc, bx) for sc, bx in pairs
+                if not ((bx[2] - bx[0]) / w > fraction and (bx[3] - bx[1]) / h > fraction)]
+    except (TypeError, ValueError, IndexError):
+        return result
+    if len(kept) == len(pairs):
+        return result
+    return _without_persons(result, kept, len(pairs) - len(kept), "oversized_persons")
 
 
 def point_in_polygon(x, y, polygon):

@@ -76,3 +76,12 @@ def test_score_of_an_untagged_frame_uses_only_global_zones(monkeypatch, tmp_path
 def test_empty_lens_zones_pass_the_global_zones_unchanged(monkeypatch, tmp_path):
     camera = _camera(ignore_zones=[GLOBAL_ZONE])
     assert _zones_seen(monkeypatch, camera, _tagged(tmp_path, "wide")) == (tuple(GLOBAL_ZONE),)
+
+
+def test_score_passes_max_person_box_through(monkeypatch, tmp_path):
+    camera = _camera(max_person_box=0.9)
+    seen = []
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, path, **kw: seen.append(kw.get("max_person_box")) or None)
+    daemon.score_for(camera)(_tagged(tmp_path, "wide"))
+    assert seen and set(seen) == {0.9}

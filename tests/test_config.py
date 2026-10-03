@@ -1439,6 +1439,23 @@ def test_scorer_ignore_zones_reject_bad_rects(zones):
             "scorer": {"url": "http://x", "ignore_zones": zones}}]})
 
 
+def _max_box_cfg(**scorer_kw):
+    return cfg.load_config_from_dict({"cameras": [{
+        "name": "a", "host": "203.0.113.10", "scorer": {"url": "http://x", **scorer_kw}}]})
+
+
+def test_scorer_max_person_box_defaults_off_and_parses():
+    assert _max_box_cfg().cameras[0].scorer.max_person_box is None
+    assert _max_box_cfg(max_person_box=0.9).cameras[0].scorer.max_person_box == 0.9
+    assert _max_box_cfg(max_person_box=1).cameras[0].scorer.max_person_box == 1.0
+
+
+@pytest.mark.parametrize("value", [0, -0.1, 1.5, "big", True, [0.9]])
+def test_scorer_max_person_box_rejects_bad_values(value):
+    with pytest.raises(cfg.ConfigError, match="max_person_box"):
+        _max_box_cfg(max_person_box=value)
+
+
 def _alert_cfg(zones, **camera):
     return {"cameras": [{"name": "a", "host": "203.0.113.10",
                          "scorer": {"url": "http://x", "alert_zones": zones}, **camera}]}

@@ -155,6 +155,9 @@ class ScorerConfig:
     # (rects...)}``: a frame with a known lens is scored with ``ignore_zones`` plus its
     # lens's rects, a frame without one (SD card, recording) with ``ignore_zones`` only.
     lens_ignore_zones: dict = field(default_factory=dict)
+    # Fraction (0, 1] of the frame: a person whose box exceeds it in BOTH width and height
+    # is dropped (see scorer.apply_max_person_box). None = off.
+    max_person_box: float | None = None
     # Polygons (tuples of ``(x, y)`` fractions): only people whose feet (box bottom centre)
     # stand in one count, after ``ignore_zones``. Empty = off. Fixed-view cameras only.
     alert_zones: tuple = ()
@@ -874,6 +877,16 @@ def _scorer(data, where):
                                         "person_bit_skips_hold", f"{where}: scorer")
     ignore_zones = _ignore_zones(d.get("ignore_zones"), where)
     lens_ignore_zones = _lens_ignore_zones(d.get("lens_ignore_zones"), where)
+    max_person_box = d.get("max_person_box")
+    if max_person_box is not None:
+        if isinstance(max_person_box, bool):
+            raise ConfigError(f"{where}: scorer max_person_box must be a number")
+        try:
+            max_person_box = float(max_person_box)
+        except (TypeError, ValueError):
+            raise ConfigError(f"{where}: scorer max_person_box must be a number") from None
+        if not 0.0 < max_person_box <= 1.0:
+            raise ConfigError(f"{where}: scorer max_person_box must be > 0 and <= 1")
     alert_vehicles = _check_bool(d.get("alert_vehicles", False), "alert_vehicles",
                                  f"{where}: scorer")
     alert_zones_mode = _check_enum(d.get("alert_zones_mode", "enforce"), FEATURE_MODES,
@@ -896,6 +909,7 @@ def _scorer(data, where):
                         motion_send_threshold=motion_send_threshold,
                         person_bit_skips_hold=person_bit_skips_hold,
                         ignore_zones=ignore_zones, lens_ignore_zones=lens_ignore_zones,
+                        max_person_box=max_person_box,
                         alert_zones=alert_zones, alert_zones_mode=alert_zones_mode,
                         vehicle_mode=vehicle_mode,
                         alert_vehicles=alert_vehicles, vehicle_threshold=vehicle_threshold,

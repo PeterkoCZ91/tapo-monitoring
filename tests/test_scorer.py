@@ -190,6 +190,63 @@ def test_score_image_applies_the_zones(monkeypatch, tmp_path):
     assert scorer.score_image("http://x/score", str(img))["person"] == 0.58
 
 
+# ── oversized person boxes ──────────────────────────────────────────────────
+
+FULL = [0, 0, 990, 490]       # 99 % x 98 % of the 1000x500 frame
+REAL = [500, 100, 560, 300]
+
+
+def test_oversized_box_is_dropped_and_the_real_person_kept():
+    out = scorer.apply_max_person_box(_zoned([0.5, 0.9], [FULL, REAL], person=0.9), 0.9)
+    assert out["person"] == 0.9 and out["person_scores"] == [0.9]
+    assert out["person_boxes"] == [REAL] and out["oversized_persons"] == 1
+
+
+def test_oversized_only_person_scores_nobody():
+    out = scorer.apply_max_person_box(_zoned([0.5], [FULL]), 0.9)
+    assert out["person"] == 0.0 and out["box"] is None
+    assert out["classes"]["person"] == 0.0 and out["oversized_persons"] == 1
+
+
+def test_a_box_wide_but_not_tall_is_kept():
+    result = _zoned([0.6], [[0, 100, 990, 300]])
+    assert scorer.apply_max_person_box(result, 0.9) is result
+
+
+def test_a_box_exactly_at_the_fraction_is_kept():
+    result = _zoned([0.6], [[0, 0, 900, 450]])
+    assert scorer.apply_max_person_box(result, 0.9) is result
+
+
+def test_oversized_filter_leaves_an_older_scorer_answer_alone():
+    result = {"person": 0.5, "animal": 0.0, "box": FULL, "w": 1000, "h": 500}
+    assert scorer.apply_max_person_box(result, 0.9) is result
+
+
+def test_score_image_applies_max_person_box_only_when_given(monkeypatch, tmp_path):
+    img = tmp_path / "f.jpg"
+    img.write_bytes(b"jpg")
+    body = json.dumps(_zoned([0.5], [FULL])).encode()
+    monkeypatch.setattr(scorer.urllib.request, "urlopen",
+                        lambda req, timeout=10: io.BytesIO(body))
+    assert scorer.score_image("http://x/score", str(img), max_person_box=0.9)["person"] == 0.0
+    assert scorer.score_image("http://x/score", str(img))["person"] == 0.5
+
+
+def test_oversized_runs_after_ignore_zones_and_before_alert_zones(monkeypatch, tmp_path):
+    img = tmp_path / "f.jpg"
+    img.write_bytes(b"jpg")
+    body = json.dumps(_zoned([0.9, 0.6, 0.5], [[600, 260, 640, 330], FULL,
+                                                 [800, 100, 880, 330]])).encode()
+    monkeypatch.setattr(scorer.urllib.request, "urlopen",
+                        lambda req, timeout=10: io.BytesIO(body))
+    out = scorer.score_image("http://x/score", str(img), ignore_zones=[(0.55, 0.5, 0.7, 0.7)],
+                             max_person_box=0.9, alert_zones=[((0.5, 0.0), (1.0, 0.0),
+                                                               (1.0, 1.0), (0.5, 1.0))])
+    assert out["person"] == 0.5 and out["ignored_persons"] == 1
+    assert out["oversized_persons"] == 1
+
+
 # ── alert zones ─────────────────────────────────────────────────────────────
 
 # Right half of the 1000x500 frame, as a polygon (fractions of the frame).

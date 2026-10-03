@@ -884,6 +884,21 @@ the `pan_tilt` lens is turned by the firmware after a subject, so after it moves
 Prefer `wide` zones, keep every zone tight, and do not put a `pan_tilt` zone on anything
 you cannot afford to miss.
 
+`max_person_box` (default off) is a fraction `(0, 1]` of the frame: a person whose box is
+larger than it in BOTH width and height is dropped, the same way an ignore zone drops one
+(the answer gains `oversized_persons`, `person` becomes the best remaining one). It catches
+the model boxing the whole frame as a person (width and height >= ~95 %, score ~0.5) or a
+huge static object. A box that is wide but short, or tall but narrow, stays. The order is
+`ignore_zones`, `max_person_box`, `alert_zones`. It needs a service that returns
+`person_boxes`; an older one is left alone, with one warning. It only removes absurd boxes:
+use `0.9` or more. On a dual-lens camera mind the pan/tilt lens, where a person close to the
+camera can legitimately fill most of the frame, so a lower value would cost real alerts.
+
+```yaml
+scorer:
+  max_person_box: 0.9
+```
+
 `alert_zones` (default none) is the opposite of `ignore_zones`: a list of polygons, each
 at least three `[x, y]` points as fractions of the frame, and a person counts only when
 the bottom centre of its box (the feet) lies inside at least one of them. Use it to watch

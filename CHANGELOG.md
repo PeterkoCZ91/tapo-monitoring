@@ -13,6 +13,10 @@ All notable changes to this project are documented here.
   which the models disagree (one at 0.45 or more, the other below 0.25), capped by
   `TAPO_SCORER_SHADOW_DISAGREE_MAX`. `/metrics` gains `shadow` counters. See
   `docs/operations.md`, "Shadow run of a second detector".
+- `scorer.max_person_box` (off by default): a fraction of the frame; a person whose box is
+  larger than it in both width and height is dropped like an ignore-zone person (counted in
+  `oversized_persons`), after `ignore_zones` and before `alert_zones`. Catches the occasional
+  whole-frame person box; use 0.9 or more, mind the pan/tilt lens of dual-lens cameras.
 - Optional shared token for the scorer service (default off, behaviour unchanged). With
   `TAPO_SCORER_TOKEN_FILE` (a 0600 file, preferred) or `TAPO_SCORER_TOKEN` set on the service,
   `/score` and `/metrics` need `Authorization: Bearer <token>` (constant-time compare, 401
