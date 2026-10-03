@@ -73,12 +73,12 @@ def stack(tmp_path):
     made = []
 
     def build(shadow, person=0.9, ensemble=True, timeout=2.0, log=True,
-              primary_delay=0.0):
+              primary_delay=0.0, trust=None):
         # positional: url, log_path, shared secret, disagreement directory
         cfg = scorer_service.ShadowConfig(
             shadow.url, str(tmp_path / "shadow.jsonl") if log else "", BEARER_VALUE,
             str(tmp_path / "dis"))
-        ens = scorer_service.EnsembleConfig(timeout=timeout) if ensemble else None
+        ens = scorer_service.EnsembleConfig(timeout=timeout, trust=trust) if ensemble else None
 
         def score(body, tiles=1):
             time.sleep(primary_delay)
@@ -312,3 +312,106 @@ class TestLoad:
         assert scorer_service.load_shadow(env) is None
         env["TAPO_SCORER_ENSEMBLE"] = "gate"
         assert scorer_service.load_shadow(env).log_path == ""
+
+
+class TestTrust:
+    """Shadow trusted from TRUST (< HOST): its marginal score is remapped into the host band."""
+
+    CFG = scorer_service.EnsembleConfig(trust=0.30)   # host 0.45, band 0.10, low 0.12
+
+    def _combine(self, primary, shadow, shadow_scores=None, primary_scores=None):
+        pr = {"person": primary, "box": PBOX[0], "person_boxes": PBOX,
+              "person_scores": primary_scores or [primary], "animal": 0.05}
+        sh = {"person": shadow, "box": SBOX[0], "person_boxes": SBOX,
+              "person_scores": shadow_scores or [shadow]}
+        return scorer_service.combine_ensemble(self.CFG, pr, sh)
+
+    @pytest.mark.parametrize("shadow,expected", [
+        (0.30, 0.45),                 # TRUST boundary inclusive -> bottom of the band
+        (0.375, 0.50),                # midpoint
+        (0.45 - 1e-9, 0.55),          # just below HOST -> top of the band (exclusive)
+    ])
+    def test_marginal_mapping(self, shadow, expected):
+        reply, used = self._combine(0.10, shadow)
+        assert used == "shadow_marginal"
+        assert reply["person"] == pytest.approx(expected, abs=1e-3)
+        assert 0.45 <= reply["person"] < 0.55 + 1e-9
+        assert reply["ensemble"]["used"] == "shadow_marginal"
+
+    def test_marginal_wins_over_confident_primary_and_uses_shadow_boxes(self):
+        reply, used = self._combine(0.90, 0.35)
+        assert used == "shadow_marginal"
+        assert reply["person"] == pytest.approx(0.4833, abs=1e-3)   # 0.45 + 0.05/0.15 * 0.10
+        assert reply["box"] == SBOX[0] and reply["person_boxes"] == SBOX
+        assert reply["animal"] == 0.05
+
+    def test_marginal_person_scores_remapped_like_person(self):
+        reply, _ = self._combine(0.9, 0.35, shadow_scores=[0.35, 0.2, 0.6])
+        assert reply["person_scores"] == [pytest.approx(reply["person"], abs=1e-3), 0.2, 0.6]
+
+    def test_at_host_shadow_unchanged(self):
+        reply, used = self._combine(0.1, 0.45)
+        assert used == "shadow" and reply["person"] == 0.45 and reply["box"] == SBOX[0]
+
+    def test_below_trust_falls_to_old_rules(self):
+        reply, used = self._combine(0.9, 0.2999)          # >= LOW and primary >= HOST
+        assert used == "primary" and reply["person"] == 0.9 and reply["box"] == PBOX[0]
+        reply, used = self._combine(0.9, 0.11)            # below LOW: veto
+        assert used == "neither" and reply["person"] == pytest.approx(0.44)
+        assert reply["person_scores"] == [pytest.approx(0.44)]
+        reply, used = self._combine(0.2, 0.2999)
+        assert used == "neither" and reply["person"] == pytest.approx(0.2999, abs=1e-4)
+
+    def test_trust_equal_host_is_the_old_behaviour(self):
+        old = scorer_service.EnsembleConfig()
+        assert old.trust == old.host == old.high == 0.45
+        reply, used = scorer_service.combine_ensemble(
+            old, {"person": 0.2, "person_scores": [0.2]}, {"person": 0.449})
+        assert used == "neither" and reply["person"] == pytest.approx(0.44)
+
+    def test_zero_band_maps_to_host(self):
+        cfg = scorer_service.EnsembleConfig(trust=0.30, band=0.0)
+        reply, used = scorer_service.combine_ensemble(cfg, {"person": 0.1}, {"person": 0.40})
+        assert used == "shadow_marginal" and reply["person"] == 0.45
+
+    def test_end_to_end_counts_marginal(self, stack):
+        sh = Shadow(person=0.35)
+        base, _, _ = stack(sh, person=0.2, trust=0.30)
+        reply, _ = _post(base)
+        assert reply["ensemble"]["used"] == "shadow_marginal"
+        assert reply["person"] == pytest.approx(0.4833, abs=1e-3)
+        assert reply["box"] == SBOX[0]
+        assert _metrics(base)["ensemble"]["shadow_marginal"] == 1
+
+
+class TestLoadTrust:
+    SHADOW = scorer_service.ShadowConfig(url="http://x/score", log_path="")
+    ON = {"TAPO_SCORER_ENSEMBLE": "gate"}
+
+    def load(self, **extra):
+        return scorer_service.load_ensemble({**self.ON, **extra}, self.SHADOW)
+
+    def test_defaults_unchanged(self):
+        e = self.load()
+        assert (e.low, e.trust, e.host, e.band) == (0.12, 0.45, 0.45, 0.10)
+
+    def test_new_values(self):
+        e = self.load(TAPO_SCORER_ENSEMBLE_TRUST="0.30", TAPO_SCORER_ENSEMBLE_HOST="0.5",
+                      TAPO_SCORER_ENSEMBLE_BAND="0.2")
+        assert (e.trust, e.host, e.band) == (0.30, 0.5, 0.2)
+
+    def test_high_is_an_alias_of_host_and_host_wins(self):
+        assert self.load(TAPO_SCORER_ENSEMBLE_HIGH="0.5").host == 0.5
+        assert self.load(TAPO_SCORER_ENSEMBLE_HIGH="0.5",
+                         TAPO_SCORER_ENSEMBLE_HOST="0.4").host == 0.4
+
+    @pytest.mark.parametrize("extra", [
+        {"TAPO_SCORER_ENSEMBLE_TRUST": "0.12"},                      # LOW == TRUST
+        {"TAPO_SCORER_ENSEMBLE_TRUST": "0.5"},                       # TRUST > HOST
+        {"TAPO_SCORER_ENSEMBLE_LOW": "0"},                           # LOW must be > 0
+        {"TAPO_SCORER_ENSEMBLE_BAND": "-0.1"},
+        {"TAPO_SCORER_ENSEMBLE_HOST": "1.5"},
+    ])
+    def test_invalid(self, extra):
+        with pytest.raises(scorer_service.EnsembleConfigError):
+            self.load(**extra)

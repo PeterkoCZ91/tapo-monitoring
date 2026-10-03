@@ -5,6 +5,12 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Ensemble mode: `TAPO_SCORER_ENSEMBLE_TRUST` lets the scorer trust the second detector from a
+  lower score than the host threshold. A shadow score in `[TRUST, HOST)` is remapped linearly
+  into `[HOST, HOST + BAND)` (`used: shadow_marginal`, boxes and score list from the shadow),
+  so hosts accept it at their usual threshold and hold band. New `TAPO_SCORER_ENSEMBLE_HOST`
+  (the old `_HIGH` stays as an alias) and `TAPO_SCORER_ENSEMBLE_BAND` (0.10); TRUST defaults to
+  HOST, which keeps the previous behaviour. Validation is now `0 < LOW < TRUST <= HOST <= 1`.
 - Scorer service: partially decoded video frames (flat grey with a few decoded blocks) are
   recognised on a small luma copy and answered with zero scores, empty boxes and
   `artifact: true` without inference; `/metrics` counts them as `artifact`;

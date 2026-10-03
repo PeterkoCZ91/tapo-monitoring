@@ -884,6 +884,10 @@ often what photographs the person seconds later.
 - [x] The scorer recognises partially decoded (flat grey) video frames and answers them with
   zero scores and `artifact: true` instead of scoring the few decoded blocks
   (`TAPO_SCORER_ARTIFACT_FILTER`, on by default).
+- [x] 10.14 Ensemble trust threshold: the second detector is trusted from
+  `TAPO_SCORER_ENSEMBLE_TRUST` (audit: >= 0.30 caught 19/19 visits at about 1.4 false
+  positives per 1000 frames, 0.45 missed 3) and its marginal scores are remapped into the
+  host's hold band; default unchanged (TRUST = HOST). Enabling 0.30 live is still open.
 - [ ] Label the audit dataset and compute precision per model and the persons both missed.
 - [ ] Run the shadow for about a week and read the log and the disagreement frames.
 - [ ] Run a recording audit on a stratified, unbiased sample of recorded windows (day and

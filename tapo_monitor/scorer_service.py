@@ -865,6 +865,7 @@ SHADOW_LOW = 0.25
 SHADOW_WARN_SECONDS = 60.0
 ENSEMBLE_LOW = 0.12
 ENSEMBLE_HIGH = 0.45
+ENSEMBLE_BAND = 0.10
 ENSEMBLE_TIMEOUT = 2.0
 
 
@@ -937,12 +938,29 @@ class EnsembleConfigError(ValueError):
 
 @dataclass
 class EnsembleConfig:
-    """Combine the primary and the shadow person score into one reply (``gate`` mode)."""
+    """Combine the primary and the shadow person score into one reply (``gate`` mode).
+
+    ``host`` is the person threshold the clients apply (the old ``high``); ``trust`` is the
+    shadow score trusted on its own and defaults to ``host``. A shadow score in
+    ``[trust, host)`` is remapped linearly into ``[host, host + band)`` so that clients that
+    compare ``person`` with their own threshold (and its hold band) accept it.
+    """
 
     mode: str = "gate"
     low: float = ENSEMBLE_LOW
-    high: float = ENSEMBLE_HIGH
+    host: float = ENSEMBLE_HIGH
     timeout: float = ENSEMBLE_TIMEOUT
+    trust: float | None = None
+    band: float = ENSEMBLE_BAND
+
+    def __post_init__(self):
+        if self.trust is None:
+            self.trust = self.host
+
+    @property
+    def high(self):
+        """Backward-compatible name of ``host``."""
+        return self.host
 
 
 def load_ensemble(env=None, shadow=None):
@@ -950,6 +968,8 @@ def load_ensemble(env=None, shadow=None):
 
     Needs the shadow settings (the second service); raises ``EnsembleConfigError`` for an
     unknown mode, a missing shadow or unusable numbers rather than starting half-configured.
+    ``TAPO_SCORER_ENSEMBLE_HOST`` (alias ``_HIGH``), ``_TRUST`` (default: HOST), ``_BAND``,
+    ``_LOW`` and ``_TIMEOUT`` tune the rule.
     """
     env = os.environ if env is None else env
     mode = (env.get("TAPO_SCORER_ENSEMBLE") or "").strip().lower()
@@ -959,41 +979,62 @@ def load_ensemble(env=None, shadow=None):
         raise EnsembleConfigError("TAPO_SCORER_ENSEMBLE must be 'gate' (or unset)")
     if shadow is None:
         raise EnsembleConfigError("TAPO_SCORER_ENSEMBLE needs TAPO_SCORER_SHADOW_URL")
+    host_default = _env_setting(env, "TAPO_SCORER_ENSEMBLE_HIGH", float, ENSEMBLE_HIGH)
+    host = _env_setting(env, "TAPO_SCORER_ENSEMBLE_HOST", float, host_default)
     cfg = EnsembleConfig(
         mode=mode,
         low=_env_setting(env, "TAPO_SCORER_ENSEMBLE_LOW", float, ENSEMBLE_LOW),
-        high=_env_setting(env, "TAPO_SCORER_ENSEMBLE_HIGH", float, ENSEMBLE_HIGH),
+        host=host,
         timeout=_env_setting(env, "TAPO_SCORER_ENSEMBLE_TIMEOUT", float, ENSEMBLE_TIMEOUT),
+        trust=_env_setting(env, "TAPO_SCORER_ENSEMBLE_TRUST", float, host),
+        band=_env_setting(env, "TAPO_SCORER_ENSEMBLE_BAND", float, ENSEMBLE_BAND),
     )
-    if not (0.0 <= cfg.low < cfg.high <= 1.0) or cfg.timeout <= 0:
+    if not (0.0 < cfg.low < cfg.trust <= cfg.host <= 1.0) or cfg.band < 0 or cfg.timeout <= 0:
         raise EnsembleConfigError(
-            "TAPO_SCORER_ENSEMBLE_LOW/HIGH/TIMEOUT need 0 <= LOW < HIGH <= 1 and TIMEOUT > 0")
+            "TAPO_SCORER_ENSEMBLE_LOW/TRUST/HOST/BAND/TIMEOUT need "
+            "0 < LOW < TRUST <= HOST <= 1, BAND >= 0 and TIMEOUT > 0")
     return cfg
+
+
+def _remap_marginal(config, score):
+    """Map a shadow score in ``[trust, host)`` linearly into ``[host, host + band)``."""
+    mapped = config.host + (score - config.trust) / (config.host - config.trust) * config.band
+    return min(mapped, 1.0)
 
 
 def combine_ensemble(config, primary, shadow):
     """One reply from the primary result and the shadow payload (both dicts with ``person``).
 
-    shadow >= HIGH -> shadow's person and boxes; else primary >= HIGH and shadow >= LOW ->
-    the primary reply; else ``min(max(primary, shadow), HIGH - 0.01)`` on the primary reply.
+    1. shadow >= host -> shadow's person and boxes.
+    2. trust <= shadow < host -> person remapped into ``[host, host + band)``, shadow boxes
+       (``person_scores`` from the shadow, remapped the same way), ``used = shadow_marginal``.
+    3. primary >= host and shadow >= low -> the primary reply.
+    4. else ``min(max(primary, shadow), host - 0.01)`` on the primary reply.
     Returns ``(reply, used)``.
     """
     p = float(primary["person"])
     s = float(shadow["person"])
     reply = dict(primary)
-    if s >= config.high:
-        used = "shadow"
-        reply["person"] = round(s, 4)
+    marginal = config.trust <= s < config.host
+    if s >= config.host or marginal:
+        used = "shadow_marginal" if marginal else "shadow"
+        reply["person"] = round(_remap_marginal(config, s) if marginal else s, 4)
         for key in ("box", "person_boxes", "person_scores"):
             if key in shadow:
                 reply[key] = shadow[key]
             else:
                 reply.pop(key, None)
-    elif p >= config.high and s >= config.low:
+        scores = reply.get("person_scores")
+        if marginal and isinstance(scores, list):
+            # Clients rebuild ``person`` from the list too: remap it with the same rule.
+            reply["person_scores"] = [
+                round(_remap_marginal(config, float(x)), 4)
+                if config.trust <= float(x) < config.host else x for x in scores]
+    elif p >= config.host and s >= config.low:
         used = "primary"
     else:
         used = "neither"
-        cap = config.high - 0.01
+        cap = config.host - 0.01
         reply["person"] = round(min(max(p, s), cap), 4)
         scores = reply.get("person_scores")
         if isinstance(scores, list):
@@ -1017,8 +1058,8 @@ class EnsembleGate:
         self.shadow = shadow
         self._lock = threading.Lock()
         self._last_warn = None
-        self.counts = {"requests": 0, "shadow": 0, "primary": 0, "neither": 0,
-                       "primary_only": 0, "failed": 0, "timeouts": 0}
+        self.counts = {"requests": 0, "shadow": 0, "primary": 0, "shadow_marginal": 0,
+                       "neither": 0, "primary_only": 0, "failed": 0, "timeouts": 0}
 
     def snapshot(self):
         with self._lock:
@@ -1499,8 +1540,9 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
         log.info("shadow scoring on (disagreement images %s)",
                  "kept" if shadow.disagree_dir else "off")
     if ensemble is not None:
-        log.info("ensemble %s on (low %.2f, high %.2f, timeout %.1fs)",
-                 ensemble.mode, ensemble.low, ensemble.high, ensemble.timeout)
+        log.info("ensemble %s on (low %.2f, trust %.2f, host %.2f, band %.2f, timeout %.1fs)",
+                 ensemble.mode, ensemble.low, ensemble.trust, ensemble.host, ensemble.band,
+                 ensemble.timeout)
 
     def stop(_signum, _frame):
         raise SystemExit(0)

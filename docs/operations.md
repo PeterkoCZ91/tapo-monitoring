@@ -433,28 +433,42 @@ it on yours with `tools/shadow_report.py --labels` first). Needs the shadow sett
 ```bash
 TAPO_SCORER_ENSEMBLE=gate            # default: unset = off
 TAPO_SCORER_ENSEMBLE_LOW=0.12        # shadow score the primary needs to be confirmed
-TAPO_SCORER_ENSEMBLE_HIGH=0.45       # shadow score that is trusted on its own
+TAPO_SCORER_ENSEMBLE_HOST=0.45       # person threshold of the monitor hosts (alias: _HIGH)
+TAPO_SCORER_ENSEMBLE_TRUST=0.45      # shadow score trusted on its own; default = HOST
+TAPO_SCORER_ENSEMBLE_BAND=0.10       # width of the band a trusted marginal score lands in
 TAPO_SCORER_ENSEMBLE_TIMEOUT=2.0     # seconds the reply may wait for the shadow
 ```
 
 For every `/score` the primary inference and a call to the shadow service (same image, same
 `?tiles`) run in parallel, then `person` becomes:
 
-- shadow >= HIGH: the shadow score, with `box`, `person_boxes` and `person_scores` from the
+- shadow >= HOST: the shadow score, with `box`, `person_boxes` and `person_scores` from the
   shadow reply;
-- else primary >= HIGH and shadow >= LOW: the primary reply as it is;
-- else `min(max(primary, shadow), HIGH - 0.01)`, so an unconfirmed primary cannot cross the
-  0.45-ish threshold (its `person_scores` list is not rewritten, so a caller that counts
-  that list at a threshold can still see the primary's entries).
+- else TRUST <= shadow < HOST: `person = HOST + (shadow - TRUST) / (HOST - TRUST) * BAND`
+  (linear into `[HOST, HOST + BAND)`), boxes from the shadow, its `person_scores` remapped
+  the same way, `used: shadow_marginal`. The hosts compare `person` with their own threshold
+  (0.45, hold band 0.45-0.55), so a second-model score of 0.30-0.45 has to be moved into
+  that band to be accepted. With the default TRUST = HOST this step never applies and the
+  behaviour is the one before it existed;
+- else primary >= HOST and shadow >= LOW: the primary reply as it is;
+- else `min(max(primary, shadow), HOST - 0.01)`, so an unconfirmed primary cannot cross the
+  host threshold (entries of its `person_scores` list are capped the same way, so a client
+  that rebuilds `person` from the list cannot revive a person the second model denied).
+
+Choosing TRUST: in a recording audit the second detector at >= 0.30 caught all 19 of 19
+visits at about 1.4 false positives per 1000 frames, while a 0.45 cut missed 3 of them
+(a small sample: re-check on yours with `tools/recording_audit_estimate.py`). Then set
+`TAPO_SCORER_ENSEMBLE_TRUST=0.30`. Raise it on one camera first and watch
+`shadow_marginal` in `/metrics`.
 
 `animal`, `vehicle`, `classes`, `w` and `h` always come from the primary. The reply gains
-`ensemble: {mode, primary, shadow, used}` with `used` one of `shadow`, `primary`, `neither`
-or `primary_only`. If the shadow fails, answers 401, sends garbage or does not answer within
+`ensemble: {mode, primary, shadow, used}` with `used` one of `shadow`, `shadow_marginal`,
+`primary`, `neither` or `primary_only`. If the shadow fails, answers 401, sends garbage or does not answer within
 the timeout, the primary reply goes out unchanged with `used: primary_only` (`shadow: null`);
 the reply never waits longer than the timeout for it, and one warning a minute names the
 error class only (never the URL or token). The shadow log and disagreement frames keep
 working and reuse the same shadow call. `/metrics` gains `ensemble` with `requests`,
-`shadow`, `primary`, `neither`, `primary_only`, `failed` and `timeouts`; a growing
+`shadow`, `shadow_marginal`, `primary`, `neither`, `primary_only`, `failed` and `timeouts`; a growing
 `primary_only` means the combined score is silently not being applied.
 
 Cost: every request now also depends on the second service. Expect about +0.3 s per request
@@ -462,8 +476,8 @@ when the shadow is the slower model (the reply takes the slower of the two, not 
 size the camera-side `scorer.timeout` for that plus the ensemble timeout. A dead shadow costs
 up to `TAPO_SCORER_ENSEMBLE_TIMEOUT` per request until it is back. Enabling the feature
 needs a restart of the scorer. To roll back, remove `TAPO_SCORER_ENSEMBLE` and restart; the
-replies are then byte-for-byte the primary's again. A bad value (unknown mode, `LOW >= HIGH`,
-no shadow URL) stops the service at start instead of running half-configured.
+replies are then byte-for-byte the primary's again. A bad value (unknown mode, anything but
+`0 < LOW < TRUST <= HOST <= 1` and `BAND >= 0`, no shadow URL) stops the service at start instead of running half-configured.
 ### Partially decoded frames (artifact filter)
 
 A damaged HEVC decode sometimes leaves a flat mid-grey picture (luma about 128) with only a
