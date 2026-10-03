@@ -5,6 +5,10 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `tools/shadow_report.py`: reads the shadow-run log (counts, errors, timing, 2x2 agreement and
+  disagreement breakdowns by hashed source, hour and score band, Pearson/Spearman) and, with
+  `--labels` and `--disagree-dir`, compares candidate decision rules on hand-labeled
+  disagreements; `--lang en|cs`, `--json`. See `docs/operations.md`.
 - Optional shadow run of a second detector inside the scorer service (default off, replies
   unchanged). With `TAPO_SCORER_SHADOW_URL` and `TAPO_SCORER_SHADOW_LOG` set, every scored
   frame is queued (8 deep, dropped and counted when full) after the reply and sent to another

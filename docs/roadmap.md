@@ -871,6 +871,8 @@ often what photographs the person seconds later.
 - [ ] Compare candidate detectors on our own hand-labeled frames (not the teacher's
   labels, which favour the YOLOX family): AUC, false alarms and misses at a matched
   operating point, day and night, and latency on the iGPU.
+- [x] `tools/shadow_report.py` summarizes the shadow-run log and rates combination rules on
+  labeled disagreements (small, biased sample: ranks rules, does not estimate error rates).
 - [x] Shadow run: the production scorer forwards a copy of each frame to a candidate service
   and logs both scores, optionally keeping the disagreeing frames for labelling
   (`TAPO_SCORER_SHADOW_*`), without touching the monitor hosts.

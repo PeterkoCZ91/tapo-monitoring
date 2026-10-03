@@ -348,6 +348,38 @@ tapo-monitor label /srv/tapo-scorer/shadow/disagree
 The share of those frames with a real person says which model is right where they differ.
 The frames are camera images: keep the directory private and delete it afterwards.
 
+`tools/shadow_report.py` does the arithmetic on the log (stdlib only, read-only):
+
+```bash
+python3 tools/shadow_report.py shadow.jsonl --since 2026-10-01 --shadow-threshold 0.45
+python3 tools/shadow_report.py shadow.jsonl --labels ~/dataset/labels.jsonl \
+    --disagree-dir /srv/tapo-scorer/shadow/disagree --lang cs --json
+```
+
+How to read it:
+
+- Records and errors: rows with an `error` are excluded from every comparison below. Many
+  errors or drops mean the sample misses busy moments.
+- Median and p95 of `primary_seconds` and `shadow_seconds` (a shadow call includes the
+  network round trip).
+- The 2x2 matrix at primary >= 0.45 and shadow >= `--shadow-threshold` (both / only primary
+  / only shadow / neither) and the share of disagreements. Thresholds differ between models,
+  so look at the matrix at the shadow threshold you would really use.
+- Disagreements by source (a short hash, no camera names), by UTC hour and by score band
+  show whether they concentrate on one camera, on night frames or near the threshold
+  (where a disagreement is cheap) rather than far from it.
+- Pearson and Spearman correlation of the two scores: high Spearman with a low Pearson
+  means the models rank frames alike but are calibrated differently, so a different
+  threshold may fix it.
+- With `--labels` (the `labels.jsonl` of `tapo-monitor label`, last line per sha256 wins,
+  `unsure` skipped) the labeled disagreement frames are scored against these rules: primary
+  alone, shadow alone at 0.45 / 0.30 / 0.194, and "shadow >= 0.45 OR (primary >= 0.45 AND
+  shadow >= T)" for T from 0.08 to 0.20, each with its false alarms and misses. Frame scores
+  come from the `p<primary>_s<shadow>` file name, matched by hash in `--disagree-dir`
+  (without it, from the path stored in the label). The sample is small and biased, because
+  only frames where the models differ strongly were saved, so use the counts to rank rules,
+  not as error rates; confirm on more frames before changing a threshold.
+
 ### Moving the scorer to another machine
 
 Because every camera shares one scorer, move it without a gap by listing both machines in
