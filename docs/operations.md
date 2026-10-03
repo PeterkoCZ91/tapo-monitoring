@@ -259,6 +259,21 @@ every `/score` answer 500 `scoring failed` (callers then fall back as for any sc
 failure); empty or NaN outputs score as "nothing found". `/health` and `/metrics` report
 the family as `arch` (never the model path).
 
+Verified settings for RF-DETR (official `model.export()`, ONNX opset 17, outputs `dets`
+`[1,300,4]` and `labels` `[1,300,91]`; the decoder picks the outputs by shape, so the names
+do not matter). Person scores through `/score` matched the reference implementation's
+`predict()` on 100 labelled frames, max difference 0.03 on the Intel iGPU and under 0.001 on CPU:
+
+| Model | `TAPO_SCORER_INPUT_SIZE` | Common settings | p50 / p95 per frame on an Intel iGPU |
+|---|---|---|---|
+| RF-DETR Medium | `576` | `TAPO_SCORER_ARCH=detr`, `TAPO_SCORER_DETR_PERSON_ID=1`, `TAPO_SCORER_DETR_ACTIVATION=sigmoid`, `TAPO_SCORER_DETR_NORMALIZE=imagenet` | 0.29 / 0.30 s |
+| RF-DETR Large | `704` | same | 0.45 / 0.46 s |
+
+The input size is the model's training resolution (read it from the export's `input`
+shape); the 640 default is wrong for both. The `openvino-gpu` provider needs the
+`onnxruntime-openvino` wheel in the scorer's environment: the plain `onnxruntime` wheel
+has no OpenVINO provider and the service falls back to CPU with a logged warning.
+
 Check a new model **before** it replaces the running one: start a second instance on
 another port with its own env, leave the production unit alone, and send both the same
 saved frames.

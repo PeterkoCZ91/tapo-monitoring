@@ -256,6 +256,37 @@ def test_detr_preprocess_squashes_to_input_and_normalises():
     assert plain.preprocess(img)[0][0, 0, 5, 5] == pytest.approx(1.0, abs=1e-3)
 
 
+def test_detr_preprocess_resize_does_not_antialias():
+    # RF-DETR's own predict() resizes with torch F.resize(antialias=False) (cv2 INTER_LINEAR):
+    # each output pixel is a 2x2 bilinear tap, so a thin bright line that a box filter
+    # (PIL BILINEAR on a downscale) would smear to a faint grey must stay at full strength
+    # where it is sampled. 8x8 -> 4x4: output pixel i samples source (2i + 0.5).
+    image_mod = pytest.importorskip("PIL.Image")
+    arr = np.zeros((8, 8, 3), np.uint8)
+    arr[:, 1] = 255                      # column 1 is white, the rest black
+    img = image_mod.fromarray(arr)
+    plain = detectors.build_decoder(detectors.detector_config({
+        "TAPO_SCORER_ARCH": "detr", "TAPO_SCORER_DETR_NORMALIZE": "none"}, 4))
+    tensor = plain.preprocess(img)[0][0, 0, 0]
+    # out x=0 samples src 0.5 -> 0.5*col0 + 0.5*col1; x=1 samples src 2.5 -> cols 2,3 = 0
+    assert tensor[0] == pytest.approx(0.5, abs=1e-6)
+    assert tensor[1] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_detr_preprocess_resize_matches_torch_reference():
+    torch = pytest.importorskip("torch")
+    image_mod = pytest.importorskip("PIL.Image")
+    rng = np.random.default_rng(3)
+    img = image_mod.fromarray(rng.integers(0, 256, (90, 160, 3), dtype=np.uint8))
+    plain = detectors.build_decoder(detectors.detector_config({
+        "TAPO_SCORER_ARCH": "detr", "TAPO_SCORER_DETR_NORMALIZE": "none"}, 48))
+    got = plain.preprocess(img)[0]
+    ref = torch.nn.functional.interpolate(
+        torch.from_numpy(np.asarray(img).copy()).permute(2, 0, 1)[None].float() / 255.0,
+        size=(48, 48), mode="bilinear", align_corners=False, antialias=False).numpy()
+    assert np.abs(got - ref).max() < 1e-5
+
+
 # ── through build_score_fn and the HTTP surface ─────────────────────────────
 
 def _fake_session(monkeypatch, outputs):

@@ -133,6 +133,28 @@ class YoloxDecoder:
         return result
 
 
+def _resize_bilinear(arr, size):
+    """``arr`` (H, W, 3 uint8) to (size, size, 3) float32, 2x2 bilinear, no antialiasing.
+
+    Half-pixel centres with clamped edges, i.e. cv2 ``INTER_LINEAR`` and torch
+    ``interpolate(mode="bilinear", align_corners=False, antialias=False)``. Rows and
+    columns are gathered while still uint8, so a 4K frame is never widened to float.
+    """
+    import numpy as np
+
+    height, width = arr.shape[:2]
+    ys = np.clip((np.arange(size) + 0.5) * height / size - 0.5, 0, height - 1)
+    xs = np.clip((np.arange(size) + 0.5) * width / size - 0.5, 0, width - 1)
+    y0, x0 = np.floor(ys).astype(np.intp), np.floor(xs).astype(np.intp)
+    y1, x1 = np.minimum(y0 + 1, height - 1), np.minimum(x0 + 1, width - 1)
+    fy = (ys - y0).astype(np.float32)[:, None, None]
+    fx = (xs - x0).astype(np.float32)[None, :, None]
+    rows0, rows1 = arr[y0], arr[y1]
+    top = rows0[:, x0] * (1 - fx) + rows0[:, x1] * fx
+    bottom = rows1[:, x0] * (1 - fx) + rows1[:, x1] * fx
+    return top * (1 - fy) + bottom * fy
+
+
 class DetrDecoder:
     """NMS-free DETR-style head: ``logits`` [1,Q,C] and ``boxes`` [1,Q,4] (norm. cxcywh).
 
@@ -155,13 +177,14 @@ class DetrDecoder:
 
     def preprocess(self, img):
         import numpy as np
-        from PIL import Image
 
         size = self.input_size
         # DETR-family models are trained on a plain (aspect-squashing) resize, so the
-        # normalised boxes map back to the original frame with no letterbox offset.
-        arr = np.asarray(img.resize((size, size), Image.BILINEAR),
-                         dtype=np.float32) / 255.0
+        # normalised boxes map back to the original frame with no letterbox offset. The
+        # resize must NOT antialias: RF-DETR trains and predicts with cv2 INTER_LINEAR /
+        # torch F.resize(antialias=False), and PIL's BILINEAR (a box filter on a
+        # downscale) shifts RF-DETR person scores by up to 0.3 on 1080p-4K frames.
+        arr = _resize_bilinear(np.asarray(img), size).astype(np.float32) / 255.0
         if self.normalize == "imagenet":
             arr = (arr - np.asarray(IMAGENET_MEAN, np.float32)) / np.asarray(
                 IMAGENET_STD, np.float32)
