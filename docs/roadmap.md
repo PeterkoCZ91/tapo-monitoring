@@ -879,6 +879,16 @@ often what photographs the person seconds later.
 - [x] Ensemble mode in the scorer (`TAPO_SCORER_ENSEMBLE=gate`): one combined person score
   from the primary and the shadow model, so hosts keep their thresholds; off by default.
 - [ ] Run the shadow for about a week and read the log and the disagreement frames.
+- [ ] Run a recording audit on a stratified, unbiased sample of recorded windows (day and
+  night) to estimate the persons that neither model catches; label the random low-score draw.
+- [ ] Decide between the ensemble, a swap to the second detector and the current model from
+  the shadow week and the audit; enable it first on one camera with the shadow log running.
+- [ ] Re-measure the second detector's latency on the host that will serve it under the real
+  request load of all monitor hosts (the benchmark ran one request at a time).
+- [ ] Move the scorer to the machine that hosts the second detector, with the shared token
+  and a candidate list, and keep the old scorer as the fallback for at least a week.
+- [ ] A cheaper second opinion for static false alarms: let an ignore-zone suggestion come
+  from boxes that repeat at the same place across many frames (tool, not automatic).
 - [x] Judge the disagreements between the best candidate and the current model by hand.
 - [x] Try a cascade instead of a swap: keep the current model and re-score only the gray
   score band with a heavier, more accurate one. Result: it did not beat the heavier model
