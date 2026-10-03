@@ -26,6 +26,7 @@ class Shadow:
         self.person, self.delay, self.status = person, delay, status
         self.received = []
         self.auth = []
+        self.payload = None
 
         class H(BaseHTTPRequestHandler):
             def do_POST(self):
@@ -33,7 +34,7 @@ class Shadow:
                 outer.received.append(body)
                 outer.auth.append(self.headers.get("Authorization"))
                 time.sleep(outer.delay)
-                payload = json.dumps({"person": outer.person}).encode()
+                payload = json.dumps(outer.payload or {"person": outer.person}).encode()
                 try:
                     self.send_response(outer.status)
                     self.send_header("Content-Length", str(len(payload)))
@@ -55,8 +56,8 @@ class Shadow:
         self.srv.server_close()
 
 
-def _primary(shadow_cfg=None, person=0.9):
-    result = {"person": person, "animal": 0.0, "vehicle": 0.2}
+def _primary(shadow_cfg=None, person=0.9, extra=None):
+    result = {"person": person, "animal": 0.0, "vehicle": 0.2, **(extra or {})}
     srv = scorer_service.make_server(lambda body, tiles=1: dict(result), port=0,
                                      shadow=shadow_cfg)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -96,13 +97,13 @@ def _lines(path):
 def stack(tmp_path):
     made = []
 
-    def build(shadow=None, person=0.9, disagree=True, **kw):
+    def build(shadow=None, person=0.9, disagree=True, extra=None, **kw):
         log = str(tmp_path / "shadow.jsonl")
         dis = str(tmp_path / "dis") if disagree else None
         cfg = scorer_service.ShadowConfig(
             url=(shadow.url if shadow else "http://127.0.0.1:9/score"),
             token=kw.pop("token", DUMMY_SHADOW_TOKEN), log_path=log, disagree_dir=dis, **kw)
-        srv, base = _primary(cfg, person)
+        srv, base = _primary(cfg, person, extra)
         made.append((srv, shadow))
         return base, log, dis, srv
 
@@ -123,6 +124,41 @@ def test_reply_identical_with_and_without_shadow(stack):
     finally:
         plain.shutdown()
         plain.server_close()
+
+
+def test_log_line_carries_normalized_person_boxes(stack):
+    sh = Shadow(person=0.33)
+    sh.payload = {"person": 0.33, "w": 200, "h": 100, "person_scores": [0.33],
+                  "person_boxes": [[20, 10, 100, 90]]}
+    extra = {"w": 100, "h": 50,
+             "person_scores": [0.5 + i / 100 for i in range(12)],
+             "person_boxes": [[float(i), 0.0, float(i) + 10, 50.0] for i in range(12)]}
+    base, log, _, _ = stack(sh, extra=extra)
+    reply = json.loads(_post(base)[1])
+    assert "primary_boxes" not in reply and "shadow_boxes" not in reply
+    assert _wait(lambda: _lines(log))
+    row = _lines(log)[0]
+    assert len(row["primary_boxes"]) == 10
+    assert row["primary_boxes"][0] == [0.11, 0.0, 0.21, 1.0, 0.61]
+    assert row["shadow_boxes"] == [[0.1, 0.1, 0.5, 0.9, 0.33]]
+
+
+def test_log_line_without_boxes_in_replies_has_no_box_fields(stack):
+    sh = Shadow(person=0.33)
+    base, log, _, _ = stack(sh)
+    _post(base)
+    assert _wait(lambda: _lines(log))
+    row = _lines(log)[0]
+    assert "primary_boxes" not in row and "shadow_boxes" not in row
+
+
+def test_log_boxes_helper():
+    f = scorer_service._log_boxes
+    assert f(None) is None and f({"person": 0.5}) is None
+    assert f({"person_boxes": [[0, 0, 1, 1]], "person_scores": [0.5]}) is None   # no w/h
+    assert f({"person_boxes": [], "person_scores": [], "w": 10, "h": 10}) == []
+    assert f({"person_boxes": [[-5, 0, 20, 5]], "person_scores": [0.12345], "w": 10,
+              "h": 10}) == [[0.0, 0.0, 1.0, 0.5, 0.123]]
 
 
 def test_log_line_has_both_scores_and_no_secrets(stack):

@@ -23,6 +23,9 @@ PRIMARY_THRESHOLD = 0.45
 BANDS = ((0.0, 0.25, "<0.25"), (0.25, 0.45, "0.25-0.45"), (0.45, 0.65, "0.45-0.65"),
          (0.65, 1.01, ">=0.65"))
 FIXED_SHADOW = (0.45, 0.30, 0.194)
+CLUSTER_GRID = 0.05
+CLUSTER_MIN = 5
+OVERLAP_IOU = 0.3
 COMBO_T = (0.08, 0.10, 0.12, 0.14, 0.16, 0.18, 0.20)
 NAME_SCORES = re.compile(r"p(\d+(?:\.\d+)?)_s(\d+(?:\.\d+)?)")
 
@@ -43,6 +46,14 @@ TEXT = {
                 "differ strongly were saved - so these counts rank rules, they do not estimate "
                 "real-world error rates.",
         "none": "none",
+        "clusters": "Box clusters (person boxes at or above the model threshold, centre grid "
+                    "{g}, at least {n} frames per source)",
+        "cluster_line": "{src}: centre ({x}, {y}), {n} frames, mean score {m}",
+        "rows_boxes": "Records with boxes (primary / shadow)",
+        "overlap": "Disagreements with boxes: do the two models see the same object "
+                   "(IoU >= {i})?",
+        "same": "same object", "different": "each sees something else",
+        "no_boxes": "no boxes in the record (old format)",
     },
     "cs": {
         "records": "Záznamů", "errors": "Chyb", "compared": "Porovnáno (skóre obou)",
@@ -59,6 +70,13 @@ TEXT = {
         "warn": "Upozornění: označený vzorek je malý a zkreslený - ukládaly se jen snímky, kde se "
                 "modely výrazně liší - čísla tedy řadí pravidla, neodhadují skutečnou chybovost.",
         "none": "žádné",
+        "clusters": "Shluky boxů (boxy osob na prahu modelu a výš, mřížka středu {g}, "
+                    "aspoň {n} snímků na zdroj)",
+        "cluster_line": "{src}: střed ({x}, {y}), {n} snímků, průměrné skóre {m}",
+        "rows_boxes": "Záznamů s boxy (primární / shadow)",
+        "overlap": "Rozporné snímky s boxy: vidí oba modely stejný objekt (IoU >= {i})?",
+        "same": "shodují se na stejném objektu", "different": "každý vidí něco jiného",
+        "no_boxes": "záznam bez boxů (starý formát)",
     },
 }
 
@@ -176,6 +194,7 @@ def build_report(rows, shadow_threshold, primary_threshold=PRIMARY_THRESHOLD):
                 by_hour[f"{ts.astimezone(timezone.utc).hour:02d}"] += 1
             by_band[_band(max(p, s))] += 1
     compared = len(xs)
+    thresholds = {"primary": primary_threshold, "shadow": shadow_threshold}
     disagree = matrix["primary_only"] + matrix["shadow_only"]
     return {
         "records": len(rows),
@@ -194,7 +213,84 @@ def build_report(rows, shadow_threshold, primary_threshold=PRIMARY_THRESHOLD):
         "disagree_by_band": dict(by_band),
         "pearson": pearson(xs, ys),
         "spearman": spearman(xs, ys),
+        "rows_with_boxes": {
+            "primary": sum(1 for r in rows if _boxes(r.get("primary_boxes")) is not None),
+            "shadow": sum(1 for r in rows if _boxes(r.get("shadow_boxes")) is not None)},
+        "box_clusters": box_clusters(rows, thresholds),
+        "box_overlap": box_overlap(rows, thresholds),
     }
+
+
+def _boxes(value):
+    """Valid ``[x1, y1, x2, y2, score]`` boxes of a log field; ``None`` if the field is absent
+    (old log format) or not a list."""
+    if not isinstance(value, list):
+        return None
+    out = []
+    for b in value:
+        if isinstance(b, (list, tuple)) and len(b) == 5:
+            nums = [_num(v) for v in b]
+            if all(v is not None for v in nums):
+                out.append(nums)
+    return out
+
+
+def _iou(a, b):
+    iw = min(a[2], b[2]) - max(a[0], b[0])
+    ih = min(a[3], b[3]) - max(a[1], b[1])
+    if iw <= 0 or ih <= 0:
+        return 0.0
+    inter = iw * ih
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def box_clusters(rows, thresholds, grid=CLUSTER_GRID, min_count=CLUSTER_MIN):
+    """Static-looking box clusters per model: the same box-centre grid cell in at least
+    ``min_count`` frames of one source (a frame counts once per cell; only boxes scoring at
+    least the model's threshold count). Rows without boxes are skipped."""
+    out = {}
+    for model, field in (("primary", "primary_boxes"), ("shadow", "shadow_boxes")):
+        cells = {}
+        for r in rows:
+            boxes = _boxes(r.get(field))
+            if not boxes or r.get("error"):
+                continue
+            seen = set()
+            for x1, y1, x2, y2, score in boxes:
+                if score < thresholds[model]:
+                    continue
+                key = (str(r.get("source_id")), int(((x1 + x2) / 2) // grid),
+                       int(((y1 + y2) / 2) // grid))
+                if key not in seen:
+                    seen.add(key)
+                    cells.setdefault(key, []).append(score)
+        found = [{"source": _short(src), "x": round((cx + 0.5) * grid, 3),
+                  "y": round((cy + 0.5) * grid, 3), "frames": len(sc),
+                  "mean_score": round(sum(sc) / len(sc), 3)}
+                 for (src, cx, cy), sc in cells.items() if len(sc) >= min_count]
+        out[model] = sorted(found, key=lambda c: (-c["frames"], c["source"], c["x"], c["y"]))
+    return out
+
+
+def box_overlap(rows, thresholds):
+    """For frames where the models disagree at their thresholds: do their boxes overlap
+    (best pair IoU >= ``OVERLAP_IOU``)? Rows without box fields count as ``no_boxes``."""
+    res = {"same": 0, "different": 0, "no_boxes": 0}
+    for r in rows:
+        p, s = _num(r.get("primary_person")), _num(r.get("shadow_person"))
+        if p is None or s is None or r.get("error"):
+            continue
+        if (p >= thresholds["primary"]) == (s >= thresholds["shadow"]):
+            continue
+        pb, sb = _boxes(r.get("primary_boxes")), _boxes(r.get("shadow_boxes"))
+        if pb is None or sb is None:
+            res["no_boxes"] += 1
+        elif any(_iou(a, b) >= OVERLAP_IOU for a in pb for b in sb):
+            res["same"] += 1
+        else:
+            res["different"] += 1
+    return res
 
 
 def _sha256(path):
@@ -285,6 +381,18 @@ def render(rep, lang="en"):
         out += ["", t[title]]
         out += [f"  {k}: {v}" for k, v in rep[key].items()] or [f"  {t['none']}"]
     out += ["", f"{t['corr']}: Pearson {_fmt(rep['pearson'])}, Spearman {_fmt(rep['spearman'])}"]
+    rb = rep["rows_with_boxes"]
+    out += ["", f"{t['rows_boxes']}: {rb['primary']} / {rb['shadow']}"]
+    if rb["primary"] or rb["shadow"]:
+        out += ["", t["clusters"].format(g=CLUSTER_GRID, n=CLUSTER_MIN)]
+        for model in ("primary", "shadow"):
+            out.append(f"  {t[model]}:")
+            out += [("    " + t["cluster_line"].format(
+                src=c["source"], x=c["x"], y=c["y"], n=c["frames"], m=c["mean_score"]))
+                for c in rep["box_clusters"][model]] or [f"    {t['none']}"]
+        ov = rep["box_overlap"]
+        out += ["", t["overlap"].format(i=OVERLAP_IOU)]
+        out += [f"  {t[k]}: {ov[k]}" for k in ("same", "different", "no_boxes")]
     lab = rep.get("labels")
     if lab is not None:
         out += ["", f"{t['labels']}: {t['labeled']} {lab['n']}, {t['persons']} {lab['persons']}"]

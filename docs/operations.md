@@ -369,6 +369,12 @@ How to read it:
 - Disagreements by source (a short hash, no camera names), by UTC hour and by score band
   show whether they concentrate on one camera, on night frames or near the threshold
   (where a disagreement is cheap) rather than far from it.
+- Since the log rows carry `primary_boxes` / `shadow_boxes` (person boxes as
+  `[x1, y1, x2, y2, score]`, normalized to 0-1, at most 10 per frame; absent in older rows),
+  the report also lists static box clusters per model (same centre cell of a 0.05 grid in
+  at least 5 frames of one source, a hint for a fixed object that looks like a person) and
+  says for disagreeing frames whether the two models' boxes overlap (IoU >= 0.3, "same
+  object") or each sees something else.
 - Pearson and Spearman correlation of the two scores: high Spearman with a low Pearson
   means the models rank frames alike but are calibrated differently, so a different
   threshold may fix it.

@@ -860,6 +860,7 @@ def _load_secret(env, file_var, value_var):
 SHADOW_QUEUE_SIZE = 8
 SHADOW_TIMEOUT = 8.0
 SHADOW_DISAGREE_MAX = 300
+SHADOW_LOG_BOXES = 10   # person boxes per model kept in a shadow log row
 SHADOW_HIGH = 0.45
 SHADOW_LOW = 0.25
 SHADOW_WARN_SECONDS = 60.0
@@ -1090,8 +1091,8 @@ class EnsembleGate:
         return thread, box, started
 
     def finish(self, handle, primary):
-        """``(reply, shadow_person, error, shadow_seconds)``; waits at most the timeout
-        counted from ``start``."""
+        """``(reply, shadow_person, error, shadow_seconds, shadow_payload)``; waits at most
+        the timeout counted from ``start``."""
         thread, box, started = handle
         thread.join(max(0.0, started + self.config.timeout - time.monotonic()))
         out = box.get("out")
@@ -1104,7 +1105,7 @@ class EnsembleGate:
         if payload is not None and usable:
             reply, used = combine_ensemble(self.config, primary, payload)
             self._count(used)
-            return reply, float(payload["person"]), None, seconds
+            return reply, float(payload["person"]), None, seconds, payload
         self._count("primary_only")
         if error:
             self._count("failed")
@@ -1118,7 +1119,7 @@ class EnsembleGate:
                                  "primary": round(float(primary_person), 4),
                                  "shadow": None, "used": "primary_only"}
         shadow_person = float(payload["person"]) if payload is not None else None
-        return reply, shadow_person, error, seconds
+        return reply, shadow_person, error, seconds, payload
 
     def _warn(self, error):
         now = time.monotonic()
@@ -1132,6 +1133,36 @@ def _score_or_none(result, key):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return round(float(value), 4)
+
+
+def _log_boxes(result):
+    """Person boxes of a scorer reply for the shadow log, or ``None`` when it carries none.
+
+    ``[[x1, y1, x2, y2, score], ...]`` normalized by the reply's ``w``/``h``, rounded to
+    3 decimals, best first, at most ``SHADOW_LOG_BOXES``. A reply without boxes or image
+    size (older service) gives ``None``; an empty list means "no person box".
+    """
+    if not isinstance(result, dict):
+        return None
+    boxes, scores = result.get("person_boxes"), result.get("person_scores")
+    w, h = result.get("w"), result.get("h")
+    if not isinstance(boxes, list) or not isinstance(scores, list):
+        return None
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+               for v in (w, h)):
+        return None
+    out = []
+    for box, score in zip(boxes, scores, strict=False):
+        try:
+            x1, y1, x2, y2 = (float(v) for v in box)
+            score = float(score)
+        except (TypeError, ValueError):
+            continue
+        out.append([round(min(max(x1 / w, 0.0), 1.0), 3), round(min(max(y1 / h, 0.0), 1.0), 3),
+                    round(min(max(x2 / w, 0.0), 1.0), 3), round(min(max(y2 / h, 0.0), 1.0), 3),
+                    round(score, 3)])
+    out.sort(key=lambda b: -b[4])
+    return out[:SHADOW_LOG_BOXES]
 
 
 class ShadowRunner:
@@ -1161,8 +1192,9 @@ class ShadowRunner:
             self.counts[key] += 1
 
     def submit(self, body, tiles, source_id, result, primary_seconds, outcome=None):
-        """Queue a frame. ``outcome`` is ``(shadow_person, error, seconds)`` when the shadow
-        was already called for this frame (ensemble mode): it is logged, not sent again."""
+        """Queue a frame. ``outcome`` is ``(shadow_person, error, seconds, payload)`` when the
+        shadow was already called for this frame (ensemble mode): it is logged, not sent
+        again."""
         try:
             self._queue.put_nowait((body, tiles, source_id, result, primary_seconds, outcome))
         except queue.Full:
@@ -1185,7 +1217,7 @@ class ShadowRunner:
     def _process(self, body, tiles, source_id, result, primary_seconds, outcome=None):
         reused = outcome is not None
         if reused:
-            shadow_person, error, shadow_seconds = outcome
+            shadow_person, error, shadow_seconds, payload = outcome
         else:
             started = time.monotonic()
             payload, error = _shadow_call(self.config.url, self.config.token, body, tiles,
@@ -1197,7 +1229,8 @@ class ShadowRunner:
             self._warn(error)
         primary_person = _score_or_none(result, "person")
         self._write_log(source_id, primary_person, _score_or_none(result, "vehicle"),
-                        shadow_person, primary_seconds, shadow_seconds, error)
+                        shadow_person, primary_seconds, shadow_seconds, error,
+                        _log_boxes(result), _log_boxes(payload))
         if (shadow_person is not None and primary_person is not None
                 and self.config.disagree_dir
                 and ((primary_person >= SHADOW_HIGH and shadow_person < SHADOW_LOW)
@@ -1212,7 +1245,8 @@ class ShadowRunner:
             log.warning("shadow scoring failed: %s", error)
 
     def _write_log(self, source_id, primary_person, primary_vehicle, shadow_person,
-                   primary_seconds, shadow_seconds, error):
+                   primary_seconds, shadow_seconds, error, primary_boxes=None,
+                   shadow_boxes=None):
         row = {
             "ts": time.strftime(JOURNAL_STAMP, time.gmtime()),
             "source_id": source_id,
@@ -1223,6 +1257,12 @@ class ShadowRunner:
             "shadow_seconds": round(shadow_seconds, 4),
             "error": error,
         }
+        # Person boxes (normalized, see _log_boxes) only when the reply carried them, so old
+        # readers and logs of older services stay valid.
+        if primary_boxes is not None:
+            row["primary_boxes"] = primary_boxes
+        if shadow_boxes is not None:
+            row["shadow_boxes"] = shadow_boxes
         path = self.config.log_path
         if not path:
             return
@@ -1399,8 +1439,9 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
             else:
                 reply = result
                 if handle is not None:
-                    reply, shadow_person, error, shadow_seconds = gate.finish(handle, result)
-                    outcome = (shadow_person, error, shadow_seconds)
+                    reply, shadow_person, error, shadow_seconds, shadow_payload = (
+                        gate.finish(handle, result))
+                    outcome = (shadow_person, error, shadow_seconds, shadow_payload)
                 self._reply(200, reply)
             finally:
                 score_seconds = time.monotonic() - score_started

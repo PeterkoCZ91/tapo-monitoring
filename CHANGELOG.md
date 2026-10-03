@@ -5,6 +5,12 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Shadow log rows gain `primary_boxes` and `shadow_boxes` (person boxes as normalized
+  `[x1, y1, x2, y2, score]`, best first, at most 10, 3 decimals; left out when a reply carries
+  none), so a frame-level label can be traced to the object a detector hit. The host reply and
+  `/metrics` are unchanged. `tools/shadow_report.py` adds "box clusters" (static box centres
+  repeated in at least 5 frames of one source, per model) and, for disagreeing frames, whether
+  the two models' boxes overlap (IoU >= 0.3); rows from the old format still work.
 - Ensemble mode: `TAPO_SCORER_ENSEMBLE_TRUST` lets the scorer trust the second detector from a
   lower score than the host threshold. A shadow score in `[TRUST, HOST)` is remapped linearly
   into `[HOST, HOST + BAND)` (`used: shadow_marginal`, boxes and score list from the shadow),

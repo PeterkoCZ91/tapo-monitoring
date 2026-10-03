@@ -134,3 +134,55 @@ def test_cli_text_and_json(tmp_path, capsys):
     assert sr.main([str(log)]) == 0
     assert "Records" in capsys.readouterr().out
     assert sr.main([str(tmp_path / "missing.jsonl")]) == 2
+
+
+def _boxed(ts, src, p, s, pboxes=None, sboxes=None):
+    r = row(ts, src, p, s)
+    if pboxes is not None:
+        r["primary_boxes"] = pboxes
+    if sboxes is not None:
+        r["shadow_boxes"] = sboxes
+    return r
+
+
+SWING = [0.52, 0.10, 0.60, 0.30, 0.8]
+
+
+def test_old_format_rows_have_no_clusters_and_count_as_no_boxes():
+    rep = sr.build_report(ROWS, 0.45)
+    assert rep["rows_with_boxes"] == {"primary": 0, "shadow": 0}
+    assert rep["box_clusters"] == {"primary": [], "shadow": []}
+    assert rep["box_overlap"] == {"same": 0, "different": 0, "no_boxes": 2}
+    assert sr.render(rep, "en") and sr.render(rep, "cs")
+
+
+def test_static_cluster_needs_five_frames_per_source():
+    rows = [_boxed(f"2026-01-01T10:0{i}:00Z", "cam-a", 0.8, 0.1, [SWING]) for i in range(5)]
+    rows += [_boxed(f"2026-01-01T11:0{i}:00Z", "cam-b", 0.8, 0.1, [SWING]) for i in range(4)]
+    rows += [_boxed("2026-01-01T12:00:00Z", "cam-a", 0.8, 0.1, [[0.1, 0.1, 0.2, 0.4, 0.3]])]
+    rep = sr.build_report(rows, 0.45)
+    prim = rep["box_clusters"]["primary"]
+    assert len(prim) == 1 and prim[0]["frames"] == 5
+    assert prim[0]["mean_score"] == pytest.approx(0.8)
+    assert prim[0]["source"] == sr._short("cam-a")
+    assert rep["box_clusters"]["shadow"] == []
+    text = sr.render(rep, "en")
+    assert "cam-a" not in text and prim[0]["source"] in text
+
+
+def test_overlap_same_object_versus_different():
+    same = _boxed("2026-01-01T10:00:00Z", "c", 0.9, 0.1, [SWING], [[0.5, 0.1, 0.6, 0.3, 0.2]])
+    other = _boxed("2026-01-01T10:01:00Z", "c", 0.9, 0.1, [SWING], [[0.8, 0.5, 0.9, 0.9, 0.2]])
+    empty = _boxed("2026-01-01T10:02:00Z", "c", 0.9, 0.1, [SWING], [])
+    agree = _boxed("2026-01-01T10:03:00Z", "c", 0.9, 0.8, [SWING], [SWING])
+    old = row("2026-01-01T10:04:00Z", "c", 0.9, 0.1)
+    rep = sr.build_report([same, other, empty, agree, old], 0.45)
+    assert rep["box_overlap"] == {"same": 1, "different": 2, "no_boxes": 1}
+    assert rep["rows_with_boxes"] == {"primary": 4, "shadow": 4}
+
+
+def test_malformed_box_fields_are_ignored():
+    r = _boxed("2026-01-01T10:00:00Z", "c", 0.9, 0.1, [[1, 2], "x", [0, 0, 1, 1, True]], "bad")
+    rep = sr.build_report([r], 0.45)
+    assert rep["rows_with_boxes"] == {"primary": 1, "shadow": 0}
+    assert rep["box_overlap"]["no_boxes"] == 1
