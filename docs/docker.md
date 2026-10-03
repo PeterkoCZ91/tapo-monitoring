@@ -36,7 +36,7 @@ finds ffmpeg; `check` prints only the config summary. To build instead of pullin
 replace `image:` with `build: .` in the Compose file (or run `docker compose build`).
 
 `cameras.yaml`, `tapo.env` and `docker-compose.yml` are git-ignored or local copies;
-`.dockerignore` keeps them, `private/`, tests and media out of the build context, so no
+`.dockerignore` keeps them, local-only notes, tests and media out of the build context, so no
 secret can end up in an image layer.
 
 ## Configuration and secrets
@@ -119,8 +119,9 @@ environment variables with these defaults:
 
 The other `TAPO_SCORER_METRICS_*` variables from `systemd/tapo-scorer.env.example` work
 unchanged. With both services in one Compose project, set the camera's `scorer.url` to
-`http://scorer:8766/score`. The scorer has no authentication; publish its port only on a
-network you trust. The image runs inference on the CPU; GPU providers need a different
+`http://scorer:8766/score`. The scorer has no authentication unless you set `TAPO_SCORER_TOKEN_FILE` or
+`TAPO_SCORER_TOKEN` (see [Shared token](operations.md#shared-token-optional)); publish its
+port only on a network you trust. The image runs inference on the CPU; GPU providers need a different
 base and are not covered here.
 
 ## Extras and upgrades

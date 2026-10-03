@@ -86,6 +86,12 @@ documented below as *available* but intentionally **not implemented** — see "A
   width skips the native original altogether. A too-tall zoom is widened just enough to
   stop being a vertical sliver — a standing figure is naturally taller than the scene, so
   widening all the way to the scene's own ratio would spend the zoom on empty margin.
+- **Scorer service options (all opt-in)** — a shared bearer token, `scorer.url` as a list
+  with failover, a DETR-family detector instead of YOLOX, a shadow run of a second
+  detector and a combined "ensemble" score; see [operations](operations.md#provision-the-scorer).
+  On the camera side `scorer.alert_zones`, `lens_ignore_zones`, `max_person_box`,
+  `sampler.loiter_frames` and `scorer.alert_vehicles` narrow or extend what alerts, with an
+  `observe` mode to try each first ([watch zones](watch-zones.md)).
 - **Event-window sampler (optional)** — for long camera events, follow-up RTSP grabs
   across the event window catch people who enter frame after the first live grab.
 - **AI description** — Groq vision model returns a short scene description for approved

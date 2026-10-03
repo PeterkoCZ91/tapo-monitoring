@@ -852,7 +852,7 @@ nearby (a bird, a shadow) "confirms" it. A person whose box lies at least 80 % i
 zone is removed from the answer; the score becomes the best remaining person, so a real
 person elsewhere, or one standing in front of the object (a taller box), still counts.
 Keep a zone tight around the object. It needs a scoring service that returns
-`person_boxes` (this release on); an older one is left alone, with one warning.
+`person_boxes` (a current service does); an older one is left alone, with one warning.
 
 ```yaml
 scorer:

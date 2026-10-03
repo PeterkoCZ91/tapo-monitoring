@@ -245,7 +245,7 @@ with boxes in pixels of the original frame, so callers need no change.
 |---|---|---|
 | `TAPO_SCORER_ARCH` | `yolox` (default), `detr` | Decoder family. Any other value stops the service at start with `scorer config error`. |
 | `TAPO_SCORER_INPUT_SIZE` | positive integer | Model input side. The unit passes it as `--input-size`; unset, `yolox` uses 416 and `detr` 640. |
-| `TAPO_SCORER_DETR_PERSON_ID` | `0` (COCO80), `1` (COCO91) | Label space of the logits; also fixes the animal and vehicle classes. |
+| `TAPO_SCORER_DETR_PERSON_ID` | `0` (COCO80, default), `1` (COCO91) | Label space of the logits; also fixes the animal and vehicle classes. |
 | `TAPO_SCORER_DETR_ACTIVATION` | `softmax` (default), `sigmoid` | `softmax` for heads with a trailing "no object" column, `sigmoid` for focal-loss heads. |
 | `TAPO_SCORER_DETR_NORMALIZE` | `imagenet` (default), `none` | Input scaling: ImageNet mean/std, or plain 0-1. |
 
@@ -306,7 +306,7 @@ To compare a candidate on live traffic without touching the cameras, let the pro
 scorer forward a copy of every frame to a second scorer service (the candidate, started as
 above on its own port) and log both scores. Monitor hosts keep calling only the primary;
 their replies are byte-for-byte what they were. Off unless both `URL` and `LOG` are set in
-`scorer.env`:
+`scorer.env` (with `TAPO_SCORER_ENSEMBLE` set, `URL` alone is enough and nothing is logged):
 
 ```bash
 TAPO_SCORER_SHADOW_URL=http://CANDIDATE_HOST:8767/score
@@ -321,12 +321,15 @@ TAPO_SCORER_SHADOW_TIMEOUT=8                                       # seconds per
 `TAPO_SCORER_SHADOW_TOKEN` works like `TAPO_SCORER_TOKEN` (the file wins; a file that is not
 0600 stops the service at start). Behaviour:
 
-- The frame goes into a queue of 8 after the reply has been written. A full queue drops the
+- The frame goes into a queue (`TAPO_SCORER_SHADOW_QUEUE`, default 8) after the reply has
+  been written. A full queue drops the
   frame and counts it; a slow, dead or unauthorized shadow only delays the background
   thread. It never changes or delays an answer to a monitor host.
 - One JSON line per frame in the log: `ts`, `source_id`, `primary_person`,
   `primary_vehicle`, `shadow_person`, `primary_seconds`, `shadow_seconds` and `error`
-  (`null`, `timeout`, `connection`, `http_<code>`, `bad_response`). The URL and token are
+  (`null`, `timeout`, `connection`, `http_<code>`, `bad_response`), plus `primary_boxes` and
+  `shadow_boxes` when the reply carried person boxes (normalized `[x1, y1, x2, y2, score]`,
+  best first, at most 10, 3 decimals). The URL and token are
   never written; repeated failures log one warning a minute. Images are not in the log.
 - With `DISAGREE_DIR`, a frame is also saved when one model scores a person at 0.45 or more
   and the other below 0.25, as `<UTC time>_p<primary>_s<shadow>.jpg` (directory 0700, files

@@ -27,9 +27,8 @@ All notable changes to this project are documented here.
   warnings; `--lang en|cs`, `--json`. See `docs/operations.md`.
 - `tools/recording_audit_estimate.py`: visit-level estimate (`--visit-gap`, default 30 s) of
   how many labeled person visits each rule catches with at least one frame, with Wilson 95 %
-  intervals, next to the per-frame estimate. Labels of `recording_audit.py dataset` now pair
-  with the score table by window and index (and the dataset index carries `frame`), which
-  fixes the "labels matched no frame" warning.
+  intervals, next to the per-frame estimate. The dataset index of `recording_audit.py
+  dataset` now carries `frame`.
 - Optional ensemble mode of the scorer service (`TAPO_SCORER_ENSEMBLE=gate`, default off, needs
   the shadow URL): each `/score` runs the primary inference and the shadow service in parallel
   and returns one combined `person` (shadow >= 0.45, or primary >= 0.45 confirmed by shadow
@@ -57,7 +56,7 @@ All notable changes to this project are documented here.
   `docs/measurements.md`, "Detector comparison".
 - Optional shadow run of a second detector inside the scorer service (default off, replies
   unchanged). With `TAPO_SCORER_SHADOW_URL` and `TAPO_SCORER_SHADOW_LOG` set, every scored
-  frame is queued (8 deep, dropped and counted when full) after the reply and sent to another
+  frame is queued (8 deep by default, `TAPO_SCORER_SHADOW_QUEUE`; dropped and counted when full) after the reply and sent to another
   scorer service with a timeout; one JSON line per frame records both scores, durations and the
   error class, never the URL, token or image. `TAPO_SCORER_SHADOW_DISAGREE_DIR` keeps frames on
   which the models disagree (one at 0.45 or more, the other below 0.25), capped by
@@ -153,14 +152,11 @@ All notable changes to this project are documented here.
   The digest labels the watcher or gateway radio and unsupported observations.
 - Enabled ledger DB/WAL sizes in the daily digest, measured without SQLite operations.
 - Generic journal and syslog size/age policy guidance in [log retention](docs/log-retention.md).
-- Daily background retention compacts expired archive metadata, cleans media even
-  without new events, and prunes the event ledger in bounded transactions.
 - Network history now caches a 24-hour digest summary with measurement coverage and
   the worst UTC hour, without extra probes. SD transfers log their start and finish,
   including failures, so operators can compare transfer intervals with network history.
 - The review digest reads that network cache locally, including a configurable
   gateway cache path, and marks stale or invalid measurements as unknown.
-
 - Standalone network watcher (`tools/network_watch.py`): five ICMP samples per target
   about every two minutes, with packet loss, mean/p95/max RTT and jitter summaries.
   Each host measures its default router separately from configured cameras or hubs;
@@ -187,11 +183,8 @@ All notable changes to this project are documented here.
   people to that defer silencing the rest of the burst.
 - `scorer.person_bit_skips_hold` (off by default): a live motion frame whose event carries
   `events_1` bit 5 skips the corroboration hold and sends at `>= threshold`, as the
-  sampler already did for such a burst. Bit 5 is the camera's person class (alarm code 6),
-  not a PIR sensor: the docs are corrected from the Tapo app's own list of event codes,
-  and bits 3 / 7 / 8 are named line crossing / vehicle / pet. Routing every bit-5 event as
-  a person was replayed on three cameras' journals and rejected: it lost more alerted
-  passages than it rescued.
+  sampler already did for such a burst. Routing every bit-5 event as a person was replayed
+  on three cameras' journals and rejected: it lost more alerted passages than it rescued.
 - Opt-in outbox for alerts Telegram did not take (`outbox:` block, off by default). A
   failed real send is kept on disk (frame + JSON sidecar, keyed by incident) and, once
   Telegram answers again, delivered late: one outage summary per camera, then the photos
@@ -223,6 +216,11 @@ All notable changes to this project are documented here.
   clips.
 
 ### Changed
+- Docs: `events_1` bit 5 is the camera's person class (alarm code 6), not a PIR sensor, and
+  bits 3 / 7 / 8 are named line crossing / vehicle / pet, corrected from the Tapo app's own
+  list of event codes.
+- Daily background retention compacts expired archive metadata, cleans media even
+  without new events, and prunes the event ledger in bounded transactions.
 - The labeling page reads the physical key (`code`), so `1`/`2`/`3` and `u` work on a layout
   whose top row types other characters without Shift (for example a Czech keyboard).
 - The camera-card segment lookup error is printed with the read's output (the journal
@@ -231,6 +229,8 @@ All notable changes to this project are documented here.
   not "event clip"; added the reported `searchVideoWithUTC`/`player_id` note for newer firmware.
 
 ### Fixed
+- Labels of a `recording_audit.py dataset` now pair with the `recording_audit_estimate.py`
+  score table by window and index, which fixes the "labels matched no frame" warning.
 - Hub clip temp dirs (`sdjob_*`) no longer outlive their frame when a failed alert is
   retried (sent, given up, too old, frame gone) or when a clip result arrives after its
   queue entry was settled; they used to stay until the next daemon start.

@@ -284,6 +284,11 @@ is not indistinguishable from a lone figure. Tiled inference and optional subjec
 help with distant subjects in wide views. The scorer also exposes
 aggregate-only runtime counters at `/metrics` for operational monitoring.
 
+The service can also require a shared bearer token, run a DETR-family detector instead of
+YOLOX, run a second detector in shadow or as an ensemble, and a camera's `scorer.url` may
+list several services with failover; all of it is off by default and described in
+[Operations](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/operations.md#provision-the-scorer).
+
 Two opt-in calibration aids help tune thresholds by frame rather than by guesswork: an
 archive of every photo sent to Telegram (`TAPO_SENT_LOG_DIR`, self-pruning) and
 `python -m tapo_monitor.scene_probe`, which scores a live frame internally without alerting.
