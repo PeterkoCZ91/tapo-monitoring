@@ -9,6 +9,14 @@ All notable changes to this project are documented here.
   alarms per 1000 frames for several decision rules from a partly labeled score table, with
   seeded bootstrap intervals, day/night split, an independent completeness check and bias
   warnings; `--lang en|cs`, `--json`. See `docs/operations.md`.
+- Optional ensemble mode of the scorer service (`TAPO_SCORER_ENSEMBLE=gate`, default off, needs
+  the shadow URL): each `/score` runs the primary inference and the shadow service in parallel
+  and returns one combined `person` (shadow >= 0.45, or primary >= 0.45 confirmed by shadow
+  >= 0.12, otherwise capped just below 0.45), with boxes from the deciding model and an
+  `ensemble` block in the reply. A failing, unauthorized or slow shadow
+  (`TAPO_SCORER_ENSEMBLE_TIMEOUT`, 2 s) yields the primary reply unchanged. `/metrics` gains
+  `ensemble` counters; the shadow log and disagreement frames keep working. See
+  `docs/operations.md`, "Ensemble mode".
 - `tools/shadow_report.py`: reads the shadow-run log (counts, errors, timing, 2x2 agreement and
   disagreement breakdowns by hashed source, hour and score band, Pearson/Spearman) and, with
   `--labels` and `--disagree-dir`, compares candidate decision rules on hand-labeled

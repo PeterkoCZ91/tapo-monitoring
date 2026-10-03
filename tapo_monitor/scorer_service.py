@@ -815,6 +815,9 @@ SHADOW_DISAGREE_MAX = 300
 SHADOW_HIGH = 0.45
 SHADOW_LOW = 0.25
 SHADOW_WARN_SECONDS = 60.0
+ENSEMBLE_LOW = 0.12
+ENSEMBLE_HIGH = 0.45
+ENSEMBLE_TIMEOUT = 2.0
 
 
 @dataclass
@@ -832,11 +835,13 @@ class ShadowConfig:
 
 def load_shadow(env=None):
     """Shadow settings from ``TAPO_SCORER_SHADOW_*``; ``None`` (feature off) unless both
-    ``..._URL`` and ``..._LOG`` are set. Token handling is the same as ``load_token``."""
+    ``..._URL`` and ``..._LOG`` are set (``..._LOG`` may be left out when
+    ``TAPO_SCORER_ENSEMBLE`` is on; nothing is then logged). Token handling is the same as ``load_token``."""
     env = os.environ if env is None else env
     url = (env.get("TAPO_SCORER_SHADOW_URL") or "").strip()
     log_path = (env.get("TAPO_SCORER_SHADOW_LOG") or "").strip()
-    if not url or not log_path:
+    ensemble_on = bool((env.get("TAPO_SCORER_ENSEMBLE") or "").strip())
+    if not url or (not log_path and not ensemble_on):
         return None
     return ShadowConfig(
         url=url,
@@ -847,6 +852,188 @@ def load_shadow(env=None):
                                          SHADOW_DISAGREE_MAX)),
         timeout=_env_setting(env, "TAPO_SCORER_SHADOW_TIMEOUT", float, SHADOW_TIMEOUT),
     )
+
+
+def _shadow_call(url, token, body, tiles, timeout):
+    """POST ``body`` to a scorer service; ``(payload, None)`` or ``(None, error_class)``.
+
+    The error class is a short fixed word (``timeout``, ``connection``, ``http_<code>``,
+    ``bad_response``); the URL and the token never leave this function.
+    """
+    if tiles > 1:
+        url += ("&" if "?" in url else "?") + f"tiles={tiles}"
+    headers = {"Content-Type": "image/jpeg"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        return None, f"http_{exc.code}"
+    except ValueError:
+        return None, "bad_response"
+    except OSError as exc:      # URLError, timeouts, refused connections
+        reason = getattr(exc, "reason", exc)
+        timed_out = isinstance(exc, TimeoutError) or isinstance(reason, TimeoutError)
+        return None, "timeout" if timed_out else "connection"
+    value = payload.get("person") if isinstance(payload, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None, "bad_response"
+    return payload, None
+
+
+class EnsembleConfigError(ValueError):
+    """``TAPO_SCORER_ENSEMBLE*`` settings are unusable; the service must not start."""
+
+
+@dataclass
+class EnsembleConfig:
+    """Combine the primary and the shadow person score into one reply (``gate`` mode)."""
+
+    mode: str = "gate"
+    low: float = ENSEMBLE_LOW
+    high: float = ENSEMBLE_HIGH
+    timeout: float = ENSEMBLE_TIMEOUT
+
+
+def load_ensemble(env=None, shadow=None):
+    """Ensemble settings from ``TAPO_SCORER_ENSEMBLE*``; ``None`` (off) when unset.
+
+    Needs the shadow settings (the second service); raises ``EnsembleConfigError`` for an
+    unknown mode, a missing shadow or unusable numbers rather than starting half-configured.
+    """
+    env = os.environ if env is None else env
+    mode = (env.get("TAPO_SCORER_ENSEMBLE") or "").strip().lower()
+    if not mode or mode == "off":
+        return None
+    if mode != "gate":
+        raise EnsembleConfigError("TAPO_SCORER_ENSEMBLE must be 'gate' (or unset)")
+    if shadow is None:
+        raise EnsembleConfigError("TAPO_SCORER_ENSEMBLE needs TAPO_SCORER_SHADOW_URL")
+    cfg = EnsembleConfig(
+        mode=mode,
+        low=_env_setting(env, "TAPO_SCORER_ENSEMBLE_LOW", float, ENSEMBLE_LOW),
+        high=_env_setting(env, "TAPO_SCORER_ENSEMBLE_HIGH", float, ENSEMBLE_HIGH),
+        timeout=_env_setting(env, "TAPO_SCORER_ENSEMBLE_TIMEOUT", float, ENSEMBLE_TIMEOUT),
+    )
+    if not (0.0 <= cfg.low < cfg.high <= 1.0) or cfg.timeout <= 0:
+        raise EnsembleConfigError(
+            "TAPO_SCORER_ENSEMBLE_LOW/HIGH/TIMEOUT need 0 <= LOW < HIGH <= 1 and TIMEOUT > 0")
+    return cfg
+
+
+def combine_ensemble(config, primary, shadow):
+    """One reply from the primary result and the shadow payload (both dicts with ``person``).
+
+    shadow >= HIGH -> shadow's person and boxes; else primary >= HIGH and shadow >= LOW ->
+    the primary reply; else ``min(max(primary, shadow), HIGH - 0.01)`` on the primary reply.
+    Returns ``(reply, used)``.
+    """
+    p = float(primary["person"])
+    s = float(shadow["person"])
+    reply = dict(primary)
+    if s >= config.high:
+        used = "shadow"
+        reply["person"] = round(s, 4)
+        for key in ("box", "person_boxes", "person_scores"):
+            if key in shadow:
+                reply[key] = shadow[key]
+            else:
+                reply.pop(key, None)
+    elif p >= config.high and s >= config.low:
+        used = "primary"
+    else:
+        used = "neither"
+        cap = config.high - 0.01
+        reply["person"] = round(min(max(p, s), cap), 4)
+        scores = reply.get("person_scores")
+        if isinstance(scores, list):
+            # A person the second model denied must not return through the list: a client
+            # that rebuilds ``person`` from it (alert zones) would otherwise revive it.
+            reply["person_scores"] = [min(float(x), cap) for x in scores]
+    reply["ensemble"] = {"mode": config.mode, "primary": round(p, 4),
+                         "shadow": round(s, 4), "used": used}
+    return reply, used
+
+
+class EnsembleGate:
+    """Per-request ensemble: starts the shadow call, joins it within the timeout, combines.
+
+    Any shadow problem yields the primary reply untouched (``used: primary_only``). Failures
+    are counted and warned about at most once a minute, by error class only.
+    """
+
+    def __init__(self, config, shadow):
+        self.config = config
+        self.shadow = shadow
+        self._lock = threading.Lock()
+        self._last_warn = None
+        self.counts = {"requests": 0, "shadow": 0, "primary": 0, "neither": 0,
+                       "primary_only": 0, "failed": 0, "timeouts": 0}
+
+    def snapshot(self):
+        with self._lock:
+            return {"mode": self.config.mode, **self.counts}
+
+    def _count(self, *keys):
+        with self._lock:
+            for key in keys:
+                self.counts[key] += 1
+
+    def start(self, body, tiles):
+        """Begin the shadow call in the background; returns the handle for ``finish``."""
+        started = time.monotonic()
+        box = {}
+
+        def run():
+            try:
+                box["out"] = _shadow_call(self.shadow.url, self.shadow.token, body, tiles,
+                                          self.config.timeout)
+            except Exception as exc:  # noqa: BLE001 - never raise out of the worker
+                box["out"] = (None, "connection")
+                log.debug("ensemble call failed: %s", type(exc).__name__)
+
+        thread = threading.Thread(target=run, name="scorer-ensemble", daemon=True)
+        thread.start()
+        return thread, box, started
+
+    def finish(self, handle, primary):
+        """``(reply, shadow_person, error, shadow_seconds)``; waits at most the timeout
+        counted from ``start``."""
+        thread, box, started = handle
+        thread.join(max(0.0, started + self.config.timeout - time.monotonic()))
+        out = box.get("out")
+        seconds = time.monotonic() - started
+        self._count("requests")
+        primary_person = primary.get("person") if isinstance(primary, dict) else None
+        usable = (not isinstance(primary_person, bool)
+                  and isinstance(primary_person, (int, float)))
+        payload, error = out if out is not None else (None, "timeout")
+        if payload is not None and usable:
+            reply, used = combine_ensemble(self.config, primary, payload)
+            self._count(used)
+            return reply, float(payload["person"]), None, seconds
+        self._count("primary_only")
+        if error:
+            self._count("failed")
+            if error == "timeout":
+                self._count("timeouts")
+            self._warn(error)
+        reply = primary
+        if usable:
+            reply = dict(primary)
+            reply["ensemble"] = {"mode": self.config.mode,
+                                 "primary": round(float(primary_person), 4),
+                                 "shadow": None, "used": "primary_only"}
+        shadow_person = float(payload["person"]) if payload is not None else None
+        return reply, shadow_person, error, seconds
+
+    def _warn(self, error):
+        now = time.monotonic()
+        if self._last_warn is None or now - self._last_warn >= SHADOW_WARN_SECONDS:
+            self._last_warn = now
+            log.warning("ensemble shadow call failed, serving the primary score: %s", error)
 
 
 def _score_or_none(result, key):
@@ -882,9 +1069,11 @@ class ShadowRunner:
         with self._lock:
             self.counts[key] += 1
 
-    def submit(self, body, tiles, source_id, result, primary_seconds):
+    def submit(self, body, tiles, source_id, result, primary_seconds, outcome=None):
+        """Queue a frame. ``outcome`` is ``(shadow_person, error, seconds)`` when the shadow
+        was already called for this frame (ensemble mode): it is logged, not sent again."""
         try:
-            self._queue.put_nowait((body, tiles, source_id, result, primary_seconds))
+            self._queue.put_nowait((body, tiles, source_id, result, primary_seconds, outcome))
         except queue.Full:
             self._count("dropped")
 
@@ -902,39 +1091,18 @@ class ShadowRunner:
             except Exception as exc:  # noqa: BLE001 - the shadow must never raise out
                 log.debug("shadow item failed: %s", type(exc).__name__)
 
-    def _send(self, body, tiles):
-        url = self.config.url
-        if tiles > 1:
-            url += ("&" if "?" in url else "?") + f"tiles={tiles}"
-        headers = {"Content-Type": "image/jpeg"}
-        if self.config.token:
-            headers["Authorization"] = f"Bearer {self.config.token}"
-        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=self.config.timeout) as resp:
-            return json.loads(resp.read())
-
-    def _process(self, body, tiles, source_id, result, primary_seconds):
-        started = time.monotonic()
-        shadow_person = None
-        error = None
-        try:
-            payload = self._send(body, tiles)
-            value = payload.get("person") if isinstance(payload, dict) else None
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                error = "bad_response"
-            else:
-                shadow_person = float(value)
-        except urllib.error.HTTPError as exc:
-            error = f"http_{exc.code}"
-        except ValueError:
-            error = "bad_response"
-        except OSError as exc:      # URLError, timeouts, refused connections
-            reason = getattr(exc, "reason", exc)
-            timed_out = isinstance(exc, TimeoutError) or isinstance(reason, TimeoutError)
-            error = "timeout" if timed_out else "connection"
-        shadow_seconds = time.monotonic() - started
+    def _process(self, body, tiles, source_id, result, primary_seconds, outcome=None):
+        reused = outcome is not None
+        if reused:
+            shadow_person, error, shadow_seconds = outcome
+        else:
+            started = time.monotonic()
+            payload, error = _shadow_call(self.config.url, self.config.token, body, tiles,
+                                          self.config.timeout)
+            shadow_person = float(payload["person"]) if payload is not None else None
+            shadow_seconds = time.monotonic() - started
         self._count("failed" if error else "sent")
-        if error:
+        if error and not reused:
             self._warn(error)
         primary_person = _score_or_none(result, "person")
         self._write_log(source_id, primary_person, _score_or_none(result, "vehicle"),
@@ -964,8 +1132,10 @@ class ShadowRunner:
             "shadow_seconds": round(shadow_seconds, 4),
             "error": error,
         }
+        path = self.config.log_path
+        if not path:
+            return
         try:
-            path = self.config.log_path
             new = not os.path.exists(path)
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(row) + "\n")
@@ -1017,7 +1187,7 @@ def _authorized(header, token):
 def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=60,
                 metrics_retention_days=7, metrics_retention_files=8,
                 metrics_max_journal_bytes=METRICS_MAX_JOURNAL_BYTES, arch=None, token=None,
-                shadow=None):
+                shadow=None, ensemble=None):
     """HTTP server: POST /score (JPEG body) -> JSON scores; GET /health -> ok.
 
     ``arch`` (the detector family name, never the model path) is reported by /health and
@@ -1030,6 +1200,11 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
     With a ``shadow`` (``ShadowConfig``) every scored frame is also handed, after the reply
     has been written, to a bounded background queue that sends it to a second scorer
     service and logs both scores; the reply itself is never delayed or changed.
+
+    With an ``ensemble`` (``EnsembleConfig``, needs the ``shadow`` for the second service's
+    URL and token) the second service is instead called in parallel with the primary
+    inference and the reply carries one combined person score; the reply waits for it at most
+    ``ensemble.timeout`` seconds, after which the primary reply goes out unchanged.
 
     Threaded so /health, /metrics and slow clients never queue behind a long
     inference (a 4K tiled request can hold the CPU for seconds). Inference itself
@@ -1046,6 +1221,9 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
     metrics.arch = arch or getattr(score_fn, "arch", None)
     inference_lock = threading.Lock()
     runner = ShadowRunner(shadow) if shadow is not None else None
+    if ensemble is not None and shadow is None:
+        raise EnsembleConfigError("ensemble mode needs a shadow service")
+    gate = EnsembleGate(ensemble, shadow) if ensemble is not None else None
 
     class Handler(BaseHTTPRequestHandler):
         def _reply(self, code, payload):
@@ -1078,6 +1256,8 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
                     snap = metrics.snapshot()
                     if runner is not None:
                         snap["shadow"] = runner.snapshot()
+                    if gate is not None:
+                        snap["ensemble"] = gate.snapshot()
                     self._reply(200, snap)
             else:
                 self._reply(404, {"error": "not found"})
@@ -1104,6 +1284,8 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
             ok = False
             result = None
             failure_reason = None
+            handle = gate.start(body, tiles) if gate is not None else None
+            outcome = None
             try:
                 with inference_lock:
                     result = score_fn(body, tiles)
@@ -1113,14 +1295,18 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
                 log.warning("scoring failed: inference_error")
                 self._reply(500, {"error": "scoring failed"})
             else:
-                self._reply(200, result)
+                reply = result
+                if handle is not None:
+                    reply, shadow_person, error, shadow_seconds = gate.finish(handle, result)
+                    outcome = (shadow_person, error, shadow_seconds)
+                self._reply(200, reply)
             finally:
                 score_seconds = time.monotonic() - score_started
                 metrics.finish(time.monotonic() - request_started, score_seconds, ok,
                                result=result, failure_reason=failure_reason, source_id=source_id)
                 if runner is not None and ok and isinstance(result, dict):
                     runner.submit(body, tiles, source_id, result,
-                                  time.monotonic() - request_started)
+                                  time.monotonic() - request_started, outcome)
 
         def log_message(self, fmt, *args):  # route http.server chatter to logging
             log.debug(fmt, *args)
@@ -1228,7 +1414,8 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
         raise SystemExit(2) from None
     try:
         shadow = load_shadow()
-    except TokenConfigError as exc:
+        ensemble = load_ensemble(os.environ, shadow)
+    except (TokenConfigError, EnsembleConfigError) as exc:
         print(f"scorer config error: {exc}", file=sys.stderr)
         raise SystemExit(2) from None
     decoder = detectors.build_decoder(config)
@@ -1238,6 +1425,7 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
         arch=decoder.name,
         token=token,
         shadow=shadow,
+        ensemble=ensemble,
         port=args.port,
         metrics_file=args.metrics_file,
         metrics_persist_seconds=args.metrics_persist_seconds,
@@ -1251,6 +1439,10 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
     if shadow is not None:
         log.info("shadow scoring on (disagreement images %s)",
                  "kept" if shadow.disagree_dir else "off")
+    if ensemble is not None:
+        log.info("ensemble %s on (low %.2f, high %.2f, timeout %.1fs)",
+                 ensemble.mode, ensemble.low, ensemble.high, ensemble.timeout)
+
     def stop(_signum, _frame):
         raise SystemExit(0)
 

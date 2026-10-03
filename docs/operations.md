@@ -420,6 +420,51 @@ How it works and how to read it:
   `lowrest` resembles it and that labels are right. Label a random draw, not the frames the
   labeling queue finds most interesting, or the estimate is biased.
 
+### Ensemble mode: one combined score (optional)
+
+When the shadow log and the labeled disagreements show that a rule combining the two models
+beats either alone, the scorer can apply that rule itself, so monitor hosts, their
+thresholds and zones stay as they are and simply see a better `person`. On the data this was
+built from, "shadow >= 0.45 OR (primary >= 0.45 AND shadow >= 0.12)" cut false alarms by about
+46 % and missed persons by about 57 % against the primary alone (a small, biased sample: check
+it on yours with `tools/shadow_report.py --labels` first). Needs the shadow settings above; the
+`..._SHADOW_LOG` line may then be left out (nothing is logged):
+
+```bash
+TAPO_SCORER_ENSEMBLE=gate            # default: unset = off
+TAPO_SCORER_ENSEMBLE_LOW=0.12        # shadow score the primary needs to be confirmed
+TAPO_SCORER_ENSEMBLE_HIGH=0.45       # shadow score that is trusted on its own
+TAPO_SCORER_ENSEMBLE_TIMEOUT=2.0     # seconds the reply may wait for the shadow
+```
+
+For every `/score` the primary inference and a call to the shadow service (same image, same
+`?tiles`) run in parallel, then `person` becomes:
+
+- shadow >= HIGH: the shadow score, with `box`, `person_boxes` and `person_scores` from the
+  shadow reply;
+- else primary >= HIGH and shadow >= LOW: the primary reply as it is;
+- else `min(max(primary, shadow), HIGH - 0.01)`, so an unconfirmed primary cannot cross the
+  0.45-ish threshold (its `person_scores` list is not rewritten, so a caller that counts
+  that list at a threshold can still see the primary's entries).
+
+`animal`, `vehicle`, `classes`, `w` and `h` always come from the primary. The reply gains
+`ensemble: {mode, primary, shadow, used}` with `used` one of `shadow`, `primary`, `neither`
+or `primary_only`. If the shadow fails, answers 401, sends garbage or does not answer within
+the timeout, the primary reply goes out unchanged with `used: primary_only` (`shadow: null`);
+the reply never waits longer than the timeout for it, and one warning a minute names the
+error class only (never the URL or token). The shadow log and disagreement frames keep
+working and reuse the same shadow call. `/metrics` gains `ensemble` with `requests`,
+`shadow`, `primary`, `neither`, `primary_only`, `failed` and `timeouts`; a growing
+`primary_only` means the combined score is silently not being applied.
+
+Cost: every request now also depends on the second service. Expect about +0.3 s per request
+when the shadow is the slower model (the reply takes the slower of the two, not their sum);
+size the camera-side `scorer.timeout` for that plus the ensemble timeout. A dead shadow costs
+up to `TAPO_SCORER_ENSEMBLE_TIMEOUT` per request until it is back. Enabling the feature
+needs a restart of the scorer. To roll back, remove `TAPO_SCORER_ENSEMBLE` and restart; the
+replies are then byte-for-byte the primary's again. A bad value (unknown mode, `LOW >= HIGH`,
+no shadow URL) stops the service at start instead of running half-configured.
+
 ### Moving the scorer to another machine
 
 Because every camera shares one scorer, move it without a gap by listing both machines in
