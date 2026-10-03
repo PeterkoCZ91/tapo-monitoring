@@ -99,9 +99,15 @@ def test_score_fn_error_500():
         with pytest.raises(urllib.error.HTTPError) as e:
             urllib.request.urlopen(req, timeout=5)
         assert e.value.code == 500
-        with urllib.request.urlopen(f"http://127.0.0.1:{srv.server_address[1]}/metrics",
-                                    timeout=5) as response:
-            metrics = json.load(response)
+        # the handler replies before it records the request, so wait for the counters
+        deadline = time.monotonic() + 5
+        while True:
+            with urllib.request.urlopen(f"http://127.0.0.1:{srv.server_address[1]}/metrics",
+                                        timeout=5) as response:
+                metrics = json.load(response)
+            if metrics["completed"] or time.monotonic() > deadline:
+                break
+            time.sleep(0.02)
         assert metrics["requests"] == 1
         assert metrics["completed"] == 1
         assert metrics["failed"] == 1
