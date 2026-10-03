@@ -628,9 +628,33 @@ class Soak:
 
     def count_files(self):
         out = {name: count_tree(path, suffix=".jpg") for name, path in self.archive_dirs().items()}
-        out["tmp"] = sum(count_tree(p) + 1 for p in (self.tmp / "tmp").glob(
-            sdworker.JOB_DIR_PREFIX + "*"))
+        out["tmp"] = self.count_job_dirs()
         return out
+
+    def count_job_dirs(self):
+        """``sdjob_*`` entries nobody owns. Deterministic, whatever the machine's speed.
+
+        A job dir is legitimately alive while its job runs on a worker thread, while the
+        finished result waits for the next ``poll`` and while a failed alert's frame waits
+        in the retry queue. Those are not counted: the harness lets the running jobs
+        finish (the worker threads are real) and sets aside the dirs of the results and
+        retry frames it can see. What remains is a leak.
+        """
+        workers = [w for w in (self.sd_worker, self.hub_worker) if w is not None]
+        deadline = time.monotonic() + 30
+        while (time.monotonic() < deadline
+               and any(w.in_flight() > len(w._done.queue) for w in workers)):
+            time.sleep(0.005)
+        owned = set()
+        paths = [e.get("image") for e in self.sc.state.pending_hub]
+        for w in workers:
+            for _key, value, _error in list(w._done.queue):
+                paths.extend(value if isinstance(value, (list, tuple)) else [value])
+        for path in paths:
+            if path:
+                owned.add(os.path.dirname(str(path)))
+        return sum(count_tree(p) + 1 for p in (self.tmp / "tmp").glob(
+            sdworker.JOB_DIR_PREFIX + "*") if str(p) not in owned)
 
     def oldest_age_days(self, now):
         """Age of the oldest archived jpeg by simulated mtime (the stamped ones)."""

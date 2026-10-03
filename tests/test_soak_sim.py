@@ -116,8 +116,9 @@ def test_a_run_reports_file_counts_and_exercises_every_archive(capsys):
     assert set(counts) == {"sent", "review", "panlimit", "tmp"}
     assert counts["sent"] > 0 and counts["panlimit"] > 0
     assert out["metrics"]["files_growth_per_day"].keys() == counts.keys()
-    # hub clip dirs are removed by the pipeline (one may be in flight at the very end)
-    assert out["metrics"]["files_growth_per_day"]["tmp"] == 0 and counts["tmp"] <= 2
+    # every hub clip dir is removed by the pipeline; the harness counts only dirs that no
+    # running job, uncollected result or retry-queued frame owns, so any left is a leak
+    assert out["metrics"]["files_growth_per_day"]["tmp"] == 0 and counts["tmp"] == 0
 
 
 def test_retention_deletes_files_whose_mtime_follows_the_fake_clock(capsys):

@@ -225,6 +225,9 @@ All notable changes to this project are documented here.
   not "event clip"; added the reported `searchVideoWithUTC`/`player_id` note for newer firmware.
 
 ### Fixed
+- Hub clip temp dirs (`sdjob_*`) no longer outlive their frame when a failed alert is
+  retried (sent, given up, too old, frame gone) or when a clip result arrives after its
+  queue entry was settled; they used to stay until the next daemon start.
 - Fleet digest health now distinguishes fresh verified camera health from cumulative
   self-heal refusals since daemon start. A health observation before a new refusal or
   a stale/missing observation cannot certify recovery.

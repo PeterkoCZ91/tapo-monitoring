@@ -2278,6 +2278,12 @@ def _drop_job_dirs(paths):
                 pass          # not empty (a frame kept for a retry) or already gone
 
 
+def _discard_job_frame(path):
+    """Delete a hub clip frame and, if it was the last file, the job dir it lived in."""
+    _safe_unlink(path)
+    _drop_job_dirs([path])
+
+
 def _default_clip_frame(cfg: CameraConfig, device):  # pragma: no cover
     """Download once and extract candidates spanning the recorded event."""
     _, password = resolve_hub_credentials(cfg)
@@ -2421,13 +2427,14 @@ def process_pending_hub(app, state, *, now, secrets):
         if cfg is None or now - entry["queued_at"] > HUB_PENDING_TTL:
             log.info("drop hub alert for %s: too old or camera gone (age=%ds)",
                      entry["camera"], int(now - entry["queued_at"]))
-            _safe_unlink(entry["image"])
+            _discard_job_frame(entry["image"])
             continue
         if now < entry["due_at"]:
             remaining.append(entry)
             continue
         if not os.path.exists(entry["image"]):
             log.warning("drop hub alert for %s: retry frame is gone", cfg.name)
+            _drop_job_dirs([entry["image"]])
             continue
         entry["attempts"] += 1
         ok = send_alert_photo(cfg, secrets, entry["image"], entry["caption"],
@@ -2442,11 +2449,11 @@ def process_pending_hub(app, state, *, now, secrets):
                      cfg.name, entry["attempts"])
             _, on_alert = alert_gate(state, cfg.name, app.alerts.cooldown, now)
             on_alert("motion", event, score=entry["score"], threshold=cfg.scorer.threshold)
-            _safe_unlink(entry["image"])
+            _discard_job_frame(entry["image"])
         elif entry["attempts"] >= HUB_RETRY_MAX_ATTEMPTS:
             log.warning("drop hub alert for %s: delivery failed %d times",
                         cfg.name, entry["attempts"])
-            _safe_unlink(entry["image"])
+            _discard_job_frame(entry["image"])
         else:
             entry["due_at"] = now + HUB_RETRY_DELAY
             remaining.append(entry)
@@ -2838,7 +2845,7 @@ def process_hub_clip_queue(app, state, worker, *, now, secrets, frame_for, score
             entry = result.context
             if not any(e is entry for e in queue) or any(e is entry for e in decided):
                 for frame in result.value or []:
-                    _safe_unlink(frame)   # given up on while it ran: never send it late
+                    _discard_job_frame(frame)   # given up on while it ran: never send it late
                 continue
             if result.error is not None:
                 log.warning("hubpoll %s: clip job failed: %s", entry["camera"],

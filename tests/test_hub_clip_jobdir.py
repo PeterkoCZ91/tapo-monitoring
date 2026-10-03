@@ -86,3 +86,49 @@ def test_delivery_removes_the_job_dir_with_its_last_frame(tmp_path):
         daemon._safe_unlink(f)
     daemon._drop_job_dirs(frames)
     assert _job_dirs(tmp_path) == []
+
+
+# -- the job dir goes with its frame on every later outcome ------------------------------
+
+def _frame_in_job_dir(tmp_path):
+    job = sdworker.job_dir(str(tmp_path))
+    path = os.path.join(job, "frame.jpg")
+    with open(path, "wb") as fh:
+        fh.write(b"jpg")
+    return path
+
+
+@pytest.mark.parametrize("outcome", ["sent", "gave_up", "too_old"])
+def test_a_retried_hub_alert_removes_its_job_dir_when_it_is_settled(
+        tmp_path, monkeypatch, outcome):
+    app = _hub_app()
+    state = daemon.MonitorState()
+    state.pending_hub.append({
+        "camera": "gate", "start_time": 100, "image": _frame_in_job_dir(tmp_path),
+        "caption": "c", "score": None, "etype": "motion", "attempts": 1,
+        "queued_at": 1000, "due_at": 1000, "audit_extra": {}})
+    now = 1000
+    if outcome == "too_old":
+        now += daemon.HUB_PENDING_TTL + 1
+    if outcome == "gave_up":
+        state.pending_hub[0]["attempts"] = daemon.HUB_RETRY_MAX_ATTEMPTS - 1
+    monkeypatch.setattr(daemon.notify, "send_photo", lambda *a, **k: outcome == "sent")
+    daemon.process_pending_hub(app, state, now=now, secrets={
+        "telegram_token": "t", "telegram_chat": "c", "groq_key": ""})
+    assert state.pending_hub == []
+    assert _job_dirs(tmp_path) == []
+
+
+def test_a_late_hub_clip_result_removes_its_job_dir(tmp_path):
+    app = _hub_app()
+    state = daemon.MonitorState()
+    frame = _frame_in_job_dir(tmp_path)
+    worker = sdworker.InlineSdWorker()
+    # The entry was already settled or dropped (it is not in the queue any more).
+    worker.submit("192.0.2.60", ("gate", 100), lambda: [frame],
+                  context={"camera": "gate", "start_time": 100})
+    daemon.process_hub_clip_queue(
+        app, state, worker, now=1000, secrets={}, frame_for=None, score_for=None,
+        time_str=str, clip_frame_for=None, cooldown=0)
+    assert not os.path.exists(frame)
+    assert _job_dirs(tmp_path) == []
