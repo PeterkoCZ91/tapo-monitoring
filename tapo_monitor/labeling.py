@@ -1233,10 +1233,14 @@ document.querySelectorAll("[data-label]").forEach(b =>
 $("skip").onclick = skip; $("undo").onclick = undo; $("undo2").onclick = undo;
 document.addEventListener("keydown", e => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
-  const map = {"1": "person", "2": "no_person", "3": "unsure"};
-  if (map[e.key]) { e.preventDefault(); label(map[e.key]); }
-  else if (e.key === " ") { e.preventDefault(); skip(); }
-  else if (e.key === "u" || e.key === "Backspace") { e.preventDefault(); undo(); }
+  // Physical keys (``code``), not typed characters: without Shift the top row of a Czech
+  // layout types "+", "ě", "š", so ``e.key`` would never be "1", "2", "3".
+  const map = {Digit1: "person", Numpad1: "person", Digit2: "no_person", Numpad2: "no_person",
+               Digit3: "unsure", Numpad3: "unsure"};
+  if (map[e.code]) { e.preventDefault(); label(map[e.code]); }
+  else if (e.key === " " || e.code === "Space") { e.preventDefault(); skip(); }
+  else if (e.code === "KeyU" || e.key === "u" || e.key === "Backspace") {
+    e.preventDefault(); undo(); }
 });
 call("/api/next");
 </script></body></html>

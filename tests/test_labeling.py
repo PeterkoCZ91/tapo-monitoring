@@ -322,6 +322,14 @@ def served(dataset):
     srv.server_close()
 
 
+def test_label_keys_use_the_physical_key_so_a_czech_layout_works():
+    # Without Shift the top row of a Czech layout types "+", "ě", "š", so a handler that reads
+    # ``event.key`` never sees "1", "2", "3". The page must read the physical key (``code``).
+    html = labeling.page("en")
+    for code in ("Digit1", "Digit2", "Digit3", "Numpad1", "Numpad2", "Numpad3", "KeyU"):
+        assert code in html
+
+
 def test_index_page_has_the_controls(served):
     _, url = served
     status, headers, body = _get(url + "/")
@@ -1023,7 +1031,7 @@ def test_page_has_overlay_and_keeps_keys(served):
     _, url = served
     page = _get(url + "/")[2].decode()
     assert 'id="boxes"' in page and "/api/boxes" in page
-    assert 'e.key === " "' in page and "map[e.key]" in page
+    assert 'e.key === " "' in page and "map[e.code]" in page
 
 
 # ── language ─────────────────────────────────────────────────────────────────

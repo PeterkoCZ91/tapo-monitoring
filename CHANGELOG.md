@@ -161,6 +161,8 @@ All notable changes to this project are documented here.
   clips.
 
 ### Changed
+- The labeling page reads the physical key (`code`), so `1`/`2`/`3` and `u` work on a layout
+  whose top row types other characters without Shift (for example a Czech keyboard).
 - The camera-card segment lookup error is printed with the read's output (the journal
   shows it when a read comes back empty); before it was swallowed.
 - Docs: `vedio_type` is the clip's trigger code (`2` motion, `6` person, `8` vehicle, `9` pet),
