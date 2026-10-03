@@ -17,6 +17,12 @@ All notable changes to this project are documented here.
   (`TAPO_SCORER_ENSEMBLE_TIMEOUT`, 2 s) yields the primary reply unchanged. `/metrics` gains
   `ensemble` counters; the shadow log and disagreement frames keep working. See
   `docs/operations.md`, "Ensemble mode".
+- `tools/recording_audit.py`: estimates detection completeness from the continuous local
+  recordings instead of the kept frames. `plan` draws a seeded day/night sample of 10-minute
+  windows and reports the bytes to copy, `score` cuts a frame every N seconds and scores it with
+  one or two scorer services (rate-limited, token sent to remote scorers only) into a
+  `scores.jsonl` with `cand`/`lowrand`/`lowrest` strata, `dataset` builds a labeling dataset
+  of the top candidates and a random low-score sample. See `docs/operations.md`.
 - `tools/shadow_report.py`: reads the shadow-run log (counts, errors, timing, 2x2 agreement and
   disagreement breakdowns by hashed source, hour and score band, Pearson/Spearman) and, with
   `--labels` and `--disagree-dir`, compares candidate decision rules on hand-labeled

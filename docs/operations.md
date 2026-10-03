@@ -464,6 +464,39 @@ up to `TAPO_SCORER_ENSEMBLE_TIMEOUT` per request until it is back. Enabling the 
 needs a restart of the scorer. To roll back, remove `TAPO_SCORER_ENSEMBLE` and restart; the
 replies are then byte-for-byte the primary's again. A bad value (unknown mode, `LOW >= HIGH`,
 no shadow URL) stops the service at start instead of running half-configured.
+### Estimating completeness from the continuous recordings
+
+The kept frames cannot show what the pipeline never flagged. If a host records RTSP
+continuously (`RECORDING_ROOT`), `tools/recording_audit.py` samples that stream without
+bias and scores it with one or two scorer services:
+
+```bash
+ssh HOST "cd /srv/recordings/CAMERA && find . -type f -name '*.mkv' -printf '%P\t%s\n'" > listing.txt
+python3 tools/recording_audit.py plan --listing listing.txt --out plan.json --files-from files.txt
+rsync -a --bwlimit=20000 --files-from=files.txt HOST:/srv/recordings/CAMERA/ raw/
+nice -n 19 python3 tools/recording_audit.py score --plan plan.json --raw raw --frames-dir frames \
+    --out scores.jsonl --scorer http://127.0.0.1:8766/score --scorer http://CANDIDATE:8767/score \
+    --token-file ~/.config/candidate-token
+python3 tools/recording_audit.py dataset --scores scores.jsonl --frames-dir frames --out dataset
+tapo-monitor label --lang cs dataset
+```
+
+`plan` draws a seeded sample, by default 6 day and 6 night windows of 10 minutes, each inside
+one segment and on a different day, from the most recent complete days (the newest day is
+still being written, the two oldest are about to be pruned). It prints the bytes to copy
+before anything is transferred; nothing on the recorder host is changed. `score` cuts a frame
+every `--every` seconds (default 5) and sends at most `--max-rate` frames per second
+(default 2) to each scorer; the token is sent to non-loopback scorers only. Rows of
+`scores.jsonl` carry a stratum: `cand` (any model at 0.25 or more), `lowrand` (a seeded
+random 150 of the frames both models rate below 0.25) and `lowrest` (the other low frames).
+`dataset` keeps the 400 highest candidates and the lowrand sample; the verdict shown in the
+labeler is the stratum.
+
+How to read the labels: the share of real persons among labeled candidates is each model's
+precision on unfiltered video. The persons in the labeled lowrand sample, multiplied by
+`lowrest / 150`, estimate what both models missed; the ratio to the persons found is the
+completeness. The segments and frames are camera images: keep them private and delete them
+afterwards.
 
 ### Moving the scorer to another machine
 

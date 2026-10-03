@@ -878,6 +878,10 @@ often what photographs the person seconds later.
   (`TAPO_SCORER_SHADOW_*`), without touching the monitor hosts.
 - [x] Ensemble mode in the scorer (`TAPO_SCORER_ENSEMBLE=gate`): one combined person score
   from the primary and the shadow model, so hosts keep their thresholds; off by default.
+- [x] `tools/recording_audit.py` estimates completeness from real recordings: a seeded day/night
+  sample of windows is cut into frames, scored by both models and split into candidates and a
+  random low-score sample for labeling, so missed persons can be counted, not only compared.
+- [ ] Label the audit dataset and compute precision per model and the persons both missed.
 - [ ] Run the shadow for about a week and read the log and the disagreement frames.
 - [ ] Run a recording audit on a stratified, unbiased sample of recorded windows (day and
   night) to estimate the persons that neither model catches; label the random low-score draw.
