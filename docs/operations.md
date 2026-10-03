@@ -314,6 +314,7 @@ TAPO_SCORER_SHADOW_LOG=/srv/tapo-scorer/shadow/shadow.jsonl
 TAPO_SCORER_SHADOW_TOKEN_FILE=/etc/tapo-monitor/shadow.token   # 0600, only if the candidate has a token
 TAPO_SCORER_SHADOW_DISAGREE_DIR=/srv/tapo-scorer/shadow/disagree   # optional: keep disagreeing frames
 TAPO_SCORER_SHADOW_DISAGREE_MAX=300                                # newest N files kept (default)
+TAPO_SCORER_SHADOW_QUEUE=8                                         # frames waiting for the single shadow worker; a full queue drops (default 8)
 TAPO_SCORER_SHADOW_TIMEOUT=8                                       # seconds per shadow call (default)
 ```
 

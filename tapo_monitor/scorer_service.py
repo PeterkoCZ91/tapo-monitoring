@@ -900,6 +900,8 @@ def load_shadow(env=None):
         disagree_max=max(1, _env_setting(env, "TAPO_SCORER_SHADOW_DISAGREE_MAX", int,
                                          SHADOW_DISAGREE_MAX)),
         timeout=_env_setting(env, "TAPO_SCORER_SHADOW_TIMEOUT", float, SHADOW_TIMEOUT),
+        queue_size=max(1, _env_setting(env, "TAPO_SCORER_SHADOW_QUEUE", int,
+                                       SHADOW_QUEUE_SIZE)),
     )
 
 

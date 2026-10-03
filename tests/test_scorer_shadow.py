@@ -244,6 +244,9 @@ def test_load_shadow_env(tmp_path):
     }
     cfg = scorer_service.load_shadow(env)
     assert cfg.token == "abc" and cfg.disagree_max == 300 and cfg.timeout == 8.0
+    assert cfg.queue_size == scorer_service.SHADOW_QUEUE_SIZE
+    assert scorer_service.load_shadow({**env, "TAPO_SCORER_SHADOW_QUEUE": "64"}).queue_size == 64
+    assert scorer_service.load_shadow({**env, "TAPO_SCORER_SHADOW_QUEUE": "0"}).queue_size == 1
     tok.chmod(0o644)
     with pytest.raises(scorer_service.TokenConfigError):
         scorer_service.load_shadow(env)
