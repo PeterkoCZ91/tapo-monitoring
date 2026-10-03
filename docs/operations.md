@@ -300,6 +300,54 @@ change `TAPO_SCORER_MODEL` and the variables above in `scorer.env`, re-run
 `tools/provision_scorer.sh` (it restarts the service because the env file changed), check
 `/health` for the new `arch`, and keep the old weights and env lines for rollback.
 
+### Shadow run of a second detector (optional)
+
+To compare a candidate on live traffic without touching the cameras, let the production
+scorer forward a copy of every frame to a second scorer service (the candidate, started as
+above on its own port) and log both scores. Monitor hosts keep calling only the primary;
+their replies are byte-for-byte what they were. Off unless both `URL` and `LOG` are set in
+`scorer.env`:
+
+```bash
+TAPO_SCORER_SHADOW_URL=http://CANDIDATE_HOST:8767/score
+TAPO_SCORER_SHADOW_LOG=/srv/tapo-scorer/shadow/shadow.jsonl
+TAPO_SCORER_SHADOW_TOKEN_FILE=/etc/tapo-monitor/shadow.token   # 0600, only if the candidate has a token
+TAPO_SCORER_SHADOW_DISAGREE_DIR=/srv/tapo-scorer/shadow/disagree   # optional: keep disagreeing frames
+TAPO_SCORER_SHADOW_DISAGREE_MAX=300                                # newest N files kept (default)
+TAPO_SCORER_SHADOW_TIMEOUT=8                                       # seconds per shadow call (default)
+```
+
+`TAPO_SCORER_SHADOW_TOKEN` works like `TAPO_SCORER_TOKEN` (the file wins; a file that is not
+0600 stops the service at start). Behaviour:
+
+- The frame goes into a queue of 8 after the reply has been written. A full queue drops the
+  frame and counts it; a slow, dead or unauthorized shadow only delays the background
+  thread. It never changes or delays an answer to a monitor host.
+- One JSON line per frame in the log: `ts`, `source_id`, `primary_person`,
+  `primary_vehicle`, `shadow_person`, `primary_seconds`, `shadow_seconds` and `error`
+  (`null`, `timeout`, `connection`, `http_<code>`, `bad_response`). The URL and token are
+  never written; repeated failures log one warning a minute. Images are not in the log.
+- With `DISAGREE_DIR`, a frame is also saved when one model scores a person at 0.45 or more
+  and the other below 0.25, as `<UTC time>_p<primary>_s<shadow>.jpg` (directory 0700, files
+  0600, oldest deleted beyond the limit). These are the frames to judge by hand.
+- `/metrics` gains `shadow` with `sent`, `failed`, `dropped` and `disagree` counters.
+
+The shadow doubles the traffic and inference load of the candidate, so keep it on a host
+that can take it, and turn it off (remove the lines, restart) when the comparison is done.
+
+To evaluate after a few days: count rows with `shadow_person` set and compare the two
+columns at the operating thresholds in use (for example how often primary is at or above the
+camera threshold and the shadow below it, and the reverse); compare `primary_seconds` to
+`shadow_seconds`; a high `failed` or `dropped` means the sample is biased towards quiet
+moments. Then label the saved disagreement frames:
+
+```bash
+tapo-monitor label /srv/tapo-scorer/shadow/disagree
+```
+
+The share of those frames with a real person says which model is right where they differ.
+The frames are camera images: keep the directory private and delete it afterwards.
+
 ### Moving the scorer to another machine
 
 Because every camera shares one scorer, move it without a gap by listing both machines in

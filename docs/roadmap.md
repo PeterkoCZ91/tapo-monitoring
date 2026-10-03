@@ -871,6 +871,10 @@ often what photographs the person seconds later.
 - [ ] Compare candidate detectors on our own hand-labeled frames (not the teacher's
   labels, which favour the YOLOX family): AUC, false alarms and misses at a matched
   operating point, day and night, and latency on the iGPU.
+- [x] Shadow run: the production scorer forwards a copy of each frame to a candidate service
+  and logs both scores, optionally keeping the disagreeing frames for labelling
+  (`TAPO_SCORER_SHADOW_*`), without touching the monitor hosts.
+- [ ] Run the shadow for about a week and read the log and the disagreement frames.
 - [ ] Judge the disagreements between the best candidate and the current model by hand.
 - [ ] Try a cascade instead of a swap: keep the current model and re-score only the gray
   score band with a heavier, more accurate one.

@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Optional shadow run of a second detector inside the scorer service (default off, replies
+  unchanged). With `TAPO_SCORER_SHADOW_URL` and `TAPO_SCORER_SHADOW_LOG` set, every scored
+  frame is queued (8 deep, dropped and counted when full) after the reply and sent to another
+  scorer service with a timeout; one JSON line per frame records both scores, durations and the
+  error class, never the URL, token or image. `TAPO_SCORER_SHADOW_DISAGREE_DIR` keeps frames on
+  which the models disagree (one at 0.45 or more, the other below 0.25), capped by
+  `TAPO_SCORER_SHADOW_DISAGREE_MAX`. `/metrics` gains `shadow` counters. See
+  `docs/operations.md`, "Shadow run of a second detector".
 - Optional shared token for the scorer service (default off, behaviour unchanged). With
   `TAPO_SCORER_TOKEN_FILE` (a 0600 file, preferred) or `TAPO_SCORER_TOKEN` set on the service,
   `/score` and `/metrics` need `Authorization: Bearer <token>` (constant-time compare, 401

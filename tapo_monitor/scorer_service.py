@@ -19,12 +19,16 @@ import hmac
 import json
 import logging
 import os
+import queue
 import signal
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 from collections import deque
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 log = logging.getLogger(__name__)
@@ -782,22 +786,221 @@ def load_token(env=None):
     unreadable, too open or empty is an error, never a silent fall back to an open service.
     """
     env = os.environ if env is None else env
-    path = (env.get("TAPO_SCORER_TOKEN_FILE") or "").strip()
+    return _load_secret(env, "TAPO_SCORER_TOKEN_FILE", "TAPO_SCORER_TOKEN")
+
+
+def _load_secret(env, file_var, value_var):
+    """A secret from ``file_var`` (a 0600 file, wins) or ``value_var``; ``None`` if unset."""
+    path = (env.get(file_var) or "").strip()
     if path:
         try:
             mode = os.stat(path).st_mode
             if mode & 0o077:
                 raise TokenConfigError(
-                    "TAPO_SCORER_TOKEN_FILE must be mode 0600 (not readable by group/others)")
+                    f"{file_var} must be mode 0600 (not readable by group/others)")
             with open(path, encoding="utf-8") as f:
                 token = f.read().strip()
         except OSError as exc:
             raise TokenConfigError(
-                f"cannot read TAPO_SCORER_TOKEN_FILE: {exc.strerror or 'error'}") from None
+                f"cannot read {file_var}: {exc.strerror or 'error'}") from None
         if not token:
-            raise TokenConfigError("TAPO_SCORER_TOKEN_FILE is empty")
+            raise TokenConfigError(f"{file_var} is empty")
         return token
-    return (env.get("TAPO_SCORER_TOKEN") or "").strip() or None
+    return (env.get(value_var) or "").strip() or None
+
+
+SHADOW_QUEUE_SIZE = 8
+SHADOW_TIMEOUT = 8.0
+SHADOW_DISAGREE_MAX = 300
+SHADOW_HIGH = 0.45
+SHADOW_LOW = 0.25
+SHADOW_WARN_SECONDS = 60.0
+
+
+@dataclass
+class ShadowConfig:
+    """Second detector run on a copy of every scored frame; never part of the reply."""
+
+    url: str
+    log_path: str
+    token: str | None = None
+    disagree_dir: str | None = None
+    disagree_max: int = SHADOW_DISAGREE_MAX
+    timeout: float = SHADOW_TIMEOUT
+    queue_size: int = SHADOW_QUEUE_SIZE
+
+
+def load_shadow(env=None):
+    """Shadow settings from ``TAPO_SCORER_SHADOW_*``; ``None`` (feature off) unless both
+    ``..._URL`` and ``..._LOG`` are set. Token handling is the same as ``load_token``."""
+    env = os.environ if env is None else env
+    url = (env.get("TAPO_SCORER_SHADOW_URL") or "").strip()
+    log_path = (env.get("TAPO_SCORER_SHADOW_LOG") or "").strip()
+    if not url or not log_path:
+        return None
+    return ShadowConfig(
+        url=url,
+        log_path=log_path,
+        token=_load_secret(env, "TAPO_SCORER_SHADOW_TOKEN_FILE", "TAPO_SCORER_SHADOW_TOKEN"),
+        disagree_dir=(env.get("TAPO_SCORER_SHADOW_DISAGREE_DIR") or "").strip() or None,
+        disagree_max=max(1, _env_setting(env, "TAPO_SCORER_SHADOW_DISAGREE_MAX", int,
+                                         SHADOW_DISAGREE_MAX)),
+        timeout=_env_setting(env, "TAPO_SCORER_SHADOW_TIMEOUT", float, SHADOW_TIMEOUT),
+    )
+
+
+def _score_or_none(result, key):
+    value = result.get(key) if isinstance(result, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return round(float(value), 4)
+
+
+class ShadowRunner:
+    """Bounded queue plus one worker thread that sends frames to the shadow service.
+
+    ``submit`` never blocks and never raises: a full queue drops the frame and counts it.
+    Everything that goes wrong in the worker is contained there, so the primary reply
+    path is untouched. The URL and the token are never logged or written anywhere.
+    """
+
+    def __init__(self, config):
+        self.config = config
+        self._queue = queue.Queue(maxsize=max(1, config.queue_size))
+        self._lock = threading.Lock()
+        self.counts = {"sent": 0, "failed": 0, "dropped": 0, "disagree": 0}
+        self._last_warn = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="scorer-shadow", daemon=True)
+        self._thread.start()
+
+    def snapshot(self):
+        with self._lock:
+            return dict(self.counts)
+
+    def _count(self, key):
+        with self._lock:
+            self.counts[key] += 1
+
+    def submit(self, body, tiles, source_id, result, primary_seconds):
+        try:
+            self._queue.put_nowait((body, tiles, source_id, result, primary_seconds))
+        except queue.Full:
+            self._count("dropped")
+
+    def close(self):
+        self._stop.set()
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                item = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                self._process(*item)
+            except Exception as exc:  # noqa: BLE001 - the shadow must never raise out
+                log.debug("shadow item failed: %s", type(exc).__name__)
+
+    def _send(self, body, tiles):
+        url = self.config.url
+        if tiles > 1:
+            url += ("&" if "?" in url else "?") + f"tiles={tiles}"
+        headers = {"Content-Type": "image/jpeg"}
+        if self.config.token:
+            headers["Authorization"] = f"Bearer {self.config.token}"
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=self.config.timeout) as resp:
+            return json.loads(resp.read())
+
+    def _process(self, body, tiles, source_id, result, primary_seconds):
+        started = time.monotonic()
+        shadow_person = None
+        error = None
+        try:
+            payload = self._send(body, tiles)
+            value = payload.get("person") if isinstance(payload, dict) else None
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                error = "bad_response"
+            else:
+                shadow_person = float(value)
+        except urllib.error.HTTPError as exc:
+            error = f"http_{exc.code}"
+        except ValueError:
+            error = "bad_response"
+        except OSError as exc:      # URLError, timeouts, refused connections
+            reason = getattr(exc, "reason", exc)
+            timed_out = isinstance(exc, TimeoutError) or isinstance(reason, TimeoutError)
+            error = "timeout" if timed_out else "connection"
+        shadow_seconds = time.monotonic() - started
+        self._count("failed" if error else "sent")
+        if error:
+            self._warn(error)
+        primary_person = _score_or_none(result, "person")
+        self._write_log(source_id, primary_person, _score_or_none(result, "vehicle"),
+                        shadow_person, primary_seconds, shadow_seconds, error)
+        if (shadow_person is not None and primary_person is not None
+                and self.config.disagree_dir
+                and ((primary_person >= SHADOW_HIGH and shadow_person < SHADOW_LOW)
+                     or (shadow_person >= SHADOW_HIGH and primary_person < SHADOW_LOW))):
+            if self._save_disagreement(body, primary_person, shadow_person):
+                self._count("disagree")
+
+    def _warn(self, error):
+        now = time.monotonic()
+        if self._last_warn is None or now - self._last_warn >= SHADOW_WARN_SECONDS:
+            self._last_warn = now
+            log.warning("shadow scoring failed: %s", error)
+
+    def _write_log(self, source_id, primary_person, primary_vehicle, shadow_person,
+                   primary_seconds, shadow_seconds, error):
+        row = {
+            "ts": time.strftime(JOURNAL_STAMP, time.gmtime()),
+            "source_id": source_id,
+            "primary_person": primary_person,
+            "primary_vehicle": primary_vehicle,
+            "shadow_person": shadow_person,
+            "primary_seconds": round(primary_seconds, 4),
+            "shadow_seconds": round(shadow_seconds, 4),
+            "error": error,
+        }
+        try:
+            path = self.config.log_path
+            new = not os.path.exists(path)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
+            if new:
+                os.chmod(path, 0o600)
+        except OSError as exc:
+            log.warning("shadow log write failed: %s", type(exc).__name__)
+
+    def _save_disagreement(self, body, primary_person, shadow_person):
+        directory = self.config.disagree_dir
+        try:
+            os.makedirs(directory, mode=0o700, exist_ok=True)
+            os.chmod(directory, 0o700)
+            now = time.time()
+            stem = (time.strftime("%Y%m%dT%H%M%S", time.gmtime(now))
+                    + f"{int(now * 1000) % 1000:03d}"
+                    + f"_p{primary_person:.2f}_s{shadow_person:.2f}")
+            path = os.path.join(directory, stem + ".jpg")
+            n = 1
+            while os.path.exists(path):
+                path = os.path.join(directory, f"{stem}-{n}.jpg")
+                n += 1
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(body)
+            names = sorted(n for n in os.listdir(directory) if n.endswith(".jpg"))
+            for old in names[:-self.config.disagree_max]:
+                try:
+                    os.unlink(os.path.join(directory, old))
+                except OSError:
+                    pass
+            return True
+        except OSError as exc:
+            log.warning("shadow disagreement save failed: %s", type(exc).__name__)
+            return False
 
 
 def _authorized(header, token):
@@ -813,7 +1016,8 @@ def _authorized(header, token):
 
 def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=60,
                 metrics_retention_days=7, metrics_retention_files=8,
-                metrics_max_journal_bytes=METRICS_MAX_JOURNAL_BYTES, arch=None, token=None):
+                metrics_max_journal_bytes=METRICS_MAX_JOURNAL_BYTES, arch=None, token=None,
+                shadow=None):
     """HTTP server: POST /score (JPEG body) -> JSON scores; GET /health -> ok.
 
     ``arch`` (the detector family name, never the model path) is reported by /health and
@@ -822,6 +1026,10 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
     With a ``token``, /score and /metrics need ``Authorization: Bearer <token>`` and answer
     401 without detail otherwise; /health stays open (failover checks, systemd) and carries
     nothing sensitive. ``None`` leaves every endpoint open, as before.
+
+    With a ``shadow`` (``ShadowConfig``) every scored frame is also handed, after the reply
+    has been written, to a bounded background queue that sends it to a second scorer
+    service and logs both scores; the reply itself is never delayed or changed.
 
     Threaded so /health, /metrics and slow clients never queue behind a long
     inference (a 4K tiled request can hold the CPU for seconds). Inference itself
@@ -837,6 +1045,7 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
     )
     metrics.arch = arch or getattr(score_fn, "arch", None)
     inference_lock = threading.Lock()
+    runner = ShadowRunner(shadow) if shadow is not None else None
 
     class Handler(BaseHTTPRequestHandler):
         def _reply(self, code, payload):
@@ -866,7 +1075,10 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
                             else {"ok": True})
             elif self.path == "/metrics":
                 if not self._deny():
-                    self._reply(200, metrics.snapshot())
+                    snap = metrics.snapshot()
+                    if runner is not None:
+                        snap["shadow"] = runner.snapshot()
+                    self._reply(200, snap)
             else:
                 self._reply(404, {"error": "not found"})
 
@@ -906,6 +1118,9 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
                 score_seconds = time.monotonic() - score_started
                 metrics.finish(time.monotonic() - request_started, score_seconds, ok,
                                result=result, failure_reason=failure_reason, source_id=source_id)
+                if runner is not None and ok and isinstance(result, dict):
+                    runner.submit(body, tiles, source_id, result,
+                                  time.monotonic() - request_started)
 
         def log_message(self, fmt, *args):  # route http.server chatter to logging
             log.debug(fmt, *args)
@@ -913,6 +1128,7 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     server.daemon_threads = True
     server.metrics = metrics
+    server.shadow = runner
     return server
 
 
@@ -1010,12 +1226,18 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
     except detectors.DetectorConfigError as exc:
         print(f"scorer config error: {exc}", file=sys.stderr)
         raise SystemExit(2) from None
+    try:
+        shadow = load_shadow()
+    except TokenConfigError as exc:
+        print(f"scorer config error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
     decoder = detectors.build_decoder(config)
     score_fn = build_score_fn(args.model, config.input_size, decoder)
     server = make_server(
         score_fn,
         arch=decoder.name,
         token=token,
+        shadow=shadow,
         port=args.port,
         metrics_file=args.metrics_file,
         metrics_persist_seconds=args.metrics_persist_seconds,
@@ -1026,6 +1248,9 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
     log.info("scorer listening on :%d (model=%s, arch=%s, input=%d, auth=%s)",
              args.port, args.model, decoder.name, config.input_size,
              "token" if token else "off")
+    if shadow is not None:
+        log.info("shadow scoring on (disagreement images %s)",
+                 "kept" if shadow.disagree_dir else "off")
     def stop(_signum, _frame):
         raise SystemExit(0)
 
@@ -1035,6 +1260,8 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
         server.serve_forever()
     finally:
         server.metrics.flush()
+        if server.shadow is not None:
+            server.shadow.close()
         server.server_close()
 
 
