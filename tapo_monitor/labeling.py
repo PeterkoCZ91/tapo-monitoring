@@ -66,6 +66,10 @@ class Frame:
     score: float | None  # person score, when the record carried one
     verdict: str | None = None       # review frames: "hold", "drop", ...; None when sent
     sample_rate: float | None = None  # sampled drops: the fraction that was archived
+    # Opt-in box labeling: None when the index record has no ``boxes`` key (whole-frame
+    # labeling, as always); otherwise the detector boxes (x1, y1, x2, y2, score, model),
+    # normalized 0-1, possibly none at all (the operator can still draw a missed one).
+    boxes: tuple | None = None
 
 
 def band(score):
@@ -142,6 +146,109 @@ def _index_records(root_real):
             yield rel, full, record
 
 
+BOX_LABELS = ("person", "no_person")
+BOX_SOURCES = ("model", "drawn")
+MAX_BOXES = 200
+MAX_MODEL_LEN = 32
+
+
+def _unit(value):
+    number = _number(value)
+    return None if number is None or not math.isfinite(number) else min(1.0, max(0.0, number))
+
+
+def _norm_box(values):
+    """``[x1, y1, x2, y2]`` clamped to 0-1 and ordered, or None when it is not a box."""
+    if not isinstance(values, (list, tuple)) or len(values) != 4:
+        return None
+    coords = [_unit(v) for v in values]
+    if None in coords:
+        return None
+    x1, x2 = sorted(coords[0::2])
+    y1, y2 = sorted(coords[1::2])
+    return [x1, y1, x2, y2] if x2 > x1 and y2 > y1 else None
+
+
+def parse_index_boxes(value):
+    """The ``boxes`` field of an index record: ``[x1,y1,x2,y2,score,model]`` entries.
+
+    None when the field is absent or not a list (the frame is labeled whole, as before);
+    otherwise a tuple of the well-formed entries, dropping the others, so a collector's
+    bad row cannot break the page.
+    """
+    if not isinstance(value, list):
+        return None
+    out = []
+    for entry in value[:MAX_BOXES]:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 6:
+            continue
+        box = _norm_box(entry[:4])
+        score = _unit(entry[4])
+        model = entry[5]
+        if box is None or score is None or not isinstance(model, str) or not model.strip():
+            continue
+        out.append((*box, score, model.strip()[:MAX_MODEL_LEN]))
+    return tuple(out)
+
+
+def parse_index_models(value):
+    """The ``models`` field of an index record: names of the models that ran on the frame.
+
+    None when absent (old format: only models with a box are known to have run), else the
+    set of names, which may be empty or name models without any box.
+    """
+    if not isinstance(value, list):
+        return None
+    return frozenset(m.strip()[:MAX_MODEL_LEN] for m in value if isinstance(m, str) and m.strip())
+
+
+def clean_box_labels(frame, boxes):
+    """Validate the operator's box verdicts for ``frame`` into label-file entries.
+
+    ``boxes`` is a list of ``{"label", "source", ...}``: ``source`` "model" names the
+    frame's detector box by ``index`` (its coordinates, model and score come from the
+    index, never from the client); "drawn" carries its own ``box``. Raises ValueError on
+    anything malformed. Returns ``[{"box", "label", "source"[, "model", "score"]}]``.
+    """
+    if boxes is None:
+        return []
+    if not isinstance(boxes, list) or len(boxes) > MAX_BOXES:
+        raise ValueError("boxes must be a list")
+    out = []
+    for item in boxes:
+        if not isinstance(item, dict):
+            raise ValueError("box must be an object")
+        label, source = item.get("label"), item.get("source")
+        if label not in BOX_LABELS or source not in BOX_SOURCES:
+            raise ValueError("bad box label or source")
+        if source == "model":
+            index = item.get("index")
+            known = frame.boxes or ()
+            if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(known):
+                raise ValueError("bad model box index")
+            *coords, score, model = known[index]
+            out.append({"box": coords, "label": label, "source": "model",
+                        "model": model, "score": score})
+        else:
+            box = _norm_box(item.get("box"))
+            if box is None:
+                raise ValueError("bad drawn box")
+            out.append({"box": box, "label": label, "source": "drawn"})
+    return out
+
+
+def suggest_label(boxes):
+    """Whole-frame label the box verdicts imply, or None when they say nothing.
+
+    Any person box makes the frame ``person``; boxes that are all ``no_person`` make it
+    ``no_person``. Only a suggestion: a label the operator typed is never overridden.
+    """
+    labels = [b.get("label") for b in boxes or ()]
+    if "person" in labels:
+        return "person"
+    return "no_person" if labels and all(x == "no_person" for x in labels) else None
+
+
 def _verdict(record):
     return str(record["verdict"]) if "verdict" in record else None
 
@@ -174,6 +281,7 @@ def load_frames(dataset_dir):
             score=_number(record.get("person")),
             verdict=_verdict(record),
             sample_rate=_sample_rate(record.get("sample_rate")),
+            boxes=parse_index_boxes(record.get("boxes")),
         ))
     return frames
 
@@ -187,7 +295,9 @@ def index_meta(dataset_dir):
     meta = {}
     for rel, _, record in _index_records(os.path.realpath(dataset_dir)):
         meta[rel] = {"ts": _number(record.get("ts")), "verdict": _verdict(record),
-                     "sample_rate": _sample_rate(record.get("sample_rate"))}
+                     "sample_rate": _sample_rate(record.get("sample_rate")),
+                     "index_boxes": parse_index_boxes(record.get("boxes")),
+                     "index_models": parse_index_models(record.get("models"))}
     return meta
 
 
@@ -282,23 +392,33 @@ class LabelSession:
             raise KeyError(path)
         return frame
 
-    def _append(self, frame, label, now, *, undo=False):
+    def _append(self, frame, label, now, *, undo=False, boxes=None):
         record = {"path": frame.path, "sha256": frame.sha256, "label": label,
                   "labeled_at": float(time.time() if now is None else now),
                   "score": frame.score, "camera": frame.camera, "source": frame.source}
+        if boxes:
+            record["boxes"] = boxes
         if undo:
             record["undo"] = True
         with open(os.path.join(self.dataset_dir, LABELS_NAME), "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
         return record
 
-    def label(self, path, label, *, now=None):
-        """Append one verdict for ``path`` and drop it from the queue."""
-        if label not in LABELS:
-            raise ValueError(f"unknown label {label!r}")
+    def label(self, path, label, *, now=None, boxes=None):
+        """Append one verdict for ``path`` and drop it from the queue.
+
+        ``boxes`` (box-labeled frames only, see :func:`clean_box_labels`) are stored beside
+        the verdict. ``label=None`` takes the one the boxes suggest; an explicit label is
+        always kept as given.
+        """
         with self._lock:
             frame = self._frame(path)
-            record = self._append(frame, label, now)
+            box_labels = clean_box_labels(frame, boxes)
+            if label is None:
+                label = suggest_label(box_labels)
+            if label not in LABELS:
+                raise ValueError(f"unknown label {label!r}")
+            record = self._append(frame, label, now, boxes=box_labels)
             previous = self._labeled.get(frame.sha256)
             self._labeled[frame.sha256] = record
             position = next((i for i, f in enumerate(self._queue) if f.path == path), None)
@@ -329,7 +449,8 @@ class LabelSession:
                 self._queue.insert(position, frame)
                 return frame
             restored = previous.get("label") if previous else UNLABELED
-            record = self._append(frame, restored, now, undo=True)
+            record = self._append(frame, restored, now, undo=True,
+                                  boxes=previous.get("boxes") if previous else None)
             if previous:
                 self._labeled[frame.sha256] = record
             else:
@@ -396,7 +517,8 @@ def _frame_view(frame):
     when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(frame.ts)) if frame.ts else None
     return {"path": frame.path, "camera": frame.camera, "ts": frame.ts, "time": when,
             "source": frame.source, "verdict": frame.verdict, "score": frame.score,
-            "band": band(frame.score)}
+            "band": band(frame.score),
+            "boxes": None if frame.boxes is None else [list(b) for b in frame.boxes]}
 
 
 # ── stats ────────────────────────────────────────────────────────────────────
@@ -407,6 +529,96 @@ def _frame_view(frame):
 MIN_SUPPORT_DECIDED = 20
 MIN_SUPPORT_PER_CLASS = 5
 DAY_NIGHT = ("day", "night", "unknown")
+
+
+BOX_SCORE = 0.45      # a model box counts as a detection from this score
+BOX_IOU = 0.3         # a drawn person is found when a detection overlaps it this much
+SMALL_HEIGHT = 0.10   # "small person": drawn box height below this (frame fraction)
+
+
+def iou(a, b):
+    """Intersection over union of two ``[x1, y1, x2, y2]`` boxes. Pure."""
+    w = min(a[2], b[2]) - max(a[0], b[0])
+    h = min(a[3], b[3]) - max(a[1], b[1])
+    if w <= 0 or h <= 0:
+        return 0.0
+    inter = w * h
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _recall_block():
+    return {"people": 0, "found": 0, "missed": 0, "small": 0, "small_found": 0,
+            "small_missed": 0, "false_boxes": 0, "true_boxes": 0,
+            "inferred": 0}
+
+
+def box_stats(records, *, box_score=BOX_SCORE, box_iou=BOX_IOU):
+    """Box verdicts of the labeled frames: per model and the hand-drawn ones.
+
+    None when no label carries boxes. Records are label lines (latest per frame), so a
+    relabeled or undone frame counts once, with its current boxes.
+    """
+    models: dict[str, dict[str, int]] = {}
+    drawn = {"person": 0, "no_person": 0}
+    recall: dict[str, dict[str, int]] = {}
+    frames = 0
+    for rec in records:
+        boxes = rec.get("boxes")
+        if not isinstance(boxes, list) or not boxes:
+            continue
+        counted = False
+        index_boxes = rec.get("index_boxes") or ()
+        # With a ``models`` field, exactly the models that ran count (one that found nothing
+        # misses). Without it (old format) a model counts only if the index holds a box of
+        # it, and its recall may be overstated.
+        listed = rec.get("index_models")
+        present = set(listed) if listed is not None else {b[5] for b in index_boxes}
+        for item in boxes:
+            if (isinstance(item, dict) and item.get("source") != "drawn"
+                    and item.get("label") in BOX_LABELS):
+                block = recall.setdefault(str(item.get("model") or "unknown"),
+                                          _recall_block())
+                score = _number(item.get("score"))
+                if item["label"] == "no_person" and score is not None and score >= box_score:
+                    block["false_boxes"] += 1
+                elif item["label"] == "person":
+                    block["true_boxes"] += 1
+            if not (isinstance(item, dict) and item.get("source") == "drawn"
+                    and item.get("label") == "person"):
+                continue
+            target = _norm_box(item.get("box"))
+            if target is None:
+                continue
+            small = target[3] - target[1] < SMALL_HEIGHT
+            for model in present:
+                block = recall.setdefault(model, _recall_block())
+                hit = any(b[5] == model and b[4] >= box_score
+                          and iou(target, b[:4]) >= box_iou
+                          for b in index_boxes)
+                block["people"] += 1
+                if listed is None:
+                    block["inferred"] += 1
+                block["found" if hit else "missed"] += 1
+                if small:
+                    block["small"] += 1
+                    block["small_found" if hit else "small_missed"] += 1
+        for item in boxes:
+            if not isinstance(item, dict) or item.get("label") not in BOX_LABELS:
+                continue
+            counted = True
+            if item.get("source") == "drawn":
+                drawn[item["label"]] += 1
+            else:
+                name = str(item.get("model") or "unknown")
+                row = models.setdefault(name, {"person": 0, "no_person": 0})
+                row[item["label"]] += 1
+        frames += counted
+    if not frames:
+        return None
+    return {"frames": frames, "models": dict(sorted(models.items())), "drawn": drawn,
+            "recall": dict(sorted(recall.items())),
+            "params": {"score": box_score, "iou": box_iou, "small_height": SMALL_HEIGHT}}
 
 
 def _rate(part, whole):
@@ -540,7 +752,8 @@ def _aliased(camera, aliases):
     return aliases.get(camera, camera) if aliases and camera else camera
 
 
-def compute_stats(dataset_dir, *, night=None, aliases=None):
+def compute_stats(dataset_dir, *, night=None, aliases=None, box_score=BOX_SCORE,
+                  box_iou=BOX_IOU):
     """Label counts, false-alarm and miss estimates, per band/camera, best threshold.
 
     Review frames are also split by their index ``verdict`` (hold / drop). With
@@ -559,7 +772,8 @@ def compute_stats(dataset_dir, *, night=None, aliases=None):
         known = meta.get(rec.get("path"))
         if known is None:
             known = {"ts": _number(rec.get("ts")), "verdict": rec.get("verdict"),
-                     "sample_rate": _sample_rate(rec.get("sample_rate"))}
+                     "sample_rate": _sample_rate(rec.get("sample_rate")),
+                     "index_boxes": None, "index_models": None}
         rec.update(known)
     stats = _summarize(records)
     stats["bands"] = {name: _summarize([r for r in records if band(r["score"]) == name])
@@ -570,6 +784,9 @@ def compute_stats(dataset_dir, *, night=None, aliases=None):
     auto = sum(1 for r in records if str(r.get("by") or "").startswith("auto"))
     stats["by"] = {"auto": auto, "human": len(records) - auto}
     stats["threshold"] = _best(records)
+    boxes = box_stats(records, box_score=box_score, box_iou=box_iou)
+    if boxes:
+        stats["boxes"] = boxes
     if night is not None:
         for rec in records:
             rec["daypart"] = ("unknown" if rec["ts"] is None
@@ -958,6 +1175,45 @@ def _verdict_lines(stats, lang=DEFAULT_LANG):
     return out
 
 
+def _box_headers(lang=DEFAULT_LANG):
+    return _headers(lang, "box_model", "box_person", "box_no_person", "box_total")
+
+
+def _box_rows(boxes, lang=DEFAULT_LANG):
+    rows = [[name, str(b["person"]), str(b["no_person"]), str(b["person"] + b["no_person"])]
+            for name, b in boxes["models"].items()]
+    d = boxes["drawn"]
+    rows.append([tr(lang, "box_drawn"), str(d["person"]), str(d["no_person"]),
+                 str(d["person"] + d["no_person"])])
+    return rows
+
+
+def _box_recall_headers(lang=DEFAULT_LANG):
+    return _headers(lang, "box_model", "box_people", "box_found", "box_missed", "box_recall",
+                    "box_small", "box_small_missed", "box_false")
+
+
+def _box_recall_rows(boxes, lang=DEFAULT_LANG):
+    rows = []
+    for name, b in boxes["recall"].items():
+        rows.append([name + (" *" if b["inferred"] else ""), str(b["people"]), str(b["found"]), str(b["missed"]),
+                     _pct(_rate(b["found"], b["people"])), str(b["small"]),
+                     str(b["small_missed"]), str(b["false_boxes"])])
+    return rows
+
+
+def _box_recall_note(boxes, lang=DEFAULT_LANG):
+    p = boxes["params"]
+    if any(b["inferred"] for b in boxes["recall"].values()):
+        return tr(lang, "box_recall_note", score=p["score"], iou=p["iou"],
+                  small=p["small_height"]) + " " + tr(lang, "box_recall_inflated")
+    return tr(lang, "box_recall_note", score=p["score"], iou=p["iou"], small=p["small_height"])
+
+
+def _box_summary(boxes, lang=DEFAULT_LANG):
+    return tr(lang, "box_summary", frames=boxes["frames"])
+
+
 def _day_night_row(name, best, lang=DEFAULT_LANG):
     def cell(value):
         return "-" if value is None else str(value)
@@ -1092,6 +1348,13 @@ def format_stats(stats, lang=DEFAULT_LANG):
             _threshold_line(stats["threshold"], lang),
             tr(lang, "stats_footnote_text")]
     out += _verdict_lines(stats, lang)
+    if "boxes" in stats:
+        out += ["", _box_summary(stats["boxes"], lang) + ":"]
+        out += _table(_box_headers(lang), _box_rows(stats["boxes"], lang))
+        if stats["boxes"]["recall"]:
+            out += ["", tr(lang, "box_recall_head") + ":"]
+            out += _table(_box_recall_headers(lang), _box_recall_rows(stats["boxes"], lang))
+            out.append(_box_recall_note(stats["boxes"], lang))
     if "day_night" in stats:
         out += ["", _day_night_summary(stats, lang) + ":"]
         out += _table(day_night_headers(lang), _day_night_rows(stats, lang))
@@ -1116,6 +1379,10 @@ body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,sans-
 main{max-width:1100px;margin:0 auto;padding:8px 16px 16px}
 #stage{position:relative}
 #boxes{position:absolute;pointer-events:none;display:none}
+#lay{position:absolute;display:none;cursor:crosshair;touch-action:none}
+#boxhelp{display:none;margin:4px 0;color:var(--muted);font-size:13px}
+#buttons button.suggest{outline:3px solid #43a047}
+#confirm{display:none;width:100%;margin-top:8px}
 #img{display:block;width:100%;max-height:72vh;object-fit:contain;background:#000;
 border-radius:6px}
 #meta{display:flex;flex-wrap:wrap;gap:4px 16px;margin:8px 0;color:var(--muted)}
@@ -1135,7 +1402,9 @@ a{color:inherit}
 <main>
 <div id="work">
 <div id="stage"><img id="img" alt="@@img_alt@@">
-<svg id="boxes" xmlns="http://www.w3.org/2000/svg"></svg></div>
+<svg id="boxes" xmlns="http://www.w3.org/2000/svg"></svg>
+<svg id="lay" xmlns="http://www.w3.org/2000/svg"></svg></div>
+<div id="boxhelp">@@box_help@@</div>
 <div id="meta"><span>@@camera@@ <b id="camera"></b></span><span id="time"></span>
 <span>@@source@@ <b id="source"></b></span><span>@@person@@ <b id="score"></b> <span id="band">
 </span></span><span>@@teacher@@ <b id="teacher"></b></span></div>
@@ -1144,6 +1413,7 @@ a{color:inherit}
 <button data-label="no_person">@@btn_no_person@@ <kbd>2</kbd></button>
 <button data-label="unsure">@@btn_unsure@@ <kbd>3</kbd></button>
 </div>
+<button id="confirm">@@btn_confirm@@ <kbd>Enter</kbd></button>
 <div id="buttons2">
 <button id="skip">@@btn_skip@@ <kbd>@@key_space@@</kbd></button>
 <button id="undo">@@btn_undo@@ <kbd>u</kbd></button>
@@ -1170,6 +1440,134 @@ function show(s) {
   $("teacher").textContent = current.teacher == null ? T.na : current.teacher.toFixed(2);
   $("band").textContent = "(" + (T["band_" + current.band] || current.band) + ")";
   loadBoxes(current.path);
+  startBoxes();
+}
+// ---- opt-in box labeling: only frames whose index record carries "boxes" ----
+let marks = [], drawn = [], sel = -1, drag = null;
+const HUES = [210, 28, 280, 160, 330, 55, 190];
+function modelHue(m) {
+  const names = (current.boxes || []).map(b => b[5]).filter((v, i, a) => a.indexOf(v) === i).sort();
+  return HUES[Math.max(0, names.indexOf(m)) % HUES.length];
+}
+function allBoxes() {
+  const out = [];
+  ((current && current.boxes) || []).forEach((b, i) =>
+    out.push({box: b.slice(0, 4), score: b[4], model: b[5], state: marks[i], src: "model", i}));
+  drawn.forEach((d, i) => out.push({box: d.box, state: d.state, src: "drawn", i}));
+  return out;
+}
+function startBoxes() {
+  const on = !!(current && current.boxes);
+  marks = on ? current.boxes.map(() => "unset") : [];
+  drawn = []; sel = -1; drag = null;
+  $("boxhelp").style.display = $("confirm").style.display = on ? "block" : "none";
+  drawLay();
+}
+function suggestion() {
+  const st = allBoxes().map(b => b.state).filter(x => x !== "unset");
+  if (st.includes("person")) return "person";
+  return st.length ? "no_person" : null;
+}
+function drawLay() {
+  const svg = $("lay"), img = $("img");
+  svg.replaceChildren(); svg.style.display = "none";
+  document.querySelectorAll("#buttons button").forEach(b =>
+    b.classList.toggle("suggest", b.dataset.label === suggestion()));
+  if (!current || !current.boxes || !img.clientWidth || !img.naturalWidth) return;
+  const k = Math.min(img.clientWidth / img.naturalWidth, img.clientHeight / img.naturalHeight);
+  const dw = img.naturalWidth * k, dh = img.naturalHeight * k;
+  svg.style.left = img.offsetLeft + (img.clientWidth - dw) / 2 + "px";
+  svg.style.top = img.offsetTop + (img.clientHeight - dh) / 2 + "px";
+  svg.style.width = dw + "px"; svg.style.height = dh + "px";
+  svg.setAttribute("viewBox", "0 0 " + dw + " " + dh);
+  const boxes = allBoxes();
+  if (drag && drag.cur) boxes.push({box: normBox(drag.start, drag.cur), state: "person",
+                                    src: "drawing"});
+  boxes.forEach((b, n) => {
+    const hue = b.src === "model" ? modelHue(b.model) : 120;
+    const alpha = b.src === "model" ? 0.35 + 0.65 * b.score : 1;
+    const fill = b.state === "person" ? "rgba(67,160,71,.28)"
+      : b.state === "no_person" ? "rgba(229,57,53,.28)" : "none";
+    const x = b.box[0] * dw, y = b.box[1] * dh, w = (b.box[2] - b.box[0]) * dw,
+          h = (b.box[3] - b.box[1]) * dh;
+    const r = document.createElementNS(SVGNS, "rect");
+    r.setAttribute("x", x); r.setAttribute("y", y); r.setAttribute("width", w);
+    r.setAttribute("height", h); r.setAttribute("fill", fill);
+    r.setAttribute("stroke", "hsl(" + hue + ",85%,50%)"); r.setAttribute("stroke-opacity", alpha);
+    r.setAttribute("stroke-width", b === boxes[sel] ? 5 : 2.5);
+    if (b.src === "drawing") r.setAttribute("stroke-dasharray", "6 4");
+    svg.appendChild(r);
+    if (b.src === "drawing") return;
+    const t = document.createElementNS(SVGNS, "text");
+    t.setAttribute("x", x + 3); t.setAttribute("y", Math.max(y - 4, 13));
+    t.setAttribute("fill", "hsl(" + hue + ",85%,60%)"); t.setAttribute("font-size", 13);
+    t.setAttribute("font-weight", "bold");
+    const tag = b.src === "model" ? b.model + " " + b.score.toFixed(2) : T.box_drawn_tag;
+    t.textContent = tag + " " + (b.state === "person" ? "\u2713" : b.state === "no_person"
+      ? "\u2717" : "?");
+    svg.appendChild(t);
+  });
+  svg.style.display = "block";
+}
+function normBox(a, b) {
+  return [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])];
+}
+function layPoint(e) {
+  const r = $("lay").getBoundingClientRect();
+  return [Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
+          Math.min(1, Math.max(0, (e.clientY - r.top) / r.height))];
+}
+const NEXT = {unset: "person", person: "no_person", no_person: "unset"};
+function setState(b, state) {
+  if (b.src === "model") marks[b.i] = state;
+  else if (state === "unset") drawn.splice(b.i, 1);
+  else drawn[b.i].state = state;
+}
+function hit(p) {
+  let best = null, area = 9;
+  allBoxes().forEach((b, n) => {
+    const a = (b.box[2] - b.box[0]) * (b.box[3] - b.box[1]);
+    if (p[0] >= b.box[0] && p[0] <= b.box[2] && p[1] >= b.box[1] && p[1] <= b.box[3]
+        && a < area) { best = n; area = a; }
+  });
+  return best;
+}
+$("lay").addEventListener("pointerdown", e => {
+  e.preventDefault(); drag = {start: layPoint(e), cur: null};
+  $("lay").setPointerCapture(e.pointerId);
+});
+$("lay").addEventListener("pointermove", e => {
+  if (!drag) return; drag.cur = layPoint(e); drawLay();
+});
+$("lay").addEventListener("pointerup", e => {
+  if (!drag) return;
+  const end = layPoint(e), moved = Math.hypot(end[0] - drag.start[0], end[1] - drag.start[1]);
+  const d = drag; drag = null;
+  if (moved >= 0.01) {
+    const box = normBox(d.start, end);
+    if ((box[2] - box[0]) > 0.005 && (box[3] - box[1]) > 0.005) {
+      drawn.push({box, state: "person"}); sel = allBoxes().length - 1;
+    }
+  } else {
+    const n = hit(end);
+    if (n !== null) { const b = allBoxes()[n]; sel = n; setState(b, NEXT[b.state]); }
+  }
+  drawLay();
+});
+function boxPayload() {
+  const out = [];
+  marks.forEach((m, i) => { if (m !== "unset") out.push({source: "model", index: i, label: m}); });
+  drawn.forEach(d => out.push({source: "drawn", box: d.box, label: d.state}));
+  return out;
+}
+function selectNext(step) {
+  const n = allBoxes().length;
+  if (!n) return;
+  sel = ((sel + step) % n + n) % n; drawLay();
+}
+function markSel(state) {
+  const b = allBoxes()[sel];
+  if (b) { setState(b, state); if (state === "unset" && b.src === "drawn") sel = -1; drawLay(); }
 }
 let boxData = null;
 const SVGNS = "http://www.w3.org/2000/svg";
@@ -1213,8 +1611,8 @@ async function loadBoxes(path) {
     drawBoxes();
   } catch (e) { /* the overlay is optional */ }
 }
-$("img").addEventListener("load", drawBoxes);
-window.addEventListener("resize", drawBoxes);
+$("img").addEventListener("load", () => { drawBoxes(); drawLay(); });
+window.addEventListener("resize", () => { drawBoxes(); drawLay(); });
 async function call(url, body) {
   if (busy) return;
   busy = true;
@@ -1225,7 +1623,14 @@ async function call(url, body) {
     if (r.ok) show(await r.json());
   } finally { busy = false; }
 }
-function label(l) { if (current) call("/api/label", {path: current.path, label: l}); }
+function label(l) {
+  if (!current) return;
+  const body = {path: current.path, label: l};
+  if (current.boxes) { const bx = boxPayload(); if (bx.length) body.boxes = bx; }
+  if (l === null && !body.boxes) return;
+  call("/api/label", body);
+}
+$("confirm").onclick = () => label(null);
 function skip() { if (current) call("/api/skip", {path: current.path}); }
 function undo() { call("/api/undo", {}); }
 document.querySelectorAll("[data-label]").forEach(b =>
@@ -1235,6 +1640,13 @@ document.addEventListener("keydown", e => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   // Physical keys (``code``), not typed characters: without Shift the top row of a Czech
   // layout types "+", "ě", "š", so ``e.key`` would never be "1", "2", "3".
+  if (current && current.boxes) {
+    if (e.key === "Tab") { e.preventDefault(); selectNext(e.shiftKey ? -1 : 1); return; }
+    if (e.code === "KeyP") { e.preventDefault(); markSel("person"); return; }
+    if (e.code === "KeyN") { e.preventDefault(); markSel("no_person"); return; }
+    if (e.code === "KeyX" || e.key === "Delete") { e.preventDefault(); markSel("unset"); return; }
+    if (e.key === "Enter") { e.preventDefault(); label(null); return; }
+  }
   const map = {Digit1: "person", Numpad1: "person", Digit2: "no_person", Numpad2: "no_person",
                Digit3: "unsure", Numpad3: "unsure"};
   if (map[e.code]) { e.preventDefault(); label(map[e.code]); }
@@ -1248,7 +1660,7 @@ call("/api/next");
 
 
 JS_KEYS = ("left", "labeled_n", "unknown", "na", "band_gray", "band_low", "band_high",
-           "band_none")
+           "band_none", "box_drawn_tag")
 
 
 def page(lang=DEFAULT_LANG):
@@ -1278,6 +1690,15 @@ def stats_page(stats, lang=DEFAULT_LANG):
     verdicts = _verdict_lines(stats, lang)
     if verdicts:
         extra += "<p>" + "<br>".join(html.escape(v.strip()) for v in verdicts) + "</p>"
+    if "boxes" in stats:
+        extra += (f"<h2>{t('h_boxes')}</h2>"
+                  f"<p>{html.escape(_box_summary(stats['boxes'], lang))}</p>"
+                  f"{_html_table(_box_headers(lang), _box_rows(stats['boxes'], lang))}")
+        if stats["boxes"]["recall"]:
+            extra += (f"<h3>{t('box_recall_head')}</h3>"
+                      + _html_table(_box_recall_headers(lang),
+                                    _box_recall_rows(stats["boxes"], lang))
+                      + f"<p>{html.escape(_box_recall_note(stats['boxes'], lang))}</p>")
     if "day_night" in stats:
         extra += (f"<h2>{t('h_day_night')}</h2>"
                   f"<p>{html.escape(_day_night_summary(stats, lang))}</p>"
@@ -1392,7 +1813,8 @@ def make_server(session, port=0, bind=DEFAULT_BIND):
                 if not isinstance(payload, dict):
                     raise ValueError("payload must be an object")
                 if path == "/api/label":
-                    session.label(payload.get("path"), payload.get("label"))
+                    session.label(payload.get("path"), payload.get("label"),
+                                  boxes=payload.get("boxes"))
                 elif path == "/api/skip":
                     session.skip(payload.get("path"))
                 elif path == "/api/undo":
@@ -1505,8 +1927,18 @@ def stats_main(argv):
     parser.add_argument("--camera-alias", action="append", default=[], metavar="OLD=NEW",
                         help="count the records of camera OLD (renamed) under NEW in every "
                              "table; repeatable")
+    parser.add_argument("--box-score", type=float, default=BOX_SCORE, metavar="S",
+                        help="box labels: a model box counts as a detection from this score "
+                             f"(default {BOX_SCORE})")
+    parser.add_argument("--box-iou", type=float, default=BOX_IOU, metavar="IOU",
+                        help="box labels: a drawn person is found when a detection overlaps "
+                             f"it at least this much (default {BOX_IOU})")
     args = parser.parse_args(argv)
     if not _dataset_ok(parser.prog, args.dataset_dir):
+        return 2
+    if not 0 <= args.box_score <= 1 or not 0 < args.box_iou <= 1:
+        print(f"{parser.prog}: --box-score must be 0-1 and --box-iou in (0, 1]",
+              file=sys.stderr)
         return 2
     try:
         aliases = parse_camera_aliases(args.camera_alias)
@@ -1518,7 +1950,8 @@ def stats_main(argv):
         night = _night_from_config(parser.prog, args.config)
         if night is None:
             return 1
-    stats = compute_stats(args.dataset_dir, night=night, aliases=aliases)
+    stats = compute_stats(args.dataset_dir, night=night, aliases=aliases,
+                          box_score=args.box_score, box_iou=args.box_iou)
     if args.json_output:
         print(json.dumps(stats, sort_keys=True))
     else:

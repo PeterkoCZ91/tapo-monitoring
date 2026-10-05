@@ -42,6 +42,36 @@ STRINGS: dict[str, dict[str, str]] = {
         "stats_footnote": ("False alarms = sent frames labeled no_person. Misses = review "
                            "(held) frames labeled person. Unsure is excluded from both "
                            "rates."),
+        # box labeling
+        "box_help": ("boxes: click a box = cycle person / no person / unmarked; drag = draw "
+                     "a missed person; Tab next box, p person, n no person, x clear/delete, "
+                     "Enter = save with the label the boxes suggest"),
+        "btn_confirm": "save by boxes",
+        "box_person": "person",
+        "box_no_person": "no person",
+        "box_unset": "unmarked",
+        "box_drawn_tag": "drawn",
+        "h_boxes": "Box labels",
+        "h_box_model": "model",
+        "h_box_person": "person",
+        "h_box_no_person": "no person",
+        "h_box_total": "total",
+        "h_box_people": "drawn persons",
+        "h_box_found": "found",
+        "h_box_missed": "missed",
+        "h_box_recall": "recall",
+        "h_box_small": "small",
+        "h_box_small_missed": "small missed",
+        "h_box_false": "false boxes",
+        "box_drawn": "(drawn by hand)",
+        "box_summary": "box labels on {frames} frames",
+        "box_recall_head": "Person recall per model (hand-drawn persons)",
+        "box_recall_inflated": ("* some frames have no `models` field: there a model counts only "
+                                "if it has a box, so recall may be overstated."),
+        "box_recall_note": ("found = a box of the model with score >= {score} overlaps the drawn "
+                            "person at IoU >= {iou}; small = height < {small}; false boxes = "
+                            "model boxes marked no person; a model counts only on frames "
+                            "whose `models` lists it"),
         "h_day_night": "Day and night",
         "h_incidents": "Incidents",
         "h_first_alert": "First alert by path",
@@ -130,6 +160,36 @@ STRINGS: dict[str, dict[str, str]] = {
         "stats_footnote": ("Falešné poplachy = odeslané snímky označené jako žádná osoba. "
                            "Zmeškané = zadržené (review) snímky označené jako osoba. "
                            "Nejisté se do obou měr nepočítají."),
+        # box labeling
+        "box_help": ("boxy: klik na box = osoba / není osoba / nezaznamenáno; tažení = "
+                     "dokreslit chybějící osobu; Tab další box, p osoba, n není osoba, "
+                     "x smazat/zrušit, Enter = uložit se štítkem, který boxy navrhují"),
+        "btn_confirm": "uložit podle boxů",
+        "box_person": "osoba",
+        "box_no_person": "není osoba",
+        "box_unset": "nezaznamenáno",
+        "box_drawn_tag": "dokreslený",
+        "h_boxes": "Boxové štítky",
+        "h_box_model": "model",
+        "h_box_person": "osoba",
+        "h_box_no_person": "není osoba",
+        "h_box_total": "celkem",
+        "h_box_people": "dokreslené osoby",
+        "h_box_found": "nalezeno",
+        "h_box_missed": "minuto",
+        "h_box_recall": "recall",
+        "h_box_small": "malé",
+        "h_box_small_missed": "malé minuto",
+        "h_box_false": "falešné boxy",
+        "box_drawn": "(dokreslené ručně)",
+        "box_summary": "boxové štítky na {frames} snímcích",
+        "box_recall_head": "Recall osob podle modelu (ručně dokreslené osoby)",
+        "box_recall_inflated": ("* část snímků nemá pole `models`: tam se model počítá jen s "
+                                "boxem, recall může být nadsazen."),
+        "box_recall_note": ("nalezeno = box modelu se skóre >= {score} překrývá dokreslenou "
+                            "osobu s IoU >= {iou}; malé = výška < {small}; falešné boxy = "
+                            "boxy modelu označené jako není osoba; model se počítá jen na "
+                            "snímcích, kde ho uvádí `models`"),
         "h_day_night": "Den a noc",
         "h_incidents": "Incidenty",
         "h_first_alert": "První alert podle cesty",

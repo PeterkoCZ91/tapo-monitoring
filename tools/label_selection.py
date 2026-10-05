@@ -283,6 +283,7 @@ def write_output(out, chosen, models, batch):
         scores = c["item"]["scores"]
         rec = {"file": f"{sub.name}/{name}", "ts": c["ts"],
                "person": scores.get(models[0], max(scores.values()))}
+        rec["models"] = [m for m in models if m in scores]
         boxes = [b for m in models for b in c["item"]["boxes"].get(m, [])]
         if boxes:
             rec["boxes"] = boxes

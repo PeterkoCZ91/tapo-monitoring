@@ -106,6 +106,7 @@ def test_output_format_and_anonymity(tmp_path):
     assert rec["ts"] == 1767225601.123 and rec["person"] == 0.9
     assert {b[5] for b in rec["boxes"]} == {"yolox640", "rfdetr", "yolox960"}
     assert all(len(b) == 6 for b in rec["boxes"])
+    assert rec["models"] == ["yolox640", "rfdetr", "yolox960"]
     (t,) = [json.loads(x) for x in (out / "teacher.jsonl").read_text().splitlines()]
     assert t == {"sha256": sha, "person": 0.1}
     everything = "".join(p.read_text() for p in out.glob("*") if p.is_file())
@@ -126,3 +127,10 @@ def test_frame_in_both_dirs_counted_once(tmp_path):
     src = next((tmp_path / "d1").iterdir())
     (tmp_path / "d2" / "20260101T000009999_p0.90_s0.80.jpg").write_bytes(src.read_bytes())
     assert len(index(e.run())) == 1
+
+
+def test_models_lists_only_models_that_ran(tmp_path):
+    e = Env(tmp_path)
+    e.add(0.9, 0.1, None)          # no second-shadow row
+    (rec,) = index(e.run())
+    assert rec["models"] == ["yolox640", "rfdetr"] and "boxes" not in rec

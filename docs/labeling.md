@@ -117,6 +117,46 @@ address (a VPN interface, say) is the operator's explicit choice. It serves only
 listed in an index that resolve inside the dataset directory; `..`, absolute paths and
 symlinks pointing outside are refused.
 
+## Box labels (opt-in)
+
+A frame is labeled as a whole by default. A collector (for example a detector
+comparison) can make a frame box-labelable by adding a `boxes` list to its `index.jsonl`
+record: `[x1, y1, x2, y2, score, model]` entries in coordinates normalized to 0-1, `model`
+a short name such as `yolox640` or `rfdetr`. An empty list is valid and still turns box
+mode on (draw the person nobody found). Records without `boxes` behave exactly as before.
+
+On such a frame the page draws the boxes, one hue per model, fainter for a low score,
+and shows the boxes' own verdict in the tag (`?` unmarked, check person, cross no person):
+
+- click a box: cycle unmarked, person, no person (the smallest box under the pointer wins);
+- drag on empty picture or over a box: draw a missed person (label `person`); click a
+  drawn box to cycle it, `x` removes it;
+- keys: `Tab` / `Shift+Tab` next / previous box, `p` person, `n` no person, `x` clear
+  (delete a drawn box), `Enter` save with the label the boxes suggest. `1` / `2` / `3`,
+  space and `u` work as always and send the box verdicts along.
+
+Any person box suggests `person` for the frame, only no-person boxes suggest `no_person`;
+the matching button is outlined. A label you press yourself is never overridden. The
+line in `labels.jsonl` gets one more field, written only when at least one box was marked
+(unmarked boxes are left out):
+
+```json
+"boxes": [{"box": [0.1, 0.1, 0.3, 0.6], "label": "person", "source": "model",
+           "model": "yolox640", "score": 0.8},
+          {"box": [0.7, 0.5, 0.9, 0.9], "label": "person", "source": "drawn"}]
+```
+
+`label-stats` adds a box section: per model the person and no-person boxes, and from the
+hand-drawn persons a per-model recall. A drawn person is *found* by a model when one of
+its boxes with score >= `--box-score` (default 0.45) overlaps it at IoU >=
+`--box-iou` (default 0.3); small persons (drawn height < 0.10) are counted separately,
+and so are false boxes (model boxes marked no person, score >= the threshold). A
+record can list the models that ran on the frame in a `models` field (names, even of
+models that found nothing); a model counts a drawn person only on frames that list it,
+so a model that ran and found nothing is a miss and one that did not run is not counted.
+Without `models` (old format) a model counts only where the record holds at least one
+box of it; the table marks such models with `*` and notes that recall may be overstated.
+
 ## The label file
 
 Verdicts are appended to `<dataset_dir>/labels.jsonl`, one line each:
@@ -128,7 +168,7 @@ Verdicts are appended to `<dataset_dir>/labels.jsonl`, one line each:
 
 `label` is `person`, `no_person` or `unsure`. The latest line per `sha256` wins, so a
 frame keeps its label when it is re-collected under another path. Undo is one more line
-(`"undo": true`) carrying the previous label, or `unlabeled`; nothing is ever rewritten.
+(`"undo": true`) carrying the previous label (and box verdicts), or `unlabeled`; nothing is ever rewritten.
 Images are only read, never modified or deleted.
 
 ## Stats

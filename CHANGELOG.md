@@ -12,7 +12,16 @@ All notable changes to this project are documented here.
   "Build a labeling set from two shadow targets" in `docs/operations.md`.
   `--image-dir` (repeatable) takes images for frames missing from `disagree/` from dataset
   directories such as `sent-log`/`review-log`, so small persons and controls get pictures; the
+  Each `index.jsonl` record also lists `models`, the models that ran on the frame.
   report counts selected frames per image source type and log rows dropped for lacking `frame`.
+- Opt-in box labeling in `tapo-monitor label`: an `index.jsonl` record with a `boxes` list
+  (`[x1,y1,x2,y2,score,model]`, normalized) shows the boxes colored by model and score; click
+  to cycle person / no person / unmarked, drag to draw a missed person, `Tab` / `p` / `n` /
+  `x` / `Enter` from the keyboard. Verdicts land in a `boxes` field of the `labels.jsonl` line
+  beside the unchanged whole-frame `label` (suggested from the boxes, never overriding a typed
+  one). `label-stats` summarizes box labels per model and computes per-model recall of
+  hand-drawn persons (incl. small ones) and false boxes, tunable with `--box-score` and
+  `--box-iou`. An optional `models` list in the index record (models that ran, even with no box) decides which models count for recall; without it the old rule applies and the report marks recall as possibly overstated. Frames without `boxes` behave as before. Czech texts included.
 - Optional second shadow target in the scorer service (`TAPO_SCORER_SHADOW2_URL`, `_LOG`, `_NAME`,
   `_TOKEN_FILE`/`_TOKEN`, `_QUEUE`, `_TIMEOUT`, `_DISAGREE_DIR`, `_DISAGREE_MAX`) with its own
   queue, worker and log (same row format plus `shadow_name`) and a `shadow2` block in

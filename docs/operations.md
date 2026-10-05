@@ -488,7 +488,8 @@ python3 tools/label_selection.py --shadow-log shadow.jsonl --shadow2-log shadow2
 
 Drop `--dry-run` to write `OUT/disagree1/*.jpg` (`--batch N` names it `disagreeN`),
 `OUT/index.jsonl` (`file`, `ts` in UTC epoch seconds from the file name, `person` = production
-score, optional `boxes` as `[x1, y1, x2, y2, score, model]` with model `yolox640`, `rfdetr` or
+score, `models` (the models that actually ran on the frame, so "ran and found nothing" is
+distinguishable from "did not run"), optional `boxes` as `[x1, y1, x2, y2, score, model]` with model `yolox640`, `rfdetr` or
 `yolox960`; change with `--models`), `OUT/teacher.jsonl` (the score farthest from production,
 for ordering by disagreement) and `OUT/selection-report.md`. Categories, in priority order:
 `strong` (one model >= 0.45, another < 0.25), `threshold` (split at 0.45), `small` (best box
