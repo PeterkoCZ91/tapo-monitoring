@@ -50,6 +50,7 @@ it. The default is `enforce`, so nothing changes unless you set one:
 | Switch | `observe` does | Audit line |
 | --- | --- | --- |
 | `scorer.alert_zones_mode` | filters nothing; alerts go out as without zones | `action=would_drop_outside_alert_zone persons_inside=N persons_outside=M`, next to the `send` it concerns |
+| `scorer.ignore_boxes_mode` | drops no box; alerts go out as without `ignore_boxes` | `action=would_drop_ignore_box boxes=N`, next to the `send` it concerns |
 | `sampler.loiter_mode` | counts the streak and sets the group's one-shot flag, sends no notice | `path=sampler action=would_loiter etype=person minutes=N` |
 | `scorer.vehicle_mode` | sends no vehicle alert, arms no cooldown | `action=would_send etype=vehicle` |
 

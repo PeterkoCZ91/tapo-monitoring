@@ -75,6 +75,13 @@ All notable changes to this project are documented here.
   which the models disagree (one at 0.45 or more, the other below 0.25), capped by
   `TAPO_SCORER_SHADOW_DISAGREE_MAX`. `/metrics` gains `shadow` counters. See
   `docs/operations.md`, "Shadow run of a second detector".
+- `scorer.ignore_boxes` (off by default): rects (fractions of the frame) of a static box the
+  model reports as one big person, e.g. a swing roof; a person is dropped only when its box
+  matches a rect in size and place (IoU >= 0.75, counted in `ignored_boxes`), so people
+  standing in front of the object, or large ones elsewhere, still count (an `ignore_zones`
+  rect or a low `max_person_box` would lose them). `scorer.ignore_boxes_mode: observe` drops
+  nothing and audits `would_drop_ignore_box boxes=N` next to the send. Config is validated
+  like `ignore_zones`; `observe` needs `ignore_boxes`.
 - `scorer.max_person_box` (off by default): a fraction of the frame; a person whose box is
   larger than it in both width and height is dropped like an ignore-zone person (counted in
   `oversized_persons`), after `ignore_zones` and before `alert_zones`. Catches the occasional

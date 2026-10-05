@@ -54,7 +54,8 @@ def auth_headers(token):
 
 
 def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None, ignore_zones=(),
-                alert_zones=(), alert_zones_mode="enforce", token=None, max_person_box=None):
+                alert_zones=(), alert_zones_mode="enforce", token=None, max_person_box=None,
+                ignore_boxes=(), ignore_boxes_mode="enforce"):
     """POST a JPEG to the scoring service; dict on success, None on ANY failure.
 
     ``tiles > 1`` asks the service to also score a tiles×tiles grid (rescues distant
@@ -65,7 +66,10 @@ def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None, ignore_
     the answer only gains ``alert_zone_observe`` when a zone would have dropped a person
     (:func:`observe_alert_zones`). ``max_person_box`` (a fraction, None = off) drops a
     person whose box exceeds it in both dimensions (:func:`apply_max_person_box`), after the
-    ignore zones and before the alert zones.
+    ignore zones and before the alert zones. ``ignore_boxes`` drops a person whose box
+    matches one of the given rects in size AND place (:func:`apply_ignore_boxes`), after the
+    ignore zones; with ``ignore_boxes_mode="observe"`` nothing is dropped and the answer
+    gains ``ignore_box_observe`` (:func:`observe_ignore_boxes`).
 
     ``token`` (the shared secret of a service that requires one) goes out as a bearer
     header and is never logged.
@@ -76,7 +80,8 @@ def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None, ignore_
     return _score_once(url, image_path, timeout, tiles, source_id=source_id,
                        ignore_zones=ignore_zones, alert_zones=alert_zones,
                        alert_zones_mode=alert_zones_mode, token=token,
-                       max_person_box=max_person_box)[0]
+                       max_person_box=max_person_box, ignore_boxes=ignore_boxes,
+                       ignore_boxes_mode=ignore_boxes_mode)[0]
 
 
 _warned_unauthorized: set = set()
@@ -111,7 +116,8 @@ def _transport_failure(exc):
 
 
 def _score_once(url, image_path, timeout, tiles, *, source_id=None, ignore_zones=(),
-                alert_zones=(), alert_zones_mode="enforce", token=None, max_person_box=None):
+                alert_zones=(), alert_zones_mode="enforce", token=None, max_person_box=None,
+                ignore_boxes=(), ignore_boxes_mode="enforce"):
     """``(result, transport_failed)`` of one scoring request; result None on any failure."""
     try:
         with open(image_path, "rb") as f:
@@ -138,6 +144,10 @@ def _score_once(url, image_path, timeout, tiles, *, source_id=None, ignore_zones
                 return None, False
             if ignore_zones:
                 result = apply_ignore_zones(result, ignore_zones)
+            if ignore_boxes and ignore_boxes_mode == "observe":
+                result = observe_ignore_boxes(result, ignore_boxes)
+            elif ignore_boxes:
+                result = apply_ignore_boxes(result, ignore_boxes)
             if max_person_box:
                 result = apply_max_person_box(result, max_person_box)
             if alert_zones and alert_zones_mode == "observe":
@@ -318,6 +328,9 @@ def reset_pools():
 IGNORE_ZONE_OVERLAP = 0.8
 _warned_no_boxes = False
 _warned_no_boxes_max = False
+_warned_no_boxes_ignore = False
+# A person is "that static box" when its box overlaps an ignore box with at least this IoU.
+IGNORE_BOX_IOU = 0.75
 
 
 def _inside_share(box, zone, w, h):
@@ -427,6 +440,64 @@ def apply_max_person_box(result, fraction):
     if len(kept) == len(pairs):
         return result
     return _without_persons(result, kept, len(pairs) - len(kept), "oversized_persons")
+
+
+def _iou(box, rect, w, h):
+    """Intersection over union of a pixel ``box`` and a ``rect`` in frame fractions. Pure."""
+    x1, y1, x2, y2 = box
+    rx1, ry1, rx2, ry2 = rect[0] * w, rect[1] * h, rect[2] * w, rect[3] * h
+    ix = max(min(x2, rx2) - max(x1, rx1), 0.0)
+    iy = max(min(y2, ry2) - max(y1, ry1), 0.0)
+    inter = ix * iy
+    union = max(x2 - x1, 0.0) * max(y2 - y1, 0.0) + (rx2 - rx1) * (ry2 - ry1) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def apply_ignore_boxes(result, rects, iou=IGNORE_BOX_IOU):
+    """Drop the people whose box IS one of ``rects`` (size and place). Pure-ish.
+
+    For a static object the model boxes as one big person (a swing roof, 0.44 x 0.43 of the
+    frame) where an ignore zone would also hide a real person standing in front of it: that
+    person's box is small and lies inside the zone. A rect here removes only a box that
+    matches it with an IoU of at least ``iou``, so a person in front, or anywhere else,
+    still counts. Counted in ``ignored_boxes``; ``person`` becomes the best one left. Needs
+    ``person_boxes``: an older service is left as it was (logged once).
+    """
+    global _warned_no_boxes_ignore
+    scores, boxes = result.get("person_scores"), result.get("person_boxes")
+    w, h = result.get("w"), result.get("h")
+    if (not isinstance(scores, list) or not isinstance(boxes, list)
+            or len(scores) != len(boxes) or not w or not h):
+        if not _warned_no_boxes_ignore:
+            log.warning("scorer: ignore_boxes needs a scorer that returns person_boxes; "
+                        "update the scoring service")
+            _warned_no_boxes_ignore = True
+        return result
+    try:
+        pairs = [(float(sc), [float(v) for v in bx]) for sc, bx in zip(scores, boxes, strict=True)]
+        w, h = float(w), float(h)
+        kept = [(sc, bx) for sc, bx in pairs if not any(_iou(bx, r, w, h) >= iou for r in rects)]
+    except (TypeError, ValueError, IndexError):
+        return result
+    if len(kept) == len(pairs):
+        return result
+    return _without_persons(result, kept, len(pairs) - len(kept), "ignored_boxes")
+
+
+def observe_ignore_boxes(result, rects):
+    """Report what :func:`apply_ignore_boxes` would do without doing it. Pure-ish.
+
+    The answer is returned unfiltered; when a box would be dropped it gains
+    ``ignore_box_observe`` = ``{"dropped", "person"}`` (boxes that would go, and the best
+    person score left after the filter).
+    """
+    filtered = apply_ignore_boxes(result, rects)
+    if filtered is result:
+        return result
+    out = dict(result)
+    out["ignore_box_observe"] = {"dropped": filtered["ignored_boxes"],
+                                 "person": filtered["person"]}
+    return out
 
 
 def point_in_polygon(x, y, polygon):
@@ -560,7 +631,8 @@ class SubjectScore(float):
     the best vehicle confidence (0.0 from an older service).
     """
 
-    def __new__(cls, person, animal, persons=None, vehicle=0.0, zone_observe=None):
+    def __new__(cls, person, animal, persons=None, vehicle=0.0, zone_observe=None,
+                box_observe=None):
         value = float.__new__(cls, person)
         value.person = person
         value.animal = animal
@@ -569,6 +641,9 @@ class SubjectScore(float):
         # ``(inside, outside)`` people when observe-mode alert zones would have dropped
         # this frame's person below the threshold, else None.
         value.zone_observe = zone_observe
+        # Number of boxes observe-mode ``ignore_boxes`` would have dropped from a frame whose
+        # person that leaves under the threshold, else None.
+        value.box_observe = box_observe
         return value
 
 
@@ -630,7 +705,20 @@ def subject_score(result, threshold=None):
         return None
     return SubjectScore(*values, persons=person_count(result, threshold),
                         vehicle=vehicle_score(result),
-                        zone_observe=_zone_observe(result, values[0], threshold))
+                        zone_observe=_zone_observe(result, values[0], threshold),
+                        box_observe=_box_observe(result, values[0], threshold))
+
+
+def _box_observe(result, person, threshold):
+    """Count of boxes observe ``ignore_boxes`` would drop, if that pushes the frame under."""
+    info = result.get("ignore_box_observe")
+    if threshold is None or not isinstance(info, dict) or person < threshold:
+        return None
+    try:
+        dropped, kept = int(info["dropped"]), float(info["person"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return dropped if kept < threshold and dropped > 0 else None
 
 
 def _zone_observe(result, person, threshold):

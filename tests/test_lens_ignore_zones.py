@@ -85,3 +85,13 @@ def test_score_passes_max_person_box_through(monkeypatch, tmp_path):
                         lambda url, path, **kw: seen.append(kw.get("max_person_box")) or None)
     daemon.score_for(camera)(_tagged(tmp_path, "wide"))
     assert seen and set(seen) == {0.9}
+
+
+def test_score_passes_ignore_boxes_through(monkeypatch, tmp_path):
+    camera = _camera(ignore_boxes=[[0.0, 0.25, 0.44, 0.69]], ignore_boxes_mode="observe")
+    seen = []
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, path, **kw: seen.append(
+                            (kw.get("ignore_boxes"), kw.get("ignore_boxes_mode"))) or None)
+    daemon.score_for(camera)(_tagged(tmp_path, "wide"))
+    assert seen and set(seen) == {(((0.0, 0.25, 0.44, 0.69),), "observe")}

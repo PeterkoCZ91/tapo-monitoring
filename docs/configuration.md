@@ -909,6 +909,29 @@ scorer:
   max_person_box: 0.9
 ```
 
+`ignore_boxes` (default none) is for a static object the model boxes as one big person,
+for example the roof of a swing seen as a box of 0.44 x 0.43 of the frame, while people
+stand in front of it. It lists rects `[x1, y1, x2, y2]` (fractions of the frame, as in
+`ignore_zones`); a person is dropped only when its box matches a rect in size AND place
+(IoU of at least 0.75, counted in `ignored_boxes`). The existing options do not fit this:
+an `ignore_zones` rect over the roof also hides a person standing in front of it (that
+box lies inside the zone), and `max_person_box: 0.4` would drop any person that large
+anywhere in the frame. A person in front of the object, or a large one elsewhere, still
+counts; only a person whose box is practically the rect itself is lost. Take the rect
+from a few frames of the false alarm (the boxes the scorer logged, normalized), keep it
+tight and cover one object per rect. It runs after `ignore_zones`, before
+`max_person_box`. Static clusters in general must not be suppressed automatically: they
+are mostly people's routes. `ignore_boxes_mode: observe` soaks a rect first: nothing is
+dropped, and a sent frame whose person a rect would have dropped adds the audit line
+`action=would_drop_ignore_box boxes=N`. It needs `ignore_boxes`.
+
+```yaml
+scorer:
+  ignore_boxes_mode: observe        # read the would_drop_ignore_box lines, then delete the key
+  ignore_boxes:
+    - [0.00, 0.26, 0.44, 0.69]      # swing roof, ~0.44 x 0.43 of the frame
+```
+
 `alert_zones` (default none) is the opposite of `ignore_zones`: a list of polygons, each
 at least three `[x, y]` points as fractions of the frame, and a person counts only when
 the bottom centre of its box (the feet) lies inside at least one of them. Use it to watch

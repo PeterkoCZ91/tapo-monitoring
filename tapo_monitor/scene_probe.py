@@ -170,6 +170,8 @@ def _real_score(tiles):
                                           getattr(cfg, "event_profile", None),
                                           cfg.rtsp_stream)),
                                   max_person_box=cfg.scorer.max_person_box,
+                                  ignore_boxes=cfg.scorer.ignore_boxes,
+                                  ignore_boxes_mode=cfg.scorer.ignore_boxes_mode,
                                   alert_zones=cfg.scorer.alert_zones,
                                   alert_zones_mode=cfg.scorer.alert_zones_mode)
     return score

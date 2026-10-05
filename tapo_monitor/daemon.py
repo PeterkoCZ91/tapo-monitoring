@@ -1436,6 +1436,8 @@ def score_for(cfg: CameraConfig):
                                   ignore_zones=scorer.zones_for_lens(
                                       cfg.scorer, snapshot.frame_lens(image_path)),
                                   max_person_box=cfg.scorer.max_person_box,
+                                  ignore_boxes=cfg.scorer.ignore_boxes,
+                                  ignore_boxes_mode=cfg.scorer.ignore_boxes_mode,
                                   alert_zones=cfg.scorer.alert_zones,
                                   alert_zones_mode=cfg.scorer.alert_zones_mode)
 
@@ -1571,6 +1573,8 @@ def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_f
                                     ignore_zones=scorer.zones_for_lens(
                                         cfg.scorer, snapshot.frame_lens(image)),
                                     max_person_box=cfg.scorer.max_person_box,
+                                    ignore_boxes=cfg.scorer.ignore_boxes,
+                                    ignore_boxes_mode=cfg.scorer.ignore_boxes_mode,
                                     alert_zones=cfg.scorer.alert_zones,
                                     alert_zones_mode=cfg.scorer.alert_zones_mode)
     if not result:

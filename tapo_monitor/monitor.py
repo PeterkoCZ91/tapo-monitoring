@@ -173,6 +173,11 @@ def audit_event(cfg, event, etype, path, action, *, score=None, threshold=None,
                     threshold=threshold,
                     extra={"persons_inside": zone_observe[0],
                            "persons_outside": zone_observe[1]})
+    box_observe = getattr(score, "box_observe", None)
+    if box_observe and action == "send":
+        # scorer.ignore_boxes_mode observe: the box match would have dropped this person.
+        audit_event(cfg, event, etype, path, "would_drop_ignore_box", threshold=threshold,
+                    extra={"boxes": box_observe})
 
 
 def audit_error(cfg, error, *, now=None):

@@ -158,6 +158,13 @@ class ScorerConfig:
     # Fraction (0, 1] of the frame: a person whose box exceeds it in BOTH width and height
     # is dropped (see scorer.apply_max_person_box). None = off.
     max_person_box: float | None = None
+    # Rects ``[x1, y1, x2, y2]`` (fractions of the frame) of static boxes the model reports
+    # as a person: a person whose box matches one in size and place (IoU) is dropped, a
+    # person in front of it is not (see scorer.apply_ignore_boxes). Empty = off.
+    ignore_boxes: tuple = ()
+    # ``observe``: ``ignore_boxes`` drop nothing; a sent frame whose person one would have
+    # dropped is audited (``would_drop_ignore_box``). Needs ``ignore_boxes``.
+    ignore_boxes_mode: str = "enforce"
     # Polygons (tuples of ``(x, y)`` fractions): only people whose feet (box bottom centre)
     # stand in one count, after ``ignore_zones``. Empty = off. Fixed-view cameras only.
     alert_zones: tuple = ()
@@ -891,6 +898,11 @@ def _scorer(data, where):
             raise ConfigError(f"{where}: scorer max_person_box must be a number") from None
         if not 0.0 < max_person_box <= 1.0:
             raise ConfigError(f"{where}: scorer max_person_box must be > 0 and <= 1")
+    ignore_boxes = _ignore_zones(d.get("ignore_boxes"), where, name="ignore_boxes")
+    ignore_boxes_mode = _check_enum(d.get("ignore_boxes_mode", "enforce"), FEATURE_MODES,
+                                    "scorer.ignore_boxes_mode", where)
+    if ignore_boxes_mode == "observe" and not ignore_boxes:
+        raise ConfigError(f"{where}: scorer ignore_boxes_mode observe needs ignore_boxes")
     alert_vehicles = _check_bool(d.get("alert_vehicles", False), "alert_vehicles",
                                  f"{where}: scorer")
     alert_zones_mode = _check_enum(d.get("alert_zones_mode", "enforce"), FEATURE_MODES,
@@ -914,18 +926,19 @@ def _scorer(data, where):
                         person_bit_skips_hold=person_bit_skips_hold,
                         ignore_zones=ignore_zones, lens_ignore_zones=lens_ignore_zones,
                         max_person_box=max_person_box,
+                        ignore_boxes=ignore_boxes, ignore_boxes_mode=ignore_boxes_mode,
                         alert_zones=alert_zones, alert_zones_mode=alert_zones_mode,
                         vehicle_mode=vehicle_mode,
                         alert_vehicles=alert_vehicles, vehicle_threshold=vehicle_threshold,
                         night_threshold=night_threshold)
 
 
-def _ignore_zones(value, where):
+def _ignore_zones(value, where, name="ignore_zones"):
     """``scorer.ignore_zones``: a list of ``[x1, y1, x2, y2]`` fractions, x1<x2, y1<y2."""
     if value is None:
         return ()
     if not isinstance(value, list):
-        raise ConfigError(f"{where}: scorer ignore_zones must be a list of [x1, y1, x2, y2]")
+        raise ConfigError(f"{where}: scorer {name} must be a list of [x1, y1, x2, y2]")
     zones = []
     for zone in value:
         try:
@@ -933,10 +946,10 @@ def _ignore_zones(value, where):
                 raise ValueError
             x1, y1, x2, y2 = (float(v) for v in zone)
         except (TypeError, ValueError):
-            raise ConfigError(f"{where}: scorer ignore_zones entries must be "
+            raise ConfigError(f"{where}: scorer {name} entries must be "
                               "[x1, y1, x2, y2] numbers") from None
         if not (0.0 <= x1 < x2 <= 1.0 and 0.0 <= y1 < y2 <= 1.0):
-            raise ConfigError(f"{where}: scorer ignore_zones entries are fractions of the "
+            raise ConfigError(f"{where}: scorer {name} entries are fractions of the "
                               "frame with x1 < x2 and y1 < y2")
         zones.append((x1, y1, x2, y2))
     return tuple(zones)
