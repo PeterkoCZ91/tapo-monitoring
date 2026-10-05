@@ -3157,14 +3157,15 @@ def test_dense_start_only_for_the_window_that_starts_at_the_event(monkeypatch):
 
 
 
-def _recording_followup(monkeypatch, source="recording"):
+def _recording_followup(monkeypatch, source="recording", **cam_extra):
     # A confirmed person whose live frame is empty, on a camera that reads the local
     # recording (or the SD card): the follow-up is queued by the real live pass.
     monkeypatch.setattr(daemon.notify, "send_photo", lambda *a, **k: True)
     monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "empty scene")
     app = cfg.load_config_from_dict(
         {"groq": {}, "cameras": [{"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
-                                  "snapshot_source": source, "sd_span_cap": 120}]})
+                                  "snapshot_source": source, "sd_span_cap": 120,
+                                  **cam_extra}]})
     state = daemon.MonitorState()
 
     class Cam:
@@ -3186,6 +3187,58 @@ def test_recording_followup_takes_an_early_look_at_the_opening_seconds(monkeypat
     assert entry["rest_span"] == 120
     assert entry["due_at"] == 500 + daemon.recclip.fresh_delay(
         daemon.recclip.RECORDING_EARLY_SPAN)
+
+
+def test_recording_defaults_keep_todays_early_look(monkeypatch):
+    app, state, _, _ = _recording_followup(monkeypatch)
+    camera = app.cameras[0]
+    assert (camera.recording_early_span, camera.recording_ready_margin) == (24, 15)
+    entry = state.pending_sd[0]
+    assert (entry["span"], entry["rest_span"], entry["due_at"]) == (24, 120, 500 + 24 + 15)
+
+
+def test_recording_early_span_and_margin_keys_are_used(monkeypatch):
+    app, state, Cam, secrets = _recording_followup(
+        monkeypatch, recording_early_span=12, recording_ready_margin=8)
+    entry = state.pending_sd[0]
+    assert (entry["span"], entry["rest_span"], entry["due_at"]) == (12, 120, 500 + 12 + 8)
+    calls = []
+    def fetch_frames(cfg_, start_time, span=None, out_dir=None):
+        calls.append((start_time, span))
+        return []
+    daemon.process_pending_sd(app, {"a": Cam()}, state, now=entry["due_at"], secrets=secrets,
+                              snapshot_for=lambda _cfg: (lambda cam, ev: None),
+                              time_str=lambda ev: "T", fetch_frames=fetch_frames)
+    # The rest of the window is read after the configured margin, from where the look ended.
+    assert calls == [(500, 12)]
+    assert (state.pending_sd[0]["offset"], state.pending_sd[0]["due_at"]) == (12, 500 + 120 + 8)
+
+
+def test_recording_early_span_and_margin_are_validated():
+    base = {"name": "a", "host": "203.0.113.10"}
+    for key, ok, bad in (("recording_early_span", (6, 60), (5, 61, "x", True, 12.5)),
+                         ("recording_ready_margin", (5, 60), (4, 61, "x", True, 7.5))):
+        for value in ok:
+            camera = cfg.load_config_from_dict({"cameras": [{**base, key: value}]}).cameras[0]
+            assert getattr(camera, key) == value
+        for value in bad:
+            with pytest.raises(cfg.ConfigError, match=key):
+                cfg.load_config_from_dict({"cameras": [{**base, key: value}]})
+
+
+def test_frame_selection_log_names_the_offset_from_the_event_start(caplog):
+    cam = _cam(sd_snapshot=True, snapshot_source="recording",
+               scorer={"url": "http://x/score", "threshold": 0.4})
+    def pick(event, frame):
+        caplog.clear()
+        with caplog.at_level("INFO"):
+            daemon._select_recording_frame(
+                cam, event=event, etype="person", frames=[frame],
+                score=lambda f: 0.9, blur_score=lambda f: 5.0)
+        return caplog.text
+    assert "offset=12.0" in pick({"start_time": 1000}, "rec_1000_at1012.jpg")
+    assert "offset=n/a" in pick({"start_time": 1000}, "f0.jpg")
+    assert "offset=n/a" in pick({}, "rec_1000_at1012.jpg")
 
 
 def test_sd_card_followup_keeps_one_window(monkeypatch):

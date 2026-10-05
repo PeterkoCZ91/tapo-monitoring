@@ -851,6 +851,13 @@ The monitor chooses frames in this order:
    Sharpness measures the whole frame, so it cannot guarantee an unblurred moving subject.
    `recording` reuses the SD follow-up queue, so it requires `sd_snapshot: true`, and it
    falls back to the SD/live path when no matching segment exists or `RECORDING_ROOT` is unset.
+   The recording read has its own per-camera timing, `recording_early_span` (first look,
+   default 24 s, 6-60) and `recording_ready_margin` (default 15 s, 5-60). A lower margin
+   can truncate the end of a window the recorder has not flushed yet, and a lower span
+   moves subjects first seen later into the retry. Every `frame selection` log line ends
+   with `offset=<s>`, the picked frame's seconds from the event's start (`n/a` when the
+   frame name carries no capture time), to measure how many finds fall in the first 12 s
+   before shortening either value.
    A person follow-up arrives a minute or two after its event, so it is held to the
    confirmed cooldown when its result is back: if another passage of the same camera
    reached the phone in between, the follow-up is not sent but audited as `sd` `cooldown`

@@ -272,6 +272,10 @@ class CameraConfig:
     # Seconds of the early look (needs sd_early_look); a shorter look is due no sooner but
     # downloads faster. 18 keeps the frames at 0, 6 and 12 s.
     sd_early_span: int = 18
+    # snapshot_source: recording only: the first look's length and how long after a window's
+    # end it is read (recclip.RECORDING_EARLY_SPAN / RECORDING_READY_MARGIN, the defaults).
+    recording_early_span: int = 24
+    recording_ready_margin: int = 15
     # Camera card only: seconds a window's end must be in the past before pytapo downloads
     # it (its FRESH_RECORDING_TIME_SECONDS). The due time of every card read follows it.
     sd_fresh_guard: int = 60
@@ -1206,6 +1210,16 @@ def _camera(data, index):
         raise ConfigError(f"{where}: 'sd_early_span' must be an integer")
     if not 6 <= sd_early_span <= 30:
         raise ConfigError(f"{where}: 'sd_early_span' must be between 6 and 30")
+    recording_early_span = data.get("recording_early_span", 24)
+    if isinstance(recording_early_span, bool) or not isinstance(recording_early_span, int):
+        raise ConfigError(f"{where}: 'recording_early_span' must be an integer")
+    if not 6 <= recording_early_span <= 60:
+        raise ConfigError(f"{where}: 'recording_early_span' must be between 6 and 60")
+    recording_ready_margin = data.get("recording_ready_margin", 15)
+    if isinstance(recording_ready_margin, bool) or not isinstance(recording_ready_margin, int):
+        raise ConfigError(f"{where}: 'recording_ready_margin' must be an integer")
+    if not 5 <= recording_ready_margin <= 60:
+        raise ConfigError(f"{where}: 'recording_ready_margin' must be between 5 and 60")
     night_vision = data.get("night_vision")
     if night_vision is not None and night_vision not in ("ir", "auto"):
         raise ConfigError(f"{where}: 'night_vision' must be 'ir' or 'auto'")
@@ -1385,6 +1399,8 @@ def _camera(data, index):
         sd_dense_start=sd_dense_start,
         sd_early_look=_check_bool(data.get("sd_early_look", False), "sd_early_look", where),
         sd_early_span=sd_early_span,
+        recording_early_span=recording_early_span,
+        recording_ready_margin=recording_ready_margin,
         sd_fresh_guard=sd_fresh_guard,
         person_sensitivity=int(data["person_sensitivity"]) if data.get("person_sensitivity") is not None else None,
         night_only=bool(data.get("night_only", False)),

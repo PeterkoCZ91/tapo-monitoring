@@ -309,19 +309,23 @@ def select_tallest(candidates, frame_size=None, max_blur_ratio=LARGEST_MAX_BLUR_
 
 # ── frame extraction + fetch entry point ─────────────────────────────────────
 
-def fresh_delay(span):
-    """Seconds to wait after the event before its window is flushed to disk."""
-    return int(span) + RECORDING_READY_MARGIN
+def fresh_delay(span, margin=RECORDING_READY_MARGIN):
+    """Seconds to wait after the event before its window is flushed to disk.
+
+    ``margin`` is the camera's ``recording_ready_margin`` (default 15 s).
+    """
+    return int(span) + int(margin)
 
 
-def early_span(span):
+def early_span(span, early=RECORDING_EARLY_SPAN):
     """The first-look window for a ``span``-second follow-up, or None when it is too short.
 
     Pure. A window that ends barely later than the first look would read almost the same
     frames twice, so the split needs at least one more frame interval beyond it.
+    ``early`` is the camera's ``recording_early_span`` (default 24 s).
     """
-    if int(span) >= RECORDING_EARLY_SPAN + RECORDING_FRAME_EVERY:
-        return RECORDING_EARLY_SPAN
+    if int(span) >= int(early) + RECORDING_FRAME_EVERY:
+        return int(early)
     return None
 
 

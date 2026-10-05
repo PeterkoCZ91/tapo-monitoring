@@ -579,6 +579,16 @@ sd_fresh_guard: 60
   seconds later. With the early look on, a failed segment lookup is also tried once more
   after 5 s. A card read logs one `SD read` line with its window, bytes and the
   download and extraction seconds.
+- `recording_early_span` (`snapshot_source: recording`, default 24, 6-60) is the length in
+  seconds of the first look at the event's opening seconds, and `recording_ready_margin`
+  (default 15, 5-60) is how long after a window's end it is read. The defaults are the
+  previous fixed values, so omitting both changes nothing. A window must be at least one
+  4 s frame interval longer than the first look to be split. Values outside the ranges are
+  a `ConfigError`. Lowering the margin reads the window sooner but the recorder trails the
+  wall clock by a few seconds and the event start comes from the camera clock, so too low
+  a margin can cut the end of the window short; lowering the span makes the first look
+  due sooner but moves subjects first visible later into the retry, which is read after
+  the rest of the window. Change them one camera at a time and compare first-alert times.
 - `sd_early_span` (camera card, default 18, 6-30, only with `sd_early_look`) is the length
   of the early look in seconds. The look is due `span + guard + 9` s after the event
   starts, so 12 is due 6 s sooner than 18 and downloads a third shorter, but covers only

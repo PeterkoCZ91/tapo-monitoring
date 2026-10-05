@@ -1975,7 +1975,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             # pytapo's freshness guard) does so only when the camera opts in
             # (sd_early_look): its look is shorter, from the aligned segment start.
             if _source == "recording":
-                early = recclip.early_span(first_span)
+                early = recclip.early_span(first_span, _cfg.recording_early_span)
             elif _cfg.sd_early_look:
                 early = sdclip.card_early_span(first_span, _cfg.sd_early_span)
             else:
@@ -1991,7 +1991,8 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                 # needs a wider window AND a later fetch, or the window end is still
                 # inside pytapo's freshness guard and downloads empty.
                 "due_at": (event.get("start_time") or now)
-                          + (recclip.fresh_delay(early or first_span)
+                          + (recclip.fresh_delay(early or first_span,
+                                                      _cfg.recording_ready_margin)
                              if _source == "recording"
                              else sdclip.fresh_delay(early or first_span,
                                                      guard=_cfg.sd_fresh_guard)),
@@ -3000,9 +3001,17 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
     selected = next(s for f, s in above if f == image)
     selected_blur = next(b for f, b in ranked if f == image)
     area = recclip.box_area(boxes[image]) if use_boxes else None
+    # Seconds from the event's start to the picked frame (its capture epoch is in the file
+    # name), so the share of finds inside the first seconds can be measured. Log only.
+    taken = sdclip.frame_capture_time(image)
+    try:
+        offset = f"{taken - float(event.get('start_time')):.1f}"
+    except (TypeError, ValueError):
+        offset = "n/a"
     log.info("frame selection %s [%s]: picked %d/%d (%s), subjects=%d score=%.3f blur=%s "
-             "box_area=%s", cfg.name, path, frames.index(image) + 1, len(frames), pick,
-             len(above), selected, selected_blur, None if area is None else int(area))
+             "box_area=%s offset=%s", cfg.name, path, frames.index(image) + 1, len(frames),
+             pick, len(above), selected, selected_blur, None if area is None else int(area),
+             offset)
     return image, selected
 
 
@@ -3448,7 +3457,7 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
                 # Checked frames of nobody: an empty rest must not become a blind grab.
                 entry["early_frames"] = True
             entry["due_at"] = start_time + (sdclip.fresh_delay(rest, guard=cfg.sd_fresh_guard)
-                                            if card else recclip.fresh_delay(rest))
+                                            if card else recclip.fresh_delay(rest, cfg.recording_ready_margin))
             monitor.audit_event(cfg, event, etype, "sd", "retry",
                                 reason=f"early_look={span}->{rest}")
             log.info("retry %s: no subject in the first %ss of the %s; "

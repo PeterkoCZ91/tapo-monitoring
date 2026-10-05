@@ -5,6 +5,10 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Cameras reading `snapshot_source: recording` can tune the follow-up timing with
+  `recording_early_span` (first look, default 24 s, 6-60) and `recording_ready_margin`
+  (default 15 s, 5-60); the defaults equal the previous fixed values. The `frame selection`
+  log line gains `offset=<s>`, the picked frame's seconds from the event start (log only).
 - Shadow log rows gain `frame`, the first 16 hex characters of the SHA-256 of the frame body,
   so a row can be matched to a saved frame. Only written when the shadow log is enabled; older
   logs stay readable by `tools/shadow_report.py`.
