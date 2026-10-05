@@ -350,6 +350,7 @@ in brackets for the best model).
 | RF-DETR Nano | 0.894 | - | - |
 | **YOLOX-m (production)** | **0.843** | 0.463 | **45** |
 | YOLOX-s | 0.795 | - | - |
+| YOLO26n (Ultralytics nano, AGPL) | 0.774 | - | - |
 
 A dash means the figure was not tabulated. Two results are not reliable and are left out of any
 conclusion: RT-DETR v2 scored 0.81 (its adapter was not verified) and plain DETR R50
@@ -358,6 +359,8 @@ Large raised 8 false alarms and missed 12 persons at 0.30, 4 and 24 at 0.45, 2 a
 YOLOX-m raised 45 and missed 7 at 0.45 (47 and 0 at 0.30, 17 and 86 at 0.65). Large on the
 day frames alone (n = 380) reached an AUC of 0.983; at night (n = 93, eight empty frames) the
 Large, Medium and RT-DETR R50 models scored 0.93 to 0.95, which is indicative only.
+
+YOLO26n, a nano model with end-to-end (NMS-free) output, ran through its reference code at 640 px on the same frames: its scores sit lower and are calibrated differently (median score of the persons 0.29, 36 persons scored 0), so fixed thresholds do not compare with YOLOX-m. At 0.30 it raised 4 false alarms and missed 218 persons, at 0.45 it raised 2 and missed 276. Of the 112 small persons (box height under a tenth of the frame; the height was estimated from RF-DETR Large boxes because the labels carry none) it found 15 at 0.45, against 110 for YOLOX-m and 101 for RF-DETR Large. It is about three times faster on a CPU (0.064 s median per frame including JPEG decoding, measured by another method than the table below) but it does not see the small distant people that cause most disagreements, so it is not a replacement for YOLOX-m here. A control run of YOLO11n with the same code scored an AUC of 0.55, which suggests the adapter or the setup was not tuned for that family; neither result is used in any conclusion above. Larger variants, 1280 px input and tiling were not tried. Ultralytics models are AGPL-3.0 licensed, which matters if you ship them.
 
 ### Latency
 
