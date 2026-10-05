@@ -293,6 +293,51 @@ def box_overlap(rows, thresholds):
     return res
 
 
+def compare_shadows(rows1, rows2, t1, t2):
+    """Compare two shadow logs of the same primary on the frames both scored.
+
+    Rows are matched on the ``frame`` fingerprint (rows without it, and rows with an error
+    or no shadow score, are skipped). Reports the 2x2 matrix of the two shadows at their
+    thresholds and the score correlation.
+    """
+    def index(rows):
+        out = {}
+        for r in rows:
+            frame, s = r.get("frame"), _num(r.get("shadow_person"))
+            if isinstance(frame, str) and s is not None and not r.get("error"):
+                out[frame] = s
+        return out
+
+    a, b = index(rows1), index(rows2)
+    common = sorted(set(a) & set(b))
+    matrix = {"both": 0, "first_only": 0, "second_only": 0, "neither": 0}
+    for f in common:
+        x, y = a[f] >= t1, b[f] >= t2
+        matrix["both" if x and y else "first_only" if x else "second_only" if y else "neither"] += 1
+    xs, ys = [a[f] for f in common], [b[f] for f in common]
+    n = len(common)
+    return {"first_frames": len(a), "second_frames": len(b), "matched": n,
+            "thresholds": {"first": t1, "second": t2}, "matrix": matrix,
+            "disagreement_share": (matrix["first_only"] + matrix["second_only"]) / n if n
+            else None,
+            "pearson": pearson(xs, ys), "spearman": spearman(xs, ys)}
+
+
+def render_compare(cmp):
+    th = cmp["thresholds"]
+    m = cmp["matrix"]
+    share = cmp["disagreement_share"]
+    return "\n".join([
+        f"Shadow 1 vs shadow 2 on the same frames (matched by frame fingerprint): "
+        f"{cmp['matched']} of {cmp['first_frames']} / {cmp['second_frames']}",
+        f"  Agreement at first >= {th['first']} and second >= {th['second']}",
+        f"  both: {m['both']}, only first: {m['first_only']}, only second: {m['second_only']}, "
+        f"neither: {m['neither']}",
+        "  Disagreement share: " + ("-" if share is None else f"{share:.1%}"),
+        f"  Score correlation: Pearson {_fmt(cmp['pearson'])}, "
+        f"Spearman {_fmt(cmp['spearman'])}"])
+
+
 def _sha256(path):
     digest = hashlib.sha256()
     with open(path, "rb") as f:
@@ -405,24 +450,43 @@ def render(rep, lang="en"):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("log", help="shadow JSONL log")
+    ap.add_argument("log2", nargs="?", help="log of a second shadow (TAPO_SCORER_SHADOW2_LOG); "
+                    "reported separately and compared with the first on matching frames")
     ap.add_argument("--since", help="ISO time; earlier records are ignored (naive = UTC)")
     ap.add_argument("--lang", choices=sorted(TEXT), default="en")
     ap.add_argument("--shadow-threshold", type=float, default=0.45)
+    ap.add_argument("--shadow2-threshold", type=float,
+                    help="threshold of the second shadow (default: --shadow-threshold)")
     ap.add_argument("--labels", help="labels.jsonl from `tapo-monitor label`")
     ap.add_argument("--disagree-dir", help="saved disagreement frames (p<primary>_s<shadow>.jpg)")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     args = ap.parse_args(argv)
     try:
         since = parse_since(args.since) if args.since else None
-        rep = build_report(load_log(args.log, since), args.shadow_threshold)
+        rows = load_log(args.log, since)
+        rep = build_report(rows, args.shadow_threshold)
         if args.labels:
             items = load_labeled(args.labels, args.disagree_dir)
             rep["labels"] = {"n": len(items), "persons": sum(1 for i in items if i[2]),
                              "rules": evaluate_rules(items)}
+        rep2 = cmp = None
+        if args.log2:
+            t2 = args.shadow2_threshold if args.shadow2_threshold is not None \
+                else args.shadow_threshold
+            rows2 = load_log(args.log2, since)
+            rep2 = build_report(rows2, t2)
+            cmp = compare_shadows(rows, rows2, args.shadow_threshold, t2)
     except (OSError, ValueError) as exc:
         print(f"shadow_report: {exc}", file=sys.stderr)
         return 2
-    print(json.dumps(rep, indent=2) if args.json else render(rep, args.lang))
+    if rep2 is None:
+        print(json.dumps(rep, indent=2) if args.json else render(rep, args.lang))
+    elif args.json:
+        print(json.dumps({"first": rep, "second": rep2, "compare": cmp}, indent=2))
+    else:
+        print("\n".join([f"=== {args.log} ===", render(rep, args.lang), "",
+                          f"=== {args.log2} ===", render(rep2, args.lang), "",
+                          render_compare(cmp)]))
     return 0
 
 

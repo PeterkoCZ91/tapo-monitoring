@@ -323,3 +323,129 @@ def test_repeated_failures_log_once_a_minute(stack, caplog):
             _post(base)
         assert _wait(lambda: len(_lines(log)) == 4)
     assert len([r for r in caplog.records if "shadow" in r.getMessage()]) == 1
+
+
+# --- optional second shadow target (TAPO_SCORER_SHADOW2_*) -------------------------------
+
+OLD_KEYS = {"ts", "source_id", "primary_person", "primary_vehicle", "shadow_person",
+            "primary_seconds", "shadow_seconds", "error", "frame"}
+
+
+def _two(tmp_path, sh1, sh2, name="yolox960", **kw2):
+    cfg1 = scorer_service.ShadowConfig(url=sh1.url, log_path=str(tmp_path / "s1.jsonl"))
+    cfg2 = scorer_service.ShadowConfig(
+        url=(sh2.url if sh2 else "http://127.0.0.1:9/score"),
+        log_path=str(tmp_path / "s2.jsonl"), name=name, **kw2)
+    srv = scorer_service.make_server(lambda body, tiles=1: {"person": 0.9, "vehicle": 0.2},
+                                     port=0, shadow=cfg1, shadow2=cfg2)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}", cfg1.log_path, cfg2.log_path
+
+
+def _stop(srv, *shadows):
+    for runner in (srv.shadow, srv.shadow2):
+        if runner is not None:
+            runner.close()      # end the worker threads: later tests count live threads
+    srv.shutdown()
+    srv.server_close()
+    for s in shadows:
+        if s:
+            s.close()
+
+
+def test_first_shadow_rows_unchanged_without_shadow2(stack):
+    sh = Shadow(person=0.3)
+    base, log, _, _ = stack(sh)
+    _post(base)
+    assert _wait(lambda: _lines(log))
+    assert set(_lines(log)[0]) == OLD_KEYS     # no shadow_name
+    assert "shadow2" not in _metrics(base)
+
+
+def test_second_shadow_logs_separately_with_name(tmp_path):
+    sh1, sh2 = Shadow(person=0.3), Shadow(person=0.7)
+    srv, base, log1, log2 = _two(tmp_path, sh1, sh2)
+    try:
+        _post(base, body=b"frame-x")
+        assert _wait(lambda: _lines(log1) and _lines(log2))
+        r1, r2 = _lines(log1)[0], _lines(log2)[0]
+        assert set(r1) == OLD_KEYS                      # first shadow: format unchanged
+        assert set(r2) == OLD_KEYS | {"shadow_name"}
+        assert r2["shadow_name"] == "yolox960" and r2["shadow_person"] == 0.7
+        assert r1["shadow_person"] == 0.3 and r1["frame"] == r2["frame"]
+        assert sh2.received == [b"frame-x"]
+        assert _wait(lambda: _metrics(base)["shadow2"]["sent"] == 1)
+        m = _metrics(base)
+        assert set(m["shadow2"]) == {"sent", "failed", "dropped", "disagree"}
+        assert m["shadow"]["sent"] == 1
+    finally:
+        _stop(srv, sh1, sh2)
+
+
+def test_reply_unchanged_by_second_shadow(tmp_path):
+    sh1, sh2 = Shadow(), Shadow()
+    srv, base, _, _ = _two(tmp_path, sh1, sh2)
+    try:
+        assert json.loads(_post(base)[1]) == {"person": 0.9, "vehicle": 0.2}
+    finally:
+        _stop(srv, sh1, sh2)
+
+
+def test_dead_second_shadow_does_not_affect_first_or_reply(tmp_path):
+    sh1 = Shadow(person=0.3)
+    srv, base, log1, log2 = _two(tmp_path, sh1, None)
+    try:
+        assert _post(base)[0] == 200
+        assert _wait(lambda: _lines(log1) and _lines(log2))
+        assert _lines(log1)[0]["error"] is None
+        assert _lines(log2)[0]["error"] and _lines(log2)[0]["shadow_person"] is None
+        assert _wait(lambda: _metrics(base)["shadow2"]["failed"] == 1)
+        assert _metrics(base)["shadow"]["failed"] == 0 and _metrics(base)["failed"] == 0
+    finally:
+        _stop(srv, sh1)
+
+
+def test_slow_second_shadow_blocks_neither_reply_nor_first_shadow(tmp_path):
+    sh1, sh2 = Shadow(person=0.3), Shadow(person=0.7, delay=1.5)
+    srv, base, log1, log2 = _two(tmp_path, sh1, sh2, timeout=3)
+    try:
+        for _ in range(3):
+            status, _, took = _post(base)
+            assert status == 200 and took < 1.0
+        assert _wait(lambda: len(_lines(log1)) == 3, timeout=2.0)
+        assert len(_lines(log2)) < 3
+    finally:
+        _stop(srv, sh1, sh2)
+
+
+def test_full_queue_of_second_shadow_drops_only_there(tmp_path):
+    sh1, sh2 = Shadow(person=0.3), Shadow(person=0.7, delay=0.5)
+    srv, base, log1, _ = _two(tmp_path, sh1, sh2, queue_size=2, timeout=2)
+    try:
+        for _ in range(8):
+            assert _post(base)[0] == 200
+        assert _wait(lambda: len(_lines(log1)) == 8)
+        m = _metrics(base)
+        assert m["shadow2"]["dropped"] >= 4 and m["shadow"]["dropped"] == 0
+    finally:
+        _stop(srv, sh1, sh2)
+
+
+def test_load_shadow2_env(tmp_path):
+    assert scorer_service.load_shadow2({}) is None
+    assert scorer_service.load_shadow2({"TAPO_SCORER_SHADOW2_URL": "http://x/score"}) is None
+    assert scorer_service.load_shadow2({"TAPO_SCORER_SHADOW2_LOG": "l"}) is None
+    # the first shadow's variables never switch the second one on
+    assert scorer_service.load_shadow2({"TAPO_SCORER_SHADOW_URL": "http://x/score",
+                                        "TAPO_SCORER_SHADOW_LOG": "l"}) is None
+    tok = tmp_path / "t"
+    tok.write_text("abc\n")
+    tok.chmod(0o600)
+    env = {"TAPO_SCORER_SHADOW2_URL": "http://x/score",
+           "TAPO_SCORER_SHADOW2_LOG": str(tmp_path / "l2.jsonl"),
+           "TAPO_SCORER_SHADOW2_TOKEN_FILE": str(tok),
+           "TAPO_SCORER_SHADOW2_QUEUE": "4"}
+    cfg = scorer_service.load_shadow2(env)
+    assert cfg.name == "shadow2" and cfg.token == "abc" and cfg.queue_size == 4
+    assert scorer_service.load_shadow2({**env, "TAPO_SCORER_SHADOW2_NAME": "yolox960"}
+                                       ).name == "yolox960"

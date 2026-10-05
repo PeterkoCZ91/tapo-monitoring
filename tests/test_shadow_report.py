@@ -192,3 +192,30 @@ def test_malformed_box_fields_are_ignored():
     rep = sr.build_report([r], 0.45)
     assert rep["rows_with_boxes"] == {"primary": 1, "shadow": 0}
     assert rep["box_overlap"]["no_boxes"] == 1
+
+
+def test_two_logs_are_reported_separately_and_compared(tmp_path, capsys):
+    def frow(frame, s, **kw):
+        return {**row("2026-01-01T10:00:00Z", "cam-a", 0.9, s, **kw), "frame": frame}
+
+    first = tmp_path / "s1.jsonl"
+    second = tmp_path / "s2.jsonl"
+    first.write_text("\n".join(json.dumps(r) for r in [
+        frow("f1", 0.8), frow("f2", 0.1), frow("f3", 0.7), frow("f4", 0.6)]) + "\n")
+    second.write_text("\n".join(json.dumps({**r, "shadow_name": "b"}) for r in [
+        frow("f1", 0.9), frow("f2", 0.6), frow("f3", 0.2), frow("f9", 0.5)]) + "\n")
+    assert sr.main([str(first), str(second), "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["first"]["records"] == 4 and out["second"]["records"] == 4
+    cmp = out["compare"]
+    assert cmp["matched"] == 3
+    assert cmp["matrix"] == {"both": 1, "first_only": 1, "second_only": 1, "neither": 0}
+    assert sr.main([str(first), str(second)]) == 0
+    assert "Shadow 1 vs shadow 2" in capsys.readouterr().out
+
+
+def test_single_log_output_keeps_its_shape(tmp_path, capsys):
+    path = write_log(tmp_path)
+    assert sr.main([str(path), "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "first" not in out and out["records"] == 6

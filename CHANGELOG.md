@@ -5,6 +5,12 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Optional second shadow target in the scorer service (`TAPO_SCORER_SHADOW2_URL`, `_LOG`, `_NAME`,
+  `_TOKEN_FILE`/`_TOKEN`, `_QUEUE`, `_TIMEOUT`, `_DISAGREE_DIR`, `_DISAGREE_MAX`) with its own
+  queue, worker and log (same row format plus `shadow_name`) and a `shadow2` block in
+  `/metrics`, so two candidates can be compared at once. Off by default; the first shadow, the
+  replies and the `/metrics` keys are unchanged. `tools/shadow_report.py` accepts a second log,
+  reports both and compares them on matching frames.
 - Cameras reading `snapshot_source: recording` can tune the follow-up timing with
   `recording_early_span` (first look, default 24 s, 6-60) and `recording_ready_margin`
   (default 15 s, 5-60); the defaults equal the previous fixed values. The `frame selection`

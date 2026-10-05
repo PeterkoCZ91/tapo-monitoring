@@ -882,6 +882,7 @@ class ShadowConfig:
     disagree_max: int = SHADOW_DISAGREE_MAX
     timeout: float = SHADOW_TIMEOUT
     queue_size: int = SHADOW_QUEUE_SIZE
+    name: str | None = None   # set only for the second shadow; written to its log rows
 
 
 def load_shadow(env=None):
@@ -904,6 +905,36 @@ def load_shadow(env=None):
         timeout=_env_setting(env, "TAPO_SCORER_SHADOW_TIMEOUT", float, SHADOW_TIMEOUT),
         queue_size=max(1, _env_setting(env, "TAPO_SCORER_SHADOW_QUEUE", int,
                                        SHADOW_QUEUE_SIZE)),
+    )
+
+
+SHADOW2_NAME = "shadow2"
+
+
+def load_shadow2(env=None):
+    """Optional second, independent shadow target from ``TAPO_SCORER_SHADOW2_*``.
+
+    Same variables as the first shadow (``URL``, ``LOG``, ``TOKEN_FILE``/``TOKEN``,
+    ``DISAGREE_DIR``, ``DISAGREE_MAX``, ``QUEUE``, ``TIMEOUT``) plus ``NAME`` (default
+    ``shadow2``), which is written to every log row as ``shadow_name``. ``None`` (off) unless
+    both ``..._URL`` and ``..._LOG`` are set; it never takes part in the ensemble.
+    """
+    env = os.environ if env is None else env
+    url = (env.get("TAPO_SCORER_SHADOW2_URL") or "").strip()
+    log_path = (env.get("TAPO_SCORER_SHADOW2_LOG") or "").strip()
+    if not url or not log_path:
+        return None
+    return ShadowConfig(
+        url=url,
+        log_path=log_path,
+        token=_load_secret(env, "TAPO_SCORER_SHADOW2_TOKEN_FILE", "TAPO_SCORER_SHADOW2_TOKEN"),
+        disagree_dir=(env.get("TAPO_SCORER_SHADOW2_DISAGREE_DIR") or "").strip() or None,
+        disagree_max=max(1, _env_setting(env, "TAPO_SCORER_SHADOW2_DISAGREE_MAX", int,
+                                         SHADOW_DISAGREE_MAX)),
+        timeout=_env_setting(env, "TAPO_SCORER_SHADOW2_TIMEOUT", float, SHADOW_TIMEOUT),
+        queue_size=max(1, _env_setting(env, "TAPO_SCORER_SHADOW2_QUEUE", int,
+                                       SHADOW_QUEUE_SIZE)),
+        name=(env.get("TAPO_SCORER_SHADOW2_NAME") or "").strip() or SHADOW2_NAME,
     )
 
 
@@ -1181,7 +1212,7 @@ class ShadowRunner:
         self.counts = {"sent": 0, "failed": 0, "dropped": 0, "disagree": 0}
         self._last_warn = None
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, name="scorer-shadow", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="scorer-" + (config.name or "shadow"), daemon=True)
         self._thread.start()
 
     def snapshot(self):
@@ -1245,7 +1276,7 @@ class ShadowRunner:
         now = time.monotonic()
         if self._last_warn is None or now - self._last_warn >= SHADOW_WARN_SECONDS:
             self._last_warn = now
-            log.warning("shadow scoring failed: %s", error)
+            log.warning("%s scoring failed: %s", self.config.name or "shadow", error)
 
     def _write_log(self, source_id, primary_person, primary_vehicle, shadow_person,
                    primary_seconds, shadow_seconds, error, primary_boxes=None,
@@ -1264,6 +1295,8 @@ class ShadowRunner:
         # readers and logs of older services stay valid.
         if frame is not None:
             row["frame"] = frame
+        if self.config.name:
+            row["shadow_name"] = self.config.name
         if primary_boxes is not None:
             row["primary_boxes"] = primary_boxes
         if shadow_boxes is not None:
@@ -1323,7 +1356,7 @@ def _authorized(header, token):
 def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=60,
                 metrics_retention_days=7, metrics_retention_files=8,
                 metrics_max_journal_bytes=METRICS_MAX_JOURNAL_BYTES, arch=None, token=None,
-                shadow=None, ensemble=None, artifact_filter=None):
+                shadow=None, ensemble=None, artifact_filter=None, shadow2=None):
     """HTTP server: POST /score (JPEG body) -> JSON scores; GET /health -> ok.
 
     ``arch`` (the detector family name, never the model path) is reported by /health and
@@ -1336,6 +1369,11 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
     With a ``shadow`` (``ShadowConfig``) every scored frame is also handed, after the reply
     has been written, to a bounded background queue that sends it to a second scorer
     service and logs both scores; the reply itself is never delayed or changed.
+
+    With ``shadow2`` (``ShadowConfig`` with a ``name``) a second, fully independent shadow
+    target gets its own queue, worker thread, log and ``/metrics`` block (``shadow2``); it
+    never takes part in the ensemble and a slow or dead target cannot delay the first shadow
+    or any reply.
 
     With an ``ensemble`` (``EnsembleConfig``, needs the ``shadow`` for the second service's
     URL and token) the second service is instead called in parallel with the primary
@@ -1364,6 +1402,7 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
         artifact_filter = artifact_filter_enabled()
     inference_lock = threading.Lock()
     runner = ShadowRunner(shadow) if shadow is not None else None
+    runner2 = ShadowRunner(shadow2) if shadow2 is not None else None
     if ensemble is not None and shadow is None:
         raise EnsembleConfigError("ensemble mode needs a shadow service")
     gate = EnsembleGate(ensemble, shadow) if ensemble is not None else None
@@ -1399,6 +1438,8 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
                     snap = metrics.snapshot()
                     if runner is not None:
                         snap["shadow"] = runner.snapshot()
+                    if runner2 is not None:
+                        snap["shadow2"] = runner2.snapshot()
                     if gate is not None:
                         snap["ensemble"] = gate.snapshot()
                     self._reply(200, snap)
@@ -1458,6 +1499,9 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
                 if runner is not None and ok and not artifact and isinstance(result, dict):
                     runner.submit(body, tiles, source_id, result,
                                   time.monotonic() - request_started, outcome)
+                if runner2 is not None and ok and not artifact and isinstance(result, dict):
+                    runner2.submit(body, tiles, source_id, result,
+                                   time.monotonic() - request_started)
 
         def log_message(self, fmt, *args):  # route http.server chatter to logging
             log.debug(fmt, *args)
@@ -1466,6 +1510,7 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
     server.daemon_threads = True
     server.metrics = metrics
     server.shadow = runner
+    server.shadow2 = runner2
     return server
 
 
@@ -1565,6 +1610,7 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
         raise SystemExit(2) from None
     try:
         shadow = load_shadow()
+        shadow2 = load_shadow2()
         ensemble = load_ensemble(os.environ, shadow)
     except (TokenConfigError, EnsembleConfigError) as exc:
         print(f"scorer config error: {exc}", file=sys.stderr)
@@ -1576,6 +1622,7 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
         arch=decoder.name,
         token=token,
         shadow=shadow,
+        shadow2=shadow2,
         ensemble=ensemble,
         port=args.port,
         metrics_file=args.metrics_file,
@@ -1590,6 +1637,9 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
     if shadow is not None:
         log.info("shadow scoring on (disagreement images %s)",
                  "kept" if shadow.disagree_dir else "off")
+    if shadow2 is not None:
+        log.info("second shadow '%s' on (disagreement images %s)", shadow2.name,
+                 "kept" if shadow2.disagree_dir else "off")
     if ensemble is not None:
         log.info("ensemble %s on (low %.2f, trust %.2f, host %.2f, band %.2f, timeout %.1fs)",
                  ensemble.mode, ensemble.low, ensemble.trust, ensemble.host, ensemble.band,
@@ -1606,6 +1656,8 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
         server.metrics.flush()
         if server.shadow is not None:
             server.shadow.close()
+        if server.shadow2 is not None:
+            server.shadow2.close()
         server.server_close()
 
 

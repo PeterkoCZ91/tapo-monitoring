@@ -338,6 +338,23 @@ TAPO_SCORER_SHADOW_TIMEOUT=8                                       # seconds per
   0600, oldest deleted beyond the limit). These are the frames to judge by hand.
 - `/metrics` gains `shadow` with `sent`, `failed`, `dropped` and `disagree` counters.
 
+A second, independent candidate can be tested at the same time (opt-in, off unless both
+`URL` and `LOG` are set; the first shadow and its log format are untouched):
+
+```bash
+TAPO_SCORER_SHADOW2_URL=http://CANDIDATE2_HOST:8768/score
+TAPO_SCORER_SHADOW2_LOG=/srv/tapo-scorer/shadow/shadow2.jsonl
+TAPO_SCORER_SHADOW2_NAME=yolox960          # written to every row as shadow_name (default shadow2)
+# optional, same meaning as the first shadow: _TOKEN_FILE / _TOKEN, _QUEUE, _TIMEOUT,
+# _DISAGREE_DIR, _DISAGREE_MAX
+```
+
+It has its own queue and worker thread, so a slow or dead second target drops its own frames
+and never delays a reply or the first shadow. Its log rows have the same fields as above plus
+`shadow_name`; `/metrics` gains `shadow2` (same four counters) only while it is on. It never
+takes part in `TAPO_SCORER_ENSEMBLE`. Both shadows add their own load to the scorer host
+and each candidate.
+
 The shadow doubles the traffic and inference load of the candidate, so keep it on a host
 that can take it, and turn it off (remove the lines, restart) when the comparison is done.
 
@@ -361,6 +378,16 @@ python3 tools/shadow_report.py shadow.jsonl --since 2026-10-01 --shadow-threshol
 python3 tools/shadow_report.py shadow.jsonl --labels ~/dataset/labels.jsonl \
     --disagree-dir /srv/tapo-scorer/shadow/disagree --lang cs --json
 ```
+
+With two shadow logs, pass both; each is reported separately and the two shadows are
+compared on the frames both scored (matched by the `frame` fingerprint):
+
+```bash
+python3 tools/shadow_report.py shadow.jsonl shadow2.jsonl --shadow-threshold 0.45 \
+    --shadow2-threshold 0.35
+```
+
+`--json` then returns `first`, `second` and `compare`; `--labels` applies to the first log.
 
 How to read it:
 
