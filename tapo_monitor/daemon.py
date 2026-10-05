@@ -4519,6 +4519,12 @@ def _fetch_scorer_metrics(url, timeout=5.0, token=None):
         return _json.loads(response.read().decode("utf-8"))
 
 
+def _recorder_rank(status):
+    """Order for the fleet recorder aggregate: a checked ``degraded`` beats a checked ``ok``,
+    and both beat ``unknown`` (not checked). Any other status counts as degraded."""
+    return {"ok": 2, "unknown": 0}.get(status, 3)
+
+
 def fleet_health_snapshot(app: AppConfig, state: MonitorState, *, now,
                           fetch_metrics=None, env=None):
     """Assemble the fleet snapshot the daily digest renders. Never raises.
@@ -4613,7 +4619,11 @@ def fleet_health_snapshot(app: AppConfig, state: MonitorState, *, now,
         candidate = {"status": entry.get("status", "unknown"),
                      "age_s": None if age is None else float(age)}
         # Worst camera wins: one silent recorder is the whole story, not an average.
-        if recorder is None or candidate["status"] != "ok":
+        # Severity is degraded > unknown > ok, except that "unknown" (no recording root,
+        # no directory for that camera) is the absence of a check, so it never overrides a
+        # camera that was actually checked; it survives only when nothing was.
+        if recorder is None or _recorder_rank(candidate["status"]) > _recorder_rank(
+                recorder["status"]):
             recorder = candidate
 
     try:

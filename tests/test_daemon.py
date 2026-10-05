@@ -7387,6 +7387,31 @@ def test_fleet_snapshot_carries_current_control_health_and_missing_verification(
     assert snap['repairs'] == {'person_detection': 1}
 
 
+@pytest.mark.parametrize("statuses, expected", [
+    (("ok", "unknown"), "ok"),
+    (("unknown", "ok"), "ok"),
+    (("degraded", "unknown"), "degraded"),
+    (("unknown", "degraded"), "degraded"),
+    (("ok", "degraded", "unknown"), "degraded"),
+    (("unknown", "unknown"), "unknown"),
+    (("ok", "ok"), "ok"),
+])
+def test_fleet_snapshot_recorder_severity(statuses, expected):
+    from tapo_monitor import reviewdigest
+    app = cfg.load_config_from_dict({'cameras': [{'name': 'a', 'host': '203.0.113.10'}]})
+    state = daemon.MonitorState()
+    state.recorder_health = {
+        f"c{i}": {"status": status, "latest_age_s": 5.0 if status != "unknown" else None}
+        for i, status in enumerate(statuses)}
+    snap = daemon.fleet_health_snapshot(app, state, now=1000)
+    assert snap["recorder"]["status"] == expected
+    assert set(snap["recorder"]) == {"status", "age_s"}
+    if expected == "unknown":
+        assert snap["recorder"]["age_s"] is None
+    problems = "\n".join(reviewdigest.fleet_lines(snap))
+    assert ("recorder unknown" in problems) == (expected == "unknown")
+
+
 def test_loop_step_schedules_retention_on_an_event_free_tick():
     from types import SimpleNamespace
     app = _app({'name': 'a'})

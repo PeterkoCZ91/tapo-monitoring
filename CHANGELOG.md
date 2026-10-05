@@ -5,6 +5,9 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- The fleet snapshot's `recorder` aggregate ranks `degraded` above `ok` above `unknown`: a
+  camera with no recording directory (or no recording root) no longer masks a checked camera,
+  so the digest stops reporting "recorder unknown" for an ok + unknown fleet.
 - The scorer's `scoring failed: inference_error` warning now names the exception class and
   the normalized source id (no traceback, no frame content); metrics and the 500 reply are
   unchanged.
