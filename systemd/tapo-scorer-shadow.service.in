@@ -1,0 +1,24 @@
+[Unit]
+Description=tapo-monitor shadow scoring service @SHADOW_NAME@
+After=network-online.target
+Wants=network-online.target
+# A shadow scorer is optional: if it keeps crashing, give up after 5 starts in 5 minutes
+# and stay down. Hosts only ever read its answer for comparison, never to decide an alert.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=@SHADOW_USER@
+# Rendered by tools/provision_shadow_scorer.sh, not copied: systemd expands ${VAR} in an
+# ExecStart argument but never in the executable, so interpreter and working directory
+# have to be literal text. The detector settings below are literal too, so one host can
+# run several shadow scorers side by side without sharing an EnvironmentFile.
+WorkingDirectory=@SHADOW_SOURCE_DIR@
+@SHADOW_ENVIRONMENT@
+ExecStart=@SHADOW_PYTHON@ -m tapo_monitor.scorer_service --model @SHADOW_MODEL@ --port @SHADOW_PORT@ --input-size @SHADOW_INPUT_SIZE@
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

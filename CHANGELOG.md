@@ -11,6 +11,11 @@ All notable changes to this project are documented here.
   `/metrics`, so two candidates can be compared at once. Off by default; the first shadow, the
   replies and the `/metrics` keys are unchanged. `tools/shadow_report.py` accepts a second log,
   reports both and compares them on matching frames.
+- `tools/provision_shadow_scorer.sh` builds or updates a shadow scorer service
+  (`tapo-scorer-shadow-NAME.service`, rendered from `systemd/tapo-scorer-shadow.service.in`)
+  with one command: validated arguments, detector settings as `Environment=` lines, optional
+  `--token-file` (path only), idempotent `--dry-run` that reports `changed=0`, and a success
+  check on the HTTP status of `/health`. See "Provision a shadow scorer" in `docs/operations.md`.
 - Cameras reading `snapshot_source: recording` can tune the follow-up timing with
   `recording_early_span` (first look, default 24 s, 6-60) and `recording_ready_margin`
   (default 15 s, 5-60); the defaults equal the previous fixed values. The `frame selection`

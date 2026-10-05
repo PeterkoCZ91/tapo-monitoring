@@ -474,6 +474,55 @@ How it works and how to read it:
   `lowrest` resembles it and that labels are right. Label a random draw, not the frames the
   labeling queue finds most interesting, or the estimate is biased.
 
+### Provision a shadow scorer
+
+The shadow target above is an ordinary `tapo_monitor.scorer_service` on another port or
+machine, typically an LXC container. `tools/provision_shadow_scorer.sh` builds it from a
+checkout in one command and is safe to re-run. It needs a Python environment with
+`".[scorer]"` installed (numpy, onnxruntime) and the ONNX weights on disk; it fetches neither.
+The unit `tapo-scorer-shadow-NAME.service` is rendered from
+`systemd/tapo-scorer-shadow.service.in` (the same renderer approach as the primary unit), and
+the detector settings (`TAPO_SCORER_ARCH`, `TAPO_SCORER_INPUT_SIZE`, `TAPO_SCORER_DETR_*`)
+are written as `Environment=` lines in it, so several shadow scorers can share one machine.
+
+```bash
+# RF-DETR (NMS-free DETR head, sigmoid scores)
+sudo tools/provision_shadow_scorer.sh --name rfdetr --model /srv/models/rfdetr.onnx \
+    --port 8767 --arch detr --detr-activation sigmoid --user tapo \
+    --python /srv/tapo-monitor/.venv/bin/python --token-file /etc/tapo-monitor/shadow.token
+
+# YOLOX-m at a larger input, to see whether resolution recovers small or distant people
+sudo tools/provision_shadow_scorer.sh --name yolox960 --model /srv/models/yolox_m.onnx \
+    --port 8768 --arch yolox --input-size 960 --user tapo \
+    --python /srv/tapo-monitor/.venv/bin/python
+
+# any run: add --dry-run first. It prints the diff, or "changed=0" when nothing differs.
+```
+
+What it does: validates the arguments (name `[a-z0-9-]`, port 1-65535, model exists, token
+file mode 0600 and owned by the service user; the token itself is never read, printed or put
+on a command line, only its path goes into the unit), installs the unit only when it differs,
+runs `daemon-reload`, `enable` and `restart` after a change, then polls
+`http://127.0.0.1:PORT/health` for up to 90 s and succeeds only on HTTP status 200. On
+failure it exits non-zero and prints the last 30 journal lines of the unit.
+`--print-unit` renders the unit to stdout without root. Point the primary scorer at the new
+service with `TAPO_SCORER_SHADOW_URL` as described above.
+
+Limits to know before you start:
+
+- The shadow runs on the CPU of the container. RF-DETR and YOLOX at 960 are several times
+  slower than the production YOLOX-m at 640; check `/metrics` (`score_seconds_p95`) on the
+  candidate. The primary queues frames (`TAPO_SCORER_SHADOW_QUEUE`) and drops what the
+  shadow cannot keep up with, so a slow candidate shows up as a rising `dropped` counter, not
+  as a slower primary.
+- Give the container its own cores and memory; `onnxruntime` takes every core it sees by
+  default and would otherwise compete with whatever else runs there.
+- A shadow never changes the answer to a monitor host. Hosts talk only to the primary scorer;
+  the candidate's reply is read by the primary for the log (and, only with
+  `TAPO_SCORER_ENSEMBLE` set explicitly, for the combined score).
+- Thresholds are not transferable between models: score the log against labels before trusting
+  a candidate (see the evaluation steps below).
+
 ### Ensemble mode: one combined score (optional)
 
 When the shadow log and the labeled disagreements show that a rule combining the two models
