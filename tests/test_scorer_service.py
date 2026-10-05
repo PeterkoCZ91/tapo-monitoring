@@ -117,6 +117,29 @@ def test_score_fn_error_500():
         srv.shutdown()
 
 
+def test_score_failure_log_names_the_exception_class_and_source(caplog):
+    def boom(_body, tiles=1):
+        raise ValueError("/secret/path/model.onnx bad image")
+    srv = scorer_service.make_server(boom, port=0)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    source = "ab" * 8
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{srv.server_address[1]}/score", data=b"frame-bytes",
+            headers={"X-Tapo-Source-ID": source})
+        with caplog.at_level(logging.WARNING, logger=scorer_service.log.name):
+            with pytest.raises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(req, timeout=5)
+        assert e.value.code == 500
+    finally:
+        srv.shutdown()
+    text = caplog.text
+    assert "scoring failed: inference_error (ValueError, source=" + source + ")" in text
+    assert "/secret/path" not in text and "Traceback" not in text
+    assert "frame-bytes" not in text
+
+
 def test_metrics_mark_malformed_score_result():
     srv = scorer_service.make_server(lambda _body, tiles=1: [tiles], port=0)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)

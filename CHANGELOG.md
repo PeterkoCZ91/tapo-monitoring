@@ -5,6 +5,9 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- The scorer's `scoring failed: inference_error` warning now names the exception class and
+  the normalized source id (no traceback, no frame content); metrics and the 500 reply are
+  unchanged.
 - Shadow log rows gain `primary_boxes` and `shadow_boxes` (person boxes as normalized
   `[x1, y1, x2, y2, score]`, best first, at most 10, 3 decimals; left out when a reply carries
   none), so a frame-level label can be traced to the object a detector hit. The host reply and

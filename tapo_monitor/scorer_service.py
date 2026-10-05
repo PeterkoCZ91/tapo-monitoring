@@ -1432,9 +1432,12 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
                     with inference_lock:
                         result = score_fn(body, tiles)
                 ok = True
-            except Exception:  # noqa: BLE001 - report, don't kill the server
+            except Exception as exc:  # noqa: BLE001 - report, don't kill the server
                 failure_reason = "inference_error"
-                log.warning("scoring failed: inference_error")
+                # Class name and normalized source only: no traceback (paths) and nothing
+                # from the frame or the raw header value.
+                log.warning("scoring failed: inference_error (%s, source=%s)",
+                            type(exc).__name__, source_id or "-")
                 self._reply(500, {"error": "scoring failed"})
             else:
                 reply = result
