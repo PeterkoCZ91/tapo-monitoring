@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `tools/label_selection.py` builds a labeling dataset (images, `index.jsonl` with optional
+  per-model `boxes`, `teacher.jsonl`, selection report) from two shadow logs and their
+  `disagree/` directories: three-model disagreement, small persons and random controls,
+  capped per source, skipping frames already labeled; `--dry-run` reports only. See
+  "Build a labeling set from two shadow targets" in `docs/operations.md`.
+  `--image-dir` (repeatable) takes images for frames missing from `disagree/` from dataset
+  directories such as `sent-log`/`review-log`, so small persons and controls get pictures; the
+  report counts selected frames per image source type and log rows dropped for lacking `frame`.
 - Optional second shadow target in the scorer service (`TAPO_SCORER_SHADOW2_URL`, `_LOG`, `_NAME`,
   `_TOKEN_FILE`/`_TOKEN`, `_QUEUE`, `_TIMEOUT`, `_DISAGREE_DIR`, `_DISAGREE_MAX`) with its own
   queue, worker and log (same row format plus `shadow_name`) and a `shadow2` block in

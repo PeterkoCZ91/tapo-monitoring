@@ -474,6 +474,34 @@ How it works and how to read it:
   `lowrest` resembles it and that labels are right. Label a random draw, not the frames the
   labeling queue finds most interesting, or the estimate is biased.
 
+### Build a labeling set from two shadow targets
+
+`tools/label_selection.py` joins `shadow.jsonl` and `shadow2.jsonl` on `frame`, keeps frames
+whose image is still in a `disagree/` directory, skips frames already in `labels.jsonl`
+(matched by image SHA-256) and writes a dataset for `tapo-monitor label`:
+
+```bash
+python3 tools/label_selection.py --shadow-log shadow.jsonl --shadow2-log shadow2.jsonl \
+    --disagree-dir shadow/disagree --disagree-dir shadow2/disagree \
+    --labels ~/tapo-dataset/labels.jsonl --out ./selection --limit 600 --dry-run
+```
+
+Drop `--dry-run` to write `OUT/disagree1/*.jpg` (`--batch N` names it `disagreeN`),
+`OUT/index.jsonl` (`file`, `ts` in UTC epoch seconds from the file name, `person` = production
+score, optional `boxes` as `[x1, y1, x2, y2, score, model]` with model `yolox640`, `rfdetr` or
+`yolox960`; change with `--models`), `OUT/teacher.jsonl` (the score farthest from production,
+for ordering by disagreement) and `OUT/selection-report.md`. Categories, in priority order:
+`strong` (one model >= 0.45, another < 0.25), `threshold` (split at 0.45), `small` (best box
+shorter than 0.10 of the frame), and random controls `control_person` / `control_empty`
+(`--control` each). `--limit` caps the total and `--source-share` the share of one source.
+`--image-dir DIR` (repeatable, e.g. the `sent-log` and `review-log` of a dataset) searches
+DIR recursively for JPEGs, hashes them the same way and supplies images for frames missing
+from `disagree/`, which is what gives `small` and the controls any images; `ts` comes from
+the neighbouring `index.jsonl`. The same image in several places counts once, `disagree/`
+wins. Log rows without `frame` (written only since the field was added) cannot be paired and
+are counted as dropped in the report, which also lists selected frames by image source type.
+Sources appear only as short hashes. Output holds camera images: keep it private.
+
 ### Provision a shadow scorer
 
 The shadow target above is an ordinary `tapo_monitor.scorer_service` on another port or
