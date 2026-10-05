@@ -329,7 +329,9 @@ TAPO_SCORER_SHADOW_TIMEOUT=8                                       # seconds per
   `primary_vehicle`, `shadow_person`, `primary_seconds`, `shadow_seconds` and `error`
   (`null`, `timeout`, `connection`, `http_<code>`, `bad_response`), plus `primary_boxes` and
   `shadow_boxes` when the reply carried person boxes (normalized `[x1, y1, x2, y2, score]`,
-  best first, at most 10, 3 decimals). The URL and token are
+  best first, at most 10, 3 decimals) and `frame` (first 16 hex characters of the SHA-256 of
+  the frame body, to match a row to a saved frame; only written when the log is on, absent in
+  older logs, which `tools/shadow_report.py` still reads). The URL and token are
   never written; repeated failures log one warning a minute. Images are not in the log.
 - With `DISAGREE_DIR`, a frame is also saved when one model scores a person at 0.45 or more
   and the other below 0.25, as `<UTC time>_p<primary>_s<shadow>.jpg` (directory 0700, files

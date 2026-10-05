@@ -152,6 +152,34 @@ def test_log_line_without_boxes_in_replies_has_no_box_fields(stack):
     assert "primary_boxes" not in row and "shadow_boxes" not in row
 
 
+def test_log_line_carries_a_short_frame_fingerprint(stack):
+    import hashlib
+    sh = Shadow(person=0.33)
+    base, log, _, _ = stack(sh)
+    _post(base, body=b"frame-one")
+    _post(base, body=b"frame-one")
+    _post(base, body=b"frame-two")
+    assert _wait(lambda: len(_lines(log)) == 3)
+    frames = [r["frame"] for r in _lines(log)]
+    assert frames[0] == hashlib.sha256(b"frame-one").hexdigest()[:16]
+    assert frames[0] == frames[1] != frames[2]
+    assert "frame-one" not in open(log).read()
+
+
+def test_no_frame_hash_without_a_shadow_log(monkeypatch):
+    seen = []
+    monkeypatch.setattr(scorer_service.hashlib, "sha256",
+                        lambda *a, **k: seen.append(1) or None)
+    runner = scorer_service.ShadowRunner(scorer_service.ShadowConfig(
+        url="http://127.0.0.1:9/score", token=DUMMY_SHADOW_TOKEN, log_path=None))
+    try:
+        runner._process(b"x", 1, SOURCE, {"person": 0.1}, 0.01,
+                        outcome=(None, "timeout", 0.0, None))
+    finally:
+        runner.close()
+    assert seen == []
+
+
 def test_log_boxes_helper():
     f = scorer_service._log_boxes
     assert f(None) is None and f({"person": 0.5}) is None

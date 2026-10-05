@@ -148,6 +148,12 @@ def _boxed(ts, src, p, s, pboxes=None, sboxes=None):
 SWING = [0.52, 0.10, 0.60, 0.30, 0.8]
 
 
+def test_rows_with_and_without_frame_field_are_both_read():
+    new = [dict(r, frame="0123456789abcdef") for r in ROWS]
+    assert sr.build_report(new + ROWS, 0.45)["records"] == 2 * len(ROWS)
+    assert sr.build_report(new, 0.45)["matrix"] == sr.build_report(ROWS, 0.45)["matrix"]
+
+
 def test_old_format_rows_have_no_clusters_and_count_as_no_boxes():
     rep = sr.build_report(ROWS, 0.45)
     assert rep["rows_with_boxes"] == {"primary": 0, "shadow": 0}

@@ -5,6 +5,9 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Shadow log rows gain `frame`, the first 16 hex characters of the SHA-256 of the frame body,
+  so a row can be matched to a saved frame. Only written when the shadow log is enabled; older
+  logs stay readable by `tools/shadow_report.py`.
 - The fleet snapshot's `recorder` aggregate ranks `degraded` above `ok` above `unknown`: a
   camera with no recording directory (or no recording root) no longer masks a checked camera,
   so the digest stops reporting "recorder unknown" for an ok + unknown fleet.

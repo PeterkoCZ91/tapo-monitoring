@@ -15,6 +15,7 @@ yes/no decision and is skipped entirely.
 
 import argparse
 import calendar
+import hashlib
 import hmac
 import json
 import logging
@@ -1228,9 +1229,11 @@ class ShadowRunner:
         if error and not reused:
             self._warn(error)
         primary_person = _score_or_none(result, "person")
+        # Frame fingerprint only when a log is written at all (no hashing otherwise).
+        frame = hashlib.sha256(body).hexdigest()[:16] if self.config.log_path else None
         self._write_log(source_id, primary_person, _score_or_none(result, "vehicle"),
                         shadow_person, primary_seconds, shadow_seconds, error,
-                        _log_boxes(result), _log_boxes(payload))
+                        _log_boxes(result), _log_boxes(payload), frame)
         if (shadow_person is not None and primary_person is not None
                 and self.config.disagree_dir
                 and ((primary_person >= SHADOW_HIGH and shadow_person < SHADOW_LOW)
@@ -1246,7 +1249,7 @@ class ShadowRunner:
 
     def _write_log(self, source_id, primary_person, primary_vehicle, shadow_person,
                    primary_seconds, shadow_seconds, error, primary_boxes=None,
-                   shadow_boxes=None):
+                   shadow_boxes=None, frame=None):
         row = {
             "ts": time.strftime(JOURNAL_STAMP, time.gmtime()),
             "source_id": source_id,
@@ -1259,6 +1262,8 @@ class ShadowRunner:
         }
         # Person boxes (normalized, see _log_boxes) only when the reply carried them, so old
         # readers and logs of older services stay valid.
+        if frame is not None:
+            row["frame"] = frame
         if primary_boxes is not None:
             row["primary_boxes"] = primary_boxes
         if shadow_boxes is not None:
