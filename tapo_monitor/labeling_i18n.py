@@ -45,7 +45,8 @@ STRINGS: dict[str, dict[str, str]] = {
         # box labeling
         "box_help": ("boxes: click a box = cycle person / no person / unmarked; drag = draw "
                      "a missed person; Tab next box, p person, n no person, x clear/delete, "
-                     "Enter = save with the label the boxes suggest"),
+                     "Enter = save with the label the boxes suggest; hold h = picture "
+                     "without boxes"),
         "btn_confirm": "save by boxes",
         "box_person": "person",
         "box_no_person": "no person",
@@ -163,7 +164,8 @@ STRINGS: dict[str, dict[str, str]] = {
         # box labeling
         "box_help": ("boxy: klik na box = osoba / není osoba / nezaznamenáno; tažení = "
                      "dokreslit chybějící osobu; Tab další box, p osoba, n není osoba, "
-                     "x smazat/zrušit, Enter = uložit se štítkem, který boxy navrhují"),
+                     "x smazat/zrušit, Enter = uložit se štítkem, který boxy navrhují; "
+                     "podržet h = obraz bez boxů"),
         "btn_confirm": "uložit podle boxů",
         "box_person": "osoba",
         "box_no_person": "není osoba",

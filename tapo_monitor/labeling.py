@@ -1380,6 +1380,7 @@ main{max-width:1100px;margin:0 auto;padding:8px 16px 16px}
 #stage{position:relative}
 #boxes{position:absolute;pointer-events:none;display:none}
 #lay{position:absolute;display:none;cursor:crosshair;touch-action:none}
+body.nobox #boxes,body.nobox #lay{visibility:hidden}
 #boxhelp{display:none;margin:4px 0;color:var(--muted);font-size:13px}
 #buttons button.suggest{outline:3px solid #43a047}
 #confirm{display:none;width:100%;margin-top:8px}
@@ -1486,18 +1487,20 @@ function drawLay() {
   boxes.forEach((b, n) => {
     const hue = b.src === "model" ? modelHue(b.model) : 120;
     const alpha = b.src === "model" ? 0.35 + 0.65 * b.score : 1;
-    const fill = b.state === "person" ? "rgba(67,160,71,.28)"
-      : b.state === "no_person" ? "rgba(229,57,53,.28)" : "none";
-    const x = b.box[0] * dw, y = b.box[1] * dh, w = (b.box[2] - b.box[0]) * dw,
-          h = (b.box[3] - b.box[1]) * dh;
+    const fill = b.state === "person" ? "rgba(67,160,71,.12)"
+      : b.state === "no_person" ? "rgba(229,57,53,.12)" : "none";
+    // Thin lines drawn just outside the box, so a distant person stays visible inside it.
+    const isSel = b === boxes[sel], sw = isSel ? 3 : 1.5, pad = sw / 2 + 1;
+    const x = b.box[0] * dw - pad, y = b.box[1] * dh - pad,
+          w = (b.box[2] - b.box[0]) * dw + 2 * pad, h = (b.box[3] - b.box[1]) * dh + 2 * pad;
     const r = document.createElementNS(SVGNS, "rect");
     r.setAttribute("x", x); r.setAttribute("y", y); r.setAttribute("width", w);
     r.setAttribute("height", h); r.setAttribute("fill", fill);
     r.setAttribute("stroke", "hsl(" + hue + ",85%,50%)"); r.setAttribute("stroke-opacity", alpha);
-    r.setAttribute("stroke-width", b === boxes[sel] ? 5 : 2.5);
+    r.setAttribute("stroke-width", sw);
     if (b.src === "drawing") r.setAttribute("stroke-dasharray", "6 4");
     svg.appendChild(r);
-    if (b.src === "drawing") return;
+    if (b.src === "drawing" || !isSel) return;   // the tag only on the selected box
     const t = document.createElementNS(SVGNS, "text");
     t.setAttribute("x", x + 3); t.setAttribute("y", Math.max(y - 4, 13));
     t.setAttribute("fill", "hsl(" + hue + ",85%,60%)"); t.setAttribute("font-size", 13);
@@ -1584,14 +1587,14 @@ function drawBoxes() {
   svg.style.top = img.offsetTop + (img.clientHeight - dh) / 2 + "px";
   svg.style.width = dw + "px"; svg.style.height = dh + "px";
   svg.setAttribute("viewBox", "0 0 " + d.w + " " + d.h);
-  const stroke = Math.max(2, d.w / 400 * 1.5), font = Math.max(12, d.w / 50);
+  const stroke = Math.max(1, d.w / 800), font = Math.max(12, d.w / 50), pad = stroke / 2 + 1;
   d.person_boxes.forEach((b, i) => {
     const sc = d.person_scores[i];
     if (sc < 0.10 || b.length < 4) return;
     const color = sc >= 0.45 ? "#e53935" : "#fbc02d";
     const r = document.createElementNS(SVGNS, "rect");
-    r.setAttribute("x", b[0]); r.setAttribute("y", b[1]);
-    r.setAttribute("width", b[2] - b[0]); r.setAttribute("height", b[3] - b[1]);
+    r.setAttribute("x", b[0] - pad); r.setAttribute("y", b[1] - pad);
+    r.setAttribute("width", b[2] - b[0] + 2 * pad); r.setAttribute("height", b[3] - b[1] + 2 * pad);
     r.setAttribute("fill", "none"); r.setAttribute("stroke", color);
     r.setAttribute("stroke-width", stroke);
     const t = document.createElementNS(SVGNS, "text");
@@ -1636,8 +1639,13 @@ function undo() { call("/api/undo", {}); }
 document.querySelectorAll("[data-label]").forEach(b =>
   b.addEventListener("click", () => label(b.dataset.label)));
 $("skip").onclick = skip; $("undo").onclick = undo; $("undo2").onclick = undo;
+// Hold H to see the picture without any boxes.
+document.addEventListener("keyup", e => {
+  if (e.code === "KeyH") document.body.classList.remove("nobox"); });
+window.addEventListener("blur", () => document.body.classList.remove("nobox"));
 document.addEventListener("keydown", e => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.code === "KeyH") { e.preventDefault(); document.body.classList.add("nobox"); return; }
   // Physical keys (``code``), not typed characters: without Shift the top row of a Czech
   // layout types "+", "ě", "š", so ``e.key`` would never be "1", "2", "3".
   if (current && current.boxes) {

@@ -27,6 +27,8 @@ All notable changes to this project are documented here.
   one). `label-stats` summarizes box labels per model and computes per-model recall of
   hand-drawn persons (incl. small ones) and false boxes, tunable with `--box-score` and
   `--box-iou`. An optional `models` list in the index record (models that ran, even with no box) decides which models count for recall; without it the old rule applies and the report marks recall as possibly overstated. Frames without `boxes` behave as before. Czech texts included.
+  Boxes are thin outlines drawn just outside the object with the tag on the selected box
+  only, so a distant person stays visible; hold `h` to see the picture without any boxes.
 - Optional second shadow target in the scorer service (`TAPO_SCORER_SHADOW2_URL`, `_LOG`, `_NAME`,
   `_TOKEN_FILE`/`_TOKEN`, `_QUEUE`, `_TIMEOUT`, `_DISAGREE_DIR`, `_DISAGREE_MAX`) with its own
   queue, worker and log (same row format plus `shadow_name`) and a `shadow2` block in
