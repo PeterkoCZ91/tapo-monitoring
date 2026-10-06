@@ -79,11 +79,24 @@ def test_quota_caps_source_and_controls(tmp_path):
         e.add(0.9, 0.8, 0.8, source="small")
     out = e.run("--limit", "8", "--source-share", "0.5", "--control", "1")
     rep = (out / "selection-report.md").read_text()
-    assert "Selected: 7" in rep
+    assert "Selected: 6" in rep          # 1 control reserved, cap 3 of the other 7
     assert "| control_person | 10 | 1 |" in rep
     per_source = [int(line.rsplit("|", 2)[1]) for line in rep.split("## By source")[1].splitlines()
                   if line.startswith("| ") and line[2:3].isalnum() and "source" not in line]
     assert per_source and max(per_source) <= 4
+
+
+def test_controls_reserved_when_one_source_fills_its_cap(tmp_path):
+    e = Env(tmp_path)
+    for _ in range(20):
+        e.add(0.9, 0.1, 0.8, source="busy")
+    for _ in range(5):
+        e.add(0.9, 0.8, 0.8, source="busy")
+        e.add(0.1, 0.05, 0.2, source="busy")
+    out = e.run("--limit", "10", "--source-share", "0.5", "--control", "2")
+    rep = (out / "selection-report.md").read_text()
+    assert "| control_person | 5 | 2 |" in rep and "| control_empty | 5 | 2 |" in rep
+    assert "| strong | 20 | 3 |" in rep       # cap = 0.5 x (10 - 4 reserved)
 
 
 def test_labeled_skipped_and_missing_image(tmp_path):
@@ -95,6 +108,21 @@ def test_labeled_skipped_and_missing_image(tmp_path):
     labels.write_text(json.dumps({"sha256": done, "label": "person"}) + "\n")
     out = e.run("--labels", str(labels))
     assert len(index(out)) == 1
+
+
+def test_teacher_labels_and_undo_do_not_skip(tmp_path):
+    e = Env(tmp_path)
+    auto = e.add(0.9, 0.1, 0.8)
+    undone = e.add(0.9, 0.1, 0.8)
+    e.add(0.9, 0.1, 0.8)
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text("\n".join(json.dumps(r) for r in (
+        {"sha256": auto, "label": "person", "by": "auto:yolox_x"},
+        {"sha256": undone, "label": "person"},
+        {"sha256": undone, "label": "unlabeled"},
+    )) + "\n")
+    out = e.run("--labels", str(labels))
+    assert len(index(out)) == 3
 
 
 def test_output_format_and_anonymity(tmp_path):
@@ -134,3 +162,36 @@ def test_models_lists_only_models_that_ran(tmp_path):
     e.add(0.9, 0.1, None)          # no second-shadow row
     (rec,) = index(e.run())
     assert rec["models"] == ["yolox640", "rfdetr"] and "boxes" not in rec
+
+
+def test_camera_from_dataset_index_reaches_frames_of_the_same_source(tmp_path):
+    e = Env(tmp_path)
+    e.add(0.9, 0.1, 0.8, source="cam-a")                 # disagree/ image, no camera
+    e.add(0.9, 0.1, 0.8, source="cam-b")                 # no dataset frame for cam-b
+    ds = tmp_path / "sent-log"
+    ds.mkdir()
+    body = b"dataset-frame"
+    sha = hashlib.sha256(body).hexdigest()
+    (ds / "f.jpg").write_bytes(body)
+    (ds / "index.jsonl").write_text(json.dumps({"file": "f.jpg", "ts": 1.0,
+                                                "camera": "garden"}) + "\n")
+    e.rows1.append({"frame": sha[:16], "source_id": "cam-a", "primary_person": 0.9,
+                    "shadow_person": 0.1, "primary_boxes": [], "shadow_boxes": []})
+    e.rows2.append({**e.rows1[-1], "shadow_person": 0.8, "shadow_name": "x"})
+    out = e.run("--image-dir", str(ds))
+    cams = sorted(str(r.get("camera")) for r in index(out))
+    assert cams == ["None", "garden", "garden"]
+
+
+def test_small_and_threshold_picked_before_strong(tmp_path):
+    e = Env(tmp_path)
+    for _ in range(20):
+        e.add(0.9, 0.1, 0.8)                             # strong
+    for _ in range(3):
+        e.add(0.5, 0.4, 0.4)                             # threshold
+    for _ in range(4):
+        e.add(0.3, 0.3, 0.3, boxes=[TINY])               # small
+    out = e.run("--limit", "8", "--source-share", "1", "--control", "0", "--small", "2")
+    rep = (out / "selection-report.md").read_text()
+    assert "| threshold | 3 | 3 |" in rep and "| small | 4 | 2 |" in rep
+    assert "| strong | 20 | 3 |" in rep

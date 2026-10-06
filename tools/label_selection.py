@@ -2,17 +2,23 @@
 """Build a labeling set from the logs of two shadow targets (see docs/operations.md).
 
 Joins ``shadow.jsonl`` and ``shadow2.jsonl`` on ``frame`` (the first 16 hex digits of the
-body's SHA-256), keeps only frames whose image survives in a ``disagree/`` directory, drops
-frames already in ``labels.jsonl`` (matched by the image's SHA-256) and picks a capped,
+body's SHA-256), keeps only frames whose image survives in a ``disagree/`` directory or a
+dataset directory (``--image-dir``), drops frames already labeled by hand in ``labels.jsonl``
+(matched by the image's SHA-256; teacher labels do not count) and picks a capped,
 per-source-balanced set:
 
 * ``strong``     one model >= --high and another < --low
 * ``threshold``  the models split at --high (and are not ``strong``)
 * ``small``      the best box of any model is shorter than --small-height of the frame
-* ``control_person`` / ``control_empty``  random samples where all models agree
+* ``control_person`` / ``control_empty``  random samples where all models agree; reserved
+  within ``--limit`` before the others, ``--source-share`` caps only the others
 
-Output: ``OUT/disagree<N>/*.jpg``, ``OUT/index.jsonl`` (``file``, ``ts``, ``person`` and
-``boxes`` as ``[x1, y1, x2, y2, score, model]``), ``OUT/teacher.jsonl`` and
+``threshold`` and ``small`` (up to ``--small``) are picked before ``strong``, which takes
+the rest of the limit.
+
+Output: ``OUT/disagree<N>/*.jpg``, ``OUT/index.jsonl`` (``file``, ``ts``, ``person``,
+``camera`` when a dataset index names it for the frame's source, and ``boxes`` as
+``[x1, y1, x2, y2, score, model]``), ``OUT/teacher.jsonl`` and
 ``OUT/selection-report.md``. Source ids appear only as short hashes. Stdlib only; inputs
 are only read.
 """
@@ -33,7 +39,10 @@ from pathlib import Path
 NAME_RE = re.compile(r"^(\d{8}T\d{6})(\d{3})_p\d+(?:\.\d+)?_s\d+(?:\.\d+)?(?:-\d+)?\.jpe?g$", re.I)
 CATEGORIES = ("strong", "threshold", "small", "control_person", "control_empty")
 DISAGREEING = ("strong", "threshold")
+CONTROLS = ("control_person", "control_empty")
 DEFAULT_MODELS = ("yolox640", "rfdetr", "yolox960")
+# Label values of a hand label (tapo_monitor.labeling.LABELS; the tool stays stdlib-only).
+HAND_LABELS = ("person", "no_person", "unsure")
 
 
 def read_jsonl(path):
@@ -118,10 +127,11 @@ def load_frames(log1, log2, models):
 
 
 def dataset_images(dirs):
-    """``{frame: (path, ts, sha256, kind)}`` for every JPEG under the dataset directories.
+    """``{frame: (path, ts, sha256, kind, camera)}`` for every JPEG under the dataset dirs.
 
-    ``kind`` is the directory's base name (e.g. ``sent-log``); ``ts`` comes from the
-    ``index.jsonl`` next to the file, else the file's mtime. The first copy of a hash wins.
+    ``kind`` is the directory's base name (e.g. ``sent-log``); ``ts`` and ``camera`` come
+    from the ``index.jsonl`` next to the file (else the file's mtime and None). The first
+    copy of a hash wins.
     """
     found = {}
     for directory in dirs:
@@ -134,21 +144,22 @@ def dataset_images(dirs):
             for rec in read_jsonl(idx):
                 ts, name = num(rec.get("ts")), rec.get("file")
                 if ts is not None and isinstance(name, str):
-                    stamps[(idx.parent, name)] = ts
+                    camera = rec.get("camera")
+                    stamps[(idx.parent, name)] = (ts, camera if isinstance(camera, str) else None)
         for path in sorted(root.rglob("*")):
             if path.suffix.lower() not in (".jpg", ".jpeg") or not path.is_file():
                 continue
             try:
                 sha = sha256_file(path)
-                ts = stamps.get((path.parent, path.name), path.stat().st_mtime)
+                ts, camera = stamps.get((path.parent, path.name), (path.stat().st_mtime, None))
             except OSError:
                 continue
-            found.setdefault(sha[:16], (path, ts, sha, kind))
+            found.setdefault(sha[:16], (path, ts, sha, kind, camera))
     return found
 
 
 def find_images(dirs):
-    """``{frame: (path, ts, sha256, "disagree")}`` from the disagree directories."""
+    """``{frame: (path, ts, sha256, "disagree", None)}`` from the disagree directories."""
     found = {}
     for directory in dirs:
         d = Path(directory)
@@ -162,17 +173,24 @@ def find_images(dirs):
                 sha = sha256_file(path)
             except OSError:
                 continue
-            found.setdefault(sha[:16], (path, ts, sha, "disagree"))
+            found.setdefault(sha[:16], (path, ts, sha, "disagree", None))
     return found
 
 
 def labeled_hashes(path):
-    out = set()
+    """Hashes whose latest record is a hand label.
+
+    Teacher labels (``"by": "auto:<model>"``) do not count: the selection exists to
+    hand-check the models, and the teacher is one of the families being compared.
+    """
+    latest = {}
     for rec in read_jsonl(path):
         sha = rec.get("sha256")
         if isinstance(sha, str):
-            out.add(sha)
-    return out
+            latest[sha] = rec
+    return {sha for sha, rec in latest.items()
+            if rec.get("label") in HAND_LABELS
+            and not str(rec.get("by") or "").startswith("auto")}
 
 
 def best_box_height(item, min_score):
@@ -231,15 +249,18 @@ def pick(candidates, quota, source_cap, source_used, budget, rng, ordered):
 
 
 def select(frames, images, labeled, *, high, low, small_height, small_min_score, limit,
-           source_share, control, seed):
+           source_share, control, seed, small=20):
     rng = random.Random(seed)
     stats = {"frames": len(frames), "with_image": 0, "labeled_skipped": 0, "no_category": 0}
     pool = defaultdict(list)
+    seen_cameras = defaultdict(Counter)
     for frame, item in sorted(frames.items()):
         if frame not in images:
             continue
         stats["with_image"] += 1
-        path, ts, sha, kind = images[frame]
+        path, ts, sha, kind, camera = images[frame]
+        if camera:
+            seen_cameras[item["source"]][camera] += 1
         if sha in labeled:
             stats["labeled_skipped"] += 1
             continue
@@ -250,13 +271,29 @@ def select(frames, images, labeled, *, high, low, small_height, small_min_score,
         pool[category].append({"frame": frame, "item": item, "source": item["source"],
                                "path": path, "ts": ts, "sha": sha, "spread": spread,
                                "category": category, "kind": kind})
-    cap = max(1, int(limit * source_share))
+    # Controls are reserved off the top: they come mostly from the busiest sources, which
+    # the disagreeing categories would otherwise fill up to the source cap first.
+    controls = []
+    for category in CONTROLS:
+        controls += pick(pool[category], control, control, Counter(), limit - len(controls),
+                         rng, False)
+    rest = limit - len(controls)
+    cap = max(1, int(rest * source_share))
     used = Counter()
     chosen = []
-    for category in CATEGORIES:
-        quota = control if category.startswith("control") else limit
-        chosen += pick(pool[category], quota, cap, used, limit - len(chosen), rng,
+    # The rare categories go first (small up to --small), so the plentiful strong
+    # disagreements take only what is left instead of crowding them out.
+    for category in ("threshold", "small", "strong"):
+        quota = small if category == "small" else rest
+        chosen += pick(pool[category], quota, cap, used, rest - len(chosen), rng,
                        category in DISAGREEING)
+    chosen += controls
+    # A source is one camera: a frame without its own camera (disagree/) takes the camera
+    # its source's dataset frames name most often.
+    cameras = {src: cnt.most_common(1)[0][0] for src, cnt in seen_cameras.items()}
+    for c in chosen:
+        c["camera"] = cameras.get(c["source"])
+    stats["controls"], stats["cap"] = len(controls), cap
     stats["available"] = {c: len(pool[c]) for c in CATEGORIES}
     return chosen, stats
 
@@ -283,6 +320,8 @@ def write_output(out, chosen, models, batch):
         scores = c["item"]["scores"]
         rec = {"file": f"{sub.name}/{name}", "ts": c["ts"],
                "person": scores.get(models[0], max(scores.values()))}
+        if c.get("camera"):
+            rec["camera"] = c["camera"]
         rec["models"] = [m for m in models if m in scores]
         boxes = [b for m in models for b in c["item"]["boxes"].get(m, [])]
         if boxes:
@@ -302,8 +341,8 @@ def report(chosen, stats, args):
              f"Log rows without `frame` (dropped, cannot be paired): {stats['no_frame']}",
              f"Frames in logs: {stats['frames']}; with image: {stats['with_image']}; "
              f"already labeled: {stats['labeled_skipped']}; no category: {stats['no_category']}",
-             f"Selected: {len(chosen)} (limit {args.limit}, per-source cap "
-             f"{max(1, int(args.limit * args.source_share))})",
+             f"Selected: {len(chosen)} (limit {args.limit}, controls reserved "
+             f"{stats['controls']}, per-source cap of the rest {stats['cap']})",
              f"Thresholds: high {args.high}, low {args.low}, small box height < "
              f"{args.small_height}", "", "## By category", "",
              "| category | available | selected |", "|---|---|---|"]
@@ -335,7 +374,8 @@ def parse_args(argv):
     ap.add_argument("--image-dir", action="append", default=[],
                     help="dataset directory searched recursively for JPEGs of frames missing "
                          "from disagree/ (repeat; e.g. sent-log, review-log)")
-    ap.add_argument("--labels", help="labels.jsonl; frames already in it are skipped")
+    ap.add_argument("--labels", help="labels.jsonl; frames labeled by hand in it are skipped "
+                                     "(teacher labels, by=auto:*, are not)")
     ap.add_argument("--out", required=True, help="output directory")
     ap.add_argument("--batch", default="1", help="N in OUT/disagreeN (default 1)")
     ap.add_argument("--models", default=",".join(DEFAULT_MODELS),
@@ -343,8 +383,12 @@ def parse_args(argv):
     ap.add_argument("--limit", type=int, default=600, help="maximum selected frames")
     ap.add_argument("--source-share", type=float, default=0.25,
                     help="largest share of --limit one source may take (default 0.25)")
-    ap.add_argument("--control", type=int, default=40,
-                    help="random frames per control category (default 40)")
+    ap.add_argument("--small", type=int, default=20,
+                    help="most small-person frames, picked before the strong disagreements "
+                         "(default 20)")
+    ap.add_argument("--control", type=int, default=20,
+                    help="random frames per control category, reserved within --limit "
+                         "(default 20)")
     ap.add_argument("--high", type=float, default=0.45)
     ap.add_argument("--low", type=float, default=0.25)
     ap.add_argument("--small-height", type=float, default=0.10)
@@ -368,6 +412,7 @@ def main(argv=None):
                            small_height=args.small_height,
                            small_min_score=args.small_min_score, limit=args.limit,
                            source_share=args.source_share, control=args.control,
+                           small=args.small,
                            seed=args.seed)
     stats["no_frame"] = no_frame
     text = report(chosen, stats, args)

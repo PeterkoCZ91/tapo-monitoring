@@ -494,7 +494,10 @@ distinguishable from "did not run"), optional `boxes` as `[x1, y1, x2, y2, score
 for ordering by disagreement) and `OUT/selection-report.md`. Categories, in priority order:
 `strong` (one model >= 0.45, another < 0.25), `threshold` (split at 0.45), `small` (best box
 shorter than 0.10 of the frame), and random controls `control_person` / `control_empty`
-(`--control` each). `--limit` caps the total and `--source-share` the share of one source.
+(`--control` each, default 20, reserved within `--limit` first). `threshold` and `small` (at
+most `--small`, default 20) are picked before `strong`, which takes the rest. `--limit` caps
+the total and `--source-share` the share of one source among the non-control frames.
+`index.jsonl` gets `camera` when a dataset index names the camera of the frame's source.
 `--image-dir DIR` (repeatable, e.g. the `sent-log` and `review-log` of a dataset) searches
 DIR recursively for JPEGs, hashes them the same way and supplies images for frames missing
 from `disagree/`, which is what gives `small` and the controls any images; `ts` comes from

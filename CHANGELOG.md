@@ -8,12 +8,17 @@ All notable changes to this project are documented here.
 - `tools/label_selection.py` builds a labeling dataset (images, `index.jsonl` with optional
   per-model `boxes`, `teacher.jsonl`, selection report) from two shadow logs and their
   `disagree/` directories: three-model disagreement, small persons and random controls,
-  capped per source, skipping frames already labeled; `--dry-run` reports only. See
-  "Build a labeling set from two shadow targets" in `docs/operations.md`.
+  skipping frames already labeled by hand (teacher labels do not count); `--dry-run` reports
+  only. See "Build a labeling set from two shadow targets" in `docs/operations.md`.
   `--image-dir` (repeatable) takes images for frames missing from `disagree/` from dataset
-  directories such as `sent-log`/`review-log`, so small persons and controls get pictures; the
-  Each `index.jsonl` record also lists `models`, the models that ran on the frame.
-  report counts selected frames per image source type and log rows dropped for lacking `frame`.
+  directories such as `sent-log`/`review-log`, so small persons and controls get pictures.
+  The controls (`--control`, default 20 each) are reserved within `--limit` before the
+  disagreeing categories, and `--source-share` caps only the rest, so a busy source cannot
+  crowd them out; `threshold` and `small` (at most `--small`, default 20) are picked before
+  `strong`, which takes the rest. Records get `camera` when a dataset index names the camera
+  of the frame's source. Each `index.jsonl` record also lists `models`, the models that ran on the
+  frame; the report counts selected frames per image source type and log rows dropped for
+  lacking `frame`.
 - Opt-in box labeling in `tapo-monitor label`: an `index.jsonl` record with a `boxes` list
   (`[x1,y1,x2,y2,score,model]`, normalized) shows the boxes colored by model and score; click
   to cycle person / no person / unmarked, drag to draw a missed person, `Tab` / `p` / `n` /
