@@ -1,0 +1,34 @@
+# Minimal tapo-monitor configuration — the smallest file that sends a Telegram alert
+# when a person is detected. Copy it to `cameras.yaml` (git-ignored), set the six
+# environment variables it names (see docs/credentials.md), then:
+#
+#   tapo-monitor check cameras.yaml      # validates config + credentials, touches nothing
+#   tapo-monitor run   cameras.yaml      # starts the daemon
+#
+# Everything optional — local scoring, weather gating, PTZ tracking, SD follow-up,
+# the Digital Twin, MQTT/Home Assistant — is deliberately absent here. Add one feature
+# at a time from cameras.example.yaml and the configuration guide once this works.
+#
+# Values below are environment-variable NAMES, never the secrets themselves, so this
+# file stays safe to share. The real values live in your shell / .env (git-ignored).
+
+telegram:
+  token_env: TELEGRAM_TOKEN         # Telegram bot token
+  chat_id_env: TELEGRAM_CHAT_ID     # chat the bot posts to
+
+cameras:
+  - name: front-door                # any label you choose; shown in the alert
+    host: 192.168.1.50              # the camera's IP address on your LAN
+
+    # Camera login — the "Camera Account" you create in the Tapo app.
+    # See docs/credentials.md for which account is which (this trips up most newcomers).
+    user_env: CAM_USER
+    password_env: CAM_PASSWORD
+
+    # RTSP login for grabbing the alert snapshot — usually the same Camera Account.
+    rtsp_user_env: CAM_RTSP_USER
+    rtsp_password_env: CAM_RTSP_PASSWORD
+
+    detection:
+      sources: [getevents]          # read detections off the camera (needs an SD card)
+      strict_people: true           # alert on confirmed people, not bare motion
