@@ -16,6 +16,7 @@ cameras.*.yaml
 # Same hole, same reason: `cameras.yaml.bak-cropnative-20260807` is the live convention.
 cameras.yaml.*
 !cameras.example.yaml
+!cameras.minimal.yaml
 # Local Compose file copied from docker-compose.example.yml (host paths, image pins).
 docker-compose.yml
 compose.yaml
