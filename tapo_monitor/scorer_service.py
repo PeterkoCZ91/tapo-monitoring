@@ -725,13 +725,21 @@ ENV_PROVIDER = "TAPO_SCORER_PROVIDER"
 def select_providers(env=None):
     """ONNX Runtime ``(providers, provider_options)`` for the configured backend. Pure.
 
-    ``TAPO_SCORER_PROVIDER=openvino-gpu`` runs on the Intel iGPU through OpenVINO;
-    anything else, including unset, keeps the CPU provider so an unconfigured host
-    behaves exactly as before.
+    ``TAPO_SCORER_PROVIDER=openvino-gpu`` runs on the Intel iGPU through OpenVINO,
+    ``cuda`` on an NVIDIA GPU (onnxruntime-gpu); anything else, including unset, keeps
+    the CPU provider so an unconfigured host behaves exactly as before.
     """
     env = os.environ if env is None else env
-    if (env.get(ENV_PROVIDER) or "").strip().lower() == "openvino-gpu":
+    provider = (env.get(ENV_PROVIDER) or "").strip().lower()
+    if provider == "openvino-gpu":
         return ["OpenVINOExecutionProvider"], [{"device_type": "GPU"}]
+    if provider == "cuda":
+        # On a shared GPU cap the arena, so the scorer cannot grow into other users' memory
+        mem_mb = _env_setting(env, "TAPO_SCORER_CUDA_MEM_MB", int, 0)
+        if mem_mb > 0:
+            return ["CUDAExecutionProvider"], [{"gpu_mem_limit": mem_mb * 1024 * 1024,
+                                                "arena_extend_strategy": "kSameAsRequested"}]
+        return ["CUDAExecutionProvider"], None
     return ["CPUExecutionProvider"], None
 
 
@@ -745,6 +753,9 @@ def _open_session(ort, model_path):
     providers, options = select_providers()
     if providers != ["CPUExecutionProvider"]:
         try:
+            if providers == ["CUDAExecutionProvider"] and hasattr(ort, "preload_dlls"):
+                # CUDA/cuDNN from the nvidia-* pip wheels, so no system CUDA install
+                ort.preload_dlls()
             session = ort.InferenceSession(
                 model_path, providers=providers, provider_options=options)
             if session.get_providers()[0] == providers[0]:
@@ -882,7 +893,8 @@ class ShadowConfig:
     disagree_max: int = SHADOW_DISAGREE_MAX
     timeout: float = SHADOW_TIMEOUT
     queue_size: int = SHADOW_QUEUE_SIZE
-    name: str | None = None   # set only for the second shadow; written to its log rows
+    name: str | None = None   # set only for the extra shadows; written to their log rows
+    tiles: int | None = None  # force this tile grid for the target; None keeps the caller's
 
 
 def load_shadow(env=None):
@@ -909,6 +921,28 @@ def load_shadow(env=None):
 
 
 SHADOW2_NAME = "shadow2"
+SHADOW3_NAME = "shadow3"
+SHADOW4_NAME = "shadow4"
+
+
+def _load_named_shadow(env, prefix, default_name):
+    env = os.environ if env is None else env
+    url = (env.get(f"{prefix}_URL") or "").strip()
+    log_path = (env.get(f"{prefix}_LOG") or "").strip()
+    if not url or not log_path:
+        return None
+    return ShadowConfig(
+        url=url,
+        log_path=log_path,
+        token=_load_secret(env, f"{prefix}_TOKEN_FILE", f"{prefix}_TOKEN"),
+        disagree_dir=(env.get(f"{prefix}_DISAGREE_DIR") or "").strip() or None,
+        disagree_max=max(1, _env_setting(env, f"{prefix}_DISAGREE_MAX", int,
+                                         SHADOW_DISAGREE_MAX)),
+        timeout=_env_setting(env, f"{prefix}_TIMEOUT", float, SHADOW_TIMEOUT),
+        queue_size=max(1, _env_setting(env, f"{prefix}_QUEUE", int, SHADOW_QUEUE_SIZE)),
+        name=(env.get(f"{prefix}_NAME") or "").strip() or default_name,
+        tiles=_env_setting(env, f"{prefix}_TILES", int, None),
+    )
 
 
 def load_shadow2(env=None):
@@ -919,23 +953,19 @@ def load_shadow2(env=None):
     ``shadow2``), which is written to every log row as ``shadow_name``. ``None`` (off) unless
     both ``..._URL`` and ``..._LOG`` are set; it never takes part in the ensemble.
     """
-    env = os.environ if env is None else env
-    url = (env.get("TAPO_SCORER_SHADOW2_URL") or "").strip()
-    log_path = (env.get("TAPO_SCORER_SHADOW2_LOG") or "").strip()
-    if not url or not log_path:
-        return None
-    return ShadowConfig(
-        url=url,
-        log_path=log_path,
-        token=_load_secret(env, "TAPO_SCORER_SHADOW2_TOKEN_FILE", "TAPO_SCORER_SHADOW2_TOKEN"),
-        disagree_dir=(env.get("TAPO_SCORER_SHADOW2_DISAGREE_DIR") or "").strip() or None,
-        disagree_max=max(1, _env_setting(env, "TAPO_SCORER_SHADOW2_DISAGREE_MAX", int,
-                                         SHADOW_DISAGREE_MAX)),
-        timeout=_env_setting(env, "TAPO_SCORER_SHADOW2_TIMEOUT", float, SHADOW_TIMEOUT),
-        queue_size=max(1, _env_setting(env, "TAPO_SCORER_SHADOW2_QUEUE", int,
-                                       SHADOW_QUEUE_SIZE)),
-        name=(env.get("TAPO_SCORER_SHADOW2_NAME") or "").strip() or SHADOW2_NAME,
-    )
+    return _load_named_shadow(env, "TAPO_SCORER_SHADOW2", SHADOW2_NAME)
+
+
+def load_shadow3(env=None):
+    """Optional third shadow target from ``TAPO_SCORER_SHADOW3_*``; same rules as
+    :func:`load_shadow2` (default name ``shadow3``)."""
+    return _load_named_shadow(env, "TAPO_SCORER_SHADOW3", SHADOW3_NAME)
+
+
+def load_shadow4(env=None):
+    """Optional fourth shadow target from ``TAPO_SCORER_SHADOW4_*``; same rules as
+    :func:`load_shadow2` (default name ``shadow4``)."""
+    return _load_named_shadow(env, "TAPO_SCORER_SHADOW4", SHADOW4_NAME)
 
 
 def _shadow_call(url, token, body, tiles, timeout):
@@ -1252,8 +1282,8 @@ class ShadowRunner:
             shadow_person, error, shadow_seconds, payload = outcome
         else:
             started = time.monotonic()
-            payload, error = _shadow_call(self.config.url, self.config.token, body, tiles,
-                                          self.config.timeout)
+            payload, error = _shadow_call(self.config.url, self.config.token, body,
+                                          self.config.tiles or tiles, self.config.timeout)
             shadow_person = float(payload["person"]) if payload is not None else None
             shadow_seconds = time.monotonic() - started
         self._count("failed" if error else "sent")
@@ -1264,7 +1294,8 @@ class ShadowRunner:
         frame = hashlib.sha256(body).hexdigest()[:16] if self.config.log_path else None
         self._write_log(source_id, primary_person, _score_or_none(result, "vehicle"),
                         shadow_person, primary_seconds, shadow_seconds, error,
-                        _log_boxes(result), _log_boxes(payload), frame)
+                        _log_boxes(result), _log_boxes(payload), frame,
+                        _score_or_none(payload, "tile_person"))
         if (shadow_person is not None and primary_person is not None
                 and self.config.disagree_dir
                 and ((primary_person >= SHADOW_HIGH and shadow_person < SHADOW_LOW)
@@ -1280,7 +1311,7 @@ class ShadowRunner:
 
     def _write_log(self, source_id, primary_person, primary_vehicle, shadow_person,
                    primary_seconds, shadow_seconds, error, primary_boxes=None,
-                   shadow_boxes=None, frame=None):
+                   shadow_boxes=None, frame=None, shadow_tile_person=None):
         row = {
             "ts": time.strftime(JOURNAL_STAMP, time.gmtime()),
             "source_id": source_id,
@@ -1301,6 +1332,8 @@ class ShadowRunner:
             row["primary_boxes"] = primary_boxes
         if shadow_boxes is not None:
             row["shadow_boxes"] = shadow_boxes
+        if shadow_tile_person is not None:
+            row["shadow_tile_person"] = shadow_tile_person
         path = self.config.log_path
         if not path:
             return
@@ -1356,7 +1389,8 @@ def _authorized(header, token):
 def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=60,
                 metrics_retention_days=7, metrics_retention_files=8,
                 metrics_max_journal_bytes=METRICS_MAX_JOURNAL_BYTES, arch=None, token=None,
-                shadow=None, ensemble=None, artifact_filter=None, shadow2=None):
+                shadow=None, ensemble=None, artifact_filter=None, shadow2=None,
+                shadow3=None, shadow4=None):
     """HTTP server: POST /score (JPEG body) -> JSON scores; GET /health -> ok.
 
     ``arch`` (the detector family name, never the model path) is reported by /health and
@@ -1373,7 +1407,8 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
     With ``shadow2`` (``ShadowConfig`` with a ``name``) a second, fully independent shadow
     target gets its own queue, worker thread, log and ``/metrics`` block (``shadow2``); it
     never takes part in the ensemble and a slow or dead target cannot delay the first shadow
-    or any reply.
+    or any reply. ``shadow3`` and ``shadow4`` are further targets with the same rules
+    (``/metrics`` blocks ``shadow3``/``shadow4``).
 
     With an ``ensemble`` (``EnsembleConfig``, needs the ``shadow`` for the second service's
     URL and token) the second service is instead called in parallel with the primary
@@ -1403,6 +1438,8 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
     inference_lock = threading.Lock()
     runner = ShadowRunner(shadow) if shadow is not None else None
     runner2 = ShadowRunner(shadow2) if shadow2 is not None else None
+    runner3 = ShadowRunner(shadow3) if shadow3 is not None else None
+    runner4 = ShadowRunner(shadow4) if shadow4 is not None else None
     if ensemble is not None and shadow is None:
         raise EnsembleConfigError("ensemble mode needs a shadow service")
     gate = EnsembleGate(ensemble, shadow) if ensemble is not None else None
@@ -1440,6 +1477,10 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
                         snap["shadow"] = runner.snapshot()
                     if runner2 is not None:
                         snap["shadow2"] = runner2.snapshot()
+                    if runner3 is not None:
+                        snap["shadow3"] = runner3.snapshot()
+                    if runner4 is not None:
+                        snap["shadow4"] = runner4.snapshot()
                     if gate is not None:
                         snap["ensemble"] = gate.snapshot()
                     self._reply(200, snap)
@@ -1502,6 +1543,12 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
                 if runner2 is not None and ok and not artifact and isinstance(result, dict):
                     runner2.submit(body, tiles, source_id, result,
                                    time.monotonic() - request_started)
+                if runner3 is not None and ok and not artifact and isinstance(result, dict):
+                    runner3.submit(body, tiles, source_id, result,
+                                   time.monotonic() - request_started)
+                if runner4 is not None and ok and not artifact and isinstance(result, dict):
+                    runner4.submit(body, tiles, source_id, result,
+                                   time.monotonic() - request_started)
 
         def log_message(self, fmt, *args):  # route http.server chatter to logging
             log.debug(fmt, *args)
@@ -1511,6 +1558,8 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
     server.metrics = metrics
     server.shadow = runner
     server.shadow2 = runner2
+    server.shadow3 = runner3
+    server.shadow4 = runner4
     return server
 
 
@@ -1611,6 +1660,8 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
     try:
         shadow = load_shadow()
         shadow2 = load_shadow2()
+        shadow3 = load_shadow3()
+        shadow4 = load_shadow4()
         ensemble = load_ensemble(os.environ, shadow)
     except (TokenConfigError, EnsembleConfigError) as exc:
         print(f"scorer config error: {exc}", file=sys.stderr)
@@ -1623,6 +1674,8 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
         token=token,
         shadow=shadow,
         shadow2=shadow2,
+        shadow3=shadow3,
+        shadow4=shadow4,
         ensemble=ensemble,
         port=args.port,
         metrics_file=args.metrics_file,
@@ -1640,6 +1693,12 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
     if shadow2 is not None:
         log.info("second shadow '%s' on (disagreement images %s)", shadow2.name,
                  "kept" if shadow2.disagree_dir else "off")
+    if shadow3 is not None:
+        log.info("third shadow '%s' on (disagreement images %s)", shadow3.name,
+                 "kept" if shadow3.disagree_dir else "off")
+    if shadow4 is not None:
+        log.info("fourth shadow '%s' on (tiles %s, disagreement images %s)", shadow4.name,
+                 shadow4.tiles or "as sent", "kept" if shadow4.disagree_dir else "off")
     if ensemble is not None:
         log.info("ensemble %s on (low %.2f, trust %.2f, host %.2f, band %.2f, timeout %.1fs)",
                  ensemble.mode, ensemble.low, ensemble.trust, ensemble.host, ensemble.band,
@@ -1658,6 +1717,10 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
             server.shadow.close()
         if server.shadow2 is not None:
             server.shadow2.close()
+        if server.shadow3 is not None:
+            server.shadow3.close()
+        if server.shadow4 is not None:
+            server.shadow4.close()
         server.server_close()
 
 

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Build a labeling set from the logs of two shadow targets (see docs/operations.md).
+"""Build a labeling set from the logs of two to four shadow targets (see docs/operations.md).
 
-Joins ``shadow.jsonl`` and ``shadow2.jsonl`` on ``frame`` (the first 16 hex digits of the
-body's SHA-256), keeps only frames whose image survives in a ``disagree/`` directory or a
+Joins ``shadow.jsonl``, ``shadow2.jsonl`` and the optional third and fourth logs on ``frame``
+(the first 16 hex digits of the body's SHA-256); a tiled target scores
+``max(shadow_person, shadow_tile_person)``, keeps only frames whose image survives in a ``disagree/`` directory or a
 dataset directory (``--image-dir``), drops frames already labeled by hand in ``labels.jsonl``
 (matched by the image's SHA-256; teacher labels do not count) and picks a capped,
 per-source-balanced set:
@@ -40,7 +41,7 @@ NAME_RE = re.compile(r"^(\d{8}T\d{6})(\d{3})_p\d+(?:\.\d+)?_s\d+(?:\.\d+)?(?:-\d
 CATEGORIES = ("strong", "threshold", "small", "control_person", "control_empty")
 DISAGREEING = ("strong", "threshold")
 CONTROLS = ("control_person", "control_empty")
-DEFAULT_MODELS = ("yolox640", "rfdetr", "yolox960")
+DEFAULT_MODELS = ("yolox640", "rfdetr", "yolox960", "rfdetr_m896", "rfdetr_m576_t2")
 # Label values of a hand label (tapo_monitor.labeling.LABELS; the tool stays stdlib-only).
 HAND_LABELS = ("person", "no_person", "unsure")
 
@@ -102,11 +103,22 @@ def clean_boxes(raw, model):
     return out
 
 
-def load_frames(log1, log2, models):
-    """``({frame: {"source", "scores", "boxes"}}, rows without a frame)``; last row wins."""
+def shadow_score(rec):
+    """The target's person score; a tiled target also reports its best tile."""
+    s, t = num(rec.get("shadow_person")), num(rec.get("shadow_tile_person"))
+    if s is None or t is None:
+        return s
+    return max(s, t)
+
+
+def load_frames(logs, models):
+    """``({frame: {"source", "scores", "boxes"}}, rows without a frame)``; last row wins.
+
+    ``logs[i]`` is the log of the target named ``models[i + 1]``.
+    """
     frames = {}
     missing = 0
-    for path, shadow_model in ((log1, models[1]), (log2, models[2])):
+    for path, shadow_model in zip(logs, models[1:], strict=True):
         for rec in read_jsonl(path):
             frame = rec.get("frame")
             if not isinstance(frame, str) or not frame:
@@ -116,7 +128,7 @@ def load_frames(log1, log2, models):
                                              "boxes": {}})
             if item["source"] is None:
                 item["source"] = rec.get("source_id")
-            p, s = num(rec.get("primary_person")), num(rec.get("shadow_person"))
+            p, s = num(rec.get("primary_person")), shadow_score(rec)
             if p is not None:
                 item["scores"][models[0]] = p
                 item["boxes"][models[0]] = clean_boxes(rec.get("primary_boxes"), models[0])
@@ -369,6 +381,9 @@ def parse_args(argv):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--shadow-log", required=True, help="shadow.jsonl of the first target")
     ap.add_argument("--shadow2-log", required=True, help="shadow2.jsonl of the second target")
+    ap.add_argument("--shadow3-log", help="shadow.jsonl of an optional third target")
+    ap.add_argument("--shadow4-log", help="shadow.jsonl of an optional fourth target "
+                                          "(needs --shadow3-log)")
     ap.add_argument("--disagree-dir", action="append", default=[],
                     help="disagree/ directory of a target (repeat for both)")
     ap.add_argument("--image-dir", action="append", default=[],
@@ -379,7 +394,8 @@ def parse_args(argv):
     ap.add_argument("--out", required=True, help="output directory")
     ap.add_argument("--batch", default="1", help="N in OUT/disagreeN (default 1)")
     ap.add_argument("--models", default=",".join(DEFAULT_MODELS),
-                    help="model names for primary,shadow,shadow2 (default %(default)s)")
+                    help="model names for primary,shadow,shadow2[,shadow3[,shadow4]]; extra "
+                         "names without a log are ignored (default %(default)s)")
     ap.add_argument("--limit", type=int, default=600, help="maximum selected frames")
     ap.add_argument("--source-share", type=float, default=0.25,
                     help="largest share of --limit one source may take (default 0.25)")
@@ -401,11 +417,17 @@ def parse_args(argv):
 
 def main(argv=None):
     args = parse_args(argv)
-    models = tuple(m.strip() for m in args.models.split(","))
-    if len(models) != 3 or not all(models):
-        print("--models needs three comma-separated names", file=sys.stderr)
+    if args.shadow4_log and not args.shadow3_log:
+        print("--shadow4-log needs --shadow3-log", file=sys.stderr)
         return 2
-    frames, no_frame = load_frames(args.shadow_log, args.shadow2_log, models)
+    logs = [args.shadow_log, args.shadow2_log, args.shadow3_log, args.shadow4_log]
+    logs = [p for p in logs if p]
+    models = tuple(m.strip() for m in args.models.split(","))[:len(logs) + 1]
+    if len(models) != len(logs) + 1 or not all(models):
+        print(f"--models needs {len(logs) + 1} comma-separated names "
+              f"(primary + one per log)", file=sys.stderr)
+        return 2
+    frames, no_frame = load_frames(logs, models)
     images = {**dataset_images(args.image_dir), **find_images(args.disagree_dir)}
     labeled = labeled_hashes(args.labels)
     chosen, stats = select(frames, images, labeled, high=args.high, low=args.low,

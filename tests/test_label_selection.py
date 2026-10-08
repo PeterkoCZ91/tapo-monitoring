@@ -195,3 +195,31 @@ def test_small_and_threshold_picked_before_strong(tmp_path):
     rep = (out / "selection-report.md").read_text()
     assert "| threshold | 3 | 3 |" in rep and "| small | 4 | 2 |" in rep
     assert "| strong | 20 | 3 |" in rep
+
+
+def test_third_and_fourth_logs_join_and_tiled_score_takes_the_best_tile(tmp_path):
+    e = Env(tmp_path)
+    sha = e.add(0.1, 0.1, 0.1)                 # all three agree on empty...
+    r1 = e.rows1[-1]
+    rows3 = [{**r1, "shadow_person": 0.2, "shadow_name": "m896"}]
+    rows4 = [{**r1, "shadow_person": 0.1, "shadow_tile_person": 0.8, "shadow_name": "t2"}]
+    (tmp_path / "s3.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows3))
+    (tmp_path / "s4.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows4))
+    out = e.run("--shadow3-log", str(tmp_path / "s3.jsonl"),
+                "--shadow4-log", str(tmp_path / "s4.jsonl"))
+    rows = index(out)
+    assert len(rows) == 1                      # ...but the tiled fourth makes it strong
+    assert rows[0]["models"] == list(ls.DEFAULT_MODELS)
+    rep = (out / "selection-report.md").read_text()
+    assert "| strong | 1 | 1 |" in rep
+    assert sha
+
+
+def test_fourth_log_needs_the_third(tmp_path):
+    e = Env(tmp_path)
+    e.add(0.9, 0.1, 0.8)
+    for fn in ("s1.jsonl", "s2.jsonl"):
+        (tmp_path / fn).write_text("")
+    argv = ["--shadow-log", str(tmp_path / "s1.jsonl"), "--shadow2-log", str(tmp_path / "s2.jsonl"),
+            "--shadow4-log", str(tmp_path / "s1.jsonl"), "--out", str(tmp_path / "o")]
+    assert ls.main(argv) == 2

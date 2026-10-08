@@ -273,6 +273,12 @@ The input size is the model's training resolution (read it from the export's `in
 shape); the 640 default is wrong for both. The `openvino-gpu` provider needs the
 `onnxruntime-openvino` wheel in the scorer's environment: the plain `onnxruntime` wheel
 has no OpenVINO provider and the service falls back to CPU with a logged warning.
+`TAPO_SCORER_PROVIDER=cuda` runs on an NVIDIA GPU through the `onnxruntime-gpu` wheel; the
+CUDA and cuDNN libraries can come from the `nvidia-*-cu12` pip wheels (loaded with
+`onnxruntime.preload_dlls()`), so no system CUDA install is needed. Pick an
+`onnxruntime-gpu` build whose CUDA major version the driver supports (CUDA 12 builds such as
+1.22 for a 535 driver; a CUDA 13 build silently falls back to CPU). On a GPU shared with
+other work, `TAPO_SCORER_CUDA_MEM_MB` caps the scorer's memory arena.
 
 Check a new model **before** it replaces the running one: start a second instance on
 another port with its own env, leave the production unit alone, and send both the same
@@ -354,6 +360,14 @@ and never delays a reply or the first shadow. Its log rows have the same fields 
 `shadow_name`; `/metrics` gains `shadow2` (same four counters) only while it is on. It never
 takes part in `TAPO_SCORER_ENSEMBLE`. Both shadows add their own load to the scorer host
 and each candidate.
+
+A third and a fourth candidate work the same way with `TAPO_SCORER_SHADOW3_*` and
+`TAPO_SCORER_SHADOW4_*` (default names `shadow3`, `shadow4`; `/metrics` blocks of the same
+names). Any extra shadow can also take `_TILES=N`: the frame is then sent to that target
+with `?tiles=N`, whatever the caller asked for, and its rows gain `shadow_tile_person`, the
+best tile's person score. `shadow_person` stays the full-frame score, as in a normal reply;
+to judge a tiled model the way the benchmark did, take `max(shadow_person,
+shadow_tile_person)`, which is what `tools/label_selection.py` does.
 
 The shadow doubles the traffic and inference load of the candidate, so keep it on a host
 that can take it, and turn it off (remove the lines, restart) when the comparison is done.
@@ -474,9 +488,10 @@ How it works and how to read it:
   `lowrest` resembles it and that labels are right. Label a random draw, not the frames the
   labeling queue finds most interesting, or the estimate is biased.
 
-### Build a labeling set from two shadow targets
+### Build a labeling set from two to four shadow targets
 
-`tools/label_selection.py` joins `shadow.jsonl` and `shadow2.jsonl` on `frame`, keeps frames
+`tools/label_selection.py` joins `shadow.jsonl` and `shadow2.jsonl` (plus the optional
+`--shadow3-log` and `--shadow4-log`) on `frame`, keeps frames
 whose image is still in a `disagree/` directory, skips frames already in `labels.jsonl`
 (matched by image SHA-256) and writes a dataset for `tapo-monitor label`:
 
@@ -489,8 +504,9 @@ python3 tools/label_selection.py --shadow-log shadow.jsonl --shadow2-log shadow2
 Drop `--dry-run` to write `OUT/disagree1/*.jpg` (`--batch N` names it `disagreeN`),
 `OUT/index.jsonl` (`file`, `ts` in UTC epoch seconds from the file name, `person` = production
 score, `models` (the models that actually ran on the frame, so "ran and found nothing" is
-distinguishable from "did not run"), optional `boxes` as `[x1, y1, x2, y2, score, model]` with model `yolox640`, `rfdetr` or
-`yolox960`; change with `--models`), `OUT/teacher.jsonl` (the score farthest from production,
+distinguishable from "did not run"), optional `boxes` as `[x1, y1, x2, y2, score, model]` with model `yolox640`, `rfdetr`,
+`yolox960`, `rfdetr_m896` or `rfdetr_m576_t2`; change with `--models`, one name for the
+primary and one per log), `OUT/teacher.jsonl` (the score farthest from production,
 for ordering by disagreement) and `OUT/selection-report.md`. Categories, in priority order:
 `strong` (one model >= 0.45, another < 0.25), `threshold` (split at 0.45), `small` (best box
 shorter than 0.10 of the frame), and random controls `control_person` / `control_empty`

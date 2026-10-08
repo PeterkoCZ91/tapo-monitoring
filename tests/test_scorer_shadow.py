@@ -25,6 +25,7 @@ class Shadow:
         outer = self
         self.person, self.delay, self.status = person, delay, status
         self.received = []
+        self.paths = []
         self.auth = []
         self.payload = None
 
@@ -32,6 +33,7 @@ class Shadow:
             def do_POST(self):
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 outer.received.append(body)
+                outer.paths.append(self.path)
                 outer.auth.append(self.headers.get("Authorization"))
                 time.sleep(outer.delay)
                 payload = json.dumps(outer.payload or {"person": outer.person}).encode()
@@ -449,3 +451,68 @@ def test_load_shadow2_env(tmp_path):
     assert cfg.name == "shadow2" and cfg.token == "abc" and cfg.queue_size == 4
     assert scorer_service.load_shadow2({**env, "TAPO_SCORER_SHADOW2_NAME": "yolox960"}
                                        ).name == "yolox960"
+
+
+def test_load_shadow3_env_is_independent(tmp_path):
+    assert scorer_service.load_shadow3({}) is None
+    # the second shadow's variables never switch the third one on
+    assert scorer_service.load_shadow3({"TAPO_SCORER_SHADOW2_URL": "http://x/score",
+                                        "TAPO_SCORER_SHADOW2_LOG": "l"}) is None
+    cfg = scorer_service.load_shadow3({"TAPO_SCORER_SHADOW3_URL": "http://x/score",
+                                       "TAPO_SCORER_SHADOW3_LOG": str(tmp_path / "l3.jsonl"),
+                                       "TAPO_SCORER_SHADOW3_QUEUE": "16"})
+    assert cfg.name == "shadow3" and cfg.queue_size == 16 and cfg.token is None
+
+
+def test_third_shadow_logs_separately_with_name(tmp_path):
+    sh1, sh3 = Shadow(person=0.3), Shadow(person=0.6)
+    cfg1 = scorer_service.ShadowConfig(url=sh1.url, log_path=str(tmp_path / "s1.jsonl"))
+    cfg3 = scorer_service.ShadowConfig(url=sh3.url, log_path=str(tmp_path / "s3.jsonl"),
+                                       name="rfdetr_m896")
+    srv = scorer_service.make_server(lambda body, tiles=1: {"person": 0.9, "vehicle": 0.2},
+                                     port=0, shadow=cfg1, shadow3=cfg3)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        _post(base, body=b"frame-y")
+        assert _wait(lambda: _lines(cfg1.log_path) and _lines(cfg3.log_path))
+        r3 = _lines(cfg3.log_path)[0]
+        assert r3["shadow_name"] == "rfdetr_m896" and r3["shadow_person"] == 0.6
+        assert sh3.received == [b"frame-y"]
+        assert _wait(lambda: _metrics(base)["shadow3"]["sent"] == 1)
+        assert "shadow2" not in _metrics(base)
+    finally:
+        srv.shadow3.close()
+        _stop(srv, sh1, sh3)
+
+
+def test_fourth_shadow_forces_tiles_and_logs_tile_score(tmp_path):
+    sh1, sh4 = Shadow(person=0.3), Shadow()
+    sh4.payload = {"person": 0.2, "tile_person": 0.81}
+    cfg1 = scorer_service.ShadowConfig(url=sh1.url, log_path=str(tmp_path / "s1.jsonl"))
+    cfg4 = scorer_service.load_shadow4({"TAPO_SCORER_SHADOW4_URL": sh4.url,
+                                        "TAPO_SCORER_SHADOW4_LOG": str(tmp_path / "s4.jsonl"),
+                                        "TAPO_SCORER_SHADOW4_NAME": "rfdetr_m576_t2",
+                                        "TAPO_SCORER_SHADOW4_TILES": "2"})
+    assert cfg4.tiles == 2
+    srv = scorer_service.make_server(lambda body, tiles=1: {"person": 0.9, "vehicle": 0.2},
+                                     port=0, shadow=cfg1, shadow4=cfg4)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        _post(base, body=b"frame-z")
+        assert _wait(lambda: _lines(cfg1.log_path) and _lines(cfg4.log_path))
+        r4, r1 = _lines(cfg4.log_path)[0], _lines(cfg1.log_path)[0]
+        assert r4["shadow_name"] == "rfdetr_m576_t2"
+        assert r4["shadow_person"] == 0.2 and r4["shadow_tile_person"] == 0.81
+        assert "shadow_tile_person" not in r1                # untiled targets: rows unchanged
+        assert sh4.paths == ["/score?tiles=2"] and sh1.paths == ["/score"]
+        assert _wait(lambda: _metrics(base)["shadow4"]["sent"] == 1)
+    finally:
+        srv.shadow4.close()
+        _stop(srv, sh1, sh4)
+
+
+def test_shadow_tiles_unset_by_default():
+    assert scorer_service.load_shadow4({"TAPO_SCORER_SHADOW4_URL": "http://x/score",
+                                        "TAPO_SCORER_SHADOW4_LOG": "l"}).tiles is None

@@ -764,6 +764,14 @@ def test_select_providers_defaults_to_cpu_and_opts_into_openvino_gpu():
         ["OpenVINOExecutionProvider"], [{"device_type": "GPU"}])
 
 
+def test_select_providers_cuda_with_optional_memory_cap():
+    from tapo_monitor import scorer_service as ss
+    assert ss.select_providers({ss.ENV_PROVIDER: "CUDA"}) == (["CUDAExecutionProvider"], None)
+    assert ss.select_providers({ss.ENV_PROVIDER: "cuda", "TAPO_SCORER_CUDA_MEM_MB": "1536"}) == (
+        ["CUDAExecutionProvider"],
+        [{"gpu_mem_limit": 1536 * 1024 * 1024, "arena_extend_strategy": "kSameAsRequested"}])
+
+
 def test_open_session_falls_back_to_cpu_when_gpu_start_fails(monkeypatch):
     from tapo_monitor import scorer_service as ss
     monkeypatch.setenv(ss.ENV_PROVIDER, "openvino-gpu")
