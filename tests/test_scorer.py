@@ -389,3 +389,58 @@ def test_score_image_applies_alert_zones_to_vehicles_too(monkeypatch, tmp_path):
                         lambda req, timeout=10: io.BytesIO(body))
     out = scorer.score_image("http://x/score", str(img), alert_zones=[RIGHT])
     assert out["person"] == 0.9 and out["vehicle"] == 0.0
+
+
+def _retry_setup(monkeypatch, tmp_path, outcomes, clock=None):
+    img = tmp_path / "f.jpg"
+    img.write_bytes(b"\xff\xd8x")
+    calls, sleeps = [], []
+
+    def fake(req, timeout=None):
+        calls.append(timeout)
+        out = outcomes[len(calls) - 1]
+        if isinstance(out, Exception):
+            raise out
+        return io.BytesIO(json.dumps(out).encode())
+    monkeypatch.setattr(scorer.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(scorer, "_sleep", sleeps.append)
+    return str(img), calls, sleeps
+
+
+def _http(code):
+    return scorer.urllib.error.HTTPError("http://x/score", code, "err", {}, None)
+
+
+def test_retry_once_after_timeout(monkeypatch, tmp_path):
+    img, calls, sleeps = _retry_setup(monkeypatch, tmp_path, [TimeoutError("timed out"),
+                                                              {"person": 0.7}])
+    assert scorer.score_image("http://x/score", img, timeout=18) == {"person": 0.7}
+    assert len(calls) == 2 and sleeps == [scorer.RETRY_BACKOFF_SECONDS]
+
+
+def test_retry_once_after_400_and_500(monkeypatch, tmp_path):
+    for code in (400, 500):
+        img, calls, _ = _retry_setup(monkeypatch, tmp_path, [_http(code), {"person": 0.1}])
+        assert scorer.score_image("http://x/score", img, timeout=18) == {"person": 0.1}
+        assert len(calls) == 2
+
+
+def test_retry_happens_only_once(monkeypatch, tmp_path):
+    img, calls, _ = _retry_setup(monkeypatch, tmp_path, [_http(500), _http(500), {"person": 1}])
+    assert scorer.score_image("http://x/score", img, timeout=18) is None
+    assert len(calls) == 2
+
+
+def test_no_retry_for_refused_unauthorized_or_gateway(monkeypatch, tmp_path):
+    for exc in (ConnectionRefusedError("refused"), _http(401), _http(503)):
+        img, calls, _ = _retry_setup(monkeypatch, tmp_path, [exc, {"person": 1}])
+        assert scorer.score_image("http://x/score", img, timeout=18) is None
+        assert len(calls) == 1
+
+
+def test_no_retry_when_budget_is_spent(monkeypatch, tmp_path):
+    img, calls, _ = _retry_setup(monkeypatch, tmp_path, [TimeoutError("t"), {"person": 1}])
+    ticks = iter([0.0, 35.0, 35.0, 35.0])
+    monkeypatch.setattr(scorer.time, "monotonic", lambda: next(ticks))
+    assert scorer.score_image("http://x/score", img, timeout=18) is None
+    assert len(calls) == 1

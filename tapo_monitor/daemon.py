@@ -1275,6 +1275,23 @@ def lens_subjects_differ(first, second):
     return isinstance(a, int) and isinstance(b, int) and a != b
 
 
+FRAME_TIME_GAP = 60     # seconds between event and grab before the caption names the frame
+
+
+def _frame_time(event, now):
+    """``HH:MM:SS`` of a grab made well after its event started, else None. Pure-ish.
+
+    A sampler follow-up can be minutes younger than the event the caption's time names;
+    the reader then needs to know the photo is not from that moment.
+    """
+    try:
+        if now - float(event.get("start_time")) <= FRAME_TIME_GAP:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return _time.strftime("%H:%M:%S", _time.localtime(now))
+
+
 def _default_time_str(event):  # pragma: no cover - trivial formatting
     return _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(event.get("start_time", _time.time())))
 
@@ -1854,11 +1871,30 @@ def _deliver_alert_photo(cfg, secrets, image, caption, downscale=None, score=Non
         if both and single and f"· {both} lenses" in caption:
             caption = caption.replace(f"· {both} lenses", f"· {single} lens")
     out_dir = os.path.dirname(image)
-    cropped = crop_for_subject(cfg, image, out_dir, secrets,
-                               source=getattr(image, "native", None),
-                               source_width=getattr(image, "native_width", None),
-                               source_height=getattr(image, "native_height", None))
+    if score is None:
+        # No score means the scorer was unavailable and the frame passed through. A crop
+        # would re-score it and zoom on whatever low-confidence box turned up, which is
+        # not what the sampler decided to send: keep the whole frame.
+        cropped = image
+    else:
+        cropped = crop_for_subject(cfg, image, out_dir, secrets,
+                                   source=getattr(image, "native", None),
+                                   source_width=getattr(image, "native_width", None),
+                                   source_height=getattr(image, "native_height", None))
     crop_temp = cropped if cropped != image else None      # crop_for_subject has no None
+    if crop_temp and getattr(image, "native", None) and _crop_too_small(cfg, crop_temp):
+        # A few hundred source pixels upscaled for delivery is mush the reader cannot
+        # judge: the whole frame is the alert, the crop only rides along as a second photo.
+        # Only a crop cut from the native grab is measured in source pixels; one cut from
+        # the delivery-width frame is always a few hundred px wide and keeps the old zoom.
+        try:
+            ok = notify.send_photo(token, chat, image, caption, camera=cfg.name, score=score,
+                                   incident=incident, send_path=send_path)
+            if ok:
+                notify.send_photo(token, chat, crop_temp, "🔍 zoom", archive=False)
+            return ok
+        finally:
+            _safe_unlink(crop_temp)
     small_crop = _reduced(cropped, out_dir, downscale) if crop_temp else None
     to_send = small_crop or cropped
     try:
@@ -1872,6 +1908,15 @@ def _deliver_alert_photo(cfg, secrets, image, caption, downscale=None, score=Non
     finally:
         for temp in (small_crop, crop_temp):
             _safe_unlink(temp)
+
+
+def _crop_too_small(cfg, crop):
+    """Whether the crop holds fewer source pixels than ``crop_min_px`` (0 = never)."""
+    floor = getattr(cfg, "crop_min_px", 0)
+    if not floor:
+        return False
+    width = snapshot.image_width(crop)
+    return bool(width) and width < floor
 
 
 def _caption_describe(cfg, groq_key, images):
@@ -3847,9 +3892,9 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
             continue
         if not sampler.due(group, now, scfg):
             continue
+        # The grab is an RTSP pull and needs no control-API client, so a camera whose
+        # control session is down still gets its follow-up frames (cam is None then).
         cam = cam_clients.get(cfg.name)
-        if cam is None:
-            continue                          # camera offline this tick; retry next tick
         snap = (snapshot_for or _sampler_snapshot)(cfg)
         image = snap(cam, group["event"])
         sampler.record_grab(group, now, scfg)
@@ -3859,6 +3904,19 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
             etype = group["etype"]
             score = score_for(cfg)
             s = score(image) if score is not None else None
+            if score is not None and s is not None:
+                group["scored"] = group.get("scored", 0) + 1
+            if (score is not None and s is None and cfg.scorer.on_error == "hold"
+                    and group.get("scored", 0) > 0 and group["frames"] < scfg.max_frames):
+                # Earlier frames of this group were scored and stayed below the bar; an
+                # unscored one is no evidence of a person, so wait for the next interval
+                # instead of spending the group's one send on an unverified frame.
+                log.warning("scorer unavailable; sampler %s holds frame %d/%d after %d "
+                            "scored frame(s)", cfg.name, group["frames"], scfg.max_frames,
+                            group["scored"])
+                monitor.audit_event(cfg, group["event"], etype, "sampler",
+                                    "scorer_unavailable", reason="skipped_prior_low_scores")
+                continue
             motion_corr = (cfg.scorer.motion_send_threshold is not None
                            and etype == "motion" and not group.get("pir_backed"))
             if sampler.loiter_enabled(scfg) and s is not None:
@@ -3890,7 +3948,8 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
             if verdict != "send":
                 _suppress_sampler_frame(cfg, group, etype, s, scfg, image, verdict, now=now)
                 continue
-            if score is not None and s is None:
+            unscored = score is not None and s is None
+            if unscored:
                 log.warning("scorer unavailable; sampler passes %s frame through", cfg.name)
                 monitor.audit_event(cfg, group["event"], etype, "sampler", "scorer_unavailable")
             can_alert, on_alert = alert_gate(state, cfg.name, app.alerts.cooldown, now)
@@ -3923,18 +3982,21 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
             label = enrich.face_label(monitor.face_ids(group["event"]), secrets.get("face_names"))
             light = (camera.whitelamp_seen(cam, cfg.name, group["event"].get("start_time"),
                                            force_time=cfg.whitelamp_force_time)
-                     if cfg.enrich.light_status else None)
+                     if cfg.enrich.light_status and cam is not None else None)
             caption = notify.build_caption(
                 monitor.TYPE_EMOJI.get(etype, "👁"), time_str(group["event"]),
                 description=description or None, detail=label or None, score=s,
                 light=light, lens=snapshot.frame_lens(image),
+                frame_time=_frame_time(group["event"], now), unverified=unscored,
             )
             ok = send_alert_photo(cfg, secrets, image, caption, score=s,
                                   incident=incident.incident_id(cfg.name, group["event"]),
                                   send_path="sampler", etype=etype)
             monitor.audit_event(cfg, group["event"], etype, "sampler", "send", score=s,
                                 threshold=cfg.scorer.threshold if score is not None else None,
-                                telegram=ok)
+                                telegram=ok,
+                                reason="scorer_unavailable" if unscored else None,
+                                extra={"degraded": "true"} if unscored else None)
             if ok:
                 log.info("alert %s sent (faces=%r, desc=%r, score=%s) [sampler]",
                          etype, label, description, f"{s:.2f}" if s is not None else "n/a")

@@ -115,16 +115,59 @@ def _transport_failure(exc):
     return isinstance(exc, (OSError, TimeoutError))
 
 
-def _score_once(url, image_path, timeout, tiles, *, source_id=None, ignore_zones=(),
-                alert_zones=(), alert_zones_mode="enforce", token=None, max_person_box=None,
-                ignore_boxes=(), ignore_boxes_mode="enforce"):
-    """``(result, transport_failed)`` of one scoring request; result None on any failure."""
+# One retry of a request that hung or that the service answered 400/500 (a truncated
+# upload, a one-off inference error). The whole call may use RETRY_BUDGET_FACTOR x the
+# request timeout; the retry runs only when at least RETRY_MIN_SECONDS of that remain.
+RETRY_BUDGET_FACTOR = 2.0
+RETRY_BACKOFF_SECONDS = 0.5
+RETRY_MIN_SECONDS = 3.0
+_sleep = time.sleep
+
+
+def _retryable(exc):
+    """True for a timeout/hang or a 400/500 answer: worth one more try, unlike a refusal."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in (400, 500)
+    if isinstance(exc, urllib.error.URLError):
+        return isinstance(exc.reason, TimeoutError)
+    return isinstance(exc, TimeoutError)
+
+
+def _score_once(url, image_path, timeout, tiles, **kwargs):
+    """``(result, transport_failed)`` of a scoring request, retried once when it makes sense.
+
+    See :func:`_score_attempt`; the retry covers timeouts and 400/500 answers only (not
+    refused connections or gateway errors, which failover handles) and only while the
+    time budget allows.
+    """
+    started = time.monotonic()
+    result, failed, exc = _score_attempt(url, image_path, timeout, tiles, **kwargs)
+    if result is not None or exc is None or not _retryable(exc):
+        return result, failed
+    remaining = timeout * RETRY_BUDGET_FACTOR - (time.monotonic() - started)
+    remaining -= RETRY_BACKOFF_SECONDS
+    if remaining < RETRY_MIN_SECONDS:
+        return result, failed
+    log.info("scorer: retrying once after %s", type(exc).__name__)
+    _sleep(RETRY_BACKOFF_SECONDS)
+    result, failed, _exc = _score_attempt(url, image_path, min(timeout, remaining), tiles,
+                                          **kwargs)
+    return result, failed
+
+
+def _score_attempt(url, image_path, timeout, tiles, *, source_id=None, ignore_zones=(),
+                   alert_zones=(), alert_zones_mode="enforce", token=None, max_person_box=None,
+                   ignore_boxes=(), ignore_boxes_mode="enforce"):
+    """``(result, transport_failed, exc)`` of one request; result None on any failure.
+
+    ``exc`` is the request exception when the request itself failed, else None.
+    """
     try:
         with open(image_path, "rb") as f:
             body = f.read()
     except OSError:
         log.warning("scorer: cannot read %s", image_path)
-        return None, False
+        return None, False, None
     if tiles and int(tiles) > 1:
         sep = "&" if "?" in url else "?"
         url = f"{url}{sep}tiles={int(tiles)}"
@@ -141,7 +184,7 @@ def _score_once(url, image_path, timeout, tiles, *, source_id=None, ignore_zones
             result = json.load(resp)
             if not isinstance(result, dict):
                 log.warning("scorer returned a non-object JSON response")
-                return None, False
+                return None, False, None
             if ignore_zones:
                 result = apply_ignore_zones(result, ignore_zones)
             if ignore_boxes and ignore_boxes_mode == "observe":
@@ -155,7 +198,7 @@ def _score_once(url, image_path, timeout, tiles, *, source_id=None, ignore_zones
             elif alert_zones:
                 result = apply_vehicle_alert_zones(apply_alert_zones(result, alert_zones),
                                                    alert_zones)
-            return result, False
+            return result, False, None
         finally:
             close = getattr(resp, "close", None)
             if close:
@@ -163,9 +206,9 @@ def _score_once(url, image_path, timeout, tiles, *, source_id=None, ignore_zones
     except Exception as e:  # noqa: BLE001 - any transport/parse failure means "unavailable"
         if _unauthorized(e):
             _warn_unauthorized(url, bool(token))
-            return None, False
+            return None, False, None
         log.warning("scorer request failed: %s", e)
-        return None, _transport_failure(e)
+        return None, _transport_failure(e), e
 
 
 # -- failover between interchangeable scoring services ----------------------------------

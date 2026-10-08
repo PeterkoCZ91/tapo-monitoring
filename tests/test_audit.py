@@ -94,3 +94,15 @@ def test_audit_json_cli(tmp_path, capsys):
     assert audit.main([str(log), "--json"]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["front"]["paths"]["live"]["latency_p50_s"] == 25
+
+def test_summary_counts_sends_that_went_out_unscored():
+    lines = [
+        "audit camera=front path=sampler action=send etype=motion start=100 "
+        "telegram=true reason=scorer_unavailable degraded=true",
+        "audit camera=front path=sampler action=send etype=motion start=200 "
+        "score=0.70 threshold=0.40 telegram=true",
+    ]
+    summary = audit.summarize(lines)["front"]
+    assert summary.sent_unscored == 1
+    assert "sent_unscored=1" in audit.format_summary({"front": summary})
+    assert audit.summary_data({"front": summary})["front"]["sent_unscored"] == 1

@@ -79,6 +79,7 @@ class CameraSummary:
     cooldown: int = 0
     dropped_below_threshold: int = 0
     scorer_unavailable: int = 0
+    sent_unscored: int = 0
     snapshot_failed: int = 0
     sent_scores: list[float] = field(default_factory=list)
     dropped_scores: list[float] = field(default_factory=list)
@@ -121,6 +122,8 @@ class CameraSummary:
             else:
                 self.telegram_unknown += 1
                 bucket["unknown"] += 1
+            if rec.get("degraded") is True or rec.get("reason") == "scorer_unavailable":
+                self.sent_unscored += 1
             if isinstance(rec.get("score"), (int, float)):
                 self.sent_scores.append(float(rec["score"]))
         elif action == "defer":
@@ -171,6 +174,7 @@ def summary_data(summaries: dict[str, CameraSummary]) -> dict:
             "telegram_ok": summary.telegram_ok,
             "telegram_failed": summary.telegram_failed,
             "telegram_unknown": summary.telegram_unknown,
+            "sent_unscored": summary.sent_unscored,
             "panlimit_frames": summary.panlimit_frames,
             "panlimit_events": len(summary.panlimit_events),
             "paths": {
@@ -211,7 +215,8 @@ def format_summary(summaries: dict[str, CameraSummary]) -> str:
         lines.append(
             f"  deferred={s.deferred} cooldown={s.cooldown} "
             f"dropped_below_threshold={s.dropped_below_threshold} "
-            f"scorer_unavailable={s.scorer_unavailable} snapshot_failed={s.snapshot_failed}"
+            f"scorer_unavailable={s.scorer_unavailable} sent_unscored={s.sent_unscored} "
+            f"snapshot_failed={s.snapshot_failed}"
         )
         lines.append(
             "  scores: "

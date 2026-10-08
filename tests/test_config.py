@@ -885,6 +885,15 @@ def _scorer_config(**scorer):
     return {"cameras": [{"name": "a", "host": "203.0.113.10", "scorer": scorer}]}
 
 
+def test_scorer_on_error_defaults_to_hold_and_validates():
+    app = cfg.load_config_from_dict(_scorer_config(url="http://x/score"))
+    assert app.cameras[0].scorer.on_error == "hold"
+    app = cfg.load_config_from_dict(_scorer_config(url="http://x/score", on_error="open"))
+    assert app.cameras[0].scorer.on_error == "open"
+    with pytest.raises(cfg.ConfigError, match="on_error"):
+        cfg.load_config_from_dict(_scorer_config(on_error="ignore"))
+
+
 def test_scorer_night_threshold_defaults_none():
     app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
     assert app.cameras[0].scorer.night_threshold is None
@@ -1510,3 +1519,12 @@ def test_scorer_alert_zones_warn_when_the_camera_can_move(caplog):
     caplog.clear()
     _load_capturing(caplog, _alert_cfg(zone, role="static"))
     assert not _unknown_key_warnings(caplog)
+
+
+def test_crop_min_px_defaults_overrides_and_rejects_negatives():
+    assert cfg.load_config_from_dict(_minimal()).cameras[0].crop_min_px == 400
+    data = {"cameras": [{"name": "front", "host": "192.0.2.50", "crop_min_px": 250}]}
+    assert cfg.load_config_from_dict(data).cameras[0].crop_min_px == 250
+    data["cameras"][0]["crop_min_px"] = -1
+    with pytest.raises(cfg.ConfigError, match="crop_min_px"):
+        cfg.load_config_from_dict(data)

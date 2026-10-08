@@ -42,7 +42,8 @@ def is_empty_scene(description, marker=EMPTY_MARKER):
 
 
 def build_caption(emoji, time_str, description=None, detail=None, count=None,
-                  minutes_since_last=None, score=None, light=None, lens=None):
+                  minutes_since_last=None, score=None, light=None, lens=None,
+                  frame_time=None, unverified=False):
     """Assemble an alert caption. Pure — no I/O.
 
     ``score`` may carry the scorer's animal confidence alongside the person one; when the
@@ -63,6 +64,11 @@ def build_caption(emoji, time_str, description=None, detail=None, count=None,
     ``lens`` names the lens of a dual-lens camera that took the photo ("wide",
     "pan/tilt"; "wide + pan/tilt" for an album of both); None — a single-lens camera, or a frame of unknown source — adds nothing.
 
+    ``frame_time`` ("HH:MM:SS") names when the photo was taken, for a follow-up frame
+    grabbed well after the event the headline time refers to. ``unverified`` marks a photo
+    that reached the alert without a score (scorer unavailable), so it is not read as a
+    confirmed person.
+
     This never changes *whether* an alert goes out — the threshold gates on person
     confidence alone.
     """
@@ -72,11 +78,15 @@ def build_caption(emoji, time_str, description=None, detail=None, count=None,
     if light is True:
         emoji = f"{emoji}🔦"
     headline = f"{emoji} {detail} {time_str}".strip() if detail else f"{emoji} {time_str}"
+    if frame_time:
+        headline = f"{headline} · frame {frame_time}"
     persons = getattr(score, "persons", None)
     if isinstance(persons, int) and persons >= 2:
         headline = f"{headline} · {persons} people"
     if lens:
         headline = f"{headline} · {lens} {'lenses' if ' + ' in lens else 'lens'}"
+    if unverified:
+        headline = f"{headline} (unverified)"
     lines = [headline]
     if description:
         lines.append(f'"{description}"')

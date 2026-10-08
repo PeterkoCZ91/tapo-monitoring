@@ -1010,7 +1010,20 @@ events with `tapo-monitor replay --compare` first (see [observability](observabi
 - `crop_to_subject` uses the best returned person box and safely falls back to the full
   frame.
 - `crop_min_frac` sets the smallest crop the zoom may produce (see below).
+- `crop_min_px` (default 400, 0 = off): with `crop_from_native`, a crop narrower than this
+  many source pixels is not sent as the alert; the whole frame is, and the crop follows as a
+  second photo. A crop cut from the delivery-width frame is not measured and is sent alone,
+  as before.
+- A frame that reached the alert without a score (scorer unavailable, passed through) is
+  never cropped: the whole frame is sent.
 - Scorer errors fail open (one automatic retry, then raw passthrough — never a silent drop).
+  The unscored photo is captioned `(unverified)` and audited with `reason=scorer_unavailable
+  degraded=true`.
+- `on_error` (`hold`, default, or `open`): the fail-open rule is kept for live frames and
+  for the first frames of a sampler group. A sampler follow-up that cannot be scored after
+  earlier frames of the same group already scored below threshold is, with `hold`, skipped
+  (audit `action=scorer_unavailable reason=skipped_prior_low_scores`) and retried at the
+  next interval; the last frame of the window still passes through. `open` always passes it.
 
 One honest note on exposure: the scorer *service* binds `0.0.0.0` and has no
 authentication — unlike the status endpoint, there is no localhost default. Anyone who

@@ -1181,7 +1181,8 @@ cannot outlive the frames it points at. It is inert when the variable is unset a
 raises into the send path — a full disk degrades to "no archive", never a lost alert.
 
 A `crop_to_subject` camera sends the zoom to Telegram but archives the **uncropped** scene:
-a cropped empty yard tells you nothing about a false positive.
+a cropped empty yard tells you nothing about a false positive. When the crop is small
+(`crop_min_px`) the whole frame is the alert and is archived as usual.
 
 ```bash
 export TAPO_SENT_LOG_DIR=~/tapo-monitor/sent-log

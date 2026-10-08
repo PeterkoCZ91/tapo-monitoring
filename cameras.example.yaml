@@ -266,6 +266,10 @@ cameras:
       threshold: 0.4         # min PERSON confidence to send a frame; animal confidence
                              # never alerts by itself, it only marks the caption
       timeout: 10            # seconds per scoring request
+      # on_error: hold         # hold (default) | open. Scorer unreachable on a sampler
+                             # follow-up after earlier frames scored low: hold = wait for
+                             # the next frame, open = send it unscored (marked unverified).
+                             # Live frames and a group's first frames always fail open.
       tiles: 1               # 1 = whole frame only; 2+ also scores a tile grid so a
                              # distant subject is not lost when the wide view is resized
       # motion_send_threshold: 0.6  # optional; corroboration for bare (non-PIR) motion.
@@ -289,6 +293,9 @@ cameras:
                              # stamp, but it also caps the zoom — where people are small
                              # and far, lower it. See
                              # docs/configuration.md#how-small-the-zoom-may-get
+    # crop_min_px: 400        # with crop_from_native: a crop narrower than this many source
+                             # pixels is sent as a second photo after the whole frame
+                             # (default 400, 0 = always send the crop alone).
     # crop_from_native: true  # crop before the downscale, so the zoom keeps the camera's
                              # detail. Costs a native grab: free on a Pi 4, about +0.5s
                              # on a Pi Zero 2 W. A stream already at delivery width skips

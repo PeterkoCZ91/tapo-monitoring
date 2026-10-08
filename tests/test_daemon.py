@@ -2826,13 +2826,95 @@ def test_send_alert_photo_archives_uncropped_scene(monkeypatch, tmp_path):
     monkeypatch.setenv("TAPO_SENT_LOG_DIR", str(archive))
 
     ok = daemon.send_alert_photo(cam, {"telegram_token": "t", "telegram_chat": "c"},
-                                 str(full), "caption")
+                                 str(full), "caption", score=0.8)
 
     assert ok is True
     assert b"ZOOM" in posted[0]                     # Telegram got the zoom
     saved = list(archive.glob("*.jpg"))
     assert len(saved) == 1
     assert saved[0].read_bytes() == b"\xff\xd8WHOLE-SCENE"
+
+
+def _native_frame(path):
+    return daemon.snapshot.Frame(str(path), native=str(path))
+
+
+def _crop_send_setup(monkeypatch, tmp_path, crop_width, crop_min_px=400):
+    cam = _cam(crop_to_subject=True, crop_min_px=crop_min_px,
+               scorer={"url": "http://x/score", "tiles": 2})
+    full = tmp_path / "frame.jpg"
+    full.write_bytes(b"\xff\xd8WHOLE-SCENE")
+    crop = tmp_path / "crop.jpg"
+    crop.write_bytes(b"\xff\xd8ZOOM")
+    calls = []
+    monkeypatch.setattr(daemon, "crop_for_subject",
+                        lambda *a, **k: (calls.append(1), str(crop))[1])
+    monkeypatch.setattr(daemon.snapshot, "image_width", lambda p: crop_width)
+    monkeypatch.setattr(daemon, "_reduced", lambda *a, **k: None)
+    posted = []
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: (posted.append(req.data), _Resp(b'{"ok":true}'))[1])
+    archive = tmp_path / "sent"
+    monkeypatch.setenv("TAPO_SENT_LOG_DIR", str(archive))
+    return cam, full, crop, calls, posted, archive
+
+
+def test_unscored_alert_is_sent_whole_not_cropped(monkeypatch, tmp_path):
+    # Scorer unavailable -> passthrough with no score. Re-scoring just to zoom on a
+    # low-confidence box once sent an unreadable 154px patch as the alert.
+    cam, full, _crop, calls, posted, _archive = _crop_send_setup(monkeypatch, tmp_path, 900)
+
+    ok = daemon.send_alert_photo(cam, {"telegram_token": "t", "telegram_chat": "c"},
+                                 str(full), "caption", score=None)
+
+    assert ok is True
+    assert calls == []
+    assert len(posted) == 1 and b"WHOLE-SCENE" in posted[0]
+
+
+def test_small_crop_sends_whole_frame_then_the_crop(monkeypatch, tmp_path):
+    cam, full, crop, calls, posted, archive = _crop_send_setup(monkeypatch, tmp_path, 154)
+
+    ok = daemon.send_alert_photo(cam, {"telegram_token": "t", "telegram_chat": "c"},
+                                 _native_frame(full), "caption", score=0.8)
+
+    assert ok is True
+    assert len(posted) == 2
+    assert b"WHOLE-SCENE" in posted[0] and b"caption" in posted[0]
+    assert b"ZOOM" in posted[1]
+    saved = list(archive.glob("*.jpg"))
+    assert len(saved) == 1 and saved[0].read_bytes() == b"\xff\xd8WHOLE-SCENE"
+    assert not crop.exists()
+
+
+def test_normal_crop_is_still_the_only_photo(monkeypatch, tmp_path):
+    cam, full, _crop, _calls, posted, _archive = _crop_send_setup(monkeypatch, tmp_path, 900)
+
+    daemon.send_alert_photo(cam, {"telegram_token": "t", "telegram_chat": "c"},
+                            _native_frame(full), "caption", score=0.8)
+
+    assert len(posted) == 1 and b"ZOOM" in posted[0]
+
+
+def test_crop_min_px_zero_keeps_small_crops_as_before(monkeypatch, tmp_path):
+    cam, full, _crop, _calls, posted, _archive = _crop_send_setup(monkeypatch, tmp_path, 154,
+                                                                  crop_min_px=0)
+
+    daemon.send_alert_photo(cam, {"telegram_token": "t", "telegram_chat": "c"},
+                            _native_frame(full), "caption", score=0.8)
+
+    assert len(posted) == 1 and b"ZOOM" in posted[0]
+
+
+def test_crop_min_px_does_not_apply_without_a_native_source(monkeypatch, tmp_path):
+    # Cut from the delivery-width frame the crop is always a few hundred px wide; the
+    # floor is for native crops, so such a camera keeps its single zoom photo.
+    cam, full, _crop, _calls, posted, _archive = _crop_send_setup(monkeypatch, tmp_path, 282)
+
+    daemon.send_alert_photo(cam, {"telegram_token": "t", "telegram_chat": "c"},
+                            str(full), "caption", score=0.8)
+
+    assert len(posted) == 1 and b"ZOOM" in posted[0]
 
 
 def test_default_snapshot_returns_delivery_frame_carrying_its_native_twin(monkeypatch, tmp_path):
@@ -2925,7 +3007,7 @@ def test_send_alert_photo_crops_from_the_native_twin(monkeypatch, tmp_path):
 
     frame = snapshot.Frame(str(scene), native=str(native), native_width=3840)
     ok = daemon.send_alert_photo(cam, {"telegram_token": "t", "telegram_chat": "c"},
-                                 frame, "caption")
+                                 frame, "caption", score=0.8)
 
     assert ok is True
     assert seen == {"image": str(scene), "source": str(native), "width": 3840}
@@ -3030,7 +3112,7 @@ def test_send_alert_photo_removes_the_crop_it_created(monkeypatch, tmp_path):
     monkeypatch.delenv("TAPO_SENT_LOG_DIR", raising=False)
 
     daemon.send_alert_photo(cam, {"telegram_token": "t", "telegram_chat": "c"},
-                            str(full), "caption")
+                            str(full), "caption", score=0.8)
 
     assert not crop.exists()        # the zoom we made is gone
     assert full.exists()            # the frame we were handed is still the caller's
@@ -5625,6 +5707,8 @@ def test_run_monitor_pass_live_alert_goes_through_the_cropping_sender(monkeypatc
                         lambda *a, **k: cropped.append(a[1]) or a[1])
     monkeypatch.setattr(daemon.notify, "send_photo", lambda *a, **k: True)
     monkeypatch.setattr(daemon.monitor.enrich, "groq_describe", lambda *a, **k: "a person")
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda *a, **k: {"person": 0.9, "box": [1, 2, 3, 4], "w": 100, "h": 100})
 
     state = daemon.MonitorState()
     secrets = {"telegram_token": "t", "telegram_chat": "c", "groq_key": "k"}
@@ -7872,3 +7956,88 @@ def test_sd_followup_vehicle_outside_the_alert_zone_is_ignored(monkeypatch, tmp_
     app, state, fetch = _vehicle_sd([str(frame)], zones=zones)
     _run_vehicle_sd(app, state, fetch, sent, monkeypatch)
     assert sent == []
+
+
+# -- sampler: scorer outage after earlier low scores ---------------------------
+
+def _scored_group(scored=1, frames=1):
+    g = _group(frames=frames)
+    g["scored"] = scored
+    g["next_due"] = 1030
+    return g
+
+
+def test_sampler_holds_unscored_frame_after_prior_low_scores(monkeypatch, caplog):
+    sent = []
+    app = _sampler_app()
+    state = daemon.MonitorState()
+    state.groups["a"] = _scored_group()
+    with caplog.at_level("INFO"):
+        _run_sampler(app, state, 1035, sent, monkeypatch, score=None)
+    assert sent == []
+    assert state.groups["a"]["sent"] is False          # group stays open
+    assert state.groups["a"]["frames"] == 2            # schedule moved on
+    assert "action=scorer_unavailable" in caplog.text
+    assert "reason=skipped_prior_low_scores" in caplog.text
+
+
+def test_sampler_on_error_open_restores_passthrough(monkeypatch):
+    sent = []
+    app = _sampler_app()
+    app.cameras[0].scorer.on_error = "open"
+    state = daemon.MonitorState()
+    state.groups["a"] = _scored_group()
+    _run_sampler(app, state, 1035, sent, monkeypatch, score=None)
+    assert len(sent) == 1
+
+
+def test_sampler_last_frame_fails_open_even_after_low_scores(monkeypatch):
+    sent = []
+    app = _sampler_app()
+    state = daemon.MonitorState()
+    state.groups["a"] = _scored_group(frames=5)         # this grab is frame 6 of 6
+    _run_sampler(app, state, 1035, sent, monkeypatch, score=None)
+    assert len(sent) == 1
+
+
+def test_sampler_unscored_send_is_marked_degraded(monkeypatch, caplog):
+    sent = []
+    app = _sampler_app()
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    with caplog.at_level("INFO"):
+        _run_sampler(app, state, 1035, sent, monkeypatch, score=None)
+    assert "(unverified)" in sent[0][1]
+    assert "reason=scorer_unavailable" in caplog.text
+    assert "degraded=true" in caplog.text
+
+
+def test_sampler_counts_scored_frames_and_names_late_frame_time(monkeypatch):
+    sent = []
+    app = _sampler_app()
+    state = daemon.MonitorState()
+    g = _group()
+    g["next_due"] = 1030
+    state.groups["a"] = g
+    _run_sampler(app, state, 1200, sent, monkeypatch, score=0.9)
+    assert g["scored"] == 1
+    assert " · frame " in sent[0][1]
+    assert "(unverified)" not in sent[0][1]
+
+
+def test_sampler_grabs_without_a_control_client(monkeypatch):
+    sent = []
+    app = _sampler_app()
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap, **k: sent.append(cap) or True)
+    monkeypatch.setattr(daemon.enrich, "groq_describe", lambda *a, **k: "Person")
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, img, timeout=10, tiles=1, **kw: {"person": 0.9, "animal": 0.0})
+    monkeypatch.setattr(daemon, "_safe_unlink", lambda p: None)
+    secrets = {"groq_key": "k", "telegram_token": "t", "telegram_chat": "c", "face_names": {}}
+    daemon.process_sampler(app, {}, state, now=1035, secrets=secrets,
+                           snapshot_for=lambda c: (lambda cam, ev: "/tmp/f.jpg"),
+                           time_str=lambda ev: "T")
+    assert len(sent) == 1

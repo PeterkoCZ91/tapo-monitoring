@@ -207,6 +207,12 @@ The trade-off is an external dependency on the event path, which is contained by
 fail-open rule below: a client that cannot reach the scorer degrades to raw passthrough
 (`score_image` returns `None` → the frame is sent unfiltered), so a scoring outage adds
 noise but never silently drops a person. See the alert reliability invariants above.
+The invariant holds for live frames and for the first frame of a sampler group. A sampler
+follow-up that cannot be scored *after earlier frames of the same group scored below
+threshold* waits for the next interval instead (`scorer.on_error: hold`, the default; the
+last frame of the window still fails open, and `open` restores unconditional passthrough).
+A frame sent unscored is marked `(unverified)` in its caption and `degraded=true` in the
+audit line.
 
 ## Health and observability
 

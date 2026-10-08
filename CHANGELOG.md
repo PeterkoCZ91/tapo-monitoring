@@ -5,6 +5,20 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Alerts that went out unscored are now visible and less likely: when the scorer is down,
+  a sampler frame is held (up to the last frame of its group) instead of sent if the group
+  already holds scored low frames (`scorer.on_error: hold`, default; `open` restores the old
+  passthrough). An unscored send is captioned `(unverified)`, audited with
+  `reason=scorer_unavailable degraded=true` and counted as `sent_unscored`. A sampler caption
+  names the frame time (`frame HH:MM:SS`) when it is more than a minute after the event, and
+  the sampler no longer waits for the camera control client for RTSP grabs.
+- `crop_min_px` (default 400, 0 = off): with `crop_from_native`, a crop narrower than this is
+  sent as a second "zoom" photo after the whole frame instead of as the alert. An unscored
+  frame is never cropped.
+- Scorer: a request whose body is shorter than its `Content-Length` is answered 400 and counted
+  as `short_body`; the `inference_error` log names body length, `Content-Length` and the JPEG
+  start marker; request latency now includes the upload; the client retries a timed-out, 400 or
+  500 request once (worst case about twice `scorer.timeout`).
 - `tools/label_selection.py` builds a labeling dataset (images, `index.jsonl` with optional
   per-model `boxes`, `teacher.jsonl`, selection report) from two shadow logs and their
   `disagree/` directories: three-model disagreement, small persons and random controls,

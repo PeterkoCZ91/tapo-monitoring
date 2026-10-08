@@ -57,6 +57,13 @@ def _parse_stamp(value):
         return None
 
 
+def _safe_exc_text(exc, limit=120):
+    """``str(exc)`` for a log line: path-like words dropped, whitespace folded, capped."""
+    words = [("<path>" if w.startswith(("/", "~")) or "\\" in w else w)
+             for w in str(exc).split()]
+    return " ".join(words)[:limit]
+
+
 def _normalize_source_id(value):
     if not isinstance(value, str):
         return None
@@ -1500,11 +1507,29 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
                 tiles = max(1, int(parse_qs(parsed.query).get("tiles", ["1"])[0]))
             except (TypeError, ValueError):
                 tiles = 1
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length)
             source_id = _normalize_source_id(self.headers.get("X-Tapo-Source-ID"))
+            # Start the clock and the counters before the upload is read, so a slow
+            # or stalled upload shows up in the latency metrics.
             metrics.begin(tiles, source_id)
             request_started = time.monotonic()
+            try:
+                length = max(0, int(self.headers.get("Content-Length", 0)))
+            except (TypeError, ValueError):
+                length = 0
+            try:
+                body = self.rfile.read(length)
+            except OSError:         # reset or timed-out upload: same as a short one
+                body = b""
+            if len(body) != length:
+                log.warning("scoring failed: short_body (got=%d, content_length=%d, source=%s)",
+                            len(body), length, source_id or "-")
+                try:
+                    self._reply(400, {"error": "short body"})
+                finally:
+                    now = time.monotonic()
+                    metrics.finish(now - request_started, 0.0, False,
+                                   failure_reason="short_body", source_id=source_id)
+                return
             score_started = time.monotonic()
             ok = False
             result = None
@@ -1523,8 +1548,10 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
                 failure_reason = "inference_error"
                 # Class name and normalized source only: no traceback (paths) and nothing
                 # from the frame or the raw header value.
-                log.warning("scoring failed: inference_error (%s, source=%s)",
-                            type(exc).__name__, source_id or "-")
+                log.warning("scoring failed: inference_error (%s, source=%s, body=%d, "
+                            "content_length=%d, soi=%s, msg=%s)",
+                            type(exc).__name__, source_id or "-", len(body), length,
+                            body[:2] == b"\xff\xd8", _safe_exc_text(exc))
                 self._reply(500, {"error": "scoring failed"})
             else:
                 reply = result

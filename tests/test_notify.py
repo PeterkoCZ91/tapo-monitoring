@@ -280,3 +280,9 @@ def test_caption_names_the_lens_after_the_count():
                                score=scorer.SubjectScore(0.9, 0.9, persons=3), light=True)
     assert cap == "👤🐾🔦 Jana 23:14 · 3 people · pan/tilt lens"
     assert notify.build_caption("👤", "23:14", lens=None) == "👤 23:14"
+
+
+def test_caption_names_frame_time_and_unverified_marker():
+    text = notify.build_caption("👁", "T", frame_time="10:11:12", unverified=True)
+    assert text.splitlines()[0] == "👁 T · frame 10:11:12 (unverified)"
+    assert notify.build_caption("👁", "T") == "👁 T"

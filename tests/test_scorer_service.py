@@ -135,9 +135,12 @@ def test_score_failure_log_names_the_exception_class_and_source(caplog):
     finally:
         srv.shutdown()
     text = caplog.text
-    assert "scoring failed: inference_error (ValueError, source=" + source + ")" in text
+    assert "scoring failed: inference_error (ValueError, source=" + source + "," in text
     assert "/secret/path" not in text and "Traceback" not in text
     assert "frame-bytes" not in text
+    # diagnostics for a failed decode: sizes, SOI marker and the sanitized message
+    assert "body=11, content_length=11, soi=False" in text
+    assert "msg=<path> bad image" in text
 
 
 def test_metrics_mark_malformed_score_result():
@@ -875,3 +878,76 @@ def test_combine_keeps_full_frame_vehicle_and_tolerates_missing_field():
     assert combined["vehicle_boxes"] == [[1, 2, 3, 4]]
     # a rect without the field (older shape) must not break the fold
     assert "vehicle" not in scorer_service.combine_rect_scores([_rect(0.9)])
+
+
+def _raw_post(port, head, payload, shutdown_write=True):
+    import socket
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+        sock.sendall(head + payload)
+        if shutdown_write:
+            sock.shutdown(socket.SHUT_WR)
+        data = b""
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                return data
+            data += chunk
+
+
+def test_short_body_is_400_and_its_own_failure_reason(caplog):
+    called = []
+    srv = scorer_service.make_server(lambda b, tiles=1: called.append(b) or {"person": 0.0},
+                                     port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    try:
+        head = (b"POST /score HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n"
+                b"X-Tapo-Source-ID: " + b"ab" * 8 + b"\r\n\r\n")
+        with caplog.at_level(logging.WARNING, logger=scorer_service.log.name):
+            reply = _raw_post(port, head, b"\xff\xd8short")
+        assert reply.startswith(b"HTTP/1.0 400") or reply.startswith(b"HTTP/1.1 400")
+        assert b"short body" in reply
+        metrics = _metrics_when_settled(f"http://127.0.0.1:{port}")
+    finally:
+        srv.shutdown()
+    assert called == []
+    assert metrics["failed"] == 1
+    assert metrics["failure_reasons"] == {"short_body": 1}
+    assert "short_body (got=7, content_length=100" in caplog.text
+
+
+def test_reset_during_upload_still_closes_the_request_counters():
+    srv = scorer_service.make_server(lambda b, tiles=1: {"person": 0.0}, port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    try:
+        import socket
+        import struct
+        sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        sock.sendall(b"POST /score HTTP/1.1\r\nHost: x\r\nContent-Length: 50\r\n\r\nab")
+        time.sleep(0.2)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        sock.close()                                    # RST in the middle of the body
+        metrics = _metrics_when_settled(f"http://127.0.0.1:{port}")
+    finally:
+        srv.shutdown()
+    assert metrics["in_flight"] == 0
+    assert metrics["failure_reasons"] == {"short_body": 1}
+
+
+def test_slow_upload_counts_in_request_latency():
+    srv = scorer_service.make_server(lambda b, tiles=1: {"person": 0.0}, port=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    try:
+        import socket
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+            sock.sendall(b"POST /score HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nab")
+            time.sleep(0.4)
+            sock.sendall(b"cd")
+            sock.recv(4096)
+        metrics = _metrics_when_settled(f"http://127.0.0.1:{port}")
+    finally:
+        srv.shutdown()
+    assert metrics["request_seconds_max"] >= 0.3
+    assert metrics["score_seconds_max"] < 0.3

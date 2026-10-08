@@ -182,6 +182,11 @@ class ScorerConfig:
     # Threshold while the camera's night is on (its schedule applied to the astral night):
     # IR scenes score differently from daylight ones. None = ``threshold`` around the clock.
     night_threshold: float | None = None
+    # What a sampler follow-up frame does when the scorer cannot be reached after earlier
+    # frames of the same group already scored below threshold: "hold" waits for the next
+    # interval (the group stays open), "open" passes the unscored frame through as before.
+    # Live frames and a group's first frames always fail open.
+    on_error: str = "hold"
 
 
 @dataclass
@@ -341,6 +346,9 @@ class CameraConfig:
     # per camera, and only as far as the delivered pixels allow — with crop_from_native the
     # crop is cut from a frame several times wider, so it can go lower there.
     crop_min_frac: float = 0.22
+    # A crop narrower than this many source pixels is mush once delivered, so the whole
+    # frame is sent as the alert and the crop only follows as a second photo. 0 = off.
+    crop_min_px: int = 400
     # How this model's getEvents fields are read (detection.EVENT_PROFILES). "default" is
     # the C560WS/C260 table every camera had before; "c545d" reads alarm_type 6 / bit 32
     # as a person (no PIR on that model) and knows its pan/tilt lens moves on its own.
@@ -832,6 +840,9 @@ def _check_hold_expiry(sampler, scorer, where):
                           "motion_send_threshold (a held score never reaches it)")
 
 
+SCORER_ON_ERROR = ("open", "hold")
+
+
 def _scorer_urls(value, where):
     """``(primary, candidates)`` from a scalar ``url`` (or None) or a list of candidates."""
     if value is None or isinstance(value, str):
@@ -920,6 +931,8 @@ def _scorer(data, where):
     alert_zones = _alert_zones(d.get("alert_zones"), where)
     if alert_zones_mode == "observe" and not alert_zones:
         raise ConfigError(f"{where}: scorer alert_zones_mode observe needs alert_zones")
+    on_error = _check_enum(d.get("on_error", "hold"), SCORER_ON_ERROR, "scorer.on_error",
+                           where)
     return ScorerConfig(url=url, urls=urls, threshold=threshold, timeout=timeout, tiles=tiles,
                         token_env=token_env,
                         motion_send_threshold=motion_send_threshold,
@@ -930,7 +943,7 @@ def _scorer(data, where):
                         alert_zones=alert_zones, alert_zones_mode=alert_zones_mode,
                         vehicle_mode=vehicle_mode,
                         alert_vehicles=alert_vehicles, vehicle_threshold=vehicle_threshold,
-                        night_threshold=night_threshold)
+                        night_threshold=night_threshold, on_error=on_error)
 
 
 def _ignore_zones(value, where, name="ignore_zones"):
@@ -1268,6 +1281,14 @@ def _camera(data, index):
     # A floor of 0 disables the postage-stamp guard entirely; above 1 it cannot fit.
     if not 0 < crop_min_frac <= 1:
         raise ConfigError(f"{where}: 'crop_min_frac' must be greater than 0 and at most 1")
+    try:
+        if isinstance(data.get("crop_min_px"), bool):
+            raise ValueError
+        crop_min_px = int(data.get("crop_min_px", 400))
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}: 'crop_min_px' must be a whole number") from None
+    if crop_min_px < 0:
+        raise ConfigError(f"{where}: 'crop_min_px' must be 0 or more")
     detection = _detection(data.get("detection"), where)
     try:
         hub_poll_interval = int(data.get("hub_poll_interval", 20))
@@ -1423,6 +1444,7 @@ def _camera(data, index):
         crop_to_subject=bool(data.get("crop_to_subject", False)),
         crop_from_native=bool(data.get("crop_from_native", False)),
         crop_min_frac=crop_min_frac,
+        crop_min_px=crop_min_px,
         event_profile=event_profile,
         lens_pick_stream=lens_pick_stream,
         lens_album=lens_album,
