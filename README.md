@@ -16,6 +16,10 @@ Python daemon.
 > nightly recorder scan measures camera miss candidates. Camera models and firmware differ;
 > unsupported capabilities degrade to `unknown` instead of being guessed.
 
+> **New here?** Go straight to **[Getting started](docs/getting-started.md)** — one camera,
+> person detection, Telegram, in about ten minutes. Read [credentials](docs/credentials.md)
+> first; it is the step most people get wrong.
+
 ## Tested cameras
 
 | Camera | How it is used | Notes |
@@ -30,50 +34,12 @@ the local API across models is in the [local API reference](https://github.com/P
 Own a model not listed here? Run `tapo-monitor report` and share the anonymized file:
 see [camera reports](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/camera-reports.md).
 
-## What's new in 0.8
+## What's new
 
-- **Home Assistant over MQTT** — an opt-in, publish-only bridge with MQTT discovery:
-  person and motion sensors, reachability, privacy mode, "detection off", health and the
-  last alert per camera, for automations ([MQTT and Home Assistant](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/mqtt.md)).
-- **Your camera model, supported from your report** — `tapo-monitor report` writes an
-  anonymized report of what your camera answers; share it through the *Camera report*
-  issue form ([camera reports](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/camera-reports.md)).
-
-## What's new in 0.7
-
-- **Told when a camera stops watching** — one Telegram message when privacy mode, motion
-  or person detection is switched off or back on (`privacy_notice`, `detection_notice`),
-  and `follow_app_notifications` to go quiet while the Tapo app's notifications are off
-  ([configuration](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/configuration.md)).
-- **One visit, one message** — an SD follow-up is held to the cooldown when the camera
-  already alerted live.
-- **Dual-lens C545D** — per-lens self-heal, the lens and the number of people in the
-  caption, and a client-side deny-list for the calls that drop the camera's API.
-- **Collect-only mode** — `telegram_alerts: false` records alerts without sending them.
-
-## What's new in 0.6
-
-- **Quality per visit, not per frame** — `label-stats` groups frames into incidents and
-  reports missed visits and the delay to the first alert by delivery path
-  ([incidents](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/labeling.md#incidents)).
-- **Labelling workflow** — a frame collector, a teacher model that pre-labels the easy
-  frames and a local labelling page ([labeling](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/labeling.md)); a small random sample
-  of below-threshold frames keeps possible misses in the queue.
-- **Opt-in alert tuning** — a separate `scorer.night_threshold`, and a
-  `sampler.hold_expiry` policy for held frames whose corroboration never came
-  ([configuration](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/configuration.md#event-window-sampler)).
-- **Faster follow-ups** — recording follow-ups are read sooner and look at the event's
-  opening seconds first, frames are scored concurrently and while ffmpeg extracts them,
-  and SD/recording reads run off the main loop so one camera's card no longer stalls the
-  others.
-- **The photo worth sending** — `sd_frame_pick: largest` sends the frame where the person
-  is closest, within a blur guard.
-- **Disk and card health** — the daily digest reports the frame logs' disk use and warns
-  when the disk runs low; a counterfeit SD card (`dilatant_suspect`) is flagged by the
-  digital twin.
-- **Dual-lens C545D** support, and a public [local API reference](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/tapo-local-api.md).
-
-Details and upgrade notes: [CHANGELOG](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/CHANGELOG.md).
+Recent highlights — Home Assistant over MQTT (opt-in, publish-only), `tapo-monitor report`
+to get your own camera model supported, off/privacy notices, dual-lens C545D support, and
+the incident-based labelling workflow. Full per-version detail and upgrade notes are in the
+[CHANGELOG](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/CHANGELOG.md).
 
 ## Why this project exists
 
@@ -150,8 +116,12 @@ See the complete [capability catalog](https://github.com/PeterkoCZ91/tapo-monito
 
 ## Quick start
 
+> First time? The step-by-step **[Getting started](docs/getting-started.md)** guide walks
+> this through to your first alert, and [credentials](docs/credentials.md) explains the
+> camera accounts. The summary below assumes you have those in hand.
+
 Requirements: Python 3.10+, `ffmpeg`, a supported Tapo camera with third-party access, and
-camera/RTSP credentials created in the Tapo app.
+camera/RTSP credentials created in the Tapo app (see [credentials](docs/credentials.md)).
 
 Install the released package from PyPI (add extras as needed: `[mqtt]` for Home
 Assistant, `[scorer]` for the local scorer, `[onvif]` for the pan limit):
@@ -162,9 +132,12 @@ source ~/tapo-monitor/.venv/bin/activate
 pip install tapo-monitor            # or: pip install 'tapo-monitor[mqtt]'
 
 curl -fsSLo cameras.yaml \
-  https://raw.githubusercontent.com/PeterkoCZ91/tapo-monitoring/main/cameras.example.yaml
+  https://raw.githubusercontent.com/PeterkoCZ91/tapo-monitoring/main/cameras.minimal.yaml
 $EDITOR cameras.yaml
 ```
+
+Start from `cameras.minimal.yaml` (one camera, person detection, Telegram) and grow into
+`cameras.example.yaml`, the fully annotated reference, once it works.
 
 For development, work from a clone instead:
 
@@ -332,6 +305,8 @@ understand the session and sequential-request limitations.
 | Document | Start here when… |
 | --- | --- |
 | [Documentation index](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/README.md) | You want a map of all public docs. |
+| [Getting started](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/getting-started.md) | You are new and want your first alert fast. |
+| [Credentials](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/credentials.md) | You are setting up the camera accounts (read before first run). |
 | [Configuration](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/configuration.md) | You are preparing `cameras.yaml` and environment variables. |
 | [Architecture](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/architecture.md) | You want component boundaries, timing and failure semantics. |
 | [Operations](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/operations.md) | You are deploying, monitoring or calibrating a live instance. |
