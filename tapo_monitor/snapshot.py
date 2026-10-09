@@ -32,6 +32,8 @@ def rotate_filter(degrees):
 
 DELIVERY_WIDTH = 1280
 SCALE_VF = f"scale={DELIVERY_WIDTH}:-1"
+ARCHIVE_WIDTH = 2560        # sent-log copy of a native frame: room to judge a small crop
+ARCHIVE_QSCALE = "5"        # ~0.4-0.8 MB at 2560 px, against ~2 MB for the native grab
 
 
 class Frame(str):
@@ -146,6 +148,19 @@ def downscale_args(src_path, out_path):
         "-i", src_path,
         "-vf", SCALE_VF,
         "-q:v", "2",
+        "-update", "1",
+        out_path,
+    ]
+
+
+def archive_args(src_path, out_path):
+    """Return the ffmpeg argv for the sent-log copy of a native frame (at most
+    :data:`ARCHIVE_WIDTH` wide, never upscaled, lighter JPEG quality). Pure."""
+    return [
+        "ffmpeg", "-y",
+        "-i", src_path,
+        "-vf", f"scale='min({ARCHIVE_WIDTH},iw)':-2",
+        "-q:v", ARCHIVE_QSCALE,
         "-update", "1",
         out_path,
     ]

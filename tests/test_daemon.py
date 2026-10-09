@@ -3015,6 +3015,50 @@ def test_send_alert_photo_crops_from_the_native_twin(monkeypatch, tmp_path):
     assert list(archive.glob("*.jpg"))[0].read_bytes() == b"\xff\xd8SCENE"
 
 
+def _crop_archive_case(monkeypatch, tmp_path, ffmpeg):
+    cam = _cam(crop_to_subject=True, scorer={"url": "http://x/score", "tiles": 2})
+    native = tmp_path / "native.jpg"
+    native.write_bytes(b"\xff\xd8NATIVE")
+    scene = tmp_path / "scene.jpg"
+    scene.write_bytes(b"\xff\xd8SCENE")
+    crop = tmp_path / "crop.jpg"
+    crop.write_bytes(b"\xff\xd8CROP")
+    monkeypatch.setattr(daemon, "crop_for_subject", lambda *a, **k: str(crop))
+    monkeypatch.setattr(daemon, "_reduced", lambda *a, **k: None)
+    monkeypatch.setattr(daemon, "_run_ffmpeg", ffmpeg)
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: _Resp(b'{"ok":true}'))
+    archive = tmp_path / "sent"
+    monkeypatch.setenv("TAPO_SENT_LOG_DIR", str(archive))
+    frame = snapshot.Frame(str(scene), native=str(native), native_width=3840)
+    assert daemon.send_alert_photo(cam, {"telegram_token": "t", "telegram_chat": "c"},
+                                   frame, "caption", score=0.8)
+    return native, archive
+
+
+def test_send_alert_photo_archives_a_reduced_native_when_it_cropped_from_it(monkeypatch, tmp_path):
+    # A postage-stamp crop cannot be reviewed from the delivery-width copy later.
+    ran = []
+
+    def fake_ffmpeg(argv, timeout=20):
+        ran.append(argv)
+        with open(argv[-1], "wb") as fh:
+            fh.write(b"\xff\xd8ARCHIVE")
+
+    native, archive = _crop_archive_case(monkeypatch, tmp_path, fake_ffmpeg)
+    assert ran and ran[0][ran[0].index("-i") + 1] == str(native)
+    assert list(archive.glob("*.jpg"))[0].read_bytes() == b"\xff\xd8ARCHIVE"
+    assert list(tmp_path.glob("archive_*")) == []          # temp copy removed
+
+
+def test_send_alert_photo_archives_the_scene_when_the_reduced_native_fails(monkeypatch, tmp_path):
+    def broken(argv, timeout=20):
+        raise OSError("ffmpeg gone")
+
+    _, archive = _crop_archive_case(monkeypatch, tmp_path, broken)
+    assert list(archive.glob("*.jpg"))[0].read_bytes() == b"\xff\xd8SCENE"
+
+
 def test_default_snapshot_keeps_native_resolution_for_crop_cameras(monkeypatch, tmp_path):
     # The crop is only worth taking from a frame that still has the detail in it.
     seen = {}
@@ -3811,6 +3855,27 @@ def test_pending_falls_back_to_rtsp_when_sd_fails(monkeypatch):
     _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent, monkeypatch)
     assert len(sent) == 1
     assert sent[0][0] == "/tmp/rtsp.jpg"  # live RTSP fallback
+
+
+def test_pending_fallback_caption_names_the_frame_time_when_it_lags(monkeypatch):
+    # The live grab is made at `now`, minutes after the event the headline time names.
+    sent = []
+    app, state, fetch_frames, snapshot_for = _pending({}, sent, sd_ok=False, rtsp_ok=True)
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+    _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent, monkeypatch)
+    assert sent[0][0] == "/tmp/rtsp.jpg"
+    assert " · frame " in sent[0][1]
+
+
+def test_pending_card_frame_caption_has_no_frame_time(monkeypatch):
+    sent = []
+    app, state, fetch_frames, snapshot_for = _pending({}, sent, sd_ok=True, rtsp_ok=False)
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+    _run_pending(app, state, {"a": object()}, 1080, fetch_frames, snapshot_for, sent, monkeypatch)
+    assert len(sent) == 1
+    assert " · frame " not in sent[0][1]
 
 
 def test_pending_dropped_when_sd_and_rtsp_fail(monkeypatch):
@@ -8023,6 +8088,28 @@ def test_sampler_counts_scored_frames_and_names_late_frame_time(monkeypatch):
     assert g["scored"] == 1
     assert " · frame " in sent[0][1]
     assert "(unverified)" not in sent[0][1]
+
+
+def test_sampler_logs_a_frame_that_runs_late(monkeypatch, caplog):
+    app = _sampler_app()
+    state = daemon.MonitorState()
+    g = _group()
+    g["next_due"] = 1000
+    state.groups["a"] = g
+    with caplog.at_level("INFO"):
+        _run_sampler(app, state, 1038, [], monkeypatch, score=0.9)
+    assert "sampler a frame 1 late by 38 s" in caplog.text
+
+
+def test_sampler_is_silent_when_a_frame_runs_on_time(monkeypatch, caplog):
+    app = _sampler_app()
+    state = daemon.MonitorState()
+    g = _group()
+    g["next_due"] = 1000
+    state.groups["a"] = g
+    with caplog.at_level("INFO"):
+        _run_sampler(app, state, 1008, [], monkeypatch, score=0.9)
+    assert "late by" not in caplog.text
 
 
 def test_sampler_grabs_without_a_control_client(monkeypatch):

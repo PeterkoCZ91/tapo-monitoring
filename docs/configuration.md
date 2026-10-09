@@ -1060,7 +1060,8 @@ occupying 5% of the width is ~64px across at 1280, but ~190px at 4K.
 
 `crop_from_native: true` grabs the frame at the camera's own resolution, crops it, and
 reduces only the result. Full-resolution bytes never leave the device — both the zoom sent
-to Telegram and the whole-scene copy kept in the sent log are downscaled after the crop.
+to Telegram (1280 px) and the whole-scene copy kept in the sent log (at most 2560 px,
+lighter JPEG quality, about 0.5 MB for a noisy 4K frame) are downscaled after the crop.
 
 The reduction happens at the grab, not at the send, so only the crop ever sees the native
 frame: the scorer, the captioner and Telegram all keep receiving delivery-width images.

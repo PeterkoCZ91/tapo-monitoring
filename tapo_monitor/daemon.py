@@ -1275,6 +1275,7 @@ def lens_subjects_differ(first, second):
     return isinstance(a, int) and isinstance(b, int) and a != b
 
 
+SAMPLER_LATE_LOG = 10   # seconds a sampler frame may run past its due time before it is logged
 FRAME_TIME_GAP = 60     # seconds between event and grab before the caption names the frame
 
 
@@ -1652,6 +1653,26 @@ def _reduced(src, out_dir, run=None, width=None):
     return out_path if os.path.exists(out_path) and os.path.getsize(out_path) > 0 else None
 
 
+def _archive_copy(image, out_dir):
+    """Reduced copy of the native frame ``image`` was cropped from, or None. Best effort.
+
+    The sent log would otherwise keep the delivery-width frame, too coarse to judge a
+    small person's crop afterwards. A 4K original is cut to :data:`snapshot.ARCHIVE_WIDTH`
+    at a lighter JPEG quality so the retention budget (days of alerts) stays small.
+    """
+    native = getattr(image, "native", None)
+    if not native:
+        return None
+    out_path = os.path.join(out_dir or "/tmp", f"archive_{int(_time.time() * 1000000)}.jpg")
+    try:
+        _run_ffmpeg(snapshot.archive_args(native, out_path))
+    except Exception:
+        log.debug("archive copy failed for %s", native, exc_info=True)
+        _safe_unlink(out_path)
+        return None
+    return out_path if os.path.exists(out_path) and os.path.getsize(out_path) > 0 else None
+
+
 def send_alert_photo(cfg, secrets, image, caption, downscale=None, score=None,
                      incident=None, send_path=None, etype=None):
     """Deliver one alert frame (:func:`_deliver_alert_photo`) and tell the MQTT bridge.
@@ -1897,16 +1918,20 @@ def _deliver_alert_photo(cfg, secrets, image, caption, downscale=None, score=Non
             _safe_unlink(crop_temp)
     small_crop = _reduced(cropped, out_dir, downscale) if crop_temp else None
     to_send = small_crop or cropped
+    # The crop was cut from the native frame: keep a reduced copy of that, not the
+    # delivery-width one, so a tiny crop can be reviewed against the whole scene.
+    archive_copy = _archive_copy(image, out_dir) if crop_temp else None
     try:
         if to_send == image:        # nothing replaced the frame, nothing extra to archive
             return notify.send_photo(token, chat, to_send, caption,
                                      camera=cfg.name, score=score, incident=incident,
                                      send_path=send_path)
-        return notify.send_photo(token, chat, to_send, caption, archive_path=image,
+        return notify.send_photo(token, chat, to_send, caption,
+                                 archive_path=archive_copy or image,
                                  camera=cfg.name, score=score, incident=incident,
                                  send_path=send_path)
     finally:
-        for temp in (small_crop, crop_temp):
+        for temp in (small_crop, crop_temp, archive_copy):
             _safe_unlink(temp)
 
 
@@ -3587,6 +3612,8 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
             monitor.TYPE_EMOJI.get(etype, "👤"), time_str(event),
             description=description or None, detail=label or None,
             score=selected_score, light=light, lens=snapshot.frame_lens(image),
+            # A card frame belongs to the event; the live fallback grab is made now.
+            frame_time=_frame_time(event, now) if image == fallback_image else None,
         )
         ok = send_alert_photo(cfg, secrets, image, caption, score=selected_score,
                               incident=incident.incident_id(cfg.name, event),
@@ -3897,7 +3924,11 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
         cam = cam_clients.get(cfg.name)
         snap = (snapshot_for or _sampler_snapshot)(cfg)
         image = snap(cam, group["event"])
+        late = now - group["next_due"]
         sampler.record_grab(group, now, scfg)
+        if late > SAMPLER_LATE_LOG:
+            # The schedule restarts from the grab, so a busy tick shifts every later frame.
+            log.info("sampler %s frame %d late by %.0f s", cfg.name, group["frames"], late)
         if not image:
             continue                          # grab hiccup: the schedule already moved on
         try:

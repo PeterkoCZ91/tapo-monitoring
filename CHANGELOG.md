@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Sampler lateness is logged: a frame that runs more than 10 s after its due time logs
+  `sampler <cam> frame N late by X s` (scheduling is unchanged). The card path's caption names
+  the frame time (`frame HH:MM:SS`) when it is the live grab that stands in for a failed card
+  read; a frame cut from the card keeps the event time.
+- With `crop_from_native`, the sent log now keeps the native frame the crop was cut from, cut
+  to at most 2560 px wide at a lighter JPEG quality (about 0.5 MB for a noisy 4K frame
+  against about 4.7 MB native) instead of the 1280 px delivery copy, so a small crop can be
+  reviewed against the whole scene. If the reduction fails, the delivery copy is archived.
 - Alerts that went out unscored are now visible and less likely: when the scorer is down,
   a sampler frame is held (up to the last frame of its group) instead of sent if the group
   already holds scored low frames (`scorer.on_error: hold`, default; `open` restores the old
