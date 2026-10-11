@@ -4,7 +4,17 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.9.0] - Unreleased
+
 ### Added
+- Shadow scorers can archive low-primary, moderate-shadow frames in a separately
+  capped, per-source rate-limited `missed/` directory. Both image directories are
+  private; collecting these frames does not change alert decisions.
+- Label selection includes capped missed-person samples, archived missed frames and
+  optional shadow-box regions. Invalid thresholds, regions and non-finite log
+  values are rejected rather than treated as evidence of a missed person.
+- Third and fourth independent shadow targets, tiled candidate inference and an
+  optional CUDA provider for compatible scoring-service deployments.
 - Sampler lateness is logged: a frame that runs more than 10 s after its due time logs
   `sampler <cam> frame N late by X s` (scheduling is unchanged). The card path's caption names
   the frame time (`frame HH:MM:SS`) when it is the live grab that stands in for a failed card
@@ -306,6 +316,11 @@ All notable changes to this project are documented here.
   not "event clip"; added the reported `searchVideoWithUTC`/`player_id` note for newer firmware.
 
 ### Fixed
+- Event-ledger transactions close their SQLite connections after commit or rollback,
+  including initialization failures, instead of deferring cleanup to garbage collection.
+- Soak RSS measurements collect unreachable cyclic garbage before sampling, so
+  interpreter collection timing does not look like retained-memory growth. The
+  unchanged limits and planted retained-memory leak checks remain in force.
 - Labels of a `recording_audit.py dataset` now pair with the `recording_audit_estimate.py`
   score table by window and index, which fixes the "labels matched no frame" warning.
 - Hub clip temp dirs (`sdjob_*`) no longer outlive their frame when a failed alert is
