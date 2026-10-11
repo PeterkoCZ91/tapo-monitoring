@@ -1,8 +1,11 @@
 """tools/soak_sim.py: a short accelerated soak passes, and a planted leak makes it fail."""
 
+import gc
 import importlib.util
 import json
+import weakref
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("soak_sim", ROOT / "tools" / "soak_sim.py")
@@ -38,6 +41,34 @@ def test_a_planted_memory_leak_fails_the_run(capsys):
                          "--max-rss-growth-mb", "10", "--features", "none")
     assert code == 1
     assert any(f.startswith("RSS grew") for f in out["findings"])
+
+
+def test_memory_measurement_collects_unreachable_cycles_but_keeps_live_objects(tmp_path, monkeypatch):
+    class Allocation:
+        def __init__(self):
+            self.cycle = self
+            self.payload = bytearray(100_000)
+
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        garbage = Allocation()
+        garbage_ref = weakref.ref(garbage)
+        del garbage
+        live = Allocation()
+        live_ref = weakref.ref(live)
+
+        def measured_rss():
+            assert garbage_ref() is None
+            assert live_ref() is live
+            return 1.0
+
+        monkeypatch.setattr(soak, "rss_mb", measured_rss)
+        simulation = SimpleNamespace(state_files=[], tmp=tmp_path, count_files=lambda: {})
+        assert soak.Soak.measure(simulation)["rss_mb"] == 1.0
+    finally:
+        if was_enabled:
+            gc.enable()
 
 
 def test_a_growing_state_file_fails_the_run(capsys):

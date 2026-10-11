@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import faulthandler
 import functools
+import gc
 import io
 import json
 import logging
@@ -669,6 +670,10 @@ class Soak:
         return out
 
     def measure(self):
+        # Compare retained memory, not cyclic garbage waiting for an interpreter-
+        # dependent collection schedule (notably different on Python 3.14).
+        # Referenced leaks, including the injected leak, remain visible in RSS.
+        gc.collect()
         files = {p.name: p.stat().st_size if p.exists() else 0 for p in self.state_files}
         return {"rss_mb": rss_mb(), "threads": threading.active_count(),
                 "files": files,
