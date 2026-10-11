@@ -430,7 +430,8 @@ cascade is more promising in traffic where YOLOX-m's false alarms are less confi
 - **One site type.** Cameras of three models, mostly outdoors; no per-camera or per-weather cuts.
 - **Licences.** The RF-DETR and RT-DETR models were Apache-2.0 according to their projects and
   model cards, and torchvision's are BSD; this was not independently verified here, and the
-  Ultralytics YOLO family (AGPL-3.0) was deliberately left out. Check the weights you deploy.
+  Ultralytics reference-code results above are exploratory and excluded from the
+  replacement conclusions. Check the licence of the exact weights and runtime you deploy.
 - **Not measured.** Several hosts scoring at once, tiled scoring with a DETR model,
   other cameras at night, and the first start on a cold machine.
 

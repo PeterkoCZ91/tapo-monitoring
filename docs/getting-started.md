@@ -42,7 +42,9 @@ The file names environment variables; it never holds secrets. See
 
 ## 3. Secrets
 
-Put the real values in your shell (or a git-ignored `.env`). Which value is which is
+Export the real values in your shell. A git-ignored `.env` can store them, but the
+CLI does not load that file automatically; load it into the environment before running.
+Which value is which is
 explained in [credentials](credentials.md).
 
 ```bash
@@ -57,16 +59,19 @@ export CAM_RTSP_PASSWORD=...
 ## 4. Check, then run
 
 ```bash
-tapo-monitor check cameras.yaml    # validates config + that every named secret is set;
-                                   # changes nothing on the camera
+tapo-monitor check cameras.yaml    # validates YAML configuration; no camera requests
+tapo-monitor selfcheck cameras.yaml # checks host prerequisites and control credentials
 tapo-monitor run   cameras.yaml    # starts the daemon in the foreground
 ```
 
-`check` is safe to run as often as you like. Only run `run` once `check` is green —
-repeated failed logins can trip a temporary camera lockout.
+`check` validates the schema; it does not verify secret values. `selfcheck` checks
+host prerequisites and configured control credentials, but does not authenticate
+Telegram or RTSP. Confirm those values before starting `run`; repeated failed
+camera logins can trip a temporary lockout.
 
-Walk in front of the camera. Within a few seconds you should get a Telegram message with
-a snapshot. That is the whole core loop: the camera detects, the daemon picks the frame
+Walk in front of the camera and wait for a Telegram snapshot. Delay depends on event
+polling, frame availability and the delivery path; card follow-ups can take minutes.
+That is the whole core loop: the camera detects, the daemon picks the frame
 where you are in view, and sends it.
 
 ## When it works
@@ -79,7 +84,9 @@ where you are in view, and sends it.
 
 ## If nothing arrives
 
-- `tapo-monitor check cameras.yaml` is green? If not, it names the missing piece.
+- `tapo-monitor check cameras.yaml` validates the configuration; `selfcheck` identifies
+  missing host prerequisites or control credentials. A green result is not an
+  end-to-end connectivity test.
 - Telegram silent but `check` passed: re-check `TELEGRAM_TOKEN`/`TELEGRAM_CHAT_ID`
   (send the bot a message first; a bot cannot start a chat with you).
 - `STORAGE_NOT_EXIST` in the log: the camera has no SD card, so `getEvents` has nothing

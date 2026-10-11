@@ -54,7 +54,8 @@ it. The default is `enforce`, so nothing changes unless you set one:
 | `sampler.loiter_mode` | counts the streak and sets the group's one-shot flag, sends no notice | `path=sampler action=would_loiter etype=person minutes=N` |
 | `scorer.vehicle_mode` | sends no vehicle alert, arms no cooldown | `action=would_send etype=vehicle` |
 
-Each needs its feature switched on (`alert_zones`, `loiter_frames`, `alert_vehicles`). The
+Each needs its feature switched on (`alert_zones`, `ignore_boxes`, `loiter_frames`,
+`alert_vehicles`). The
 lines go through the normal audit log, so the review and replay tools see them. Read a few
 days of them, then switch the mode to `enforce` (or delete the key).
 

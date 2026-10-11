@@ -7,6 +7,8 @@ All notable changes to this project are documented here.
 ## [0.9.0] - Unreleased
 
 ### Added
+- Updated capability and onboarding guides, with a dedicated 0.9.0 upgrade guide
+  distinguishing default behavior changes from optional and experimental features.
 - Shadow scorers can archive low-primary, moderate-shadow frames in a separately
   capped, per-source rate-limited `missed/` directory. Both image directories are
   private; collecting these frames does not change alert decisions.

@@ -136,6 +136,10 @@ loop:
 ```
 
 - `cooldown` gates repeated alerts per camera/event class after confirmed delivery.
+  A delivered photo whose person score reaches the active person threshold also suppresses
+  a duplicate person SD/recording follow-up within that cooldown, even when the first
+  photo came from a motion event. An empty or unscored motion photo does not suppress it.
+  This delivery fact survives restart; older runtime state without it keeps the old behaviour.
 - `outage_threshold` avoids alerting on brief network gaps.
 - `event_failure_threshold` alerts when a connected camera's `getEvents` call keeps failing. Network reachability alone is not enough:
   a camera can answer configuration calls while its event endpoint is unavailable.
@@ -755,6 +759,10 @@ photo may be delivered late as well, so after an outage one visit can make two m
 
 ### Local scorer and crop
 
+For changes from older releases, see [Upgrading](upgrading.md). In particular, omitted
+`scorer.on_error` now means `hold` and omitted camera-level `crop_min_px` means `400`;
+set `on_error: open` or `crop_min_px: 0` explicitly to retain the respective older policies.
+
 ```yaml
 scorer:
   url: http://127.0.0.1:8766/score
@@ -1016,7 +1024,11 @@ events with `tapo-monitor replay --compare` first (see [observability](observabi
   as before.
 - A frame that reached the alert without a score (scorer unavailable, passed through) is
   never cropped: the whole frame is sent.
-- Scorer errors fail open (one automatic retry, then raw passthrough — never a silent drop).
+- When no score is available, live frames fail open as raw passthrough.
+  The client retries timeouts and HTTP 400/500 once, with a 0.5 s backoff and a budget of
+  about twice `scorer.timeout`; it retries only with at least 3 s left. Connection refusals,
+  HTTP 401 and gateway errors are not retried this way. Budget for this latency when
+  adjusting the sampling interval; a healthy request has no retry delay.
   The unscored photo is captioned `(unverified)` and audited with `reason=scorer_unavailable
   degraded=true`.
 - `on_error` (`hold`, default, or `open`): the fail-open rule is kept for live frames and
@@ -1024,12 +1036,17 @@ events with `tapo-monitor replay --compare` first (see [observability](observabi
   earlier frames of the same group already scored below threshold is, with `hold`, skipped
   (audit `action=scorer_unavailable reason=skipped_prior_low_scores`) and retried at the
   next interval; the last frame of the window still passes through. `open` always passes it.
+- The [artifact filter](operations.md#partially-decoded-frames-artifact-filter) is enabled
+  by default on the scorer service. A recognised partially decoded grey frame returns
+  zero scores with `artifact: true`; this is a successful filtered result, not a scorer
+  outage handled by `on_error`. `TAPO_SCORER_ARTIFACT_FILTER=0` on the service turns it off.
 
-One honest note on exposure: the scorer *service* binds `0.0.0.0` and has no
-authentication — unlike the status endpoint, there is no localhost default. Anyone who
-can reach the port can submit frames and read `/metrics`. Run it on a trusted network or
-firewall the port; pointing `scorer.url` at `127.0.0.1` changes nothing about what the
-service listens on.
+The scorer *service* binds `0.0.0.0`; unlike the status endpoint, there is no localhost
+default. Authentication is optional: without a [shared token](operations.md#shared-token-optional),
+anyone who can reach the port can submit frames and read `/metrics`. With a token,
+`/score` and `/metrics` require it, but `/health` remains open. Use a trusted network or
+firewall the port, and TLS when required; pointing `scorer.url` at `127.0.0.1` changes
+nothing about what the service listens on.
 
 ### How small the zoom may get
 

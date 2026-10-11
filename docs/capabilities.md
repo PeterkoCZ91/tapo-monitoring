@@ -1,7 +1,8 @@
 # Tapo detection — capability catalog
 
 What a TP-Link Tapo PTZ camera (validated on the C560WS) can do for monitoring, and
-what this project adds on top. Each capability is opt-in per camera via `cameras.yaml`.
+what this project adds on top. Camera policy comes from `cameras.yaml`; optional
+capabilities below require their corresponding settings or services.
 
 This project controls camera monitoring policy and PTZ tracking, but its response remains
 **observe and notify**. The active-response actuator layer (siren, floodlight, speaker) is
@@ -70,7 +71,7 @@ documented below as *available* but intentionally **not implemented** — see "A
   detection runs on stream2, and it sends the sharpest above-threshold frame (ffmpeg
   `blurdetect`) rather than the first. It requires `sd_snapshot: true` (it reuses the SD
   follow-up queue) and falls back to the SD/live path when no segment is available.
-- **Local YOLO scorer (optional)** — a stateless HTTP scorer gates person alerts by
+- **HTTP scorer (optional)** — a stateless YOLOX or supported DETR-family scorer gates person alerts by
   person confidence; animal confidence never triggers an alert, but a confident animal
   score does add a paw to the caption of an alert that was already going out, and two or
   more people at the threshold are counted in it (`· 2 people`).
@@ -86,12 +87,23 @@ documented below as *available* but intentionally **not implemented** — see "A
   width skips the native original altogether. A too-tall zoom is widened just enough to
   stop being a vertical sliver — a standing figure is naturally taller than the scene, so
   widening all the way to the scene's own ratio would spend the zoom on empty margin.
+  With native cropping, `crop_min_px` (default 400, 0 disables the rule) sends a narrow
+  crop as a second zoom photo after the whole scene. Unscored frames are not cropped.
 - **Scorer service options (all opt-in)** — a shared bearer token, `scorer.url` as a list
-  with failover, a DETR-family detector instead of YOLOX, a shadow run of a second
-  detector and a combined "ensemble" score; see [operations](operations.md#provision-the-scorer).
-  On the camera side `scorer.alert_zones`, `lens_ignore_zones`, `max_person_box`,
-  `sampler.loiter_frames` and `scorer.alert_vehicles` narrow or extend what alerts, with an
-  `observe` mode to try each first ([watch zones](watch-zones.md)).
+  with failover and return to the primary, up to four independent shadow detectors with
+  separate queues/logs, and an experimental combined ensemble score using the first
+  shadow; see [operations](operations.md#provision-the-scorer). Shadows leave live replies
+  unchanged unless ensemble mode is separately enabled. Detector choice stays manual.
+  On the camera side `scorer.alert_zones`, `lens_ignore_zones`, `ignore_boxes` and
+  `max_person_box` exclude unwanted detections; `sampler.loiter_frames` and
+  `scorer.alert_vehicles` optionally add lingering-person and vehicle notices.
+  Watch zones, loitering, vehicles and static-box exclusion support observation before
+  enforcement; see [watch zones](watch-zones.md) and [configuration](configuration.md).
+- **Scorer failure policy** — camera-confirmed alerts can still pass without a score.
+  With default `scorer.on_error: hold`, a sampler group already holding low-scored frames
+  waits for later frames until its last scheduled frame; `open` restores passthrough in
+  that case. An unscored sampler send is marked `(unverified)` and audited as degraded.
+  See [scorer failures](operations.md#when-the-scorer-itself-fails).
 - **Event-window sampler (optional)** — for long camera events, follow-up RTSP grabs
   across the event window catch people who enter frame after the first live grab.
 - **AI description** — Groq vision model returns a short scene description for approved
@@ -99,6 +111,16 @@ documented below as *available* but intentionally **not implemented** — see "A
 - **Face-ID naming** — map stable `face_id`s to names locally.
 - **Telegram** — photo + caption plus operational alerts. Delivery is confirmed before
   cooldown/outage state advances; SD, sampler and recovery paths retry failed sends.
+  The [persistent outbox](configuration.md#outbox-late-delivery-after-an-outage) is opt-in:
+  it keeps failed alerts across restarts for age- and size-bounded late delivery.
+- **Human review and calibration** — collect sent/review-log frames, pre-label clear
+  agreements with a teacher, and review remaining frames locally. A
+  [two-to-four-shadow selection tool](operations.md#build-a-labeling-set-from-two-to-four-shadow-targets)
+  balances disagreements, small persons, missed-person candidates and controls, including
+  `disagree/missed/` archives; human-labeled frames are skipped. Optional
+  [box labels](labeling.md#box-labels-opt-in) mark model detections or draw missed persons.
+  When provided, each frame's `models` list prevents a detector that did not run from
+  being counted as having missed a person. Candidates and model disagreements require review.
 
 ## 4. Weather gating
 
@@ -130,6 +152,8 @@ Rain makes auto-tracking cameras chase raindrops and IR reflections. Using open-
 ## 6. Operations
 
 - Camera-down watchdog with de-duplicated Telegram alerts.
+- Optional `privacy_notice` and `detection_notice` report privacy changes or disabled
+  detection settings, with recovery notices; both are off by default.
 - Event-API watchdog: records `getEvents` errors, alerts on sustained failures, reports
   recovery, and can request one API reboot per failure episode.
 - Daemon dead-man's switch (`alerts.stall_threshold`): the camera watchdog runs inside the
@@ -138,6 +162,9 @@ Rain makes auto-tracking cameras chase raindrops and IR reflections. Using open-
   when one completes again. It shares the process it guards, so it covers a *raising*
   tick — not a hung one, and not a crash loop, which reset the timer on restart.
 - Reconnect handling and lockout-aware sessions (see below).
+- Optional [camera host failover](configuration.md#host-failover-optional) for alternate
+  addresses of the same device; optional [scorer failover](configuration.md#scorer-failover-optional)
+  for interchangeable scoring services. Neither selects a detector model.
 - Structured audit logs plus `tapo-monitor audit-log` for threshold calibration.
 - Daily digest heartbeat: the review digest carries a fleet block — camera reachability,
   the daemon's tick, the shared scorer, recorder freshness, alert counts, refused

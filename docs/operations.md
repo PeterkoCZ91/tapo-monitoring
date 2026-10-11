@@ -145,6 +145,12 @@ Defaults, all overridable: `--home ~USER/tapo-scorer`, `--python <home>/env/bin/
 host, `--bootstrap` creates the venv and installs `".[scorer]"` from the checkout; the
 ONNX weights are the one thing the script will not fetch, so put them at `--model` first.
 
+Without `--bootstrap`, provisioning validates the package already importable by the
+configured interpreter and working directory; it does not upgrade that package. With
+`--bootstrap`, pip installs this checkout's scorer extra. A copied `tapo_monitor/` in the
+working directory takes precedence over the installed package, so replace the complete
+package when upgrading and verify the version from the service's working directory.
+
 `scorer.env` is created once and never overwritten — it holds the host's own paths, and
 re-provisioning must not silently undo a local retention change. Edit it by hand and
 re-run the script, which restarts the service because the env file changed.
@@ -259,6 +265,12 @@ every `/score` answer 500 `scoring failed` (callers then fall back as for any sc
 failure); empty or NaN outputs score as "nothing found". `/health` and `/metrics` report
 the family as `arch` (never the model path).
 
+These are supported export layouts, not a bundled model catalogue: weights must be
+supplied separately. YOLOX and compatible two-output DETR exports are served by these
+decoders; benchmark adapters for other detector families do not make their exports
+automatically compatible with the HTTP scorer. Keep the model's input size, class space
+and preprocessing together with its weights.
+
 Verified settings for RF-DETR (official `model.export()`, ONNX opset 17, outputs `dets`
 `[1,300,4]` and `labels` `[1,300,91]`; the decoder picks the outputs by shape, so the names
 do not matter). Person scores through `/score` matched the reference implementation's
@@ -279,6 +291,15 @@ CUDA and cuDNN libraries can come from the `nvidia-*-cu12` pip wheels (loaded wi
 `onnxruntime-gpu` build whose CUDA major version the driver supports (CUDA 12 builds such as
 1.22 for a 535 driver; a CUDA 13 build silently falls back to CPU). On a GPU shared with
 other work, `TAPO_SCORER_CUDA_MEM_MB` caps the scorer's memory arena.
+
+Provider selection is separate from deployment: `TAPO_SCORER_PROVIDER=openvino-gpu`
+needs the GPU runtime, device access and a service user allowed to open the render node;
+`cuda` needs a compatible driver and runtime. Neither provisioning tool installs those
+host requirements or reserves GPU capacity. The service logs the provider actually
+selected and falls back to CPU on GPU startup failure; this setting is not a GPU-only
+guarantee, and `/health` does not prove GPU use. Verify the startup log and device
+activity before assuming CPU inference has stopped. Low CPU priority or `CPUQuota`
+limits do not guarantee low GPU contention.
 
 Check a new model **before** it replaces the running one: start a second instance on
 another port with its own env, leave the production unit alone, and send both the same
@@ -348,6 +369,9 @@ TAPO_SCORER_SHADOW_TIMEOUT=8                                       # seconds per
   30 s, with their own limit
   (`..._MISSED_MAX`), so they cannot push out the disagreement images.
   Strong disagreements still use the top-level directory and the original capture rule.
+  Both the parent and `missed/` directory are mode 0700 and JPEGs mode 0600, including
+  when the first saved frame is a missed frame. Capture requires `DISAGREE_DIR`; setting
+  `MISSED_MAX` alone does not enable it. The limit defaults to 1500 for each shadow.
 - `/metrics` gains `shadow` with `sent`, `failed`, `dropped` and `disagree` counters (plus
   `missed` once the first such frame is saved).
 
@@ -364,7 +388,8 @@ TAPO_SCORER_SHADOW2_NAME=yolox960          # written to every row as shadow_name
 
 It has its own queue and worker thread, so a slow or dead second target drops its own frames
 and never delays a reply or the first shadow. Its log rows have the same fields as above plus
-`shadow_name`; `/metrics` gains `shadow2` (same four counters) only while it is on. It never
+`shadow_name`; `/metrics` gains `shadow2` (the same counters, plus `missed` after capture)
+only while it is on. It never
 takes part in `TAPO_SCORER_ENSEMBLE`. Both shadows add their own load to the scorer host
 and each candidate.
 
@@ -375,6 +400,12 @@ with `?tiles=N`, whatever the caller asked for, and its rows gain `shadow_tile_p
 best tile's person score. `shadow_person` stays the full-frame score, as in a normal reply;
 to judge a tiled model the way the benchmark did, take `max(shadow_person,
 shadow_tile_person)`, which is what `tools/label_selection.py` does.
+
+All four targets support their own `_DISAGREE_DIR`, `_DISAGREE_MAX` and `_MISSED_MAX`
+settings and per-source missed-frame rate limit. Their image capture is observational;
+enabling another shadow or collecting missed frames does not enable the ensemble or
+change the monitor's alert threshold. Each candidate still needs its own reachable
+scorer endpoint, weights and runtime.
 
 The shadow doubles the traffic and inference load of the candidate, so keep it on a host
 that can take it, and turn it off (remove the lines, restart) when the comparison is done.
@@ -498,9 +529,10 @@ How it works and how to read it:
 ### Build a labeling set from two to four shadow targets
 
 `tools/label_selection.py` joins `shadow.jsonl` and `shadow2.jsonl` (plus the optional
-`--shadow3-log` and `--shadow4-log`) on `frame`, keeps frames
-whose image is still in a `disagree/` directory, skips frames already in `labels.jsonl`
-(matched by image SHA-256) and writes a dataset for `tapo-monitor label`:
+`--shadow3-log` and `--shadow4-log`) on `frame`, keeps frames with an available JPEG in
+`disagree/`, its `missed/` subdirectory or a supplied `--image-dir`, skips frames already
+labeled by hand in `labels.jsonl` (matched by image SHA-256), and writes a dataset for
+`tapo-monitor label`:
 
 ```bash
 python3 tools/label_selection.py --shadow-log shadow.jsonl --shadow2-log shadow2.jsonl \
@@ -520,9 +552,9 @@ shorter than 0.10 of the frame), `missed` (primary < `--missed-primary` 0.10 whi
 model scores >= `--missed-shadow` 0.25, optionally with its best box centre inside
 `--missed-region x1,y1,x2,y2`; at most `--missed`, default 30, checked first; the `missed/`
 subdirectory of each `--disagree-dir` is searched too), and random controls `control_person` / `control_empty`
-(`--control` each, default 20, reserved within `--limit` first). `missed`, `threshold` and
-`small` are picked before `strong`, which takes the rest; `--small` caps the small-person
-selection at 20 by default. `--limit` caps
+(`--control` each, default 20, reserved within `--limit` first). `threshold`, `missed` and
+`small` are picked in that order before `strong`, which takes the rest; `--small` caps the
+small-person selection at 20 by default. `--limit` caps
 the total and `--source-share` the share of one source among the non-control frames.
 `index.jsonl` gets `camera` when a dataset index names the camera of the frame's source.
 `--image-dir DIR` (repeatable, e.g. the `sent-log` and `review-log` of a dataset) searches
@@ -532,6 +564,27 @@ the neighbouring `index.jsonl`. The same image in several places counts once, `d
 wins. Log rows without `frame` (written only since the field was added) cannot be paired and
 are counted as dropped in the report, which also lists selected frames by image source type.
 Sources appear only as short hashes. Output holds camera images: keep it private.
+
+The missed category compares production with the first shadow log (the second entry in
+`--models`). It is checked before strong disagreement
+when categorizing a frame, so its quota also covers strong misses. This differs from
+runtime capture, where strong disagreements stay in the top-level directory. Invalid
+thresholds or regions are rejected; missing or non-finite scores are not evidence of a
+missed person. Model scores are available only for models that actually ran on a frame;
+missing predictions must not be counted as a model finding nobody.
+
+Teacher labels (`by=auto:*`) do not count as human review and do not exclude frames from
+selection. `teacher.jsonl` here holds scores to order the labeling queue, not ground-truth
+labels. Random controls and hand-drawn missed-person boxes are needed alongside the
+interesting disagreements to assess blind spots and per-model recall.
+
+For automatic labeling, `tapo-monitor autolabel DATASET --model /srv/models/yolox_x.onnx`
+uses a local YOLOX teacher on CPU (640 input, two threads by default), caches scores by
+image hash and never overwrites an existing label. Its agreement labels are marked
+`auto:<model>`; two models can share a blind spot, so they cannot establish completeness
+or replace manual evaluation. Scorer GPU provider settings do not change this CLI's CPU
+teacher; a separate remote teacher integration is a deployment choice, not an option
+provided by that command.
 
 ### Provision a shadow scorer
 
@@ -543,6 +596,11 @@ The unit `tapo-scorer-shadow-NAME.service` is rendered from
 `systemd/tapo-scorer-shadow.service.in` (the same renderer approach as the primary unit), and
 the detector settings (`TAPO_SCORER_ARCH`, `TAPO_SCORER_INPUT_SIZE`, `TAPO_SCORER_DETR_*`)
 are written as `Environment=` lines in it, so several shadow scorers can share one machine.
+
+The script has no provider, GPU device, CPU quota or priority options. Configure any such
+service settings separately, for example in a systemd drop-in, and preserve them when
+upgrading. As with the primary scorer, GPU configuration requires the matching runtime
+and device access; rendering a shadow unit alone does not enable GPU inference.
 
 ```bash
 # RF-DETR (NMS-free DETR head, sigmoid scores)
@@ -652,6 +710,11 @@ any inference: `person`, `animal` and `vehicle` 0, empty boxes and score lists, 
 IR, dark and foggy frames stay at a grey share of 0.12 or less. On by default; set
 `TAPO_SCORER_ARTIFACT_FILTER=0` and restart the scorer to turn it off. Undecodable input is not
 treated as an artifact.
+
+This is a scorer-service default, independent of the monitor's `scorer.on_error` policy.
+Upgrade the scorer package to obtain the filter; changing only a camera's YAML cannot
+enable it on an older service. Retain normal, dark and partially decoded examples when
+checking a rollout, and compare `artifact` separately from failed inference.
 
 ### Estimating completeness from the continuous recordings
 
@@ -764,6 +827,12 @@ Deploy the **whole package**, never a subset of changed files: modules are versi
 together and a partial copy fails at import, which `Restart=always` then retries forever.
 `tools/deploy_release.sh` enforces that by construction — it ships `git archive` output,
 so what lands on the host is always one complete, committed tree.
+
+Read [Upgrading](upgrading.md) before moving from an older version: it lists changed
+defaults, scorer retry latency and compatibility checks. Upgrade and verify the shared
+scorer before the monitors, then roll out monitor hosts one at a time with their existing
+configurations. Upgrade shadow packages separately; do not combine a code rollout with
+switching detector weights, thresholds or an ensemble rule.
 
 ### Layout on the host
 

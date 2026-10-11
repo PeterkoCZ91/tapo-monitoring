@@ -41,7 +41,8 @@ camera names, addresses, credentials, coordinates and observations do not belong
 8. [MQTT and Home Assistant](mqtt.md) — the opt-in, publish-only bridge: entities, topics,
    delivery guarantees and an example automation.
 9. [Labeling](labeling.md) — label collected sent/review-log frames and measure false
-   alarms, misses and the best threshold.
+   alarms, misses and the best threshold; optional box verdicts and hand-drawn persons
+   support per-model recall checks.
 10. [Watch zones, loitering and vehicle alerts](watch-zones.md) — restrict person alerts
     to polygons, get one notice for someone who lingers, and alert on vehicles.
 11. [Measurements](measurements.md) — anonymized accuracy, miss, latency and replay
@@ -49,9 +50,14 @@ camera names, addresses, credentials, coordinates and observations do not belong
 12. [Detector comparison](measurements.md#detector-comparison) — accuracy, latency and
     hand-checked disagreements of several person detectors, and the
     [benchmark tool](../tools/bench_detectors/README.md) to repeat it on your own frames.
+    [Shadow comparison and selection](operations.md#build-a-labeling-set-from-two-to-four-shadow-targets)
+    builds a review sample from two to four shadow logs, including missed-person candidates.
+    Comparisons do not switch the production model automatically.
 13. [Roadmap](roadmap.md) — remaining product phases and research tracks.
 14. [Releasing](releasing.md) — how a GitHub release reaches PyPI, and the one-time
     Trusted Publishing setup.
+15. [Upgrading to 0.9.0](upgrading.md) — changed defaults, optional features and
+    the scorer-first deployment sequence.
 
 ## Feature maturity
 
@@ -60,7 +66,13 @@ camera names, addresses, credentials, coordinates and observations do not belong
 | Config-driven fleet daemon | Operational | One daemon manages multiple cameras. |
 | `getEvents` detection and Telegram pipeline | Operational | Primary production event path. |
 | Live + SD/local-recorder frame selection | Operational, opt-in media follow-up | Requires the matching credentials/storage source. |
-| Local HTTP scorer and subject crop | Operational, optional | Fails open if unavailable. |
+| HTTP scorer and subject crop | Operational, optional | Configured failure policy; low-scored sampler groups hold unscored frames by default. |
+| Scorer/camera address failover | Operational, opt-in | Scorers must be interchangeable; camera addresses must reach the same device. |
+| Detector shadow comparisons | Opt-in evaluation | Up to four independent targets; live decisions unchanged without ensemble mode. |
+| Ensemble decision policy | Experimental, opt-in | Uses the first shadow; thresholds require validation on your own frames. |
+| Human frame/box review | Operational, opt-in box mode | Missed-person sampling and per-model recall support manual detector evaluation. |
+| Persistent Telegram outbox | Operational, opt-in | Bounded late delivery after outages; off by default. |
+| Watch zones, loitering and vehicle notices | Operational, opt-in | Observation modes let you review candidate decisions before enforcement. |
 | Weather, day/night and PTZ control | Operational | Model/firmware behavior can differ. |
 | Network uptime and outage alerts | Operational | State persists across restarts. |
 | ICMP network measurements | Operational, opt-in standalone tool | Router/camera loss, RTT and jitter; bounded daily history. Sleeping battery cameras are not ping targets. |
@@ -91,8 +103,17 @@ Terms that recur across these docs:
   the moment the subject is clearest, rather than judging one live frame.
 - **follow-up (SD / recording)** — when the live frame misses the subject, pull the right
   frame from the camera's SD recording or a local recorder and send that instead.
-- **scorer** — an optional local HTTP service that rates whether a frame really contains a
-  person; the daemon fails open (alerts anyway) if it is down.
+- **scorer** — an optional HTTP service that rates whether a frame contains a person.
+  Scoring failures follow the [failure policy](operations.md#when-the-scorer-itself-fails);
+  camera-confirmed alerts can still pass, while a low-scored sampler group holds later
+  unscored frames by default until its last scheduled frame.
+- **detector shadow** — an optional candidate scorer fed copies of live frames, with its
+  own queue and comparison log. Up to four can run; they do not change alerts unless
+  the first is explicitly used by the experimental ensemble policy.
+- **missed-person candidate** — a low primary score with a higher shadow score, selected
+  for human review. The disagreement is not itself a confirmed missed person.
+- **outbox** — an opt-in persistent queue for failed Telegram deliveries, with bounded
+  retention and late delivery; separate from pending media-work state.
 - **Camera Digital Twin** — opt-in read-only health model of a camera: layered health,
   config drift and allow-listed self-healing. See [observability](observability.md).
 - **Shadow Detection Auditor** — opt-in independent watcher that logs what a second

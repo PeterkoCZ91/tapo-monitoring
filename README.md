@@ -36,10 +36,15 @@ see [camera reports](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/do
 
 ## What's new
 
-Recent highlights — Home Assistant over MQTT (opt-in, publish-only), `tapo-monitor report`
-to get your own camera model supported, off/privacy notices, dual-lens C545D support, and
-the incident-based labelling workflow. Full per-version detail and upgrade notes are in the
+Recent highlights — compare up to four shadow detectors without changing live alerts,
+review individual model boxes and missed-person candidates, and use optional scorer
+failover or watch-zone, loitering and vehicle policies. Native-resolution crops keep small
+subjects visible; unscored sampler alerts are marked for review. Home Assistant over MQTT,
+dual-lens C545D support, off/privacy notices and incident-based labeling remain available. Full per-version
+detail and upgrade notes are in the
 [CHANGELOG](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/CHANGELOG.md).
+For existing installations, [Upgrading to 0.9.0](docs/upgrading.md) lists changed
+defaults, optional features and the scorer-first deployment sequence.
 
 ## Why this project exists
 
@@ -67,7 +72,7 @@ recorder and scorer can complement the daemon, but neither is required for the b
   session while reconnect/control runs on a slower interval.
 - **Firmware-safe camera control** — day/night policy, people-only SmartTrack, presets,
   rain gating, sensitivity control and optional ONVIF soft pan limits.
-- **Hardware-aligned optics & safety** — on-sensor Lens Distortion Correction (LDC)
+- **Opt-in optics & camera policy** — on-sensor Lens Distortion Correction (LDC)
   straightens wide-angle 4K frames for sharper peripheral YOLO scoring, tamper monitoring
   is self-healed every control pass, and white floodlight activation duration scales down
   to polite 30 s pulses instead of the 5-minute firmware default.
@@ -79,8 +84,10 @@ recorder and scorer can complement the daemon, but neither is required for the b
 - **Battery cameras on a hub** — `hubpoll` reads a sleeping camera's detections off the
   hub it records to; with a scorer, the sharpest accepted frame is selected from the
   stored clip. A go2rtc sidecar supplies a live fallback when the clip cannot be decoded.
-- **Optional local scorer** — a small HTTP YOLO service can gate frames and return subject
-  boxes; Groq remains optional caption enrichment.
+- **Optional HTTP scorer** — YOLOX or a supported DETR-family model gates frames and
+  returns subject boxes; Groq remains optional caption enrichment. Scorer failover and
+  up to four independent shadow targets are opt-in; shadow results leave live decisions
+  unchanged unless you separately enable the experimental ensemble policy.
 - **Confirmed Telegram semantics** — failed sends do not arm cooldowns; recovery, SD and
   sampler paths remain retryable.
 - **It tells you when it stops working** — a dead-man's switch outside the main loop
@@ -101,9 +108,11 @@ recorder and scorer can complement the daemon, but neither is required for the b
 - **One owner for the motor** — preset recalls and the pan-limit guard ask one arbiter
   before moving, so the guard never fights a tracked subject or a lens parked by privacy
   mode.
-- **Restart-safe, traceable alerts** — queued alerts and cooldowns survive a deploy;
-  every alert carries an incident ID you can follow with `tapo-monitor incident`, and
-  `tapo-monitor replay` checks a config change against a recorded night before it ships.
+- **Restart-safe, traceable alerts** — pending media work and cooldown state survive a
+  deploy. Enable the optional [outbox](docs/configuration.md#outbox-late-delivery-after-an-outage)
+  to retain failed Telegram deliveries for bounded late delivery; it is off by default.
+  Every alert carries an incident ID you can follow with `tapo-monitor incident`, and
+  `tapo-monitor replay` checks a config change against recorded events before it ships.
 - **Watch zones, loitering and vehicles (opt-in)** — count only people standing inside
   polygons you draw, get one "someone is lingering" notice, and optionally alert on
   vehicles the scorer sees; see the
@@ -249,17 +258,24 @@ pip install 'tapo-monitor[scorer]'   # from a clone: pip install -e ".[scorer]"
 python -m tapo_monitor.scorer_service --model /path/to/model.onnx --port 8766
 ```
 
-Then set the camera's `scorer.url`. If the scorer is unavailable, the alert pipeline
-degrades to unfiltered passthrough rather than silently dropping camera-confirmed people.
+Then set the camera's `scorer.url`. When scoring is unavailable, camera-confirmed alerts
+can still pass through. With `scorer.on_error: hold` (the default), a sampler group that
+already has low-scored frames waits for later frames rather than spending its alert on
+an unscored frame, until its last scheduled frame. `open` restores unconditional
+passthrough for that case. An unscored sampler send is marked `(unverified)` and audited
+as degraded. See [scorer failures](docs/operations.md#when-the-scorer-itself-fails).
 The configured threshold gates on **person** confidence; animal confidence never sends an
 alert by itself, but a confident animal score marks the caption with a paw so a dog walker
 is not indistinguishable from a lone figure. Tiled inference and optional subject cropping
 help with distant subjects in wide views. The scorer also exposes
 aggregate-only runtime counters at `/metrics` for operational monitoring.
 
-The service can also require a shared bearer token, run a DETR-family detector instead of
-YOLOX, run a second detector in shadow or as an ensemble, and a camera's `scorer.url` may
-list several services with failover; all of it is off by default and described in
+The service can require a shared bearer token, run a DETR-family detector instead of
+YOLOX, feed up to four independent shadow services, or use the first shadow in an
+experimental ensemble. A camera's `scorer.url` may list interchangeable services with
+failover and return to the primary. These features are opt-in; shadow comparisons do
+not select a winning model or switch the production detector automatically. Setup and
+model validation are described in
 [Operations](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/operations.md#provision-the-scorer).
 
 Two opt-in calibration aids help tune thresholds by frame rather than by guesswork: an
@@ -272,6 +288,13 @@ truth, `tools/collect_frames.sh` gathers every host's frames into one dataset,
 false-alarm rate, the misses and the best-separating threshold, by day and night with
 `--config`, and per incident how many visits with a person got no alert and how late the
 first alert came on each delivery path ([Labeling](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/labeling.md)).
+
+For detector comparisons, [build a labeling set from two to four shadow logs](docs/operations.md#build-a-labeling-set-from-two-to-four-shadow-targets).
+Selection includes small-person, missed-person and control samples, can use surviving
+sent/review-log images, and skips existing human labels. Frames with box metadata enable
+[box review](docs/labeling.md#box-labels-opt-in): mark each model box or draw a person it
+missed. Per-model recall counts only the models recorded as having run on that frame;
+the sample supports manual evaluation, not an automatic model promotion.
 
 ## Home Assistant (MQTT)
 

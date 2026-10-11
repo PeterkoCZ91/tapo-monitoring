@@ -2,7 +2,8 @@
 # when a person is detected. Copy it to `cameras.yaml` (git-ignored), set the six
 # environment variables it names (see docs/credentials.md), then:
 #
-#   tapo-monitor check cameras.yaml      # validates config + credentials, touches nothing
+#   tapo-monitor check cameras.yaml      # validates configuration, no camera requests
+#   tapo-monitor selfcheck cameras.yaml  # host prerequisites + control credentials
 #   tapo-monitor run   cameras.yaml      # starts the daemon
 #
 # Everything optional — local scoring, weather gating, PTZ tracking, SD follow-up,
@@ -10,7 +11,8 @@
 # at a time from cameras.example.yaml and the configuration guide once this works.
 #
 # Values below are environment-variable NAMES, never the secrets themselves, so this
-# file stays safe to share. The real values live in your shell / .env (git-ignored).
+# file stays safe to share. Export real values in your shell; a git-ignored .env must
+# be loaded into the environment explicitly (the CLI does not load it automatically).
 
 telegram:
   token_env: TELEGRAM_TOKEN         # Telegram bot token
