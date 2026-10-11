@@ -4,10 +4,98 @@ import sqlite3
 import stat
 import threading
 import time
+from contextlib import closing
 
 import pytest
 
 from tapo_monitor import ledger
+
+
+@pytest.fixture
+def captured_connections(monkeypatch):
+    """Keep real SQLite handles alive so GC cannot hide a missing close."""
+    connect = sqlite3.connect
+    connections = []
+
+    def capture(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(ledger.sqlite3, "connect", capture)
+    yield connections
+    for connection in connections:
+        connection.close()
+
+
+@pytest.mark.parametrize("operation", [
+    "initialize", "record", "decision", "scene", "observations", "decisions",
+    "scene_events", "retention", "bounded_retention",
+])
+def test_operations_close_real_connections_before_return(tmp_path, captured_connections, operation):
+    events = ledger.EventLedger(tmp_path / "events.sqlite3")
+    operations = {
+        "initialize": lambda: ledger.EventLedger(events.path),
+        "record": lambda: events.record_camera_event(camera="front", event_type="person", event_at=1),
+        "decision": lambda: events.record_decision(camera="front", event_type="person", event_at=1,
+                                                  path="live", action="send"),
+        "scene": lambda: events.record_scene_event(group="gate", event_at=1, lead_camera="front",
+                                                   follow_camera="back", delta_seconds=1),
+        "observations": lambda: events.observations(camera="front", start=0, end=2),
+        "decisions": lambda: events.decisions(camera="front", start=0, end=2),
+        "scene_events": lambda: events.scene_events(start=0, end=2),
+        "retention": lambda: events.cleanup(1, now=3),
+        "bounded_retention": lambda: events.cleanup_bounded(1, now=3),
+    }
+    before = len(captured_connections)
+    operations[operation]()
+    assert len(captured_connections) > before
+    for connection in captured_connections[before:]:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+
+
+def test_record_failure_rolls_back_and_closes_real_connection(tmp_path, monkeypatch):
+    events = ledger.EventLedger(tmp_path / "events.sqlite3")
+
+    class FailingSelection(sqlite3.Connection):
+        def execute(self, sql, *args, **kwargs):
+            if sql.startswith("SELECT id FROM observations"):
+                raise sqlite3.OperationalError("injected lookup failure")
+            return super().execute(sql, *args, **kwargs)
+
+    connection = sqlite3.connect(events.path, factory=FailingSelection)
+    connection.row_factory = sqlite3.Row
+    monkeypatch.setattr(events, "_connect", lambda: connection)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="injected lookup failure"):
+            events.record_camera_event(camera="front", event_type="person", event_at=1)
+        with closing(sqlite3.connect(events.path)) as check:
+            assert check.execute("SELECT count(*) FROM observations").fetchone()[0] == 0
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+    finally:
+        connection.close()
+
+
+def test_connect_setup_failure_closes_real_connection(tmp_path, monkeypatch):
+    events = ledger.EventLedger(tmp_path / "events.sqlite3")
+
+    class FailingPragma(sqlite3.Connection):
+        def execute(self, sql, *args, **kwargs):
+            if sql.startswith("PRAGMA"):
+                raise sqlite3.OperationalError("injected pragma failure")
+            return super().execute(sql, *args, **kwargs)
+
+    connection = sqlite3.connect(events.path, factory=FailingPragma)
+    monkeypatch.setattr(ledger.sqlite3, "connect", lambda *args, **kwargs: connection)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="injected pragma failure"):
+            events._connect()
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+    finally:
+        connection.close()
 
 
 def _observation(identifier, source, event_at, event_type="person"):
@@ -41,7 +129,7 @@ def test_schema_is_initialized_atomically_and_file_is_private(tmp_path):
     path = tmp_path / "nested" / "events.sqlite3"
     ledger.EventLedger(path)
 
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         version = connection.execute(
             "SELECT version FROM ledger_schema WHERE singleton = 1"
         ).fetchone()[0]
@@ -54,9 +142,9 @@ def test_schema_is_initialized_atomically_and_file_is_private(tmp_path):
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
-def test_unknown_schema_version_rolls_back_initialization(tmp_path):
+def test_unknown_schema_version_rolls_back_initialization(tmp_path, captured_connections):
     path = tmp_path / "events.sqlite3"
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute(
             "CREATE TABLE ledger_schema (singleton INTEGER PRIMARY KEY, version INTEGER NOT NULL)"
         )
@@ -64,8 +152,10 @@ def test_unknown_schema_version_rolls_back_initialization(tmp_path):
 
     with pytest.raises(ValueError, match="unsupported event ledger schema"):
         ledger.EventLedger(path)
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        captured_connections[-1].execute("SELECT 1")
 
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         tables = {
             row[0]
             for row in connection.execute(
@@ -130,7 +220,7 @@ def test_metadata_is_allowlisted_and_never_keeps_media_or_credentials(tmp_path):
         dedupe_key="api-secret-that-must-only-be-hashed",
     )
 
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         metadata_json, fingerprint = connection.execute(
             "SELECT metadata_json, fingerprint FROM observations"
         ).fetchone()
@@ -267,7 +357,7 @@ def test_audit_records_camera_observation_and_pipeline_decision(tmp_path):
     }, observed_at=102)
 
     assert len(events.observations(camera="front", start=0, end=200)) == 1
-    with sqlite3.connect(events.path) as connection:
+    with closing(sqlite3.connect(events.path)) as connection, connection:
         decision = connection.execute(
             "SELECT action, score, threshold, telegram FROM decisions"
         ).fetchone()

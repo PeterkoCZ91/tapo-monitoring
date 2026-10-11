@@ -20,6 +20,7 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from stat import S_ISREG
@@ -267,15 +268,21 @@ class EventLedger:
 
     def _connect(self):
         connection = sqlite3.connect(self.path, timeout=10.0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 10000")
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 10000")
+        except BaseException:
+            connection.close()
+            raise
         return connection
 
     def _initialize(self) -> None:
         parent = Path(self.path).expanduser().resolve().parent
         parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with self._connect() as connection:
+        # SQLite's context manager commits/rolls back but does not close the handle.
+        # Exit the transaction before closing, including when setup or a query fails.
+        with closing(self._connect()) as connection, connection:
             connection.executescript(_SCHEMA)
             row = connection.execute(
                 "SELECT version FROM ledger_schema WHERE singleton = 1"
@@ -327,7 +334,7 @@ class EventLedger:
         fingerprint = _fingerprint(
             camera, source, adapter, event_type, event_at, dedupe_key
         )
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute(
                 """
                 INSERT INTO observations(
@@ -390,7 +397,7 @@ class EventLedger:
         fingerprint = hashlib.sha256(json.dumps(
             identity, ensure_ascii=True, separators=(",", ":")
         ).encode()).hexdigest()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute(
                 """
                 INSERT INTO decisions(
@@ -421,7 +428,7 @@ class EventLedger:
             raise ValueError("direction must be forward, reverse or None")
         identity = [group, event_at, lead_camera, follow_camera, delta_seconds, direction]
         fingerprint = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute(
                 """INSERT INTO scene_events(
                     group_name, event_at, lead_camera, follow_camera, delta_seconds,
@@ -446,7 +453,7 @@ class EventLedger:
         if group is not None:
             clauses.append("group_name = ?")
             params.append(_safe_identifier(group, "group"))
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 "SELECT group_name, event_at, lead_camera, follow_camera, delta_seconds, direction "
                 "FROM scene_events WHERE " + " AND ".join(clauses) + " ORDER BY event_at, id",
@@ -514,7 +521,7 @@ class EventLedger:
             params.append(event_type)
         query = "SELECT * FROM observations WHERE " + " AND ".join(clauses)
         query += " ORDER BY event_at, id"
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(query, params).fetchall()
         return [_row_to_observation(row) for row in rows]
 
@@ -525,7 +532,7 @@ class EventLedger:
         end = _finite_timestamp(end, "end")
         if end < start:
             raise ValueError("end must not precede start")
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 "SELECT event_type, event_at, path, action, observed_at, score, threshold,"
                 " telegram, reason FROM decisions"
@@ -589,7 +596,7 @@ class EventLedger:
     def delete_before(self, cutoff: float) -> int:
         """Delete observations older than cutoff and return the number removed."""
         cutoff = _finite_timestamp(cutoff, "cutoff")
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             observations = connection.execute(
                 "DELETE FROM observations WHERE event_at < ?", (cutoff,)
             )
