@@ -320,6 +320,7 @@ TAPO_SCORER_SHADOW_LOG=/srv/tapo-scorer/shadow/shadow.jsonl
 TAPO_SCORER_SHADOW_TOKEN_FILE=/etc/tapo-monitor/shadow.token   # 0600, only if the candidate has a token
 TAPO_SCORER_SHADOW_DISAGREE_DIR=/srv/tapo-scorer/shadow/disagree   # optional: keep disagreeing frames
 TAPO_SCORER_SHADOW_DISAGREE_MAX=300                                # newest N files kept (default)
+TAPO_SCORER_SHADOW_MISSED_MAX=1500                                 # newest N files kept in disagree/missed/ (default)
 TAPO_SCORER_SHADOW_QUEUE=8                                         # frames waiting for the single shadow worker; a full queue drops (default 8)
 TAPO_SCORER_SHADOW_TIMEOUT=8                                       # seconds per shadow call (default)
 ```
@@ -342,7 +343,13 @@ TAPO_SCORER_SHADOW_TIMEOUT=8                                       # seconds per
 - With `DISAGREE_DIR`, a frame is also saved when one model scores a person at 0.45 or more
   and the other below 0.25, as `<UTC time>_p<primary>_s<shadow>.jpg` (directory 0700, files
   0600, oldest deleted beyond the limit). These are the frames to judge by hand.
-- `/metrics` gains `shadow` with `sent`, `failed`, `dropped` and `disagree` counters.
+- Additional frames where the primary is blind (below 0.10) but the shadow scores from
+  0.25 up to, but below, 0.45 go to `DISAGREE_DIR/missed/`, at most one per source per
+  30 s, with their own limit
+  (`..._MISSED_MAX`), so they cannot push out the disagreement images.
+  Strong disagreements still use the top-level directory and the original capture rule.
+- `/metrics` gains `shadow` with `sent`, `failed`, `dropped` and `disagree` counters (plus
+  `missed` once the first such frame is saved).
 
 A second, independent candidate can be tested at the same time (opt-in, off unless both
 `URL` and `LOG` are set; the first shadow and its log format are untouched):
@@ -352,7 +359,7 @@ TAPO_SCORER_SHADOW2_URL=http://CANDIDATE2_HOST:8768/score
 TAPO_SCORER_SHADOW2_LOG=/srv/tapo-scorer/shadow/shadow2.jsonl
 TAPO_SCORER_SHADOW2_NAME=yolox960          # written to every row as shadow_name (default shadow2)
 # optional, same meaning as the first shadow: _TOKEN_FILE / _TOKEN, _QUEUE, _TIMEOUT,
-# _DISAGREE_DIR, _DISAGREE_MAX
+# _DISAGREE_DIR, _DISAGREE_MAX, _MISSED_MAX
 ```
 
 It has its own queue and worker thread, so a slow or dead second target drops its own frames
@@ -507,11 +514,15 @@ score, `models` (the models that actually ran on the frame, so "ran and found no
 distinguishable from "did not run"), optional `boxes` as `[x1, y1, x2, y2, score, model]` with model `yolox640`, `rfdetr`,
 `yolox960`, `rfdetr_m896` or `rfdetr_m576_t2`; change with `--models`, one name for the
 primary and one per log), `OUT/teacher.jsonl` (the score farthest from production,
-for ordering by disagreement) and `OUT/selection-report.md`. Categories, in priority order:
+for ordering by disagreement) and `OUT/selection-report.md`. Categories:
 `strong` (one model >= 0.45, another < 0.25), `threshold` (split at 0.45), `small` (best box
-shorter than 0.10 of the frame), and random controls `control_person` / `control_empty`
-(`--control` each, default 20, reserved within `--limit` first). `threshold` and `small` (at
-most `--small`, default 20) are picked before `strong`, which takes the rest. `--limit` caps
+shorter than 0.10 of the frame), `missed` (primary < `--missed-primary` 0.10 while the second
+model scores >= `--missed-shadow` 0.25, optionally with its best box centre inside
+`--missed-region x1,y1,x2,y2`; at most `--missed`, default 30, checked first; the `missed/`
+subdirectory of each `--disagree-dir` is searched too), and random controls `control_person` / `control_empty`
+(`--control` each, default 20, reserved within `--limit` first). `missed`, `threshold` and
+`small` are picked before `strong`, which takes the rest; `--small` caps the small-person
+selection at 20 by default. `--limit` caps
 the total and `--source-share` the share of one source among the non-control frames.
 `index.jsonl` gets `camera` when a dataset index names the camera of the frame's source.
 `--image-dir DIR` (repeatable, e.g. the `sent-log` and `review-log` of a dataset) searches

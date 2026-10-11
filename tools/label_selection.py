@@ -10,11 +10,15 @@ per-source-balanced set:
 
 * ``strong``     one model >= --high and another < --low
 * ``threshold``  the models split at --high (and are not ``strong``)
+* ``missed``     primary < --missed-primary while the second model (--models order) scores
+                 >= --missed-shadow, optionally with its best box centre inside
+                 --missed-region; checked first, quota --missed
 * ``small``      the best box of any model is shorter than --small-height of the frame
 * ``control_person`` / ``control_empty``  random samples where all models agree; reserved
   within ``--limit`` before the others, ``--source-share`` caps only the others
 
-``threshold`` and ``small`` (up to ``--small``) are picked before ``strong``, which takes
+``threshold``, ``missed`` (up to ``--missed``) and ``small`` (up to ``--small``) are picked
+before ``strong``, which takes
 the rest of the limit.
 
 Output: ``OUT/disagree<N>/*.jpg``, ``OUT/index.jsonl`` (``file``, ``ts``, ``person``,
@@ -29,6 +33,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import random
 import re
 import shutil
@@ -38,7 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 NAME_RE = re.compile(r"^(\d{8}T\d{6})(\d{3})_p\d+(?:\.\d+)?_s\d+(?:\.\d+)?(?:-\d+)?\.jpe?g$", re.I)
-CATEGORIES = ("strong", "threshold", "small", "control_person", "control_empty")
+CATEGORIES = ("strong", "threshold", "missed", "small", "control_person", "control_empty")
 DISAGREEING = ("strong", "threshold")
 CONTROLS = ("control_person", "control_empty")
 DEFAULT_MODELS = ("yolox640", "rfdetr", "yolox960", "rfdetr_m896", "rfdetr_m576_t2")
@@ -64,7 +69,7 @@ def read_jsonl(path):
 def num(value):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    return float(value) if math.isfinite(value) else None
 
 
 def short(source):
@@ -125,7 +130,7 @@ def load_frames(logs, models):
                 missing += 1
                 continue
             item = frames.setdefault(frame, {"source": rec.get("source_id"), "scores": {},
-                                             "boxes": {}})
+                                             "boxes": {}, "primary": models[0]})
             if item["source"] is None:
                 item["source"] = rec.get("source_id")
             p, s = num(rec.get("primary_person")), shadow_score(rec)
@@ -171,9 +176,12 @@ def dataset_images(dirs):
 
 
 def find_images(dirs):
-    """``{frame: (path, ts, sha256, "disagree", None)}`` from the disagree directories."""
+    """``{frame: (path, ts, sha256, "disagree", None)}`` from the disagree directories.
+
+    The ``missed/`` subdirectory of each one is searched too; it may not exist.
+    """
     found = {}
-    for directory in dirs:
+    for directory in [x for d in dirs for x in (Path(d), Path(d) / "missed")]:
         d = Path(directory)
         if not d.is_dir():
             continue
@@ -214,12 +222,35 @@ def best_box_height(item, min_score):
     return None if best is None else best[1]
 
 
-def categorize(item, high, low, small_height, small_min_score):
-    """One category per frame (priority order), plus the score spread for ordering."""
+def is_missed(item, shadow_model, primary_max, shadow_min, region):
+    """Primary below ``primary_max`` while ``shadow_model`` scores >= ``shadow_min``.
+
+    With a ``region`` (x1, y1, x2, y2) the centre of the shadow's best box must lie in it.
+    """
+    p, s = item["scores"].get(item["primary"]), item["scores"].get(shadow_model)
+    if p is None or s is None or p >= primary_max or s < shadow_min:
+        return False
+    if region is None:
+        return True
+    boxes = item["boxes"].get(shadow_model) or []
+    if not boxes:
+        return False
+    x1, y1, x2, y2, _score, _model = max(boxes, key=lambda b: b[4])
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    return region[0] <= cx <= region[2] and region[1] <= cy <= region[3]
+
+
+def categorize(item, high, low, small_height, small_min_score, missed=None):
+    """One category per frame (priority order), plus the score spread for ordering.
+
+    ``missed`` is ``(shadow_model, primary_max, shadow_min, region)`` or None (off).
+    """
     scores = list(item["scores"].values())
     if len(scores) < 2:
         return None, 0.0
     spread = max(scores) - min(scores)
+    if missed and is_missed(item, *missed):
+        return "missed", spread
     if max(scores) >= high and min(scores) < low:
         return "strong", spread
     if max(scores) >= high > min(scores):
@@ -261,7 +292,7 @@ def pick(candidates, quota, source_cap, source_used, budget, rng, ordered):
 
 
 def select(frames, images, labeled, *, high, low, small_height, small_min_score, limit,
-           source_share, control, seed, small=20):
+           source_share, control, seed, small=20, missed=30, missed_args=None):
     rng = random.Random(seed)
     stats = {"frames": len(frames), "with_image": 0, "labeled_skipped": 0, "no_category": 0}
     pool = defaultdict(list)
@@ -276,7 +307,8 @@ def select(frames, images, labeled, *, high, low, small_height, small_min_score,
         if sha in labeled:
             stats["labeled_skipped"] += 1
             continue
-        category, spread = categorize(item, high, low, small_height, small_min_score)
+        category, spread = categorize(item, high, low, small_height, small_min_score,
+                                      missed_args)
         if category is None:
             stats["no_category"] += 1
             continue
@@ -295,8 +327,9 @@ def select(frames, images, labeled, *, high, low, small_height, small_min_score,
     chosen = []
     # The rare categories go first (small up to --small), so the plentiful strong
     # disagreements take only what is left instead of crowding them out.
-    for category in ("threshold", "small", "strong"):
-        quota = small if category == "small" else rest
+    quotas = {"small": small, "missed": missed}
+    for category in ("threshold", "missed", "small", "strong"):
+        quota = quotas.get(category, rest)
         chosen += pick(pool[category], quota, cap, used, rest - len(chosen), rng,
                        category in DISAGREEING)
     chosen += controls
@@ -356,7 +389,8 @@ def report(chosen, stats, args):
              f"Selected: {len(chosen)} (limit {args.limit}, controls reserved "
              f"{stats['controls']}, per-source cap of the rest {stats['cap']})",
              f"Thresholds: high {args.high}, low {args.low}, small box height < "
-             f"{args.small_height}", "", "## By category", "",
+             f"{args.small_height}, missed primary < {args.missed_primary} and shadow >= "
+             f"{args.missed_shadow} (region {args.missed_region or 'any'})", "", "## By category", "",
              "| category | available | selected |", "|---|---|---|"]
     by_cat = Counter(c["category"] for c in chosen)
     for cat in CATEGORIES:
@@ -375,6 +409,20 @@ def report(chosen, stats, args):
         lines.append(f"| {src} | " + " | ".join(str(row[c]) for c in CATEGORIES)
                      + f" | {sum(row.values())} |")
     return "\n".join(lines) + "\n"
+
+
+def parse_region(text):
+    try:
+        vals = tuple(float(v) for v in text.split(","))
+    except ValueError:
+        vals = ()
+    if len(vals) != 4:
+        raise argparse.ArgumentTypeError("expected x1,y1,x2,y2")
+    if not all(math.isfinite(v) and 0 <= v <= 1 for v in vals):
+        raise argparse.ArgumentTypeError("region coordinates must be finite and within [0, 1]")
+    if vals[0] >= vals[2] or vals[1] >= vals[3]:
+        raise argparse.ArgumentTypeError("region needs x1 < x2 and y1 < y2")
+    return vals
 
 
 def parse_args(argv):
@@ -402,6 +450,16 @@ def parse_args(argv):
     ap.add_argument("--small", type=int, default=20,
                     help="most small-person frames, picked before the strong disagreements "
                          "(default 20)")
+    ap.add_argument("--missed", type=int, default=30,
+                    help="most missed-person frames (primary low, second model high), picked "
+                         "before the strong disagreements (default 30)")
+    ap.add_argument("--missed-primary", type=float, default=0.10,
+                    help="missed: the primary scores below this (default 0.10)")
+    ap.add_argument("--missed-shadow", type=float, default=0.25,
+                    help="missed: the second model scores at least this (default 0.25)")
+    ap.add_argument("--missed-region", type=parse_region, default=None,
+                    help="x1,y1,x2,y2 (normalized): the second model's best box centre must "
+                         "lie inside (default: anywhere)")
     ap.add_argument("--control", type=int, default=20,
                     help="random frames per control category, reserved within --limit "
                          "(default 20)")
@@ -412,7 +470,14 @@ def parse_args(argv):
                     help="a box needs this score to count as the best box (default 0.25)")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--dry-run", action="store_true", help="print the report, write nothing")
-    return ap.parse_args(argv)
+    args = ap.parse_args(argv)
+    if args.missed < 0:
+        ap.error("--missed must be nonnegative")
+    for option in ("missed_primary", "missed_shadow"):
+        value = getattr(args, option)
+        if not math.isfinite(value) or not 0 <= value <= 1:
+            ap.error(f"--{option.replace('_', '-')} must be finite and within [0, 1]")
+    return args
 
 
 def main(argv=None):
@@ -434,7 +499,9 @@ def main(argv=None):
                            small_height=args.small_height,
                            small_min_score=args.small_min_score, limit=args.limit,
                            source_share=args.source_share, control=args.control,
-                           small=args.small,
+                           small=args.small, missed=args.missed,
+                           missed_args=(models[1], args.missed_primary, args.missed_shadow,
+                                        args.missed_region),
                            seed=args.seed)
     stats["no_frame"] = no_frame
     text = report(chosen, stats, args)

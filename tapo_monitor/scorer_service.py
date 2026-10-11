@@ -882,6 +882,9 @@ SHADOW_DISAGREE_MAX = 300
 SHADOW_LOG_BOXES = 10   # person boxes per model kept in a shadow log row
 SHADOW_HIGH = 0.45
 SHADOW_LOW = 0.25
+SHADOW_MISSED_PRIMARY = 0.10   # primary this blind + shadow >= SHADOW_LOW -> kept in missed/
+SHADOW_MISSED_MAX = 1500
+SHADOW_MISSED_GAP = 30.0       # at most one missed/ image per source per this many seconds
 SHADOW_WARN_SECONDS = 60.0
 ENSEMBLE_LOW = 0.12
 ENSEMBLE_HIGH = 0.45
@@ -898,6 +901,7 @@ class ShadowConfig:
     token: str | None = None
     disagree_dir: str | None = None
     disagree_max: int = SHADOW_DISAGREE_MAX
+    missed_max: int = SHADOW_MISSED_MAX   # own cap for disagree_dir/missed/, so it cannot flush the rest
     timeout: float = SHADOW_TIMEOUT
     queue_size: int = SHADOW_QUEUE_SIZE
     name: str | None = None   # set only for the extra shadows; written to their log rows
@@ -921,6 +925,8 @@ def load_shadow(env=None):
         disagree_dir=(env.get("TAPO_SCORER_SHADOW_DISAGREE_DIR") or "").strip() or None,
         disagree_max=max(1, _env_setting(env, "TAPO_SCORER_SHADOW_DISAGREE_MAX", int,
                                          SHADOW_DISAGREE_MAX)),
+        missed_max=max(1, _env_setting(env, "TAPO_SCORER_SHADOW_MISSED_MAX", int,
+                                       SHADOW_MISSED_MAX)),
         timeout=_env_setting(env, "TAPO_SCORER_SHADOW_TIMEOUT", float, SHADOW_TIMEOUT),
         queue_size=max(1, _env_setting(env, "TAPO_SCORER_SHADOW_QUEUE", int,
                                        SHADOW_QUEUE_SIZE)),
@@ -945,6 +951,7 @@ def _load_named_shadow(env, prefix, default_name):
         disagree_dir=(env.get(f"{prefix}_DISAGREE_DIR") or "").strip() or None,
         disagree_max=max(1, _env_setting(env, f"{prefix}_DISAGREE_MAX", int,
                                          SHADOW_DISAGREE_MAX)),
+        missed_max=max(1, _env_setting(env, f"{prefix}_MISSED_MAX", int, SHADOW_MISSED_MAX)),
         timeout=_env_setting(env, f"{prefix}_TIMEOUT", float, SHADOW_TIMEOUT),
         queue_size=max(1, _env_setting(env, f"{prefix}_QUEUE", int, SHADOW_QUEUE_SIZE)),
         name=(env.get(f"{prefix}_NAME") or "").strip() or default_name,
@@ -1248,6 +1255,7 @@ class ShadowRunner:
         self._lock = threading.Lock()
         self.counts = {"sent": 0, "failed": 0, "dropped": 0, "disagree": 0}
         self._last_warn = None
+        self._missed_last = {}   # source_id -> monotonic time of its last missed/ image
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="scorer-" + (config.name or "shadow"), daemon=True)
         self._thread.start()
@@ -1258,7 +1266,8 @@ class ShadowRunner:
 
     def _count(self, key):
         with self._lock:
-            self.counts[key] += 1
+            # "missed" is added on first use so the counts keys stay as before until it fires
+            self.counts[key] = self.counts.get(key, 0) + 1
 
     def submit(self, body, tiles, source_id, result, primary_seconds, outcome=None):
         """Queue a frame. ``outcome`` is ``(shadow_person, error, seconds, payload)`` when the
@@ -1309,6 +1318,18 @@ class ShadowRunner:
                      or (shadow_person >= SHADOW_HIGH and primary_person < SHADOW_LOW))):
             if self._save_disagreement(body, primary_person, shadow_person):
                 self._count("disagree")
+        elif (shadow_person is not None and primary_person is not None
+                and self.config.disagree_dir
+                and shadow_person >= SHADOW_LOW and primary_person < SHADOW_MISSED_PRIMARY):
+            # Primary blind, shadow sees a person: very frequent, so rate-limited per source
+            # and kept in its own capped subdirectory.
+            now = time.monotonic()
+            last = self._missed_last.get(source_id)
+            if last is None or now - last >= SHADOW_MISSED_GAP:
+                if self._save_disagreement(body, primary_person, shadow_person,
+                                           "missed", self.config.missed_max):
+                    self._missed_last[source_id] = now
+                    self._count("missed")
 
     def _warn(self, error):
         now = time.monotonic()
@@ -1353,11 +1374,17 @@ class ShadowRunner:
         except OSError as exc:
             log.warning("shadow log write failed: %s", type(exc).__name__)
 
-    def _save_disagreement(self, body, primary_person, shadow_person):
+    def _save_disagreement(self, body, primary_person, shadow_person, subdir=None,
+                           limit=None):
         directory = self.config.disagree_dir
+        limit = limit or self.config.disagree_max
         try:
             os.makedirs(directory, mode=0o700, exist_ok=True)
             os.chmod(directory, 0o700)
+            if subdir:
+                directory = os.path.join(directory, subdir)
+                os.makedirs(directory, mode=0o700, exist_ok=True)
+                os.chmod(directory, 0o700)
             now = time.time()
             stem = (time.strftime("%Y%m%dT%H%M%S", time.gmtime(now))
                     + f"{int(now * 1000) % 1000:03d}"
@@ -1371,7 +1398,7 @@ class ShadowRunner:
             with os.fdopen(fd, "wb") as f:
                 f.write(body)
             names = sorted(n for n in os.listdir(directory) if n.endswith(".jpg"))
-            for old in names[:-self.config.disagree_max]:
+            for old in names[:-limit]:
                 try:
                     os.unlink(os.path.join(directory, old))
                 except OSError:

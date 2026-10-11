@@ -5,6 +5,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location(
     "label_selection", ROOT / "tools" / "label_selection.py")
@@ -61,12 +63,13 @@ def test_categories(tmp_path):
     e.add(0.1, 0.2, 0.3, boxes=[TINY])         # small (no model reaches 0.45)
     e.add(0.9, 0.8, 0.7, boxes=[BIG])          # control_person
     e.add(0.1, 0.05, 0.2)                      # control_empty
+    e.add(0.05, 0.3, 0.1)                      # missed (rfdetr 0.3 >= 0.25, primary < 0.10)
     e.add(0.3, 0.3, 0.3)                       # nothing
     out = e.run()
     rep = (out / "selection-report.md").read_text()
     for cat in ls.CATEGORIES:
         assert f"| {cat} | 1 | 1 |" in rep
-    assert len(index(out)) == 5
+    assert len(index(out)) == 6
 
 
 def test_quota_caps_source_and_controls(tmp_path):
@@ -223,3 +226,90 @@ def test_fourth_log_needs_the_third(tmp_path):
     argv = ["--shadow-log", str(tmp_path / "s1.jsonl"), "--shadow2-log", str(tmp_path / "s2.jsonl"),
             "--shadow4-log", str(tmp_path / "s1.jsonl"), "--out", str(tmp_path / "o")]
     assert ls.main(argv) == 2
+
+
+def test_missed_category_region_and_missed_subdir(tmp_path):
+    e = Env(tmp_path)
+    inside = [0.65, 0.1, 0.75, 0.3, 0.5]
+    outside = [0.1, 0.5, 0.2, 0.9, 0.5]
+    e.add(0.05, 0.4, 0.4, boxes=[inside])          # missed, in region
+    e.add(0.05, 0.4, 0.4, boxes=[outside])         # missed, outside region
+    e.add(0.20, 0.4, 0.4, boxes=[inside])          # primary too high
+    e.add(0.05, 0.4, 0.4, boxes=[inside], image=False)  # image only in missed/
+    (tmp_path / "d1" / "missed").mkdir()
+    (tmp_path / "d1" / "missed" / "20260101T000059123_p0.05_s0.40.jpg").write_bytes(
+        b"body-4")
+    out = e.run("--control", "0", "--missed-region", "0.6,0.05,0.8,0.35")
+    rep = (out / "selection-report.md").read_text()
+    assert "| missed | 2 | 2 |" in rep
+    assert len(index(out)) == 2
+
+
+def test_missed_quota_before_strong_and_region_off_by_default(tmp_path):
+    e = Env(tmp_path)
+    for _ in range(5):
+        e.add(0.05, 0.6, 0.6, boxes=[BIG])         # missed (not strong: max 0.6 >= high, min < low)
+    for _ in range(10):
+        e.add(0.9, 0.1, 0.8)                       # strong
+    out = e.run("--limit", "8", "--source-share", "1", "--control", "0", "--missed", "3")
+    rep = (out / "selection-report.md").read_text()
+    assert "| missed | 5 | 3 |" in rep and "| strong | 10 | 5 |" in rep
+
+
+@pytest.mark.parametrize("region", ["nan,0,1,1", "0,0,inf,1", "-0.1,0,1,1",
+                                   "0,0,1.1,1", "0.8,0,0.2,1", "0,0.8,1,0.2",
+                                   "0.2,0,0.2,1"])
+def test_invalid_missed_region_rejected_before_output(tmp_path, region):
+    e = Env(tmp_path)
+    e.add(0.05, 0.4, 0.4)
+    with pytest.raises(SystemExit) as exc:
+        e.run("--missed-region", region)
+    assert exc.value.code == 2
+    assert not (tmp_path / "out").exists()
+
+
+def test_nonfinite_primary_cannot_create_missed_candidate(tmp_path):
+    e = Env(tmp_path)
+    e.add(float("nan"), 0.3, 0.3, image=False)
+    (tmp_path / "d1" / "20260101T000001123_p0.05_s0.30.jpg").write_bytes(b"body-1")
+    out = e.run("--control", "0")
+    assert index(out) == []
+    assert "| missed | 0 | 0 |" in (out / "selection-report.md").read_text()
+
+
+@pytest.mark.parametrize("option,value", [("--missed", "-1"),
+                                         ("--missed-primary", "nan"),
+                                         ("--missed-primary", "1.1"),
+                                         ("--missed-shadow", "inf"),
+                                         ("--missed-shadow", "-0.1")])
+def test_invalid_missed_threshold_or_quota_rejected(tmp_path, option, value):
+    e = Env(tmp_path)
+    e.add(0.05, 0.4, 0.4)
+    with pytest.raises(SystemExit) as exc:
+        e.run(option, value)
+    assert exc.value.code == 2
+    assert not (tmp_path / "out").exists()
+
+
+def test_missed_boundaries_follow_second_model_with_custom_names(tmp_path):
+    e = Env(tmp_path)
+    e.add(0.10, 0.30, 0.30)       # primary boundary is excluded
+    e.add(0.099, 0.25, 0.10)      # shadow boundary is included
+    e.add(0.05, 0.249, 0.30)      # third model cannot qualify instead of the second
+    out = e.run("--models", "production,teacher,other", "--control", "0")
+    (rec,) = index(out)
+    assert rec["person"] == 0.099
+    assert rec["models"] == ["production", "teacher", "other"]
+    assert "| missed | 1 | 1 |" in (out / "selection-report.md").read_text()
+
+
+def test_missed_region_uses_highest_scoring_shadow_box(tmp_path):
+    e = Env(tmp_path)
+    inside = [0.65, 0.1, 0.75, 0.3, 0.5]
+    outside = [0.1, 0.5, 0.2, 0.9, 0.8]
+    e.add(0.05, 0.4, 0.4, boxes=[inside, outside])
+    e.add(0.05, 0.4, 0.4, boxes=[[*inside[:4], 0.9], outside])
+    out = e.run("--control", "0", "--missed-region", "0.6,0.05,0.8,0.35")
+    (rec,) = index(out)
+    assert rec["file"].endswith("000002123_p0.05_s0.40.jpg")
+    assert "| missed | 1 | 1 |" in (out / "selection-report.md").read_text()

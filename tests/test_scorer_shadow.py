@@ -516,3 +516,121 @@ def test_fourth_shadow_forces_tiles_and_logs_tile_score(tmp_path):
 def test_shadow_tiles_unset_by_default():
     assert scorer_service.load_shadow4({"TAPO_SCORER_SHADOW4_URL": "http://x/score",
                                         "TAPO_SCORER_SHADOW4_LOG": "l"}).tiles is None
+
+
+def _missed_runner(tmp_path, **kw):
+    cfg = scorer_service.ShadowConfig(url="http://127.0.0.1:9/score", token=DUMMY_SHADOW_TOKEN,
+                                      log_path=None, disagree_dir=str(tmp_path / "dis"), **kw)
+    return scorer_service.ShadowRunner(cfg), tmp_path / "dis"
+
+
+def _feed(runner, primary, shadow, source=SOURCE, body=b"jpg"):
+    runner._process(body, 1, source, {"person": primary}, 0.01,
+                    outcome=(shadow, None, 0.01, {"person": shadow}))
+
+
+def test_missed_frame_saved_in_subdir_and_counted(tmp_path):
+    runner, dis = _missed_runner(tmp_path)
+    try:
+        _feed(runner, 0.05, 0.30)
+        (name,) = os.listdir(dis / "missed")
+        assert name.endswith("_p0.05_s0.30.jpg")
+        assert [p for p in os.listdir(dis) if p.endswith(".jpg")] == []
+        assert runner.snapshot()["missed"] == 1 and runner.snapshot()["disagree"] == 0
+        _feed(runner, 0.10, 0.30, source="other")    # primary not < 0.10, plain gray band
+        _feed(runner, 0.05, 0.20, source="third")    # shadow below SHADOW_LOW
+        assert len(os.listdir(dis / "missed")) == 1
+    finally:
+        runner.close()
+
+
+def test_first_missed_frame_keeps_both_directories_private(tmp_path):
+    runner, dis = _missed_runner(tmp_path)
+    try:
+        _feed(runner, 0.05, 0.25)
+        assert stat.S_IMODE(dis.stat().st_mode) == 0o700
+        assert stat.S_IMODE((dis / "missed").stat().st_mode) == 0o700
+        (image,) = (dis / "missed").glob("*.jpg")
+        assert stat.S_IMODE(image.stat().st_mode) == 0o600
+    finally:
+        runner.close()
+
+
+def test_missed_does_not_replace_the_old_disagreement_trigger(tmp_path):
+    runner, dis = _missed_runner(tmp_path)
+    try:
+        _feed(runner, 0.05, 0.90)                    # both rules match: one image, top level
+        _feed(runner, 0.90, 0.10, source="other")
+        assert len([p for p in os.listdir(dis) if p.endswith(".jpg")]) == 2
+        assert not (dis / "missed").exists()
+        assert runner.snapshot() == {"sent": 2, "failed": 0, "dropped": 0, "disagree": 2}
+    finally:
+        runner.close()
+
+
+def test_missed_rate_limit_is_per_source(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(scorer_service.time, "monotonic", lambda: clock[0])
+    runner, dis = _missed_runner(tmp_path)
+    try:
+        _feed(runner, 0.0, 0.3, body=b"a")
+        _feed(runner, 0.0, 0.3, body=b"b")           # same source, 0 s later: skipped
+        _feed(runner, 0.0, 0.3, source="other", body=b"c")
+        clock[0] += scorer_service.SHADOW_MISSED_GAP
+        _feed(runner, 0.0, 0.3, body=b"d")
+        assert len(os.listdir(dis / "missed")) == 3
+        assert runner.snapshot()["missed"] == 3
+    finally:
+        runner.close()
+
+
+def test_missed_cap_rotates_alone(tmp_path, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(scorer_service.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(scorer_service.time, "time", lambda: clock[0])
+    runner, dis = _missed_runner(tmp_path, disagree_max=2, missed_max=3)
+    try:
+        _feed(runner, 0.9, 0.1)
+        _feed(runner, 0.9, 0.1, source="x")
+        for _ in range(6):
+            clock[0] += 100
+            _feed(runner, 0.0, 0.3)
+        assert len(os.listdir(dis / "missed")) == 3
+        assert len([p for p in os.listdir(dis) if p.endswith(".jpg")]) == 2
+    finally:
+        runner.close()
+
+
+def test_failed_missed_save_does_not_consume_source_rate_limit(tmp_path, monkeypatch):
+    runner, dis = _missed_runner(tmp_path)
+    save = runner._save_disagreement
+    try:
+        monkeypatch.setattr(runner, "_save_disagreement", lambda *args: False)
+        _feed(runner, 0.05, 0.30)
+        assert "missed" not in runner.snapshot()
+        monkeypatch.setattr(runner, "_save_disagreement", save)
+        _feed(runner, 0.05, 0.30)
+        assert runner.snapshot()["missed"] == 1
+        assert len(list((dis / "missed").glob("*.jpg"))) == 1
+    finally:
+        runner.close()
+
+
+def test_missed_max_env():
+    env = {"TAPO_SCORER_SHADOW_URL": "http://x/score", "TAPO_SCORER_SHADOW_LOG": "l"}
+    assert scorer_service.load_shadow(env).missed_max == 1500
+    assert scorer_service.load_shadow(
+        {**env, "TAPO_SCORER_SHADOW_MISSED_MAX": "7"}).missed_max == 7
+    env2 = {"TAPO_SCORER_SHADOW2_URL": "http://x/score", "TAPO_SCORER_SHADOW2_LOG": "l",
+            "TAPO_SCORER_SHADOW2_MISSED_MAX": "9"}
+    assert scorer_service.load_shadow2(env2).missed_max == 9
+
+
+@pytest.mark.parametrize("number", [2, 3, 4])
+@pytest.mark.parametrize("setting,expected", [("0", 1), ("-1", 1), ("bad", 1500), ("23", 23)])
+def test_extra_shadows_load_missed_max(number, setting, expected):
+    prefix = f"TAPO_SCORER_SHADOW{number}"
+    env = {f"{prefix}_URL": "http://x/score", f"{prefix}_LOG": "l",
+           f"{prefix}_MISSED_MAX": setting}
+    config = getattr(scorer_service, f"load_shadow{number}")(env)
+    assert config.missed_max == expected
