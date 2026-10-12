@@ -3,6 +3,26 @@
 This guide covers the changes since 0.8.1. For the full feature list, see the
 [changelog](../CHANGELOG.md) and [capabilities](capabilities.md).
 
+## Why upgrade
+
+- **Alerts survive an internet outage.** Before, the in-memory retries gave up after
+  about ten minutes, so a night-long outage lost every alert of the night. With the
+  optional outbox they are kept on disk and delivered once Telegram answers again,
+  with one outage summary per camera (English, or Czech with `outbox.lang: cs`).
+- **Fewer misleading or redundant alerts.** An alert sent without a score is marked
+  `(unverified)` instead of passing as a confirmed person, small crops no longer
+  arrive as unreadable thumbnails, damaged grey frames are not scored, and a motion
+  photo that already showed a person suppresses the duplicate SD follow-up.
+- **More stable long runs.** Event-ledger transactions close their SQLite connections
+  deterministically, which fixes connection build-up on Python 3.13.
+- **More control without risk.** Watch and ignore zones, loitering and vehicle alerts,
+  scorer and camera failover lists and scorer authentication are all opt-in, and
+  `observe` modes let you trial a rule before it affects alerts.
+- **Evaluate detectors on your own data.** Up to four shadow detectors (optionally
+  rate-limited per target) run beside the live one without changing alerts, with
+  labeling, box review and report tools to compare them.
+- **One more tested camera:** the TC46 behaves like the C560WS.
+
 ## Changes to existing behavior
 
 | Change | Effect | Setting |

@@ -4,7 +4,7 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
-## [0.9.0] - Unreleased
+## [0.9.0] - 2026-10-12
 
 ### Added
 - TC46 in the tested cameras, with its anonymized report as a fixture: same getters,
