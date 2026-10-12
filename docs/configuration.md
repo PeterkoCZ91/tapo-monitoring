@@ -1310,6 +1310,7 @@ outbox:
   max_entries: 300              # oldest dropped beyond this
   max_photos: 10                # late photos per camera per drain
   summary: true                 # one outage text before the late photos
+  lang: en                      # en or cs: language of the outage text and late captions
 ```
 
 - Off unless `enabled: true`. Without it a failed Telegram send is retried in memory
@@ -1329,9 +1330,9 @@ outbox:
 - Once Telegram answers again (a delivered alert, or a silent `getMe` probe at most once
   a minute while it is down), each camera's batch is delivered: one summary text naming
   the outage window and the counts, then the photos that showed a person, captioned
-  `⏳ zpožděno o X h Y min · <original caption>`, at most `max_photos` of them. The rest
+  `⏳ delayed by X h Y min · <original caption>`, at most `max_photos` of them. The rest
   go to the review log (`TAPO_REVIEW_LOG_DIR`, verdict `outbox`) instead of the phone;
-  without that variable they are only counted (the summary says "neodesláno") and the
+  without that variable they are only counted (the summary says "not sent") and the
   daemon warns at startup. A later summary counts only entries no earlier one did.
 - The drain runs on the main loop, so each tick does a bounded amount: at most 5
   rescorings, 3 photos and about 10 s; a backlog trickles out over the following ticks.

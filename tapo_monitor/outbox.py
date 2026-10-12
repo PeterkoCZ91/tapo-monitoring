@@ -1,4 +1,4 @@
-"""Opt-in persistent outbox for alerts Telegram never took ("zpožděno" delivery).
+"""Opt-in persistent outbox for alerts Telegram never took ("delayed" delivery).
 
 The in-memory retries (the SD follow-up, the hub retry) give up after about ten minutes,
 which covers a Telegram blip but not an outage: a site whose internet was down overnight
@@ -157,17 +157,19 @@ def format_delay(seconds) -> str:
     return f"{hours} h {minutes} min" if hours else f"{minutes} min"
 
 
-def delayed_caption(entry: Entry, now) -> str:
-    """The original caption behind a ``⏳ zpožděno o …`` prefix. Pure."""
-    return f"⏳ zpožděno o {format_delay(now - entry.event_time)} · {entry.caption}"
+def delayed_caption(entry: Entry, now, lang="en") -> str:
+    """The original caption behind a ``⏳ delayed by …`` prefix (``lang`` en/cs). Pure."""
+    prefix = "zpožděno o" if lang == "cs" else "delayed by"
+    return f"⏳ {prefix} {format_delay(now - entry.event_time)} · {entry.caption}"
 
 
 def _clock(ts, with_date):
     return time.strftime("%d.%m. %H:%M" if with_date else "%H:%M", time.localtime(ts))
 
 
-def summary_text(camera, entries, persons, to_phone, now, review_enabled=True) -> str:
-    """The one message that opens a camera's late batch (HTML-escaped, Czech). Pure.
+def summary_text(camera, entries, persons, to_phone, now, review_enabled=True,
+                 lang="en") -> str:
+    """The one message that opens a camera's late batch (HTML-escaped, ``lang`` en/cs). Pure.
 
     Names the outage window (first and last failed send), how many alerts were lost and
     how many showed a person, and where the rest went, so the photos that follow read as
@@ -180,13 +182,24 @@ def summary_text(camera, entries, persons, to_phone, now, review_enabled=True) -
     with_date = (time.localtime(first)[:3] != time.localtime(last)[:3]
                  or time.localtime(first)[:3] != time.localtime(now)[:3])
     n = len(entries)
-    lines = [f"⏳ Výpadek spojení {_clock(first, with_date)}–{_clock(last, with_date)}"
+    window = f"{_clock(first, with_date)}–{_clock(last, with_date)}"
+    rest = n - to_phone
+    if lang != "cs":
+        lines = [f"⏳ Connection outage {window} · {camera} — {n} undelivered "
+                 f"{'event' if n == 1 else 'events'}, {persons} with a person."]
+        if to_phone:
+            lines.append(f"Sending {to_phone} delayed person "
+                         f"{'photo' if to_phone == 1 else 'photos'}:")
+        if rest:
+            where = "only in the review log" if review_enabled else "not sent"
+            lines.append(f"+{rest} more {where}.")
+        return html.escape("\n".join(lines), quote=False)
+    lines = [f"⏳ Výpadek spojení {window}"
              f" · {camera} — nedoručeno {n} {plural(n, 'událost', 'události', 'událostí')},"
              f" z toho {persons} s osobou."]
     if to_phone:
         lines.append(f"Posílám zpožděně {to_phone} "
                      f"{plural(to_phone, 'fotku', 'fotky', 'fotek')} s osobou:")
-    rest = n - to_phone
     if rest:
         where = "jen v review logu" if review_enabled else "neodesláno"
         lines.append(f"+{rest} {plural(rest, 'další', 'další', 'dalších')} {where}.")
@@ -229,12 +242,13 @@ class Outbox:
     """The outbox directory plus the in-memory Telegram reachability probe state."""
 
     def __init__(self, directory, *, max_age=24 * 3600, max_entries=300, max_photos=10,
-                 summary=True, min_age=MIN_AGE):
+                 summary=True, min_age=MIN_AGE, lang="en"):
         self.dir = directory
         self.max_age = max_age
         self.max_entries = max_entries
         self.max_photos = max_photos
         self.summary = summary
+        self.lang = lang
         self.min_age = min_age
         self.last_ok_at: float | None = None
         self.next_probe_at = 0.0
@@ -561,7 +575,7 @@ def drain(box: Outbox, *, now, known_cameras, send_text, send_photo, archive_rev
                               if f and not e.announced)
             to_phone = sum(1 for e in phone if not e.announced)
             if not send_text(summary_text(camera, new, new_persons, to_phone, now,
-                                          review_enabled)):
+                                          review_enabled, lang=box.lang)):
                 box.note_failed(now)
                 report["stopped"] = True
                 return report
@@ -578,7 +592,7 @@ def drain(box: Outbox, *, now, known_cameras, send_text, send_photo, archive_rev
                 report["budget"] = True
                 break
             sends += 1
-            if send_photo(entry, delayed_caption(entry, now)):
+            if send_photo(entry, delayed_caption(entry, now, box.lang)):
                 box.remove(entry.key)
                 report["sent"] += 1
                 continue

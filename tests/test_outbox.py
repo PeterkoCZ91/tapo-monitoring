@@ -84,8 +84,9 @@ def test_outbox_block_parses_and_validates():
     assert (ob.enabled, ob.max_age, ob.max_entries, ob.max_photos, ob.summary) == (
         True, 3600, 50, 3, False)
     assert ob.dir == os.path.expanduser("~/ob")
+    assert ob.lang == "en" and _app({"lang": "cs"}).outbox.lang == "cs"
     for bad in ({"enabled": "yes"}, {"max_age": 10}, {"max_entries": 0},
-                {"max_photos": True}, {"dir": ""}, {"surprise": 1}):
+                {"max_photos": True}, {"dir": ""}, {"surprise": 1}, {"lang": "de"}):
         with pytest.raises(cfg.ConfigError):
             _app(bad)
 
@@ -193,7 +194,7 @@ def test_a_sidecar_without_its_frame_is_dropped(tmp_path):
 # ── drain ────────────────────────────────────────────────────────────────────
 
 def test_drain_sends_the_summary_then_persons_and_reviews_the_rest(tmp_path):
-    box = _box(tmp_path)
+    box = _box(tmp_path, lang="cs")
     base = T0 - 5 * 3600
     _capture(box, tmp_path, int(base), etype="motion", score=scorer.SubjectScore(0.9, 0))
     _capture(box, tmp_path, int(base) + 60, etype="motion", score=scorer.SubjectScore(0.1, 0))
@@ -232,7 +233,7 @@ def test_entries_past_max_age_are_dropped_unsent(tmp_path):
 
 
 def test_persons_past_the_cap_go_to_the_review_log(tmp_path):
-    box = _box(tmp_path, max_photos=2)
+    box = _box(tmp_path, max_photos=2, lang="cs")
     for i in range(4):
         _capture(box, tmp_path, int(T0 - 3600) + i * 60)
     rec = _Recorder()
@@ -438,16 +439,16 @@ def test_plural_forms():
 
 def test_summary_grammar_for_one_and_five():
     one = [outbox.Entry(key="k", camera="yard", image="x", caption="", failed_at=T0)]
-    text = outbox.summary_text("yard", one, 1, 1, T0)
+    text = outbox.summary_text("yard", one, 1, 1, T0, lang="cs")
     assert "nedoručeno 1 událost," in text and "Posílám zpožděně 1 fotku s osobou" in text
     five = one * 6
-    text = outbox.summary_text("yard", five, 5, 5, T0)
+    text = outbox.summary_text("yard", five, 5, 5, T0, lang="cs")
     assert "6 událostí" in text and "5 fotek" in text and "+1 další jen v review logu" in text
 
 
 def test_summary_says_not_sent_when_there_is_no_review_log():
     entries = [outbox.Entry(key="k", camera="yard", image="x", caption="", failed_at=T0)] * 7
-    text = outbox.summary_text("yard", entries, 0, 0, T0, review_enabled=False)
+    text = outbox.summary_text("yard", entries, 0, 0, T0, review_enabled=False, lang="cs")
     assert "+7 dalších neodesláno" in text and "review" not in text
 
 
@@ -544,7 +545,7 @@ def test_a_failed_summary_stops_every_camera(tmp_path):
 
 
 def test_a_later_summary_counts_only_entries_not_reported_before(tmp_path):
-    box = _box(tmp_path)
+    box = _box(tmp_path, lang="cs")
     for i in range(2):
         _capture(box, tmp_path, int(T0 - 3600) + i * 60)
     rec = _Recorder(photo_ok=lambda n: False)
@@ -560,7 +561,7 @@ def test_a_later_summary_counts_only_entries_not_reported_before(tmp_path):
 
 
 def test_an_unscored_motion_entry_waits_for_the_scorer(tmp_path):
-    box = _box(tmp_path)
+    box = _box(tmp_path, lang="cs")
     _capture(box, tmp_path, int(T0 - 3600), etype="motion")
     _capture(box, tmp_path, int(T0 - 3000), etype="person")
     dead = lambda c: (lambda path: None)  # noqa: E731
@@ -705,3 +706,25 @@ def test_writes_are_fsynced(tmp_path, monkeypatch):
     monkeypatch.setattr(outbox.os, "fsync", lambda fd: synced.append(fd) or real(fd))
     _capture(_box(tmp_path), tmp_path, 1000)
     assert len(synced) == 2                        # frame and sidecar
+
+
+def test_outage_texts_default_to_english(tmp_path):
+    box = _box(tmp_path)
+    base = T0 - 5 * 3600
+    _capture(box, tmp_path, int(base), etype="motion", score=scorer.SubjectScore(0.9, 0))
+    _capture(box, tmp_path, int(base) + 60, etype="motion", score=scorer.SubjectScore(0.1, 0))
+    _capture(box, tmp_path, int(base) + 120, etype="person")
+    rec = _Recorder()
+    rec.drain(box)
+    text = rec.calls[0][1]
+    assert "3 undelivered events, 2 with a person" in text
+    assert "Sending 2 delayed person photos:" in text and "+1 more only in the review log" in text
+    assert rec.calls[2][2].startswith("⏳ delayed by 5 h 0 min · 👤 ")
+
+
+def test_english_summary_singular_and_not_sent():
+    one = [outbox.Entry(key="k", camera="yard", image="x", caption="", failed_at=T0)]
+    text = outbox.summary_text("yard", one, 1, 1, T0)
+    assert "1 undelivered event, 1 with a person" in text and "Sending 1 delayed person photo:" in text
+    text = outbox.summary_text("yard", one * 7, 0, 0, T0, review_enabled=False)
+    assert "+7 more not sent" in text and "review" not in text

@@ -479,6 +479,7 @@ class OutboxConfig:
     max_entries: int = 300              # oldest dropped beyond this
     max_photos: int = 10                # late photos per camera per drain
     summary: bool = True                # one "outage" text before the late photos
+    lang: str = "en"                    # language of the outage text and late captions
 
 
 @dataclass
@@ -1520,6 +1521,9 @@ def _outbox(data):
         raise ConfigError("outbox must be a mapping")
     enabled = _check_bool(data.get("enabled", False), "enabled", "outbox")
     summary = _check_bool(data.get("summary", True), "summary", "outbox")
+    lang = data.get("lang", "en")
+    if lang not in ("en", "cs"):
+        raise ConfigError("outbox.lang must be 'en' or 'cs'")
     directory = data.get("dir")
     if directory is not None and (not isinstance(directory, str) or not directory.strip()):
         raise ConfigError("outbox.dir must be a non-empty path (or omitted for the default)")
@@ -1532,7 +1536,7 @@ def _outbox(data):
         ints[key] = value
     return OutboxConfig(enabled=enabled,
                         dir=os.path.expanduser(directory.strip()) if directory else None,
-                        summary=summary, **ints)
+                        summary=summary, lang=lang, **ints)
 
 
 def load_config_from_dict(data) -> AppConfig:

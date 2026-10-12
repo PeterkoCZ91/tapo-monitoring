@@ -282,13 +282,14 @@ All notable changes to this project are documented here.
 - Opt-in outbox for alerts Telegram did not take (`outbox:` block, off by default). A
   failed real send is kept on disk (frame + JSON sidecar, keyed by incident) and, once
   Telegram answers again, delivered late: one outage summary per camera, then the photos
-  that showed a person (`⏳ zpožděno o …`, capped by `max_photos`), the rest to the review
+  that showed a person (`⏳ delayed by …`, capped by `max_photos`), the rest to the review
   log. Unscored frames are scored at drain time (other than a camera `person` event, an
   unscored one waits up to six hours for the scorer); an incident delivered by any other
   path, or deliberately not sent by the SD follow-up or sampler, is removed first; late
   photos (sent-log `path: outbox`) arm no cooldown; each tick drains a bounded amount. Before,
   the in-memory retries gave up after ten minutes, so a night-long internet outage lost
-  every alert of the night.
+  every alert of the night. The outage text and late captions are English by default;
+  `outbox.lang: cs` switches them to Czech.
 - Opt-in early look for camera-card follow-ups (`sd_early_look: true`, off by default).
   A card window of 24 s or more is read in two parts, as the local recording already is:
   the first 18 s from the start of the camera's recorded segment, due about 87 s after
