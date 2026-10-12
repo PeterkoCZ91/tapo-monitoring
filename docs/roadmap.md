@@ -462,7 +462,8 @@ turns after a person the wide lens saw (dual-cam linkage). See
 - [x] Normalize the per-lens event shape (`chn_events`) into `events_1` + `channels`
   for every camera, before the watermark, classification and audit.
 - [x] Per-model bit meaning: `event_profile: c545d` reads `alarm_type` 6 / bit 5 as a
-  person (the C560WS PIR pair; the C545D has no PIR). Observed n=10 — amend the
+  person (bit 5 is the person class on the C560WS too, not a PIR; the C545D just never
+  sets bit 19). Observed n=10 — amend the
   `EVENT_PROFILES` row as samples grow.
 - [x] The motion arbiter treats the firmware linkage as an owner of the pan/tilt lens:
   no scheduled recall and no pan-limit recall until 180 s after an event on channel 2.
@@ -572,7 +573,8 @@ shadows. The generic detector has never seen this fleet's IR night scenes.
   labelling page queues the biggest disagreements first — the most likely errors, and
   the only frames a person has to look at. Runs on the CPU of the operator's machine
   (about 2 s a frame on two threads); observe-only, nothing on the alert path changes.
-- [ ] Move the teacher to the shared GPU host only when the dataset outgrows a CPU run.
+- [x] The teacher also runs as a GPU-only service beside the production scorer (iGPU,
+  OpenVINO), so new frames no longer wait for a CPU run.
 - [ ] Rules for the shared host: announce every write, work in one own directory, check
   free disk and GPU use first, clean up after each run.
 
@@ -595,7 +597,8 @@ camera; 10.4: recording follow-ups 119 s -> 56 s and follow-ups off the main loo
 camera-card path and hub clips next; 10.8 done; 10.9 in a trial on one site; 10.10 in a
 trial on one camera since 2026-10-01; opt-in `sd_early_span`, `sd_frame_pick: tallest` and
 `lens_album` shipped, each awaiting its own trial; 10.11 network history and digest
-integration shipped)
+integration shipped; 0.9.0 (2026-10-12) ships the 10.9 outbox, 10.12, 10.13 and the
+10.14 shadow tooling, all opt-in)
 
 Frame statistics hide what matters to the person holding the phone: was each visit
 alerted, and how late. A first join of labels with deliveries showed that of 31 held
@@ -740,6 +743,10 @@ closest.
   Try ranking by box height before recommending it further. Implemented as the opt-in
   `sd_frame_pick: tallest` (box height, 1.1x gain over the sharpest, edge-touching boxes
   set aside when another frame is clear); the trial against `largest` is still open.
+- [x] A crop narrower than `crop_min_px` (default 400) follows the whole frame as a second
+  zoom photo instead of arriving as an unreadable thumbnail; the native frame a crop was
+  cut from is archived for review, and an alert that went out without a score is captioned
+  `(unverified)`. Shipped in 0.9.0.
 - [ ] Camera-card sites stay on `sharpest`: their card path is already the slowest, and
   their one checked clip gained 1.16× with more motion blur. Revisit with their own
   week of `box_area` after the card early look (10.4) lands.
@@ -801,8 +808,11 @@ reached over the same uplink, so the frames of that window also went out unscore
   and the person photos marked as delayed, and moves the rest to the review log.
   Incidents delivered or deliberately suppressed later are cleared, and each drain works
   within a small per-tick budget so it never holds up live polling.
-- [ ] Trial on one site; after its first real outage, compare the summary and the delayed
-  photos with the review log before enabling it on the other hosts.
+- [x] `outbox.lang` (`en` default, `cs`) for the outage summary and the delayed captions;
+  the outbox shipped in 0.9.0.
+- [ ] Trial on one site (enabled there; no real outage reviewed yet); after its first real
+  outage, compare the summary and the delayed photos with the review log before enabling
+  it on the other hosts.
 - [ ] Decide whether a host needs a small local fallback scorer for the time the shared
   one is unreachable, so an outage stops meaning unscored motion alerts.
 
@@ -850,8 +860,8 @@ often what photographs the person seconds later.
 - [x] `tools/soak_report.sh` (read-only per-host report with a baseline) and
   `tools/soak_sim.py` (the real loop against fake cameras on a fake clock).
 - [x] `label-stats --camera-alias`, and `label --scorer-url` / `--lang`.
-- [ ] Soak the 0.9 features for at least five days on real hosts in observe mode, then
-  decide the defaults; release gates are alert volume within 30 % of the baseline and
+- [ ] 0.9.0 shipped these features opt-in. Soak them for at least five days on real hosts
+  in observe mode before changing any default; release gates are alert volume within 30 % of the baseline and
   no unexpected restart or traceback.
 - [ ] Host failover does not yet cover the recorder paths, the CLI commands, MQTT or hub
   cameras, and never returns to the primary address by itself.
@@ -889,7 +899,14 @@ often what photographs the person seconds later.
   positives per 1000 frames, 0.45 missed 3) and its marginal scores are remapped into the
   host's hold band; default unchanged (TRUST = HOST). Enabling 0.30 live is still open.
 - [ ] Label the audit dataset and compute precision per model and the persons both missed.
-- [ ] Run the shadow for about a week and read the log and the disagreement frames.
+- [x] Up to four independent shadow targets (`TAPO_SCORER_SHADOW2..4_*`), tiled candidate
+  scoring, an optional CUDA provider, a per-target `_MIN_INTERVAL` for candidates sharing a
+  GPU with the primary, and a capped `missed/` archive of low-primary, moderate-shadow
+  frames that feeds the labelling selection. Shipped in 0.9.0.
+- [ ] Read the shadow run: since early October four candidates (RF-DETR Large 704,
+  YOLOX-m 960, RF-DETR Medium 896 and RF-DETR Medium 576 tiled 2×2) log next to both the
+  live and the recording-feed scorer, the two Medium models on a separate CUDA GPU
+  machine. Label the disagreement frames and the `missed/` archive by hand.
 - [ ] Run a recording audit on a stratified, unbiased sample of recorded windows (day and
   night) to estimate the persons that neither model catches; label the random low-score draw.
 - [ ] Decide between the ensemble, a swap to the second detector and the current model from
@@ -898,6 +915,7 @@ often what photographs the person seconds later.
   request load of all monitor hosts (the benchmark ran one request at a time).
 - [ ] Move the scorer to the machine that hosts the second detector, with the shared token
   and a candidate list, and keep the old scorer as the fallback for at least a week.
+  (Only shadow candidates run there so far; the primary has not moved.)
 - [ ] A cheaper second opinion for static false alarms: let an ignore-zone suggestion come
   from boxes that repeat at the same place across many frames (tool, not automatic).
 - [x] Judge the disagreements between the best candidate and the current model by hand.
@@ -951,43 +969,45 @@ often what photographs the person seconds later.
 
 These horizons are relative to the next planning cycle, not release promises. Move an
 item forward only when its evidence is available; keep behaviour opt-in until a trial
-has an incident-level review.
+has an incident-level review. Updated after the 0.9.0 release (2026-10-12).
 
-### Next week — close the trials already producing evidence
+### Next weeks — read the evidence that is already being collected
 
-- Finish the labelled, incident-level review of observe-only hold expiry and the
-  deferred-sampling/person-bit trial (10.1 and 10.10). Promote each policy separately;
-  keep it in observe mode when labels are inconclusive or replay shows a regression.
-- Compare the early SD window and `largest`/`tallest` frame picks on labelled clips.
-  Record first-alert delay, person size and edge clipping before extending either choice
-  to more cameras (10.4 and 10.5).
-- Exercise the opt-in outbox through a controlled send outage and a daemon restart.
-  Verify one outage summary, bounded draining, correct rescoring and review routing before
-  treating it as a general recovery path (10.9).
+- Read the shadow run (10.14): label the disagreement frames and the `missed/` archive by
+  hand, then compare the four candidates with the current model on misses, false alarms
+  and day/night, at a matched operating point. Teacher labels do not count as ground truth.
+- Finish the TC46 lab tests at home: pure motion without a person, a monitor smoke test
+  (person, frame, scorer), SD follow-up and frame time, power-loss recovery without a
+  login lockout, night, and preset recall. Only then mark it as fully tested.
+- Close the open trials (10.1, 10.10, 10.5 `tallest` against `largest`) with a labelled,
+  incident-level review; promote each policy separately.
+- Exercise the outbox through a controlled send outage and a daemon restart, and review
+  the first real outage on the trial site (10.9).
 
-### Next month — bound the remaining slow and disk-heavy paths
+### Next month — decide the detector and bound the slow paths
 
-- Measure hub clip wait time and its effect on the daemon tick. If clip I/O delays normal
-  camera work, move it to a bounded worker while serializing access to each hub session
-  and preserving retry state across restarts (10.4).
-- Give the outbox a total on-disk byte budget in addition to its entry-count and age
-  limits. Evict lower-priority entries first, report every eviction, and test that a full
-  filesystem cannot interrupt live alert delivery.
-- Review the first network and radio history for coverage gaps. Keep unsupported or stale
-  measurements explicit, and add a metric only when it changes a diagnosis or operator
-  decision (10.11).
+- Decide between the ensemble, a swap to the best candidate and the current model, from
+  the shadow run and a stratified recording audit; enable the choice on one camera first
+  with the shadow log still running (10.14).
+- Load-test the GPU machine that hosts the candidates under the real request rate of all
+  monitor hosts before it serves anything live.
+- Give the outbox a total on-disk byte budget next to its entry and age limits; evict
+  lower-priority entries first, report every eviction, and test that a full filesystem
+  cannot interrupt live delivery.
+- Soak the 0.9.0 opt-in features (zones, loitering, vehicles, failover lists) in observe
+  mode for at least five days before any default changes (10.12, 10.13).
 
 ### Next quarter — validate resilience and broaden device evidence
 
-- Shadow-run a local fallback scorer during shared-scorer failures. Compare its decisions
+- Shadow-run a local fallback scorer during shared-scorer failures; compare its decisions
   with the shared scorer and labelled frames, and measure CPU, latency and storage cost
   before considering any failover policy (10.9).
-- Expand the model/firmware capability fixtures from sanitized camera reports. Add
-  contract coverage for newly observed getters and event profiles before using them in
-  production decisions (Research track 5).
-- When a second overlapping camera is available, trial the existing handoff coordinator
-  against missed and duplicate incidents. Keep the feature dormant until both outcomes
-  can be measured (Phase 5).
+- Extend host failover to the recorder paths, the CLI, MQTT and hub cameras, with an
+  automatic return to the primary address (10.13).
+- Expand the model/firmware capability fixtures from sanitized camera reports (Research
+  track 5); add an event profile only when a report shows bits the default table lacks.
+- When a second overlapping camera is available, trial the handoff coordinator against
+  missed and duplicate incidents (Phase 5).
 
 ## Research tracks
 
@@ -1005,7 +1025,10 @@ These stay separate from production until repeatable evidence exists:
 5. Extend the capability manifest across camera models and firmware versions to replace
    model assumptions with adapters selected from observed support. (**Started:**
    `tapo-monitor report` and the *Camera report* issue form collect anonymized reports;
-   each accepted one lands in `tests/fixtures/cameras/` as a contract test. Next: widen
+   each accepted one lands in `tests/fixtures/cameras/` as a contract test. The TC46 was
+   the first model added this way: its getters, streams and person bits match the
+   C560WS; it is a lab camera, not yet on a site, and pure motion without a person, SD
+   follow-ups, outage recovery, night and PTZ are still to be tested. Next: widen
    the redaction allow-list from real reports, and add an `event_profile` row when a
    report's `--watch` shows bits the default table does not know.)
 6. Standalone battery camera onboarding (hubless protocol). (**Paused:** BLE pairing key
