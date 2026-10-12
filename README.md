@@ -37,7 +37,9 @@ see [camera reports](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/do
 
 ## What's new
 
-Recent highlights — compare up to four shadow detectors without changing live alerts,
+Recent highlights — an optional outbox delivers alerts lost to an internet outage once
+Telegram is back (English or Czech texts), and the TC46 joins the tested cameras. Compare
+up to four shadow detectors, each optionally rate-limited, without changing live alerts,
 review individual model boxes and missed-person candidates, and use optional scorer
 failover or watch-zone, loitering and vehicle policies. Native-resolution crops keep small
 subjects visible; unscored sampler alerts are marked for review. Home Assistant over MQTT,
