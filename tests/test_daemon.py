@@ -485,6 +485,24 @@ def test_select_recording_frame_picks_sharpest_above_threshold():
     assert s == 0.7
 
 
+def test_select_recording_frame_audits_a_drop_only_when_no_frame_passes(monkeypatch):
+    # A sequence whose best frame is sent is one send, not also a drop: soak and incident
+    # reports would otherwise count the incident twice.
+    cam = _cam(sd_snapshot=True, snapshot_source="sd",
+               scorer={"url": "http://x/score", "threshold": 0.4})
+    actions = []
+    monkeypatch.setattr(daemon.monitor, "audit_event",
+                        lambda cfg, ev, etype, path, action, **kw: actions.append(action))
+    monkeypatch.setattr(daemon.monitor, "sample_drop", lambda *a, **kw: None)
+    kw = dict(event={"start_time": 1}, etype="person", frames=["f0.jpg", "f1.jpg"],
+              blur_score=lambda f: 1.0)
+    mixed = {"f0.jpg": 0.01, "f1.jpg": 0.95}
+    assert daemon._select_recording_frame(cam, score=lambda f: mixed[f], **kw)[0] == "f1.jpg"
+    assert "drop" not in actions
+    assert daemon._select_recording_frame(cam, score=lambda f: 0.01, **kw) == (None, None)
+    assert actions == ["drop"]
+
+
 def test_select_recording_frame_tallest_ranks_by_height_and_skips_cut_frames(monkeypatch):
     cam = _cam(sd_snapshot=True, snapshot_source="recording",
                scorer={"url": "http://x/score", "threshold": 0.4})

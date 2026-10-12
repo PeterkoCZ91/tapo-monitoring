@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- A camera-card or recording follow-up whose best frame is sent is no longer also audited
+  as a `drop` because other frames of the clip scored below the threshold. The drop audit
+  now marks only a clip in which no frame passed, so soak and incident reports stop
+  counting such an incident twice.
+
 ## [0.9.0] - 2026-10-12
 
 ### Added

@@ -3046,9 +3046,13 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
         # One line per sequence: nine frames under the threshold are one decision.
         log.info("frame selection %s [%s]: %d frame(s) below threshold %.2f",
                  cfg.name, path, len(below), cfg.scorer.threshold)
-        monitor.audit_event(cfg, event, etype, path, "drop", score=max(s for _, s in below),
-                            threshold=cfg.scorer.threshold, reason="below_threshold",
-                            extra=audit_extra)
+        if not above:
+            # Audited as a drop only when the whole sequence missed: a sequence whose
+            # best frame is sent is one send, and counting it twice skews the reports.
+            monitor.audit_event(cfg, event, etype, path, "drop",
+                                score=max(s for _, s in below),
+                                threshold=cfg.scorer.threshold, reason="below_threshold",
+                                extra=audit_extra)
     if not above:
         if keep_below and below:
             return max(below, key=lambda fs: fs[1])
