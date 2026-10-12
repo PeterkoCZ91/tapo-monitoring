@@ -20,6 +20,9 @@ Python daemon.
 > person detection, Telegram, in about ten minutes. Read [credentials](docs/credentials.md)
 > first; it is the step most people get wrong.
 
+> **Questions, ideas or another Tapo model?** Join the
+> [Home Assistant Community thread](https://community.home-assistant.io/t/tapo-monitor-tapo-alerts-where-the-photo-actually-shows-the-person-with-home-assistant-over-mqtt/1028479).
+
 ## Tested cameras
 
 | Camera | How it is used | Notes |
@@ -321,6 +324,8 @@ mqtt:
 The bridge runs on its own thread with a bounded queue, so a slow or unreachable broker
 never delays an alert. Entities, topics and an example automation:
 [docs/mqtt.md](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/mqtt.md).
+Questions and setups from other Home Assistant users are welcome in the
+[community thread](https://community.home-assistant.io/t/tapo-monitor-tapo-alerts-where-the-photo-actually-shows-the-person-with-home-assistant-over-mqtt/1028479).
 
 ## Safety and privacy
 
