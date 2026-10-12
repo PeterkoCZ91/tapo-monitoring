@@ -344,6 +344,7 @@ TAPO_SCORER_SHADOW_DISAGREE_MAX=300                                # newest N fi
 TAPO_SCORER_SHADOW_MISSED_MAX=1500                                 # newest N files kept in disagree/missed/ (default)
 TAPO_SCORER_SHADOW_QUEUE=8                                         # frames waiting for the single shadow worker; a full queue drops (default 8)
 TAPO_SCORER_SHADOW_TIMEOUT=8                                       # seconds per shadow call (default)
+TAPO_SCORER_SHADOW_MIN_INTERVAL=0                                  # seconds between frames sent; frames inside it are skipped (default 0 = every frame)
 ```
 
 `TAPO_SCORER_SHADOW_TOKEN` works like `TAPO_SCORER_TOKEN` (the file wins; a file that is not
@@ -353,6 +354,11 @@ TAPO_SCORER_SHADOW_TIMEOUT=8                                       # seconds per
   been written. A full queue drops the
   frame and counts it; a slow, dead or unauthorized shadow only delays the background
   thread. It never changes or delays an answer to a monitor host.
+- `TAPO_SCORER_SHADOW_MIN_INTERVAL` (and `_MIN_INTERVAL` on any extra shadow) samples
+  instead of queueing: a frame arriving sooner than the interval after the last one sent is
+  skipped and counted as `throttled`. Use it when the shadow shares a GPU with the primary;
+  each primary forwards on its own, so two primaries feeding one shadow send it up to two
+  frames per interval. Ensemble calls are never skipped.
 - One JSON line per frame in the log: `ts`, `source_id`, `primary_person`,
   `primary_vehicle`, `shadow_person`, `primary_seconds`, `shadow_seconds` and `error`
   (`null`, `timeout`, `connection`, `http_<code>`, `bad_response`), plus `primary_boxes` and

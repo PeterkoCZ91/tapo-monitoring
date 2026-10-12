@@ -906,6 +906,7 @@ class ShadowConfig:
     queue_size: int = SHADOW_QUEUE_SIZE
     name: str | None = None   # set only for the extra shadows; written to their log rows
     tiles: int | None = None  # force this tile grid for the target; None keeps the caller's
+    min_interval: float = 0.0  # seconds between frames sent to the target; 0 sends every frame
 
 
 def load_shadow(env=None):
@@ -930,6 +931,7 @@ def load_shadow(env=None):
         timeout=_env_setting(env, "TAPO_SCORER_SHADOW_TIMEOUT", float, SHADOW_TIMEOUT),
         queue_size=max(1, _env_setting(env, "TAPO_SCORER_SHADOW_QUEUE", int,
                                        SHADOW_QUEUE_SIZE)),
+        min_interval=max(0.0, _env_setting(env, "TAPO_SCORER_SHADOW_MIN_INTERVAL", float, 0.0)),
     )
 
 
@@ -956,6 +958,7 @@ def _load_named_shadow(env, prefix, default_name):
         queue_size=max(1, _env_setting(env, f"{prefix}_QUEUE", int, SHADOW_QUEUE_SIZE)),
         name=(env.get(f"{prefix}_NAME") or "").strip() or default_name,
         tiles=_env_setting(env, f"{prefix}_TILES", int, None),
+        min_interval=max(0.0, _env_setting(env, f"{prefix}_MIN_INTERVAL", float, 0.0)),
     )
 
 
@@ -1256,6 +1259,7 @@ class ShadowRunner:
         self.counts = {"sent": 0, "failed": 0, "dropped": 0, "disagree": 0}
         self._last_warn = None
         self._missed_last = {}   # source_id -> monotonic time of its last missed/ image
+        self._last_accepted = None   # monotonic time of the last frame let through min_interval
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="scorer-" + (config.name or "shadow"), daemon=True)
         self._thread.start()
@@ -1273,6 +1277,17 @@ class ShadowRunner:
         """Queue a frame. ``outcome`` is ``(shadow_person, error, seconds, payload)`` when the
         shadow was already called for this frame (ensemble mode): it is logged, not sent
         again."""
+        # Sampling, not queueing: a frame inside min_interval is skipped outright, so a busy
+        # target (a GPU shared with the primary) sees at most one frame per interval. Ensemble
+        # outcomes are already paid for and are always logged.
+        if self.config.min_interval > 0 and outcome is None:
+            now = time.monotonic()
+            with self._lock:
+                if (self._last_accepted is not None
+                        and now - self._last_accepted < self.config.min_interval):
+                    self.counts["throttled"] = self.counts.get("throttled", 0) + 1
+                    return
+                self._last_accepted = now
         try:
             self._queue.put_nowait((body, tiles, source_id, result, primary_seconds, outcome))
         except queue.Full:

@@ -286,6 +286,44 @@ def test_full_queue_drops_and_counts(stack):
     assert set(m) == {"sent", "failed", "dropped", "disagree"}
 
 
+def _idle_runner(min_interval):
+    """A runner whose worker has stopped, so submitted frames stay in its queue."""
+    runner = scorer_service.ShadowRunner(scorer_service.ShadowConfig(
+        url="http://127.0.0.1:9/score", log_path=None, min_interval=min_interval))
+    runner.close()
+    runner._thread.join(timeout=2)
+    runner._queue = scorer_service.queue.Queue()
+    return runner
+
+
+def test_min_interval_skips_frames_inside_the_interval(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(scorer_service.time, "monotonic", lambda: clock[0])
+    runner = _idle_runner(5.0)
+    for t in (100.0, 101.0, 104.9, 105.0, 107.0, 110.5):
+        clock[0] = t
+        runner.submit(b"x", 1, SOURCE, {"person": 0.1}, 0.01)
+    assert runner._queue.qsize() == 3   # 100.0, 105.0, 110.5
+    assert runner.snapshot()["throttled"] == 3
+
+
+def test_min_interval_never_skips_ensemble_outcomes(monkeypatch):
+    monkeypatch.setattr(scorer_service.time, "monotonic", lambda: 100.0)
+    runner = _idle_runner(5.0)
+    for _ in range(3):
+        runner.submit(b"x", 1, SOURCE, {"person": 0.1}, 0.01,
+                      outcome=(0.2, None, 0.1, {"person": 0.2}))
+    assert runner._queue.qsize() == 3
+    assert "throttled" not in runner.snapshot()
+
+
+def test_no_min_interval_sends_every_frame():
+    runner = _idle_runner(0.0)
+    for _ in range(4):
+        runner.submit(b"x", 1, SOURCE, {"person": 0.1}, 0.01)
+    assert runner._queue.qsize() == 4
+
+
 def test_off_means_no_shadow_block():
     srv, base = _primary(None)
     try:
@@ -313,6 +351,16 @@ def test_load_shadow_env(tmp_path):
     assert cfg.queue_size == scorer_service.SHADOW_QUEUE_SIZE
     assert scorer_service.load_shadow({**env, "TAPO_SCORER_SHADOW_QUEUE": "64"}).queue_size == 64
     assert scorer_service.load_shadow({**env, "TAPO_SCORER_SHADOW_QUEUE": "0"}).queue_size == 1
+    assert cfg.min_interval == 0.0
+    assert scorer_service.load_shadow(
+        {**env, "TAPO_SCORER_SHADOW_MIN_INTERVAL": "5"}).min_interval == 5.0
+    assert scorer_service.load_shadow(
+        {**env, "TAPO_SCORER_SHADOW_MIN_INTERVAL": "-1"}).min_interval == 0.0
+    shadow2 = scorer_service.load_shadow2({
+        "TAPO_SCORER_SHADOW2_URL": "http://x/score",
+        "TAPO_SCORER_SHADOW2_LOG": str(tmp_path / "l2.jsonl"),
+        "TAPO_SCORER_SHADOW2_MIN_INTERVAL": "2.5"})
+    assert shadow2.min_interval == 2.5
     tok.chmod(0o644)
     with pytest.raises(scorer_service.TokenConfigError):
         scorer_service.load_shadow(env)

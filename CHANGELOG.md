@@ -9,6 +9,9 @@ All notable changes to this project are documented here.
 ### Added
 - Updated capability and onboarding guides, with a dedicated 0.9.0 upgrade guide
   distinguishing default behavior changes from optional and experimental features.
+- `TAPO_SCORER_SHADOW_MIN_INTERVAL` (and `_MIN_INTERVAL` per extra shadow) samples a
+  shadow target to at most one frame per interval, for candidates sharing a GPU with the
+  primary. Skipped frames are counted as `throttled`; off by default.
 - Shadow scorers can archive low-primary, moderate-shadow frames in a separately
   capped, per-source rate-limited `missed/` directory. Both image directories are
   private; collecting these frames does not change alert decisions.
