@@ -7,6 +7,8 @@ All notable changes to this project are documented here.
 ## [0.9.0] - Unreleased
 
 ### Added
+- TC46 in the tested cameras, with its anonymized report as a fixture: same getters,
+  streams and person event bits as the C560WS, `event_profile: default`.
 - Updated capability and onboarding guides, with a dedicated 0.9.0 upgrade guide
   distinguishing default behavior changes from optional and experimental features.
 - `TAPO_SCORER_SHADOW_MIN_INTERVAL` (and `_MIN_INTERVAL` per extra shadow) samples a
