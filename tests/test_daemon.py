@@ -521,6 +521,41 @@ def test_select_recording_frame_tallest_ranks_by_height_and_skips_cut_frames(mon
     assert daemon._select_recording_frame(cam, pick="tallest", **kw)[0] == "f0.jpg"
 
 
+def test_select_recording_frame_skips_a_frame_smeared_by_camera_motion(monkeypatch):
+    cam = _cam(sd_snapshot=True, snapshot_source="recording",
+               scorer={"url": "http://x/score", "threshold": 0.4})
+    monkeypatch.setattr(daemon.snapshot, "image_size", lambda p: (1000, 600))
+    frames = ["still0.jpg", "walker.jpg", "pan.jpg", "still1.jpg"]
+    boxes = {"walker.jpg": [100, 100, 140, 200],     # 100 px tall
+             "pan.jpg": [100, 100, 200, 400]}        # 300 px tall, but the view is smeared
+
+    def score(f):
+        return 0.9 if f in boxes else 0.1
+    score.boxes = boxes
+    detail = {"still0.jpg": 1000, "walker.jpg": 950, "pan.jpg": 300, "still1.jpg": 1010}.get
+    kw = dict(event={"start_time": 1}, etype="person", frames=frames, score=score,
+              blur_score=lambda f, box=None: 1.0, pick="tallest")
+    assert daemon._select_recording_frame(cam, frame_detail=detail, **kw)[0] == "walker.jpg"
+    # Unmeasurable detail (no Pillow/numpy) leaves the selection as it was.
+    assert daemon._select_recording_frame(cam, frame_detail=lambda f: None,
+                                          **kw)[0] == "pan.jpg"
+
+
+def test_select_recording_frame_keeps_smeared_frames_when_nothing_else_passed(monkeypatch):
+    cam = _cam(sd_snapshot=True, snapshot_source="recording",
+               scorer={"url": "http://x/score", "threshold": 0.4})
+    frames = ["still0.jpg", "pan0.jpg", "pan1.jpg", "still1.jpg"]
+
+    def score(f):
+        return 0.9 if f.startswith("pan") else 0.1
+    detail = {"still0.jpg": 1000, "pan0.jpg": 300, "pan1.jpg": 320, "still1.jpg": 1010}.get
+    image, _s = daemon._select_recording_frame(
+        cam, event={"start_time": 1}, etype="person", frames=frames, score=score,
+        blur_score=lambda f, box=None: {"pan0.jpg": 2.0, "pan1.jpg": 1.0}[f],
+        frame_detail=detail)
+    assert image == "pan1.jpg"
+
+
 def test_score_all_scores_concurrently_and_keeps_the_order():
     # A barrier only opens when two requests are in flight at once: scored one by one,
     # the first call would wait out its timeout and raise.

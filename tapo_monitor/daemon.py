@@ -3010,8 +3010,11 @@ class _Prescorer:
 
 def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
                             *, path="sd", keep_below=False, audit_extra=None,
-                            pick="sharpest", vehicle_out=None):
+                            pick="sharpest", vehicle_out=None, frame_detail=None):
     """Pick the sharpest subject from an already-extracted, bounded frame sequence.
+
+    Whatever the pick, candidates smeared by the camera's own motion are set aside first
+    (:func:`recclip.smeared_frames`, ``frame_detail`` overrides its measurement).
 
     ``pick="largest"`` instead takes the frame with the largest subject box among
     candidates not much blurrier than the sharpest (:func:`recclip.select_largest`);
@@ -3063,6 +3066,15 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
             monitor.sample_drop(cfg, frame, etype, s, path, event)
         return None, None
     above.sort(key=lambda fs: fs[1], reverse=True)
+    if len(above) > 1:
+        # A frame smeared by the camera's own swing is never the photo to send; keep the
+        # rest, or all of them when every candidate is smeared (better than nothing).
+        smeared = recclip.smeared_frames(frames, detail=frame_detail)
+        steady = [fs for fs in above if fs[0] not in smeared]
+        if steady and len(steady) < len(above):
+            log.info("frame selection %s [%s]: skipped %d frame(s) smeared by camera motion",
+                     cfg.name, path, len(above) - len(steady))
+            above = steady
     boxes = getattr(score, "boxes", None) or {}
     # Mixing crop and whole-frame measurements is not comparable: use boxes all-or-none.
     use_boxes = all(boxes.get(f) for f, _ in above)

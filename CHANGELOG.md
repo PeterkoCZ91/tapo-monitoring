@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Changed
+- The SD/recording follow-up sets aside frames smeared by the camera's own motion (an
+  auto-track swing or a preset recall) before picking the photo. The whole frame's
+  detail is compared with the rest of the clip; a frame below 0.4x the clip median is
+  skipped while any steady candidate is left. `largest`/`tallest` used to prefer exactly
+  those frames, because a smeared subject box is often the biggest in the clip.
+
 ### Fixed
 - A camera-card or recording follow-up whose best frame is sent is no longer also audited
   as a `drop` because other frames of the clip scored below the threshold. The drop audit

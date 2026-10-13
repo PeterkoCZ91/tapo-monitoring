@@ -307,6 +307,57 @@ def select_tallest(candidates, frame_size=None, max_blur_ratio=LARGEST_MAX_BLUR_
     return best[0]
 
 
+# Camera-motion guard. A PTZ camera swinging after a walker (auto-track, a preset recall)
+# smears the whole frame for a second or so. The subject-crop blur cannot see it — the
+# crop of a smeared frame is often the biggest box in the clip, so ``largest``/``tallest``
+# preferred exactly those frames. The whole frame gives it away: its detail (Laplacian
+# variance at 640x360) drops far below the rest of the same clip, while a person walking
+# through a still view barely moves it. Measured on 33 C560WS SD clips at 1 frame/s
+# (outdoor, day and night) and a TC46 indoor auto-track: swing frames fell to 0.27-0.38
+# of the clip median; the lowest sharp frame, a still but wider view after the camera
+# had moved, sat at 0.53. 0.4 keeps that margin.
+SMEAR_DETAIL_RATIO = 0.4
+SMEAR_MIN_FRAMES = 3
+_DETAIL_SIZE = (640, 360)
+
+
+def _frame_variance(path):  # pragma: no cover - needs optional Pillow/numpy
+    import numpy as np
+    from PIL import Image
+    with Image.open(path) as im:
+        g = np.asarray(im.convert("L").resize(_DETAIL_SIZE), dtype=np.float64)
+    lap = (-4 * g[1:-1, 1:-1] + g[:-2, 1:-1] + g[2:, 1:-1] + g[1:-1, :-2] + g[1:-1, 2:])
+    return float(lap.var())
+
+
+def frame_detail(path, variance=None):
+    """Whole-frame detail (Laplacian variance; higher = sharper), or None if unavailable."""
+    variance = variance or _frame_variance
+    try:
+        value = variance(path)
+    except Exception:  # noqa: BLE001 - Pillow/numpy missing or unreadable image
+        return None
+    return value if value is not None and math.isfinite(value) and value >= 0 else None
+
+
+def smeared_frames(frames, detail=None, ratio=SMEAR_DETAIL_RATIO,
+                   min_frames=SMEAR_MIN_FRAMES):
+    """The frames of one clip whose whole-frame detail is below ``ratio`` x the clip median.
+
+    ``frames`` is the whole extracted sequence, not only the candidates: the median of a
+    clip is its still view, which a two-frame candidate list may not contain. Fewer than
+    ``min_frames`` measured frames give no median worth trusting, so nothing is marked.
+    """
+    detail = detail or frame_detail
+    measured = [(f, detail(f)) for f in frames]
+    values = sorted(v for _f, v in measured if v is not None)
+    if len(values) < min_frames:
+        return set()
+    mid = len(values) // 2
+    median = values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2
+    return {f for f, v in measured if v is not None and v < median * ratio}
+
+
 # ── frame extraction + fetch entry point ─────────────────────────────────────
 
 def fresh_delay(span, margin=RECORDING_READY_MARGIN):

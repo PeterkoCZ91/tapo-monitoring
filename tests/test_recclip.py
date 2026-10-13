@@ -346,6 +346,26 @@ def test_select_tallest_falls_back_to_sharpest_without_every_box():
     assert recclip.select_tallest([]) is None
 
 
+def test_smeared_frames_marks_the_camera_swing_against_the_clip_median():
+    detail = {"a": 1000, "b": 980, "pan": 350, "c": 1020, "walker": 900}.get
+    frames = ["a", "b", "pan", "c", "walker"]
+    assert recclip.smeared_frames(frames, detail=detail) == {"pan"}
+
+
+def test_smeared_frames_needs_enough_measured_frames():
+    assert recclip.smeared_frames(["a", "pan"], detail={"a": 1000, "pan": 10}.get) == set()
+    detail = {"a": 1000, "b": None, "c": None, "pan": 10}.get
+    assert recclip.smeared_frames(["a", "b", "c", "pan"], detail=detail) == set()
+
+
+def test_frame_detail_is_none_when_it_cannot_be_measured():
+    def boom(path):
+        raise OSError("unreadable")
+    assert recclip.frame_detail("x.jpg", variance=boom) is None
+    assert recclip.frame_detail("x.jpg", variance=lambda p: float("nan")) is None
+    assert recclip.frame_detail("x.jpg", variance=lambda p: 12.5) == 12.5
+
+
 def test_box_height():
     assert recclip.box_height([10, 20, 30, 60]) == 40
     assert recclip.box_height(None) is None
