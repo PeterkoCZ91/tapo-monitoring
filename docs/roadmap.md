@@ -907,6 +907,12 @@ often what photographs the person seconds later.
   YOLOX-m 960, RF-DETR Medium 896 and RF-DETR Medium 576 tiled 2×2) log next to both the
   live and the recording-feed scorer, the two Medium models on a separate CUDA GPU
   machine. Label the disagreement frames and the `missed/` archive by hand.
+  Second hand-labelled set (2026-10-13, 206 frames biased to hard cases, per frame at 0.45,
+  104 frames all five models scored): RF-DETR Medium 896 found 21 of 39 persons with
+  6 false alarms, RF-DETR Large 17/6, YOLOX-m 960 13/11, the tiled Medium 576 16/14 and the
+  current YOLOX-m 640 8/15. Medium 896 beats the current model clearly; its lead over
+  RF-DETR Large is within noise. The tiled candidate was dropped early (a night false-alarm
+  cluster on one camera); three candidates run until the end of the week.
 - [ ] Run a recording audit on a stratified, unbiased sample of recorded windows (day and
   night) to estimate the persons that neither model catches; label the random low-score draw.
 - [ ] Decide between the ensemble, a swap to the second detector and the current model from
@@ -974,7 +980,7 @@ has an incident-level review. Updated after the 0.9.0 release (2026-10-12).
 ### Next weeks — read the evidence that is already being collected
 
 - Read the shadow run (10.14): label the disagreement frames and the `missed/` archive by
-  hand, then compare the four candidates with the current model on misses, false alarms
+  hand, then compare the remaining three candidates with the current model on misses, false alarms
   and day/night, at a matched operating point. Teacher labels do not count as ground truth.
 - Finish the TC46 lab tests at home: pure motion without a person, a monitor smoke test
   (person, frame, scorer), SD follow-up and frame time, power-loss recovery without a
