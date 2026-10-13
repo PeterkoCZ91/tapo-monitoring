@@ -47,6 +47,23 @@ def test_is_night_force_hhmm_skips_astral(monkeypatch):
     assert scheduling.is_night(datetime(2026, 1, 1, 15, 0)) is False
 
 
+def test_fallback_warning_is_logged_once_per_reason(monkeypatch, capsys):
+    for var in ("NIGHT_LAT", "NIGHT_LON", "NIGHT_TZ", "NIGHT_FORCE_HHMM"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(scheduling, "_warned_fallback", None)
+    for _ in range(5):  # the daemon polls every few seconds
+        scheduling.is_night(datetime(2026, 1, 1, 15, 0))
+    assert capsys.readouterr().err.count("astral failed") == 1
+
+    # a different failure is news again
+    monkeypatch.setenv("NIGHT_LAT", "x")
+    monkeypatch.setenv("NIGHT_LON", "14")
+    monkeypatch.setenv("NIGHT_TZ", "UTC")
+    scheduling.is_night(datetime(2026, 1, 1, 15, 0))
+    scheduling.is_night(datetime(2026, 1, 1, 15, 0))
+    assert capsys.readouterr().err.count("astral failed") == 1
+
+
 def test_is_night_falls_back_to_hhmm_without_coords(monkeypatch):
     for var in ("NIGHT_LAT", "NIGHT_LON", "NIGHT_TZ", "NIGHT_FORCE_HHMM"):
         monkeypatch.delenv(var, raising=False)

@@ -9,6 +9,9 @@ All notable changes to this project are documented here.
   as a `drop` because other frames of the clip scored below the threshold. The drop audit
   now marks only a clip in which no frame passed, so soak and incident reports stop
   counting such an incident twice.
+- The `astral failed … falling back to HH:MM` warning is printed once per reason instead
+  of on every poll. Without `NIGHT_LAT`/`NIGHT_LON`/`NIGHT_TZ` it used to repeat every few
+  seconds and filled most of the daemon's journal.
 
 ## [0.9.0] - 2026-10-12
 

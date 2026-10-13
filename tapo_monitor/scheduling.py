@@ -23,6 +23,10 @@ from datetime import datetime, timedelta
 DEFAULT_SUNSET_OFFSET = 30
 DEFAULT_SUNRISE_OFFSET = 30
 
+# The daemon asks is_night() every poll (~4 s); an unset NIGHT_TZ would otherwise
+# repeat the same fallback warning ~20 000 times a day and drown the journal.
+_warned_fallback = None
+
 
 def _parse_hhmm(val, default_hour):
     val = str(val).strip()
@@ -84,10 +88,14 @@ def is_night(now=None, location=None):
     try:
         return _is_night_astral(now, location)
     except Exception as e:
-        # stderr, not stdout: this is a diagnostic, and stdout carries the CLI's
-        # machine-readable output — a warning mixed into it breaks any --json consumer.
-        print(f"[scheduling] astral failed ({e}), falling back to HH:MM",
-              file=sys.stderr, flush=True)
+        global _warned_fallback
+        reason = str(e)
+        if reason != _warned_fallback:
+            _warned_fallback = reason
+            # stderr, not stdout: this is a diagnostic, and stdout carries the CLI's
+            # machine-readable output — a warning mixed into it breaks any --json consumer.
+            print(f"[scheduling] astral failed ({e}), falling back to HH:MM",
+                  file=sys.stderr, flush=True)
         return _is_night_hhmm(now)
 
 
