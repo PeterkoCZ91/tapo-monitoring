@@ -142,6 +142,11 @@ See the complete [capability catalog](https://github.com/PeterkoCZ91/tapo-monito
 Requirements: Python 3.10+, `ffmpeg`, a supported Tapo camera with third-party access, and
 camera/RTSP credentials created in the Tapo app (see [credentials](docs/credentials.md)).
 
+Home Assistant OS: tapo-monitor is a standalone service, not an integration or App. Run it
+on a separate Linux host (a Raspberry Pi 4 is enough) and connect it to your broker over
+[MQTT](#home-assistant-mqtt); Container, Supervised and Core installs can run it on the
+same machine.
+
 Install the released package from PyPI (add extras as needed: `[mqtt]` for Home
 Assistant, `[scorer]` for the local scorer, `[onvif]` for the pan limit):
 
