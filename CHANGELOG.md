@@ -19,6 +19,11 @@ All notable changes to this project are documented here.
   those frames, because a smeared subject box is often the biggest in the clip.
 
 ### Fixed
+- A camera-card read whose first request fails with a transient session error (`-40214`
+  or `Invalid authentication data`) gets one more try after 5 s, on a fresh login, for
+  every camera. pytapo logs in again by itself only on `-40401`, so the same session stayed
+  dead, and before this only cameras with `sd_early_look` retried at all. On one C560WS,
+  6 of 140 card reads in 16 days were lost this way.
 - A camera-card or recording follow-up whose best frame is sent is no longer also audited
   as a `drop` because other frames of the clip scored below the threshold. The drop audit
   now marks only a clip in which no frame passed, so soak and incident reports stop

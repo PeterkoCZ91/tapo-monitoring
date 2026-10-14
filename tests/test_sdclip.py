@@ -631,6 +631,30 @@ def test_segment_lookup_retries_once_after_a_transient_error(capsys):
     assert "-40214" in capsys.readouterr().err       # the real error reaches the journal
 
 
+def test_segment_lookup_retry_logs_in_again_first():
+    events = []
+
+    class Cam(_FlakyCam):
+        def getRecordingsUTC(self, start, end):
+            events.append("lookup")
+            return super().getRecordingsUTC(start, end)
+
+        def close(self):
+            events.append("close")
+    assert sdclip._segment_bounds(Cam(1), 1000, sleep=lambda s: None, retry_pause=5) \
+        == (995, 1055)
+    assert events == ["lookup", "close", "lookup"]
+
+
+def test_segment_lookup_retry_survives_a_failing_close(capsys):
+    class Cam(_FlakyCam):
+        def close(self):
+            raise OSError("socket gone")
+    assert sdclip._segment_bounds(Cam(1), 1000, sleep=lambda s: None, retry_pause=5) \
+        == (995, 1055)
+    assert "close failed" in capsys.readouterr().err
+
+
 def test_segment_lookup_gives_up_after_the_second_error():
     cam, pauses = _FlakyCam(5), []
     assert sdclip._segment_bounds(cam, 1000, sleep=pauses.append, retry_pause=5) is None
@@ -694,15 +718,15 @@ def test_fetch_frames_asks_for_the_lookup_retry_only_when_on():
     assert seen == [{}, {"retry_pause": sdclip.SD_LOOKUP_RETRY_PAUSE}]
 
 
-def test_fetch_subprocess_asks_for_the_lookup_retry_only_with_the_early_look():
+def test_fetch_subprocess_leaves_the_lookup_retry_to_the_childs_default():
     argvs = []
     def run(argv, **kw):
         argvs.append(argv)
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
     sdclip.fetch_sd_frames_subprocess(_cfg(sd_early_look=False), 1000, run=run, python="PY")
     sdclip.fetch_sd_frames_subprocess(_cfg(sd_early_look=True), 1000, run=run, python="PY")
-    assert "lookup_retry=1" not in argvs[0]
-    assert argvs[1] == argvs[0] + ["lookup_retry=1"]
+    assert not any(a.startswith("lookup_retry") for a in argvs[0])   # the child's default
+    assert argvs[1] == argvs[0]
 
 
 def test_download_main_reads_the_lookup_retry_option(monkeypatch):
@@ -715,4 +739,5 @@ def test_download_main_reads_the_lookup_retry_option(monkeypatch):
     base = ["203.0.113.12", "", "", "", "1000", "/tmp", "18", "6"]
     sdclip.download_main(base)
     sdclip.download_main(base + ["lookup_retry=1"])
-    assert [k["lookup_retry"] for k in seen] == [False, True]
+    sdclip.download_main(base + ["lookup_retry=0"])
+    assert [k["lookup_retry"] for k in seen] == [True, True, False]   # on by default

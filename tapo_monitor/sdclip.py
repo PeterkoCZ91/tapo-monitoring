@@ -311,9 +311,22 @@ SD_SEG_LOOKAHEAD = 60
 
 # A fresh session's first control calls sometimes fail with a transient camera error
 # (-40214, seen on getUserID inside the segment lookup: 8 of ~120 card reads in 7 days on
-# one C560WS, each a lost read). One more try after a short pause; the pause is far
-# below the download itself.
+# one C560WS, each a lost read; 6 of 140 on another C560WS in 16 days, plus one "Invalid
+# authentication data" that hit the poller at the same second). pytapo logs in again by
+# itself only on -40401, so the session stays dead: the retry closes the transport first,
+# which makes the next request authenticate afresh. One more try after a short pause;
+# the pause is far below the download itself.
 SD_LOOKUP_RETRY_PAUSE = 5
+
+
+def _drop_session(client):
+    """Close a pytapo client's transport so its next request logs in again. Never raises."""
+    close = getattr(client, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception as exc:  # noqa: BLE001 - a failed close still lets the retry run
+            print(f"SD session close failed: {exc}", file=sys.stderr)
 
 
 def _segment_bounds(client, event_start, lookback=SD_SEG_LOOKBACK, lookahead=SD_SEG_LOOKAHEAD,
@@ -329,7 +342,8 @@ def _segment_bounds(client, event_start, lookback=SD_SEG_LOOKBACK, lookahead=SD_
 
     A failed lookup is printed (the parent logs the subprocess's stderr when the read
     comes back empty). With ``retry_pause`` (seconds) it is tried once more after that
-    pause; without it (the default) one failure is final, as before.
+    pause, on a fresh login (the client's transport is closed first); without it (the
+    default) one failure is final, as before.
     """
     lookup = getattr(client, "getRecordingsUTC", None)
     if lookup is None:
@@ -344,6 +358,7 @@ def _segment_bounds(client, event_start, lookback=SD_SEG_LOOKBACK, lookahead=SD_
             if attempt == 2 or retry_pause is None:
                 return None
             sleep(retry_pause)
+            _drop_session(client)
     best = None
     for item in results or []:
         seg = item if isinstance(item, dict) and "startTime" in item else None
@@ -379,7 +394,8 @@ def fetch_sd_frames(client, start_time, out_dir="/tmp", span=SD_SPAN, every=SD_F
     ``stats``, when a dict, receives the read's window, bytes and stage seconds.
     ``guard`` overrides pytapo's freshness guard (config ``sd_fresh_guard``).
     ``lookup_retry`` tries a failed segment lookup once more after
-    :data:`SD_LOOKUP_RETRY_PAUSE` seconds (on with ``sd_early_look``).
+    :data:`SD_LOOKUP_RETRY_PAUSE` seconds on a fresh login (the daemon's card-read
+    subprocess turns it on unless told ``lookup_retry=0``).
     """
     try:
         time_correction = client.getTimeCorrection() or 0
@@ -492,8 +508,6 @@ def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
         argv.append(f"offset={int(offset)}")
     if guard is not None:
         argv.append(f"guard={int(guard)}")
-    if getattr(cfg, "sd_early_look", False) is True:
-        argv.append("lookup_retry=1")
     started = _time.monotonic()
     camera_name = getattr(cfg, "name", "camera")
     log.info("SD transfer start %s: at=%.3f timeout=%ss", camera_name, _time.time(), timeout)
@@ -529,7 +543,7 @@ def download_main(argv):  # pragma: no cover - subprocess entry, real camera I/O
     """Entry for the download subprocess: build a fresh client, fetch frames, print paths.
 
     argv: host user_env password_env cloud_env start out_dir span every [rotate
-    [dense_seconds dense_every]] [offset=N] [guard=N] [lookup_retry=1]
+    [dense_seconds dense_every]] [offset=N] [guard=N] [lookup_retry=0|1 (default 1)]
     """
     import json
 
@@ -556,7 +570,10 @@ def download_main(argv):  # pragma: no cover - subprocess entry, real camera I/O
     frames = fetch_sd_frames(client, int(start), out_dir=out_dir,
                              span=int(span), every=int(every), rotate=rotate,
                              dense=dense, offset=offset, stats=stats, guard=guard,
-                             lookup_retry=options.get("lookup_retry") == "1")
+                             # On unless the caller says lookup_retry=0: a lost read
+                             # costs the whole photo, the retry at most
+                             # SD_LOOKUP_RETRY_PAUSE s (it came with sd_early_look only).
+                             lookup_retry=options.get("lookup_retry", "1") != "0")
     for path in frames:
         print(f"{_FRAME_MARKER}{path}")
     print(_STATS_MARKER + json.dumps(stats))
