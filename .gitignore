@@ -82,3 +82,6 @@ ha-forum-post.md
 # Stray GPU/kernel compiler debug dumps (e.g. from OpenVINO iGPU work), not repo content
 kernel.errors.txt
 *.kernel.errors.txt
+
+# setuptools build output
+build/
