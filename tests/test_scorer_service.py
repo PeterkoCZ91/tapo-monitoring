@@ -951,3 +951,63 @@ def test_slow_upload_counts_in_request_latency():
         srv.shutdown()
     assert metrics["request_seconds_max"] >= 0.3
     assert metrics["score_seconds_max"] < 0.3
+
+
+def _face_server(face_fn, person=0.8):
+    srv = scorer_service.make_server(lambda body, tiles=1: {"person": person, "animal": 0.0},
+                                     port=0, face_fn=face_fn)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}"
+
+
+def _post(url):
+    req = urllib.request.Request(url, data=b"jpeg", headers={"Content-Type": "image/jpeg"})
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return json.load(resp)
+
+
+def test_faces_only_when_asked_and_a_person_is_there():
+    calls = []
+
+    def face_fn(body):
+        calls.append(body)
+        return [[1.0, 2.0, 30.0, 40.0, 0.9]]
+    srv, url = _face_server(face_fn)
+    try:
+        assert "faces" not in _post(f"{url}/score")
+        assert _post(f"{url}/score?faces=1")["faces"] == [[1.0, 2.0, 30.0, 40.0, 0.9]]
+        assert calls == [b"jpeg"]
+    finally:
+        srv.shutdown()
+    srv, url = _face_server(face_fn, person=0.05)
+    try:
+        assert "faces" not in _post(f"{url}/score?faces=1")   # nobody to look at
+        assert len(calls) == 1
+    finally:
+        srv.shutdown()
+
+
+def test_face_failure_answers_null_and_keeps_the_score():
+    def boom(body):
+        raise RuntimeError("model gone")
+    srv, url = _face_server(boom)
+    try:
+        out = _post(f"{url}/score?faces=1")
+        assert out["person"] == 0.8 and out["faces"] is None
+    finally:
+        srv.shutdown()
+
+
+def test_faces_query_is_ignored_without_a_face_model():
+    srv, url = _face_server(None)
+    try:
+        assert "faces" not in _post(f"{url}/score?faces=1")
+    finally:
+        srv.shutdown()
+
+
+def test_load_face_fn_is_off_without_a_model_and_rejects_bad_numbers():
+    assert scorer_service.load_face_fn({}) is None
+    with pytest.raises(ValueError):
+        scorer_service.load_face_fn({"TAPO_SCORER_FACE_MODEL": "/m.onnx",
+                                     "TAPO_SCORER_FACE_MIN_SCORE": "2"})

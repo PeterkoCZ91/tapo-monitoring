@@ -556,6 +556,31 @@ def test_select_recording_frame_keeps_smeared_frames_when_nothing_else_passed(mo
     assert image == "pan1.jpg"
 
 
+def test_select_recording_frame_prefers_a_frame_with_a_face_on_the_person(monkeypatch):
+    cam = _cam(sd_snapshot=True, snapshot_source="recording", sd_prefer_face=True,
+               scorer={"url": "http://x/score", "threshold": 0.4})
+    monkeypatch.setattr(daemon.snapshot, "image_size", lambda p: (1000, 600))
+    frames = ["back.jpg", "face.jpg", "stray.jpg"]
+    boxes = {"back.jpg": [100, 100, 160, 400],      # tallest: seen from behind
+             "face.jpg": [500, 150, 550, 330],
+             "stray.jpg": [700, 150, 750, 350]}
+
+    def score(f):
+        return 0.9
+    score.boxes = boxes
+    score.faces = {"back.jpg": [],
+                   "face.jpg": [[515, 155, 535, 175, 0.9]],
+                   "stray.jpg": [[10, 10, 40, 40, 0.9]]}     # a face, but not on the person
+    kw = dict(event={"start_time": 1}, etype="person", frames=frames, score=score,
+              blur_score=lambda f, box=None: 1.0, pick="tallest", frame_detail=lambda f: None)
+    assert daemon._select_recording_frame(cam, **kw)[0] == "face.jpg"
+    off = _cam(sd_snapshot=True, snapshot_source="recording",
+               scorer={"url": "http://x/score", "threshold": 0.4})
+    assert daemon._select_recording_frame(off, **kw)[0] == "back.jpg"
+    score.faces = {f: None for f in frames}                  # unknown: pick unchanged
+    assert daemon._select_recording_frame(cam, **kw)[0] == "back.jpg"
+
+
 def test_score_all_scores_concurrently_and_keeps_the_order():
     # A barrier only opens when two requests are in flight at once: scored one by one,
     # the first call would wait out its timeout and raise.

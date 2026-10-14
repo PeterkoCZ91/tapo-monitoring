@@ -631,6 +631,16 @@ sd_fresh_guard: 60
   dense frames; the rest of a window after the recorder's early look keeps the normal
   spacing.
 
+- `sd_prefer_face` (default off) asks the scorer for faces (`?faces=1`). It needs a scorer
+  with `TAPO_SCORER_FACE_MODEL`; see [operations](operations.md). When some of the
+  above-threshold frames show a face on the chosen person (the face's centre is inside the
+  person box), `sd_frame_pick` picks only among those frames. Otherwise the pick is the
+  same as without the option. It helps most on close cameras, where the tallest box is
+  often someone's back or a body with the head cut off. Faces of people far away are
+  rarely found.
+- Before any pick, frames blurred by the camera's own movement (auto-track, a preset
+  recall) are set aside, as long as at least one steady frame is left.
+
 ```yaml
 sd_frame_pick: largest     # sd_dense_start follows: true
 ```

@@ -665,6 +665,17 @@ def test_camera_config_accepts_the_tallest_pick_and_dense_start_follows_it():
     assert (app.cameras[0].sd_frame_pick, app.cameras[0].sd_dense_start) == ("tallest", True)
 
 
+def test_camera_config_sd_prefer_face_is_off_by_default_and_must_be_a_bool():
+    app = cfg.load_config_from_dict({"cameras": [{"name": "a", "host": "203.0.113.10"}]})
+    assert app.cameras[0].sd_prefer_face is False
+    app = cfg.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10", "sd_prefer_face": True}]})
+    assert app.cameras[0].sd_prefer_face is True
+    with pytest.raises(cfg.ConfigError, match="sd_prefer_face"):
+        cfg.load_config_from_dict(
+            {"cameras": [{"name": "a", "host": "203.0.113.10", "sd_prefer_face": "yes"}]})
+
+
 def test_camera_config_rejects_bad_sd_frame_pick_and_dense_start():
     with pytest.raises(cfg.ConfigError, match="sd_frame_pick"):
         cfg.load_config_from_dict(

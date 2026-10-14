@@ -42,6 +42,7 @@ from . import (
     dnsfix,
     drift,
     enrich,
+    faces,
     health,
     hubclient,
     incident,
@@ -1457,7 +1458,8 @@ def score_for(cfg: CameraConfig):
                                   ignore_boxes=cfg.scorer.ignore_boxes,
                                   ignore_boxes_mode=cfg.scorer.ignore_boxes_mode,
                                   alert_zones=cfg.scorer.alert_zones,
-                                  alert_zones_mode=cfg.scorer.alert_zones_mode)
+                                  alert_zones_mode=cfg.scorer.alert_zones_mode,
+                                  faces=cfg.sd_prefer_face)
 
     def score(image_path):
         started = _time.monotonic()
@@ -1477,11 +1479,14 @@ def score_for(cfg: CameraConfig):
             result = score_remote(image_path)
         if result is not None:
             boxes[image_path] = scorer.subject_box(result)
+            face_boxes[image_path] = scorer.frame_faces(result)
         return (None if result is None
                 else scorer.subject_score(result, threshold=cfg.scorer.threshold))
 
     boxes: dict = {}   # frame path -> subject box; lets sharpness be judged on the subject
+    face_boxes: dict = {}   # frame path -> face boxes (None = unknown), for sd_prefer_face
     score.boxes = boxes  # type: ignore[attr-defined]
+    score.faces = face_boxes  # type: ignore[attr-defined]
     return score
 
 
@@ -3076,6 +3081,17 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
                      cfg.name, path, len(above) - len(steady))
             above = steady
     boxes = getattr(score, "boxes", None) or {}
+    if getattr(cfg, "sd_prefer_face", False) and len(above) > 1:
+        # A frame showing the person's face beats a bigger or sharper one of their back or
+        # with the head cut off. Only a known answer counts, and only a face on the chosen
+        # person (centre inside their box); with no such frame the pick is unchanged.
+        known = getattr(score, "faces", None) or {}
+        with_face = [fs for fs in above
+                     if faces.faces_in_box(known.get(fs[0]) or [], boxes.get(fs[0]))]
+        if with_face and len(with_face) < len(above):
+            log.info("frame selection %s [%s]: %d of %d frame(s) show a face; picking among those",
+                     cfg.name, path, len(with_face), len(above))
+            above = with_face
     # Mixing crop and whole-frame measurements is not comparable: use boxes all-or-none.
     use_boxes = all(boxes.get(f) for f, _ in above)
     ranked = [(f, blur_score(f, box=boxes[f]) if use_boxes else blur_score(f))

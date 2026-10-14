@@ -77,6 +77,24 @@ def test_score_image_appends_tiles_query(monkeypatch, tmp_path):
     assert calls[0][0] == "http://h/score?tiles=2"
 
 
+def test_score_image_asks_for_faces_only_when_told(monkeypatch, tmp_path):
+    img = tmp_path / "f.jpg"
+    img.write_bytes(b"x")
+    calls = []
+    _fake_urlopen(monkeypatch, payload={"person": 0.5}, capture=calls)
+    scorer.score_image("http://h/score", str(img), tiles=2, faces=True)
+    scorer.score_image("http://h/score", str(img))
+    assert [c[0] for c in calls] == ["http://h/score?tiles=2&faces=1", "http://h/score"]
+
+
+def test_frame_faces_tells_unknown_from_none_found():
+    assert scorer.frame_faces({"person": 0.9}) is None
+    assert scorer.frame_faces({"faces": None}) is None
+    assert scorer.frame_faces({"faces": []}) == []
+    assert scorer.frame_faces({"faces": [[1, 2, 3, 4, 0.9], "junk", [1]]}) == [[1, 2, 3, 4, 0.9]]
+    assert scorer.frame_faces(None) is None
+
+
 def test_score_image_no_tiles_query_when_one(monkeypatch, tmp_path):
     img = tmp_path / "f.jpg"
     img.write_bytes(b"x")

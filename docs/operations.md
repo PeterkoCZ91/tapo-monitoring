@@ -255,6 +255,26 @@ with boxes in pixels of the original frame, so callers need no change.
 | `TAPO_SCORER_DETR_ACTIVATION` | `softmax` (default), `sigmoid` | `softmax` for heads with a trailing "no object" column, `sigmoid` for focal-loss heads. |
 | `TAPO_SCORER_DETR_NORMALIZE` | `imagenet` (default), `none` | Input scaling: ImageNet mean/std, or plain 0-1. |
 
+### Faces (optional)
+
+With `TAPO_SCORER_FACE_MODEL` set, the service also finds faces. A client asks for them with
+`?faces=1`; the reply then gains `faces`, a list of `[x1, y1, x2, y2, score]` in original
+pixels. The list is `[]` when no face was found and `null` when the detector failed.
+Frames scoring below 0.2 for a person are not searched and get no `faces` field. Without
+the variable, or without `?faces=1`, replies are unchanged.
+
+| Variable | Values | Meaning |
+|---|---|---|
+| `TAPO_SCORER_FACE_MODEL` | path | [YuNet 2023mar](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) ONNX (`face_detection_yunet_2023mar.onnx`, 228 KB, MIT). It runs on the CPU through onnxruntime; OpenCV is not needed. Unset turns faces off. |
+| `TAPO_SCORER_FACE_MIN_SCORE` | 0-1, default `0.75` | Faces scoring lower are dropped. |
+| `TAPO_SCORER_FACE_MIN_SIZE` | pixels, default `20` | Faces whose shorter side is smaller are dropped. |
+
+A face costs about 40-60 ms of CPU per 1280x720 frame and holds the inference lock for that
+time. The detector misses profiles, covered faces and heads cut off by the frame edge, so
+treat a face as a hint about which frame to send, not as a detection. The defaults were
+set on an indoor camera at 1-3 m: true faces scored 0.77-0.94, and the false ones scored
+0.65-0.73 or were smaller than 20 px.
+
 `detr` covers NMS-free exports with two outputs, `logits` `[1,Q,C]` and `boxes` `[1,Q,4]`
 (normalised centre-x/centre-y/width/height), such as RF-DETR, D-FINE and RT-DETR. The
 settings come from how the model was trained and exported, so read them off the export

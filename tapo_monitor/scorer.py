@@ -55,7 +55,7 @@ def auth_headers(token):
 
 def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None, ignore_zones=(),
                 alert_zones=(), alert_zones_mode="enforce", token=None, max_person_box=None,
-                ignore_boxes=(), ignore_boxes_mode="enforce"):
+                ignore_boxes=(), ignore_boxes_mode="enforce", faces=False):
     """POST a JPEG to the scoring service; dict on success, None on ANY failure.
 
     ``tiles > 1`` asks the service to also score a tiles×tiles grid (rescues distant
@@ -74,6 +74,9 @@ def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None, ignore_
     ``token`` (the shared secret of a service that requires one) goes out as a bearer
     header and is never logged.
 
+    ``faces=True`` asks the service for face boxes (``faces`` in the answer, see
+    :func:`frame_faces`); a service without a face model simply leaves them out.
+
     Callers that have a camera's ``ScorerConfig`` use :func:`score`, which adds failover
     and reads the token named by ``scorer.token_env``.
     """
@@ -81,7 +84,7 @@ def score_image(url, image_path, timeout=10, tiles=1, *, source_id=None, ignore_
                        ignore_zones=ignore_zones, alert_zones=alert_zones,
                        alert_zones_mode=alert_zones_mode, token=token,
                        max_person_box=max_person_box, ignore_boxes=ignore_boxes,
-                       ignore_boxes_mode=ignore_boxes_mode)[0]
+                       ignore_boxes_mode=ignore_boxes_mode, faces=faces)[0]
 
 
 _warned_unauthorized: set = set()
@@ -157,7 +160,7 @@ def _score_once(url, image_path, timeout, tiles, **kwargs):
 
 def _score_attempt(url, image_path, timeout, tiles, *, source_id=None, ignore_zones=(),
                    alert_zones=(), alert_zones_mode="enforce", token=None, max_person_box=None,
-                   ignore_boxes=(), ignore_boxes_mode="enforce"):
+                   ignore_boxes=(), ignore_boxes_mode="enforce", faces=False):
     """``(result, transport_failed, exc)`` of one request; result None on any failure.
 
     ``exc`` is the request exception when the request itself failed, else None.
@@ -171,6 +174,9 @@ def _score_attempt(url, image_path, timeout, tiles, *, source_id=None, ignore_zo
     if tiles and int(tiles) > 1:
         sep = "&" if "?" in url else "?"
         url = f"{url}{sep}tiles={int(tiles)}"
+    if faces:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}faces=1"
     headers = {"Content-Type": "image/jpeg"}
     if isinstance(source_id, str) and len(source_id) in range(16, 65):
         normalized_source_id = source_id.lower()
@@ -774,6 +780,18 @@ def _zone_observe(result, person, threshold):
     except (KeyError, TypeError, ValueError):
         return None
     return (inside, outside) if kept < threshold else None
+
+
+def frame_faces(result):
+    """Face boxes ``[[x1, y1, x2, y2, score], ...]`` from an answer, or None when unknown.
+
+    None (not asked, no face model on the service, or the detector failed) is different
+    from ``[]`` (looked, found none): only a known answer may steer the frame pick. Pure.
+    """
+    faces = result.get("faces") if isinstance(result, dict) else None
+    if not isinstance(faces, list):
+        return None
+    return [f for f in faces if isinstance(f, (list, tuple)) and len(f) >= 4]
 
 
 def subject_box(result):

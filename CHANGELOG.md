@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+- Optional face detection in the scoring service (`TAPO_SCORER_FACE_MODEL`, the YuNet ONNX
+  model, run through onnxruntime without OpenCV). A client asks for faces with `?faces=1`.
+  The new per-camera option `sd_prefer_face` then picks the follow-up photo among the
+  frames that show a face on the person, when there are any. Both are off by default, and
+  replies stay unchanged without them.
+
 ### Changed
 - The SD/recording follow-up sets aside frames smeared by the camera's own motion (an
   auto-track swing or a preset recall) before picking the photo. The whole frame's

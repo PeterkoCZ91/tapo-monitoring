@@ -278,6 +278,10 @@ class CameraConfig:
     # Extra frames every 2 s over the event's first 12 s of the follow-up window. Unset in
     # the YAML it follows sd_frame_pick: on for "largest", off for "sharpest".
     sd_dense_start: bool = False
+    # Ask the scorer for faces (``?faces=1``) and, among the follow-up's above-threshold
+    # frames, pick only from those with a face on the chosen person when any has one. Needs
+    # a scorer with TAPO_SCORER_FACE_MODEL; without faces in the answers nothing changes.
+    sd_prefer_face: bool = False
     # Camera card only: read the event's first 18 s as soon as they clear pytapo's
     # freshness guard, and the rest of the window only when that look shows nobody.
     sd_early_look: bool = False
@@ -1226,6 +1230,9 @@ def _camera(data, index):
         sd_dense_start = sd_frame_pick in ("largest", "tallest")
     elif not isinstance(sd_dense_start, bool):
         raise ConfigError(f"{where}: 'sd_dense_start' must be true or false")
+    sd_prefer_face = data.get("sd_prefer_face", False)
+    if not isinstance(sd_prefer_face, bool):
+        raise ConfigError(f"{where}: 'sd_prefer_face' must be true or false")
     try:
         sd_fresh_guard = int(data.get("sd_fresh_guard", 60))
     except (TypeError, ValueError):
@@ -1432,6 +1439,7 @@ def _camera(data, index):
         follow_app_notifications=_check_bool(data.get("follow_app_notifications", False),
                                              "follow_app_notifications", where),
         sd_dense_start=sd_dense_start,
+        sd_prefer_face=sd_prefer_face,
         sd_early_look=_check_bool(data.get("sd_early_look", False), "sd_early_look", where),
         sd_early_span=sd_early_span,
         recording_early_span=recording_early_span,

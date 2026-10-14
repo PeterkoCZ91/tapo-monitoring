@@ -909,6 +909,47 @@ class ShadowConfig:
     min_interval: float = 0.0  # seconds between frames sent to the target; 0 sends every frame
 
 
+# Faces (``?faces=1``): only worth running on a frame that has a person at all, and the
+# detector costs ~40-60 ms of CPU per 1280x720 frame.
+FACE_PERSON_FLOOR = 0.2
+
+
+def _face_worthy(person):
+    """Whether a frame's person score is high enough to look for faces. Pure."""
+    try:
+        return float(person) >= FACE_PERSON_FLOOR
+    except (TypeError, ValueError):
+        return False
+
+
+def load_face_fn(env=None):
+    """``face_fn(jpeg_bytes) -> [[x1, y1, x2, y2, score], ...]`` from the environment, or None.
+
+    ``TAPO_SCORER_FACE_MODEL`` is the YuNet ONNX path (unset = faces off);
+    ``TAPO_SCORER_FACE_MIN_SCORE`` / ``TAPO_SCORER_FACE_MIN_SIZE`` override the defaults of
+    :mod:`tapo_monitor.faces`. A bad number is a config error (``ValueError``).
+    """
+    env = os.environ if env is None else env
+    path = (env.get("TAPO_SCORER_FACE_MODEL") or "").strip()
+    if not path:
+        return None
+    from . import faces
+    min_score = float(env.get("TAPO_SCORER_FACE_MIN_SCORE") or faces.DEFAULT_MIN_SCORE)
+    min_size = float(env.get("TAPO_SCORER_FACE_MIN_SIZE") or faces.DEFAULT_MIN_SIZE)
+    if not (0 < min_score <= 1) or min_size < 0:
+        raise ValueError("TAPO_SCORER_FACE_MIN_SCORE must be in (0, 1], "
+                         "TAPO_SCORER_FACE_MIN_SIZE >= 0")
+    detector = faces.FaceDetector(path, min_score=min_score, min_size=min_size)
+
+    def face_fn(jpeg_bytes):
+        import io
+
+        from PIL import Image
+        return detector.detect(Image.open(io.BytesIO(jpeg_bytes)))
+
+    return face_fn
+
+
 def load_shadow(env=None):
     """Shadow settings from ``TAPO_SCORER_SHADOW_*``; ``None`` (feature off) unless both
     ``..._URL`` and ``..._LOG`` are set (``..._LOG`` may be left out when
@@ -1439,8 +1480,13 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
                 metrics_retention_days=7, metrics_retention_files=8,
                 metrics_max_journal_bytes=METRICS_MAX_JOURNAL_BYTES, arch=None, token=None,
                 shadow=None, ensemble=None, artifact_filter=None, shadow2=None,
-                shadow3=None, shadow4=None):
+                shadow3=None, shadow4=None, face_fn=None):
     """HTTP server: POST /score (JPEG body) -> JSON scores; GET /health -> ok.
+
+    With a ``face_fn`` (:func:`load_face_fn`) a request with ``?faces=1`` whose frame has a
+    person (``person >= FACE_PERSON_FLOOR``) also gets ``faces`` — face boxes with scores in
+    original pixels, ``[]`` when none was found, ``null`` when the detector failed. Without
+    the query parameter, or without a ``face_fn``, the reply is exactly as before.
 
     ``arch`` (the detector family name, never the model path) is reported by /health and
     /metrics; ``None`` leaves both replies exactly as they were.
@@ -1545,10 +1591,12 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
                 return
             if self._deny():
                 return
+            query = parse_qs(parsed.query)
             try:
-                tiles = max(1, int(parse_qs(parsed.query).get("tiles", ["1"])[0]))
+                tiles = max(1, int(query.get("tiles", ["1"])[0]))
             except (TypeError, ValueError):
                 tiles = 1
+            want_faces = face_fn is not None and query.get("faces", ["0"])[0] == "1"
             source_id = _normalize_source_id(self.headers.get("X-Tapo-Source-ID"))
             # Start the clock and the counters before the upload is read, so a slow
             # or stalled upload shows up in the latency metrics.
@@ -1585,6 +1633,14 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
                 else:
                     with inference_lock:
                         result = score_fn(body, tiles)
+                        if (want_faces and isinstance(result, dict)
+                                and _face_worthy(result.get("person"))):
+                            try:
+                                result["faces"] = face_fn(body)
+                            except Exception as exc:  # noqa: BLE001 - faces are optional
+                                log.warning("face detection failed (%s, source=%s)",
+                                            type(exc).__name__, source_id or "-")
+                                result["faces"] = None
                 ok = True
             except Exception as exc:  # noqa: BLE001 - report, don't kill the server
                 failure_reason = "inference_error"
@@ -1732,7 +1788,8 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
         shadow3 = load_shadow3()
         shadow4 = load_shadow4()
         ensemble = load_ensemble(os.environ, shadow)
-    except (TokenConfigError, EnsembleConfigError) as exc:
+        face_fn = load_face_fn()
+    except (TokenConfigError, EnsembleConfigError, ValueError) as exc:
         print(f"scorer config error: {exc}", file=sys.stderr)
         raise SystemExit(2) from None
     decoder = detectors.build_decoder(config)
@@ -1746,6 +1803,7 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
         shadow3=shadow3,
         shadow4=shadow4,
         ensemble=ensemble,
+        face_fn=face_fn,
         port=args.port,
         metrics_file=args.metrics_file,
         metrics_persist_seconds=args.metrics_persist_seconds,
@@ -1768,6 +1826,8 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
     if shadow4 is not None:
         log.info("fourth shadow '%s' on (tiles %s, disagreement images %s)", shadow4.name,
                  shadow4.tiles or "as sent", "kept" if shadow4.disagree_dir else "off")
+    if face_fn is not None:
+        log.info("face detection on (?faces=1, person >= %.2f)", FACE_PERSON_FLOOR)
     if ensemble is not None:
         log.info("ensemble %s on (low %.2f, trust %.2f, host %.2f, band %.2f, timeout %.1fs)",
                  ensemble.mode, ensemble.low, ensemble.trust, ensemble.host, ensemble.band,
