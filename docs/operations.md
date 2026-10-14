@@ -1482,6 +1482,27 @@ the filename under `--archive-dir` (default `~/tapo-monitor/probe-log`; `--no-ar
 prints only). It reuses the daemon's snapshot and scorer helpers and does not touch a
 running daemon, so it is safe to run against production cameras.
 
+### Evaluating the follow-up frame pick
+
+Which SD frame the follow-up sends depends on the frame grid and the picker. Three tools in
+`tools/` replay that choice against every second of real clips:
+
+1. `sd_frame_dump.py` runs **on the camera host** and downloads the card clip of each recent
+   `path: sd` alert in the sent-photo archive at 1 frame/s, one directory per event.
+   Credentials come from the env vars named in `cameras.yaml`. Run it per host and keep it
+   sequential: parallel media sessions make the camera answer `-40214` and can disturb the
+   running daemon.
+2. `frame_pick_eval.py` scores every frame and writes a features JSON (score, box, subject
+   blur, whole-frame detail). Each frame is one scorer request — keep `--workers` low (default
+   2) or point `--url` at a backup scorer rather than loading the production one.
+3. `frame_pick_sim.py features.json --threshold 0.3` prints, per grid/picker/smear-guard
+   variant, the mean chosen height relative to the best steady frame of the clip, smeared
+   picks and missed events; `--gallery DIR` and `--sheets DIR` draw a before/after page and
+   contact sheets.
+
+The frames are private camera images: copy them only between your own machines, and keep
+them, the features JSON, galleries and sheets out of the repository.
+
 ## Watching the hosts themselves
 
 Everything above reports from inside the host: the daemon's outage messages, `OnFailure`
