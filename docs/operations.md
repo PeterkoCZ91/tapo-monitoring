@@ -321,6 +321,57 @@ the number of HTTP requests in flight, or impose a hard CPU limit. The face dete
 session starts an all-core pool. Measure latency and throughput under concurrent requests before combining
 it with a service CPU quota.
 
+### Running the scorer on a CPU
+
+A CPU is enough for a few cameras; these notes come from running the scorer for several
+hosts on a 16-core AVX-512 Xeon virtual machine.
+
+- **One inference at a time.** The service answers `/health` and `/metrics` in parallel, but
+  inference runs behind a single lock: parallel CPU runs would only slow each other past the
+  callers' timeouts. Four requests arriving together therefore finish at about one, two, three
+  and four times the single-request latency. Size for the single request; per-camera
+  `sd_score_parallel` (default 1) keeps follow-up batches from piling up.
+- **Match `TAPO_SCORER_THREADS` to the CPU budget.** Without it ONNX Runtime starts one
+  thread per visible core. Under a systemd `CPUQuota` (or a container CPU limit) that pool
+  burns its quota in bursts and is throttled: YOLOX-m with 2x2 tiles and faces took
+  1.09 s per request under a 10-CPU quota and 0.55 s with no quota on the same 16 cores.
+  With the service limited to 4 CPUs and `TAPO_SCORER_THREADS=4` it was barely throttled.
+  Some container platforms also report the host's CPU numbers to processes, so pinning with
+  `AllowedCPUs=` may have no effect there; check `cpuset.cpus.effective` of the unit's
+  cgroup before relying on it.
+- **INT8 YOLOX-m.** A static INT8 copy of `yolox_m.onnx` made with ONNX Runtime's
+  quantization tools was about 1.6x faster (0.65 to 0.40 s per tiled request, p50) and used
+  half the memory (562 to 308 MB), on a CPU with AVX-512 VNNI. Through the full scoring path
+  on 200 frames the person score moved by 0.010 on average (0.2 at most); at 0.45 no frame
+  changed its decision, at 0.30 one frame gained a person. Point `TAPO_SCORER_MODEL` at the
+  INT8 file; nothing else changes. How it was made:
+
+  ```python
+  # opset < 13 first: onnx.version_converter.convert_version(model, 13)
+  from onnxruntime.quantization import (CalibrationMethod, QuantFormat, QuantType,
+                                        quantize_static)
+  from onnxruntime.quantization.shape_inference import quant_pre_process
+  quant_pre_process("yolox_m_op13.onnx", "yolox_m_pre.onnx", skip_symbolic_shape=True)
+  quantize_static("yolox_m_pre.onnx", "yolox_m-int8.onnx", reader,  # reader: ~40 of your
+                  quant_format=QuantFormat.QDQ,                      # frames, preprocessed
+                  activation_type=QuantType.QUInt8,                  # like the scorer does,
+                  weight_type=QuantType.QInt8, per_channel=True,     # whole frame and its
+                  calibrate_method=CalibrationMethod.MinMax,         # 2x2 tiles
+                  extra_options={"CalibMovingAverage": True})
+  ```
+
+  Calibrate on frames from your own cameras and compare the INT8 and FP32 scores on frames
+  you did not calibrate on before switching. RF-DETR did not quantize usefully: static INT8
+  was slower than FP32 and lost people, and weights-only (dynamic) INT8 was 1.3x faster but
+  still lost a few.
+- **OpenVINO on CPU can crash in containers.** In one container platform that exposes host
+  CPU numbers to processes, the OpenVINO CPU plugin (2025.4 and 2026.4) died with a
+  segmentation fault while compiling the model, whatever the pinning and stream settings.
+  Plain ONNX Runtime CPU worked there; prefer it unless OpenVINO is verified on that host.
+- **Model choice.** YOLOX-m with 2x2 tiles took about 0.5 s per request (INT8, 4 CPUs);
+  RF-DETR Medium 896 on the whole frame about 1.0 s and 1.2 GiB. A week-long comparison on
+  live cameras is in [Measurements](measurements.md#a-week-of-shadow-scoring-on-live-cameras).
+
 Provider selection is separate from deployment: `TAPO_SCORER_PROVIDER=openvino-gpu`
 needs the GPU runtime, device access and a service user allowed to open the render node;
 `cuda` needs a compatible driver and runtime. Neither provisioning tool installs those
