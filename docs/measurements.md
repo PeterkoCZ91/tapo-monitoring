@@ -438,6 +438,63 @@ cascade is more promising in traffic where YOLOX-m's false alarms are less confi
 To repeat this on your own frames, follow the
 [tool's README](../tools/bench_detectors/README.md) (hand labels, one venv, one model at a time).
 
+### A week of shadow scoring on live cameras
+
+The benchmark above scored saved frames. To see the models on live traffic, the production
+scorer forwarded every frame it scored to candidate models running as shadows (see
+[Shadow run of a second detector](operations.md#shadow-run-of-a-second-detector-optional)) for one week
+in October 2026: nine camera streams, day and night, YOLOX-m 640 (production) against
+YOLOX-m at 960 px, RF-DETR Large and RF-DETR Medium at 896 px. A fifth variant, RF-DETR
+Medium at 576 px with 2x2 tiles, was dropped after five days for repeated night-time false
+alarms on one camera. The shadow replies never reached an alert.
+
+**Labels.** From about 38,000 shadow-logged frames, 350 where the models disagreed most were
+picked with `tools/label_selection.py` and labeled by hand; 346 got a decisive label. Not every
+model saw every frame (a shadow can time out or start later), so models are compared on the
+**198 frames all four scored**: 68 with a person, 130 empty. A frame counts as a detection
+when the model's highest person score reaches the threshold.
+
+| Model (input) | Persons found of 68 | False alarms of 130 |
+|---|---|---|
+| YOLOX-m 640 (production) | 25 | 45 |
+| YOLOX-m 960 | 20 | 79 |
+| RF-DETR Large (704) | 35 | 6 |
+| **RF-DETR Medium 896** | **46** | **6** |
+
+At threshold 0.45. RF-DETR Medium 896 against Large: 13 frames with a person only Medium 896
+found, 2 only Large found (exact binomial p = 0.007, not adjusted for the several comparisons
+made); on empty frames they tied, 4 false alarms each that the other did not have. The higher input
+resolution did not help YOLOX-m here: at 960 px it found fewer people and raised the most
+false alarms. RF-DETR Medium 896 across thresholds on the same 198 frames:
+
+| Threshold | 0.30 | 0.35 | 0.40 | 0.45 | 0.50 |
+|---|---|---|---|---|---|
+| Persons found of 68 | 54 | 50 | 49 | 46 | 40 |
+| False alarms of 130 | 13 | 8 | 7 | 6 | 5 |
+
+**Small people.** On the 63 common frames where some model put a box under a tenth of the
+frame height (a proxy: people every model missed completely are not in it), 19 had a person.
+RF-DETR Medium 896 found 10 with 2 false alarms on the 44 empty ones, YOLOX-m 960 found 7 with
+18, RF-DETR Large 6 with 1, YOLOX-m 640 2 with 10.
+
+**On a CPU.** Measured through the scoring service on a 16-core AVX-512 Xeon virtual machine,
+with the service limited to 4 CPUs and 4 threads (`TAPO_SCORER_THREADS`), JPEG decoding, HTTP
+and face detection included: RF-DETR Medium 896 on the whole frame took 1.03 / 1.07 s per
+request (p50 / p95) and 1.2 GiB of memory; YOLOX-m with 2x2 tiles took 0.51 / 0.56 s as an
+INT8 model (see [Running the scorer on a CPU](operations.md#running-the-scorer-on-a-cpu)). Tiling
+a DETR model multiplies its cost by five and was not tried. Because the service runs one
+inference at a time, four requests arriving together wait for each other (about 4.2 s for the
+last of them with RF-DETR Medium 896).
+
+**How far to trust it.** The 350 frames were chosen *because* the models disagreed, so the
+numbers say which model is right when they differ, not what share of all people a model finds
+or how many false alerts a day it would send. Counts are frames, not incidents: one passer-by
+can fill several frames. Camera and day/night metadata were missing from the shadow logs, so
+there is no split by either. The models also did not run on identical frame sets outside the
+common 198 (shadow start dates and timeouts differ), which is why only the common frames are
+compared. Given those limits, RF-DETR Medium 896 at about 0.35 is the candidate worth a
+production trial, and one camera has been switched to it, with YOLOX-m as the fallback scorer.
+
 ## Limitations
 
 - **One deployment.** One owner, a handful of cameras, one region and climate. Scenes
