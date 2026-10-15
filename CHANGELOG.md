@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- One walk no longer alerts twice when the camera reports its person event late. A motion
+  photo that already showed the person (score at the threshold) now blocks a person event
+  whose camera start lies within the cooldown of that photo's passage, at the live gate,
+  before any card read. Seen on a C560WS: the AI person event of a walk arrived 549 s after
+  its motion event, the wall-clock cooldown had expired, and the card photo of the same
+  walk followed the sampler's photo ten minutes later. Sampler and held-frame alerts now
+  also record their passage's camera start time, which they did not before.
+
 ## [0.10.0] - 2026-10-15
 
 ### Added

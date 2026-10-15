@@ -847,7 +847,9 @@ def _motion_then_person_story(monkeypatch, tmp_path, motion_score):
     sc.run(30)                                   # 20: the sampler's photo; group closes
     sc.cams["a"].push(person(at(40)))
     sc.tick(advance=5)                           # 40: nobody in the live frame -> card
-    assert len(sc.state.pending_sd) == 1
+    # A motion photo that showed the person makes the person event of the same walk a
+    # duplicate already at the live gate (camera event start), so no card read is queued.
+    assert len(sc.state.pending_sd) == (1 if motion_score is None else 0)
     while sc.state.pending_sd:
         sc.tick(advance=5)
         if worker.busy("a"):
@@ -861,17 +863,19 @@ def test_a_card_photo_behind_a_motion_photo_that_showed_the_person_is_kept_off_t
         monkeypatch, tmp_path, caplog):
     # Seen live: a sampler motion photo at 0.69 (threshold 0.45), then 36 s later the card
     # photo of a person event from the same second at 0.79. The motion photo already
-    # showed the person, so it counts like a confirmed alert and the card photo is
-    # skipped as a duplicate of the same visit.
+    # showed the person, so it counts like a confirmed alert: the person event of the same
+    # walk is a duplicate at the live gate (its camera start is inside the cooldown of the
+    # motion photo's), before any card read. Also covers a person event the camera reports
+    # minutes late (seen: 549 s), where the wall-clock cooldown has long expired.
     caplog.set_level(logging.INFO)
     sc = _motion_then_person_story(monkeypatch, tmp_path, 0.69)
 
     assert sc.actions("send", "send_failed") == [("send", "a")]
     assert sc.notifier.send_paths == ["sampler"]
     skipped = [line for line in _audit(caplog, "person")
-               if "path=sd" in line and "action=cooldown" in line]
+               if "path=live" in line and "action=cooldown" in line]
     assert len(skipped) == 1
-    assert f"start={int(at(40))}" in skipped[0] and "reason=sd_within_cooldown" in skipped[0]
+    assert f"start={int(at(40))}" in skipped[0]
 
 
 def test_a_card_photo_behind_a_motion_photo_with_no_person_score_still_goes_out(

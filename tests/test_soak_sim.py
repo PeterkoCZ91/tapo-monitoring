@@ -72,7 +72,10 @@ def test_memory_measurement_collects_unreachable_cycles_but_keeps_live_objects(t
 
 
 def test_a_growing_state_file_fails_the_run(capsys):
-    code, out = run_json(capsys, "--inject", "statefile", "--inject-rate", "4096",
+    # Every state save rewrites runtime.json and drops what the injection appended, so the
+    # rate must outgrow the limit between saves by a wide margin, not depend on how often
+    # the daemon happens to save (4 KiB/tick sat 14 % over the limit and flipped).
+    code, out = run_json(capsys, "--inject", "statefile", "--inject-rate", "16384",
                          "--features", "none", "--restarts-per-day", "0")
     assert code == 1
     assert any("runtime.json reached" in f for f in out["findings"])

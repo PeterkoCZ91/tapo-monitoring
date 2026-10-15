@@ -1298,8 +1298,9 @@ def _default_time_str(event):  # pragma: no cover - trivial formatting
     return _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(event.get("start_time", _time.time())))
 
 
-# ``last_alert`` key of the newest delivered photo whose person score reached the camera's
-# threshold, whatever its event type (see _sd_within_cooldown). Not a cooldown of its own.
+# ``last_alert`` / ``last_event_start`` key of the newest delivered photo whose person score
+# reached the camera's threshold, whatever its event type: its send time for
+# _sd_within_cooldown, its camera event start for alert_gate. Not a cooldown of its own.
 PERSON_PHOTO = "person_photo"
 
 
@@ -1389,8 +1390,10 @@ def alert_gate(state, name, cooldown, now):
     the same passage.
 
     ``on_alert`` also takes the delivered photo's ``score`` and the ``threshold`` it was
-    held to; a photo that showed a person is stamped under :data:`PERSON_PHOTO`, which
-    only :func:`_sd_within_cooldown` reads. Arming for a defer passes neither.
+    held to; a photo that showed a person is stamped under :data:`PERSON_PHOTO` (send time
+    for :func:`_sd_within_cooldown`, camera event start for the confirmed gate here, so a
+    person event the camera reports minutes late is still the walk a motion photo
+    already showed). Arming for a defer passes neither.
     """
     def key_for(etype):
         # A vehicle alert has a cooldown of its own so it can never eat a person alert.
@@ -1424,8 +1427,10 @@ def alert_gate(state, name, cooldown, now):
                     and notify.should_send_alert(confirmed_ts, now, cooldown)
                     and event_time_allowed(("vehicle", "confirmed"), event))
         if etype != "motion":
+            # PERSON_PHOTO: a motion photo that showed the person is this passage's alert
+            # too, so a confirmed event of the same walk the camera reports late is not.
             return (notify.should_send_alert(confirmed_ts, now, cooldown)
-                    and event_time_allowed(("confirmed",), event))
+                    and event_time_allowed(("confirmed", PERSON_PHOTO), event))
         motion_ts = state.last_alert.get((name, "motion"))
         recent = [t for t in (confirmed_ts, motion_ts) if t is not None]
         return (notify.should_send_alert(max(recent) if recent else None, now, cooldown)
@@ -1434,9 +1439,11 @@ def alert_gate(state, name, cooldown, now):
     def on_alert(etype, event=None, *, score=None, threshold=None):
         key = key_for(etype)
         state.last_alert[(name, key)] = now
+        start = event_start(event)
         if photo_had_person(score, threshold):
             state.last_alert[(name, PERSON_PHOTO)] = now
-        start = event_start(event)
+            if start is not None:
+                state.last_event_start[(name, PERSON_PHOTO)] = start
         if start is not None:
             state.last_event_start[(name, key)] = start
 
@@ -3741,7 +3748,7 @@ def _send_held_frame(app, cfg, state, group, *, now, secrets, time_str, reason, 
     if ok:
         log.info("%s %s: held frame sent (score=%s)",
                  reason, cfg.name, f"{s:.2f}" if s is not None else "n/a")
-        on_alert("motion", score=s, threshold=cfg.scorer.threshold)
+        on_alert("motion", group["event"], score=s, threshold=cfg.scorer.threshold)
         group["sent"] = True
         group["delivered"] = True
         note_passage_delivered(state, cfg.name, *group_span(group),
@@ -4065,7 +4072,7 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
             if ok:
                 log.info("alert %s sent (faces=%r, desc=%r, score=%s) [sampler]",
                          etype, label, description, f"{s:.2f}" if s is not None else "n/a")
-                on_alert(etype, score=s,
+                on_alert(etype, group["event"], score=s,
                          threshold=cfg.scorer.threshold if score is not None else None)
                 group["sent"] = True
                 group["delivered"] = True

@@ -2509,6 +2509,34 @@ def test_alert_gate_allows_later_camera_event_after_event_cooldown():
     assert can2("person", {"start_time": 1783599244}) is True
 
 
+def test_alert_gate_late_person_event_of_a_passage_a_motion_photo_already_showed():
+    # Seen on a C560WS: a motion event at 11:15:04 was alerted by the sampler with a 0.91
+    # person photo; the camera reported the AI person event of the same walk (11:15:05)
+    # only 549 s later, and its card photo went out ten minutes after the first.
+    state = daemon.MonitorState()
+    _, on = daemon.alert_gate(state, "a", cooldown=120, now=1000)
+    on("motion", {"start_time": 1792055704}, score=0.91, threshold=0.35)
+    can, _ = daemon.alert_gate(state, "a", cooldown=120, now=1600)
+    assert can("person", {"start_time": 1792055705}) is False
+    assert can("person", {"start_time": 1792056400}) is True     # a later passage
+
+
+def test_alert_gate_motion_photo_of_nobody_does_not_block_the_late_person():
+    state = daemon.MonitorState()
+    _, on = daemon.alert_gate(state, "a", cooldown=120, now=1000)
+    on("motion", {"start_time": 1792055704}, score=0.10, threshold=0.35)
+    can, _ = daemon.alert_gate(state, "a", cooldown=120, now=1600)
+    assert can("person", {"start_time": 1792055705}) is True     # the card may upgrade it
+
+
+def test_alert_gate_unscored_motion_photo_does_not_block_the_late_person():
+    state = daemon.MonitorState()
+    _, on = daemon.alert_gate(state, "a", cooldown=120, now=1000)
+    on("motion", {"start_time": 1792055704})
+    can, _ = daemon.alert_gate(state, "a", cooldown=120, now=1600)
+    assert can("person", {"start_time": 1792055705}) is True
+
+
 def test_alert_gate_motion_does_not_block_person():
     state = daemon.MonitorState()
     _, on = daemon.alert_gate(state, "a", cooldown=120, now=1000)
@@ -4627,6 +4655,18 @@ def test_sampler_due_group_scores_and_sends(monkeypatch):
     assert g["sent"] is True
     assert g["frames"] == 1
     assert state.last_alert[("a", "motion")] == 1035   # cooldown recorded
+
+
+def test_sampler_send_records_the_passage_start_for_the_event_gate(monkeypatch):
+    # Without the group's camera event the gate cannot tell a late event of the same
+    # walk from a new one (wall-clock cooldown alone expires while the camera lags).
+    sent = []
+    app = _sampler_app()
+    state = daemon.MonitorState()
+    state.groups["a"] = _group(started=1000)
+    _run_sampler(app, state, 1035, sent, monkeypatch, score=0.9)
+    assert state.last_event_start[("a", "motion")] == 1000
+    assert state.last_event_start[("a", daemon.PERSON_PHOTO)] == 1000
 
 
 def test_sampler_send_marks_group_delivered(monkeypatch):
@@ -7633,6 +7673,25 @@ def test_a_held_frame_send_marks_the_open_burst_only_when_it_showed_a_person(
                             reason="hold_expiry_send", threshold=0.45,
                             send_path="hold_expiry")
     assert bool(entry.get("passage_delivered")) is marked
+
+
+def test_a_held_frame_send_records_the_passage_start(monkeypatch, tmp_path):
+    app = _keep_app()
+    camera = app.cameras[0]
+    state = daemon.MonitorState()
+    frame = tmp_path / "held.jpg"
+    frame.write_bytes(b"\xff\xd8held")
+    group = {"event": {"start_time": 1030.0}, "started": 1000.0, "hold_path": str(frame),
+             "hold_score": 0.9}
+    monkeypatch.setattr(daemon, "send_alert_photo", lambda *a, **k: True)
+    monkeypatch.setattr(daemon, "_caption_describe", lambda *a, **k: "")
+    daemon._send_held_frame(app, camera, state, group, now=1200.0,
+                            secrets={"groq_key": ""}, time_str=lambda _e: "T",
+                            reason="hold_expiry_send", threshold=0.45,
+                            send_path="hold_expiry")
+    name = camera.name
+    assert state.last_event_start[(name, "motion")] == 1030.0
+    assert state.last_event_start[(name, daemon.PERSON_PHOTO)] == 1030.0
 
 
 @pytest.mark.parametrize("etype, person_photo, marked", [
