@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-15
+
 ### Fixed
 - One walk no longer alerts twice when the camera reports its person event late. A motion
   photo that already showed the person (score at the threshold) now blocks a person event
