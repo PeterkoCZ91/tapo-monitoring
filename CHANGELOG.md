@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-10-15
+
+### Fixed
+- A card or recording clip no longer goes out unscored because one of its frames failed
+  while the others scored. During a scorer restart the first frame of a clip failed twice
+  (its retry still reached the restarting service) while the rest scored about 0.004 on
+  the backup, and the empty clip was sent as an unscored alert. A frame that fails while
+  others score is now retried once after the batch and otherwise left out of the
+  decision; only a clip the scorer answered for not at all still passes through.
+- An unscored card or recording follow-up (a real scorer outage) is marked
+  `(unverified)` in its caption and audited as `degraded`, as unscored sampler sends are.
+
 ## [0.10.1] - 2026-10-15
 
 ### Fixed

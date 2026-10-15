@@ -54,8 +54,9 @@ see [camera reports](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/do
 
 ## What's new
 
-**0.10.1** stops one walk from alerting twice when the camera reports its person event
-late. **0.10.0:** the follow-up photo skips frames smeared by a pan/tilt swing and can prefer one
+**0.10.2** keeps a clip from going out unscored when one frame failed during a scorer
+switch; **0.10.1** stops one walk from alerting twice when the camera reports its person
+event late. **0.10.0:** the follow-up photo skips frames smeared by a pan/tilt swing and can prefer one
 that shows a face, card reads retry on a fresh login, follow-up scoring no longer floods
 slow uplinks, and the scorer gets a thread budget for CPUs. A week-long comparison of four
 detectors on live cameras is in the [measurements](docs/measurements.md#a-week-of-shadow-scoring-on-live-cameras).
