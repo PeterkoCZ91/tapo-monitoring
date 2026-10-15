@@ -12,8 +12,10 @@ from tests.test_daemon import _clip, _FakeHub, _frames, _hub_app, _hub_for, _hub
     ([0.9, 0.8, 0.1], [12, 2, 1], 1),  # sharp background must not beat a person
     ([0.2, 0.6, 0.1], [12, 2, 1], 1),  # subject enters after the first frame
     ([0.6, 0.9, 0.1], [None, None, None], 1),
-    ([0.7, None, 0.9], [2, 1, 1], 0),  # outage cannot replace confirmed subject
-    ([None, 0.9, 0.8], [None, None, None], 0),  # original fail-open behavior
+    # A frame that fails while others score is retried and left out of the decision: it
+    # never replaces a confirmed subject, and the frames after it still count.
+    ([0.7, None, 0.9], [2, 1, 1], 2),
+    ([None, 0.9, 0.8], [None, None, None], 1),  # was: the unscored first frame went out
 ])
 def test_hub_selects_subject_before_sharpness(monkeypatch, tmp_path, scores, blurs, expected):
     app = _hub_app(scorer={"url": "http://scorer/score", "threshold": 0.5})

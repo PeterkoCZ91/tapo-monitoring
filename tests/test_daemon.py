@@ -594,16 +594,17 @@ def test_score_all_scores_concurrently_and_keeps_the_order():
     assert daemon._score_all(lambda f: 0.5, []) == []
 
 
-def test_select_recording_frame_keeps_the_sequence_order_when_a_score_fails():
-    # Concurrent scoring must not change the decision: a failure after a confirmed
-    # candidate keeps that candidate, exactly as the one-by-one loop did.
+def test_select_recording_frame_leaves_a_failed_frame_out_between_candidates():
+    # A failure between confirmed candidates never wins and no longer ends the sequence:
+    # the failed frame is left out and the confirmed frames on both sides compete.
     cam = _cam(sd_snapshot=True, snapshot_source="recording",
                scorer={"url": "http://x/score", "threshold": 0.5})
     scores = {"/f0.jpg": 0.8, "/f1.jpg": None, "/f2.jpg": 0.95}
+    blur = {"/f0.jpg": 3.0, "/f2.jpg": 1.0}         # lower is sharper: f2 wins
     image, s = daemon._select_recording_frame(
         cam, {"start_time": 1}, "motion", ["/f0.jpg", "/f1.jpg", "/f2.jpg"],
-        lambda f: scores[f], blur_score=lambda f, **k: 1.0)
-    assert (image, s) == ("/f0.jpg", 0.8)
+        lambda f: scores[f], blur_score=lambda f, **k: blur[f])
+    assert (image, s) == ("/f2.jpg", 0.95)
 
 
 def test_select_recording_frame_none_when_all_below():
@@ -659,6 +660,64 @@ def test_select_recording_frame_passes_through_when_scorer_down():
         cam, event={"start_time": 1}, etype="person", frames=["a.jpg", "b.jpg"],
         score=lambda f: None, blur_score=lambda f: 1.0)
     assert image == "a.jpg" and s is None
+
+
+def test_select_recording_frame_rescores_a_frame_that_failed_while_others_scored(monkeypatch):
+    # Seen during a scorer restart: the first card frame failed twice (its retry still hit
+    # the restarting service), the rest scored ~0.004 on the backup, and the clip went out
+    # unscored. A frame that failed while others scored gets one more try after the batch.
+    cam = _cam(sd_snapshot=True, snapshot_source="sd",
+               scorer={"url": "http://x/score", "threshold": 0.4})
+    monkeypatch.setattr(daemon.monitor, "sample_drop", lambda *a, **kw: None)
+    calls = {"a.jpg": 0}
+
+    def score(f):
+        if f == "a.jpg":
+            calls[f] += 1
+            return None if calls[f] == 1 else 0.003
+        return 0.004
+
+    result = daemon._select_recording_frame(
+        cam, event={"start_time": 1}, etype="motion", frames=["a.jpg", "b.jpg", "c.jpg"],
+        score=score, blur_score=lambda f: 1.0)
+    assert result == (None, None)                 # an empty clip, dropped like any other
+    assert calls["a.jpg"] == 2
+
+
+def test_select_recording_frame_drops_a_clip_whose_scored_frames_all_missed(monkeypatch):
+    # The failed frame still fails on the second try, but the scorer answered for the
+    # other frames: that is not an outage, so no unscored passthrough.
+    cam = _cam(sd_snapshot=True, snapshot_source="sd",
+               scorer={"url": "http://x/score", "threshold": 0.4})
+    actions = []
+    monkeypatch.setattr(daemon.monitor, "audit_event",
+                        lambda cfg, ev, etype, path, action, **kw: actions.append(action))
+    monkeypatch.setattr(daemon.monitor, "sample_drop", lambda *a, **kw: None)
+    scores = {"a.jpg": None, "b.jpg": 0.004, "c.jpg": 0.01}
+    result = daemon._select_recording_frame(
+        cam, event={"start_time": 1}, etype="motion", frames=list(scores),
+        score=lambda f: scores[f], blur_score=lambda f: 1.0)
+    assert result == (None, None)
+    assert actions == ["scorer_unavailable", "drop"]
+
+
+def test_select_recording_frame_keeps_a_person_found_after_a_failed_frame():
+    cam = _cam(sd_snapshot=True, snapshot_source="sd",
+               scorer={"url": "http://x/score", "threshold": 0.4})
+    scores = {"a.jpg": None, "b.jpg": 0.9}
+    result = daemon._select_recording_frame(
+        cam, event={"start_time": 1}, etype="person", frames=list(scores),
+        score=lambda f: scores[f], blur_score=lambda f: 1.0)
+    assert result == ("b.jpg", 0.9)
+
+
+def test_prescorer_scores_a_failed_frame_again_on_the_next_ask():
+    answers = iter([None, 0.7])
+    pre = daemon._Prescorer(lambda f: next(answers), parallel=1)
+    pre.submit("a.jpg")
+    assert pre.score("a.jpg") is None             # the prescored answer, as before
+    assert pre.score("a.jpg") == 0.7              # a retry is a new request, not the cache
+    pre.close()
 
 
 def test_apply_plan_leaves_daynight_untouched_by_default(monkeypatch):
@@ -3332,6 +3391,40 @@ def test_pending_dense_start_does_not_overload_a_serial_uplink(monkeypatch, sour
         snapshot_for=lambda c: (lambda cam, ev: None), time_str=lambda ev: "T",
         **({"fetch_frames": fetch} if source == "sd" else {}))
     assert sent == [frames[-1]]
+
+
+def test_pending_unscored_card_photo_is_marked_unverified_and_degraded(monkeypatch):
+    # A real outage (no frame of the clip scored) still passes the card photo through, as
+    # the sampler does, but it must not read like a confirmed alert on the phone.
+    sent, audits = [], []
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "a", "host": "203.0.113.10", "sd_snapshot": True, "snapshot_source": "sd",
+         "scorer": {"url": "http://x/score", "threshold": 0.4}}]})
+    state = daemon.MonitorState()
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+    frames = ["/f0.jpg", "/f1.jpg"]
+
+    def fetch(c, start, span=None, out_dir=None, on_frame=None, **kw):
+        return frames
+
+    monkeypatch.setattr(daemon, "score_for", lambda c: (lambda frame: None))
+    monkeypatch.setattr(daemon, "_caption_describe", lambda *a, **k: "")
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap, **kw: sent.append(cap) or True)
+    real_audit = daemon.monitor.audit_event
+    monkeypatch.setattr(daemon.monitor, "audit_event",
+                        lambda cfg_, ev, et, path, action, **kw: audits.append((path, action, kw))
+                        or real_audit(cfg_, ev, et, path, action, **kw))
+    daemon.process_pending_sd(
+        app, {"a": object()}, state, now=1075,
+        secrets={"telegram_token": "t", "telegram_chat": "c", "groq_key": "k"},
+        snapshot_for=lambda c: (lambda cam, ev: None), time_str=lambda ev: "T",
+        fetch_frames=fetch)
+    assert len(sent) == 1 and "(unverified)" in sent[0]
+    send = [kw for path, action, kw in audits if path == "sd" and action == "send"]
+    assert send and send[0].get("extra") == {"degraded": "true"}
+    assert send[0].get("reason") == "scorer_unavailable"
 
 
 @pytest.mark.parametrize("source", ["recording", "sd"])

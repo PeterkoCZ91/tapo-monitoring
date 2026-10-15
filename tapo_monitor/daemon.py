@@ -3008,7 +3008,14 @@ class _Prescorer:
 
         def result(frame):
             pending = self._pending.get(frame)
-            return pending.result() if pending is not None else score(frame)
+            if pending is None:
+                return score(frame)
+            answer = pending.result()
+            if answer is None:
+                # A failed prescore is not an answer to keep: asking again is a retry,
+                # which must reach the scorer (it may have failed over meanwhile).
+                self._pending.pop(frame, None)
+            return answer
 
         result.boxes = getattr(score, "boxes", None)
         self.score = result
@@ -3033,9 +3040,9 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
     without a box for every candidate it stays with the sharpest. ``pick="tallest"`` ranks
     by box height and prefers boxes clear of the frame edge (:func:`recclip.select_tallest`).
     Missing blur measurements fall back to detection score. Frames are scored
-    with bounded concurrency (:func:`_score_all`); a scorer failure ends selection: retain
-    a confirmed candidate if available, otherwise preserve the existing unscored
-    passthrough. Hub callers keep the best rejected candidate
+    with bounded concurrency (:func:`_score_all`). Only a sequence the scorer answered for
+    not at all passes through unscored (an outage); a frame that failed while others scored
+    is retried once and otherwise left out of the decision. Hub callers keep the best rejected candidate
     so their normal threshold gate can audit the rejected clip once.
 
     ``vehicle_out``, when a list, collects ``(frame, vehicle_score)`` for every frame that
@@ -3045,12 +3052,22 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
     blur_score = blur_score or recclip.blur_score
     above, below = [], []
     parallel = cfg.sd_score_parallel if path == "sd" else SCORE_PARALLEL
-    for frame, s in zip(frames, _score_all(score, frames, parallel), strict=True):
+    scores = _score_all(score, frames, parallel)
+    # The scorer answered for some frames: a frame that failed is a blip (a restart, a
+    # failover switching mid-batch), not an outage. Give it one more try, and if it still
+    # fails decide on the frames that did score instead of passing the clip through.
+    scored_any = any(s is not None for s in scores)
+    failed = [f for f, s in zip(frames, scores, strict=True) if s is None]
+    if failed and scored_any:
+        log.info("frame selection %s [%s]: rescoring %d frame(s) that failed while others "
+                 "scored", cfg.name, path, len(failed))
+        scores = [score(f) if s is None else s for f, s in zip(frames, scores, strict=True)]
+    for frame, s in zip(frames, scores, strict=True):
         if s is None:
             monitor.audit_event(cfg, event, etype, path, "scorer_unavailable",
                                 extra=audit_extra)
-            if above:
-                break
+            if scored_any:
+                continue
             return frame, s
         if vehicle_out is not None and monitor.vehicle_verdict(cfg, s):
             vehicle_out.append((frame, s.vehicle))
@@ -3649,12 +3666,16 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
         light = (camera.whitelamp_seen(cam, cfg.name, event.get("start_time"),
                                        force_time=cfg.whitelamp_force_time)
                  if cfg.enrich.light_status and cam is not None else None)
+        # The scorer is configured but answered for no frame (an outage): the photo still
+        # goes out, marked like an unscored sampler send so it does not read as confirmed.
+        unscored = job.scored and selected_score is None
         caption = notify.build_caption(
             monitor.TYPE_EMOJI.get(etype, "👤"), time_str(event),
             description=description or None, detail=label or None,
             score=selected_score, light=light, lens=snapshot.frame_lens(image),
             # A card frame belongs to the event; the live fallback grab is made now.
             frame_time=_frame_time(event, now) if image == fallback_image else None,
+            unverified=unscored,
         )
         ok = send_alert_photo(cfg, secrets, image, caption, score=selected_score,
                               incident=incident.incident_id(cfg.name, event),
@@ -3684,7 +3705,9 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
             kept = True
         monitor.audit_event(cfg, event, etype, "sd", "send", score=selected_score,
                             threshold=cfg.scorer.threshold if job.scored else None,
-                            telegram=ok)
+                            telegram=ok,
+                            reason="scorer_unavailable" if unscored else None,
+                            extra={"degraded": "true"} if unscored else None)
         return kept
     finally:
         shutil.rmtree(job.out_dir, ignore_errors=True)   # frames + any orphaned mp4/partials
