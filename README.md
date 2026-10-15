@@ -86,7 +86,9 @@ recorder and scorer can complement the daemon, but neither is required for the b
   events, and `faces.ignore_known` quiets alerts for familiar household members.
 - **Reliable event media** — live RTSP first, then an event-time SD-card or local-recorder
   follow-up when the first frame misses the subject; the subject zoom can be cropped from
-  a native-resolution grab so a distant figure stays legible.
+  a native-resolution grab so a distant figure stays legible. The follow-up photo can be
+  the frame where the person is tallest, skips frames smeared by a pan/tilt swing, and can
+  prefer one that shows a face ([frame pick](docs/configuration.md#live-sd-and-local-recorder-media)).
 - **Battery cameras on a hub** — `hubpoll` reads a sleeping camera's detections off the
   hub it records to; with a scorer, the sharpest accepted frame is selected from the
   stored clip. A go2rtc sidecar supplies a live fallback when the clip cannot be decoded.
@@ -306,6 +308,15 @@ sent/review-log images, and skips existing human labels. Frames with box metadat
 [box review](docs/labeling.md#box-labels-opt-in): mark each model box or draw a person it
 missed. Per-model recall counts only the models recorded as having run on that frame;
 the sample supports manual evaluation, not an automatic model promotion.
+
+**Which detector?** A week of shadow scoring on nine live camera streams, with the 350
+frames where the models disagreed labeled by hand, put RF-DETR Medium at 896 px clearly
+ahead: on the 198 frames all four models saw it found 46 of 68 people with 6 false alarms
+in 130 empty frames, against 25 and 45 for the YOLOX-m 640 default. It is now on trial
+on one camera, so the default does not change yet. Numbers, threshold sweep and limits:
+[detector comparison](docs/measurements.md#a-week-of-shadow-scoring-on-live-cameras).
+On a CPU, match `TAPO_SCORER_THREADS` to the CPUs the service gets, and consider an INT8
+copy of YOLOX-m ([Running the scorer on a CPU](docs/operations.md#running-the-scorer-on-a-cpu)).
 
 ## Home Assistant (MQTT)
 
