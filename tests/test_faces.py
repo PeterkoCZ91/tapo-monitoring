@@ -71,3 +71,28 @@ def test_faces_in_box_keeps_faces_centred_on_the_person():
     assert faces.faces_in_box(found, None) == found        # no box: every face counts
     assert faces.faces_in_box(None, [0, 0, 10, 10]) == []
     assert faces.faces_in_box([["x", 1, 2, 3]], [0, 0, 10, 10]) == []
+
+
+@pytest.mark.parametrize("threads", [3, None])
+def test_face_detector_honours_the_inference_thread_budget(monkeypatch, tmp_path, threads):
+    import types
+
+    calls = []
+
+    def session(_data, options, **_kwargs):
+        calls.append(options)
+        return types.SimpleNamespace(get_inputs=lambda: [types.SimpleNamespace(name="in")],
+                                     get_outputs=lambda: [])
+
+    monkeypatch.setitem(sys.modules, "onnxruntime", types.SimpleNamespace(
+        InferenceSession=session, SessionOptions=types.SimpleNamespace))
+    monkeypatch.setattr(faces, "dynamic_model_bytes", lambda data: data)
+    model = tmp_path / "face.onnx"
+    model.write_bytes(b"model")
+
+    faces.FaceDetector(str(model), threads=threads)
+
+    if threads:
+        assert calls[0].intra_op_num_threads == 3
+    else:
+        assert not hasattr(calls[0], "intra_op_num_threads")

@@ -729,6 +729,21 @@ def combine_rect_scores(rect_results):
 ENV_PROVIDER = "TAPO_SCORER_PROVIDER"
 
 
+def load_threads(env=None):
+    """Optional positive ONNX Runtime intra-op thread count; unset keeps its default."""
+    env = os.environ if env is None else env
+    value = (env.get("TAPO_SCORER_THREADS") or "").strip()
+    if not value:
+        return None
+    try:
+        threads = int(value)
+    except ValueError:
+        raise ValueError("TAPO_SCORER_THREADS must be a positive integer") from None
+    if threads <= 0:
+        raise ValueError("TAPO_SCORER_THREADS must be a positive integer")
+    return threads
+
+
 def select_providers(env=None):
     """ONNX Runtime ``(providers, provider_options)`` for the configured backend. Pure.
 
@@ -758,13 +773,19 @@ def _open_session(ort, model_path):
     that does not answer, and the scorer being down blocks every camera's gating.
     """
     providers, options = select_providers()
+    session_kwargs = {}
+    threads = load_threads()
+    if threads is not None:
+        session_options = ort.SessionOptions()
+        session_options.intra_op_num_threads = threads
+        session_kwargs["sess_options"] = session_options
     if providers != ["CPUExecutionProvider"]:
         try:
             if providers == ["CUDAExecutionProvider"] and hasattr(ort, "preload_dlls"):
                 # CUDA/cuDNN from the nvidia-* pip wheels, so no system CUDA install
                 ort.preload_dlls()
             session = ort.InferenceSession(
-                model_path, providers=providers, provider_options=options)
+                model_path, providers=providers, provider_options=options, **session_kwargs)
             if session.get_providers()[0] == providers[0]:
                 log.info("scorer inference provider: %s", providers[0])
                 return session
@@ -773,7 +794,7 @@ def _open_session(ort, model_path):
         except Exception as exc:  # noqa: BLE001 - any GPU start failure means CPU
             log.warning("scorer provider %s failed to start (%s: %s); falling back to CPU",
                         providers[0], type(exc).__name__, exc)
-    return ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+    return ort.InferenceSession(model_path, providers=["CPUExecutionProvider"], **session_kwargs)
 
 
 def build_score_fn(model_path, input_size=416, decoder=None):
@@ -939,7 +960,8 @@ def load_face_fn(env=None):
     if not (0 < min_score <= 1) or min_size < 0:
         raise ValueError("TAPO_SCORER_FACE_MIN_SCORE must be in (0, 1], "
                          "TAPO_SCORER_FACE_MIN_SIZE >= 0")
-    detector = faces.FaceDetector(path, min_score=min_score, min_size=min_size)
+    detector = faces.FaceDetector(path, min_score=min_score, min_size=min_size,
+                                  threads=load_threads(env))
 
     def face_fn(jpeg_bytes):
         import io
@@ -1783,6 +1805,7 @@ def main(argv=None):  # pragma: no cover - thin entry point, needs model weights
         print(f"scorer config error: {exc}", file=sys.stderr)
         raise SystemExit(2) from None
     try:
+        load_threads()
         shadow = load_shadow()
         shadow2 = load_shadow2()
         shadow3 = load_shadow3()

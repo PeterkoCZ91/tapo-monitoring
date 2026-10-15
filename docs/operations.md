@@ -312,6 +312,15 @@ CUDA and cuDNN libraries can come from the `nvidia-*-cu12` pip wheels (loaded wi
 1.22 for a 535 driver; a CUDA 13 build silently falls back to CPU). On a GPU shared with
 other work, `TAPO_SCORER_CUDA_MEM_MB` caps the scorer's memory arena.
 
+`TAPO_SCORER_THREADS` sets a positive integer limit on the detector's ONNX Runtime
+intra-op threads (for example `4`). Unset or blank keeps the runtime's automatic
+choice; invalid values stop startup with a configuration error. The setting also
+applies after a GPU provider falls back to CPU. It does not change provider selection,
+the number of HTTP requests in flight, or impose a hard CPU limit. The face detector
+(`TAPO_SCORER_FACE_MODEL`) uses the same thread count, so under a CPU quota neither
+session starts an all-core pool. Measure latency and throughput under concurrent requests before combining
+it with a service CPU quota.
+
 Provider selection is separate from deployment: `TAPO_SCORER_PROVIDER=openvino-gpu`
 needs the GPU runtime, device access and a service user allowed to open the render node;
 `cuda` needs a compatible driver and runtime. Neither provisioning tool installs those

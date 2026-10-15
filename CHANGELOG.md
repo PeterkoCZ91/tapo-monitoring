@@ -5,6 +5,9 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `TAPO_SCORER_THREADS` sets the ONNX Runtime intra-op thread count of the detector
+  (including CPU fallback) and of the face detector. Unset keeps the runtime's automatic
+  thread selection.
 - Per-camera `sd_score_parallel` (1–4, default 1) bounds scoring uploads for both
   SD and recording follow-ups, including scoring during frame extraction. Sequential
   uploads avoid dense-start batches saturating slow uplinks and timing out; fast

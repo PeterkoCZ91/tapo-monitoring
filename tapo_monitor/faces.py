@@ -206,12 +206,16 @@ def faces_in_box(faces, box):
 class FaceDetector:
     """YuNet on the CPU; ``detect(pil_image)`` -> faces as in :func:`decode`."""
 
-    def __init__(self, model_path, min_score=DEFAULT_MIN_SCORE, min_size=DEFAULT_MIN_SIZE):
+    def __init__(self, model_path, min_score=DEFAULT_MIN_SCORE, min_size=DEFAULT_MIN_SIZE,
+                 threads=None):
         import onnxruntime as ort
         with open(model_path, "rb") as f:
             data = dynamic_model_bytes(f.read())
         options = ort.SessionOptions()
         options.log_severity_level = 3
+        if threads:
+            # Same budget as the detector: under a CPU quota a default (all-core) pool throttles
+            options.intra_op_num_threads = int(threads)
         self._session = ort.InferenceSession(data, options,
                                              providers=["CPUExecutionProvider"])
         self._input = self._session.get_inputs()[0].name

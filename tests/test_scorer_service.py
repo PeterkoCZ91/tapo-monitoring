@@ -792,6 +792,81 @@ def test_open_session_falls_back_to_cpu_when_gpu_start_fails(monkeypatch):
     assert calls == [["OpenVINOExecutionProvider"], ["CPUExecutionProvider"]]
 
 
+@pytest.mark.parametrize("threads", ["4", "", None])
+@pytest.mark.parametrize("provider,expected,options,gpu_fails", [
+    ("cpu", ["CPUExecutionProvider"], None, False),
+    ("openvino-gpu", ["OpenVINOExecutionProvider"], [{"device_type": "GPU"}], False),
+    ("cuda", ["CUDAExecutionProvider"],
+     [{"gpu_mem_limit": 1536 * 1024 * 1024, "arena_extend_strategy": "kSameAsRequested"}], False),
+    ("openvino-gpu", ["OpenVINOExecutionProvider"], [{"device_type": "GPU"}], True),
+])
+def test_score_fn_configures_requested_runtime_threads(
+        monkeypatch, threads, provider, expected, options, gpu_fails):
+    import types
+
+    pytest.importorskip("PIL.Image")
+    calls = []
+
+    def session(_path, **kwargs):
+        calls.append(kwargs)
+        if gpu_fails and kwargs["providers"] != ["CPUExecutionProvider"]:
+            raise RuntimeError("GPU unavailable")
+        return types.SimpleNamespace(
+            get_inputs=lambda: [types.SimpleNamespace(name="images")],
+            get_providers=lambda: kwargs["providers"])
+
+    fake_ort = types.SimpleNamespace(InferenceSession=session, SessionOptions=types.SimpleNamespace)
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
+    monkeypatch.setenv(scorer_service.ENV_PROVIDER, provider)
+    monkeypatch.setenv("TAPO_SCORER_CUDA_MEM_MB", "1536")
+    if threads is None:
+        monkeypatch.delenv("TAPO_SCORER_THREADS", raising=False)
+    else:
+        monkeypatch.setenv("TAPO_SCORER_THREADS", threads)
+
+    scorer_service.build_score_fn("m.onnx")
+
+    for call in calls:
+        if threads:
+            assert call["sess_options"].intra_op_num_threads == 4
+        else:
+            assert "sess_options" not in call
+    assert calls[0]["providers"] == expected
+    assert calls[0].get("provider_options") == options
+    if gpu_fails:
+        assert calls[-1]["providers"] == ["CPUExecutionProvider"]
+
+
+@pytest.mark.parametrize("threads,expected", [("2", 2), (None, None)])
+def test_face_detector_shares_the_scorer_thread_budget(monkeypatch, threads, expected):
+    from tapo_monitor import faces
+
+    seen = {}
+
+    class Detector:
+        def __init__(self, path, min_score, min_size, threads=None):
+            seen["threads"] = threads
+
+    monkeypatch.setattr(faces, "FaceDetector", Detector)
+    env = {"TAPO_SCORER_FACE_MODEL": "face.onnx"}
+    if threads is not None:
+        env["TAPO_SCORER_THREADS"] = threads
+
+    assert scorer_service.load_face_fn(env) is not None
+    assert seen["threads"] == expected
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", "four"])
+def test_invalid_runtime_thread_setting_stops_startup_with_config_error(monkeypatch, capsys, value):
+    monkeypatch.setenv("TAPO_SCORER_THREADS", value)
+
+    with pytest.raises(SystemExit) as exc:
+        scorer_service.main(["--model", "m.onnx"])
+
+    assert exc.value.code == 2
+    assert "TAPO_SCORER_THREADS must be a positive integer" in capsys.readouterr().err
+
+
 def test_score_fn_reports_one_person_score_per_person(monkeypatch):
     """End to end through build_score_fn with a fake model: two people in the frame."""
     import io
