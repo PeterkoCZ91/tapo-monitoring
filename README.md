@@ -4,10 +4,24 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/LICENSE)
 
-A lightweight, config-driven reliability and alerting stack for TP-Link Tapo PTZ cameras.
-It combines camera control, on-device detection events, event-aligned frame selection,
-optional local scoring, Telegram delivery and layered health monitoring in one tested
-Python daemon.
+**Tapo alerts where the photo actually shows the person.** Tapo cameras like to report
+*motion detected* with a picture of an empty driveway: by the time the snapshot is taken, the
+person has walked out of frame. tapo-monitor is a self-hosted Python daemon that listens to the
+camera's own detection events, finds the frame the person is really in and sends that one to
+Telegram (and, if you want, to Home Assistant over MQTT).
+
+- **The right photo** — if the live frame is empty, it reads the camera's own SD-card recording
+  around the event and picks the frame where the person appears tallest, skips frames smeared by a
+  pan/tilt swing, and can prefer one that shows a face.
+- **Fewer false alarms** — an optional local scorer (YOLOX, or RF-DETR) checks every photo for a
+  person before it is sent. In a week-long test on live cameras RF-DETR Medium 896 found 46 of 68
+  people with 6 false alarms, the YOLOX default 25 with 45
+  ([detector comparison](docs/measurements.md#a-week-of-shadow-scoring-on-live-cameras)).
+  It runs on a CPU; nothing has to leave your network.
+- **It keeps working, and says when it doesn't** — alerts lost to an outage are delivered
+  later, camera and service health is watched, and a dead-man's switch reports a silent daemon.
+- **Light** — no continuous video decoding; a Raspberry Pi runs the daemon. Not a Frigate
+  replacement: the opposite trade-off.
 
 > **Project status:** the core daemon and alert pipeline are operational and validated on
 > the C560WS, and the `hubpoll` battery-camera path is validated end to end against real
