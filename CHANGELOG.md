@@ -5,6 +5,10 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Per-camera `sd_score_parallel` (1–4, default 1) bounds scoring uploads for both
+  SD and recording follow-ups, including scoring during frame extraction. Sequential
+  uploads avoid dense-start batches saturating slow uplinks and timing out; fast
+  links can opt into parallel uploads.
 - Optional face detection in the scoring service (`TAPO_SCORER_FACE_MODEL`, the YuNet ONNX
   model, run through onnxruntime without OpenCV). A client asks for faces with `?faces=1`.
   The new per-camera option `sd_prefer_face` then picks the follow-up photo among the

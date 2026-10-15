@@ -2972,16 +2972,16 @@ def process_hub_clip_queue(app, state, worker, *, now, secrets, frame_for, score
     state.pending_hub_clips[:] = [e for e in queue if not any(e is d for d in decided)]
 
 
-def _score_all(score, frames):
-    """Scores of ``frames`` in order, requested concurrently (``SCORE_PARALLEL``).
+def _score_all(score, frames, parallel=SCORE_PARALLEL):
+    """Scores of ``frames`` in order, with at most ``parallel`` requests in flight.
 
     Same answers as scoring one by one; only the wall time changes. A single frame is
     scored inline, without a thread.
     """
     frames = list(frames)
-    if len(frames) < 2:
+    if len(frames) < 2 or parallel == 1:
         return [score(f) for f in frames]
-    with ThreadPoolExecutor(max_workers=min(SCORE_PARALLEL, len(frames))) as pool:
+    with ThreadPoolExecutor(max_workers=min(parallel, len(frames))) as pool:
         return list(pool.map(score, frames))
 
 
@@ -2994,9 +2994,9 @@ class _Prescorer:
     flight; each is bounded by the scorer's own timeout.
     """
 
-    def __init__(self, score):
+    def __init__(self, score, parallel=SCORE_PARALLEL):
         self._score = score
-        self._pool = ThreadPoolExecutor(max_workers=SCORE_PARALLEL)
+        self._pool = ThreadPoolExecutor(max_workers=parallel)
         self._pending = {}
 
         def result(frame):
@@ -3026,7 +3026,7 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
     without a box for every candidate it stays with the sharpest. ``pick="tallest"`` ranks
     by box height and prefers boxes clear of the frame edge (:func:`recclip.select_tallest`).
     Missing blur measurements fall back to detection score. Frames are scored
-    concurrently (:func:`_score_all`); a scorer failure ends the selection there: retain
+    with bounded concurrency (:func:`_score_all`); a scorer failure ends selection: retain
     a confirmed candidate if available, otherwise preserve the existing unscored
     passthrough. Hub callers keep the best rejected candidate
     so their normal threshold gate can audit the rejected clip once.
@@ -3037,7 +3037,8 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
     """
     blur_score = blur_score or recclip.blur_score
     above, below = [], []
-    for frame, s in zip(frames, _score_all(score, frames), strict=True):
+    parallel = cfg.sd_score_parallel if path == "sd" else SCORE_PARALLEL
+    for frame, s in zip(frames, _score_all(score, frames, parallel), strict=True):
         if s is None:
             monitor.audit_event(cfg, event, etype, path, "scorer_unavailable",
                                 extra=audit_extra)
@@ -3154,7 +3155,7 @@ def _sd_followup_job(cfg, event, etype, fetch, start, span, out_dir, score, *,
     touch MonitorState. Audit and log lines are its only side effects besides the frames
     in ``out_dir``, which the loop removes when it collects the result.
     """
-    prescorer = _Prescorer(score) if prescore else None
+    prescorer = _Prescorer(score, cfg.sd_score_parallel) if prescore else None
     fetch_started = _time.monotonic()
     # dense_kw carries every optional fetch keyword (dense frames, the card's offset).
     try:

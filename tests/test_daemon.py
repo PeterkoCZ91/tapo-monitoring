@@ -3260,6 +3260,101 @@ def test_send_alert_photo_archives_sent_frame_without_crop(monkeypatch, tmp_path
 
 # ── process_pending_sd ────────────────────────────────────────────────────────
 
+@pytest.mark.parametrize("source", ["sd", "recording"])
+def test_pending_dense_start_does_not_overload_a_serial_uplink(monkeypatch, source):
+    import threading
+
+    sent = []
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
+         "snapshot_source": source, "sd_dense_start": True,
+         "scorer": {"url": "http://x/score", "threshold": 0.4}}]})
+    state = daemon.MonitorState()
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+    overlap = threading.Event()
+    first_in_flight = threading.Event()
+    frames = [f"/f{i}.jpg" for i in range(10)]
+
+    def score(frame):
+        # Competing uploads make the opening upload miss its deadline on a slow link.
+        if frame == frames[0]:
+            first_in_flight.set()
+            timed_out = overlap.wait(0.1)
+            first_in_flight.clear()
+            return None if timed_out else 0.1
+        if first_in_flight.is_set():
+            overlap.set()
+        return 0.9 if frame == frames[-1] else 0.1
+
+    def fetch(c, start, span=None, out_dir=None, on_frame=None, **kw):
+        if on_frame:
+            for frame in frames:
+                on_frame(frame)
+        return frames
+
+    monkeypatch.setattr(daemon, "score_for", lambda c: score)
+    monkeypatch.setattr(daemon.recclip, "fetch_recording_frames", fetch)
+    monkeypatch.setattr(daemon, "_caption_describe", lambda *a, **k: "")
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap, **kw: sent.append(img) or True)
+    daemon.process_pending_sd(
+        app, {"a": object()}, state, now=1075,
+        secrets={"telegram_token": "t", "telegram_chat": "c", "groq_key": "k"},
+        snapshot_for=lambda c: (lambda cam, ev: None), time_str=lambda ev: "T",
+        **({"fetch_frames": fetch} if source == "sd" else {}))
+    assert sent == [frames[-1]]
+
+
+@pytest.mark.parametrize("source", ["recording", "sd"])
+@pytest.mark.parametrize("parallel", [2, 4])
+def test_pending_scoring_honours_the_configured_upload_limit(monkeypatch, source, parallel):
+    import threading
+    import time
+
+    sent = []
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "a", "host": "203.0.113.10", "sd_snapshot": True,
+         "snapshot_source": source, "sd_score_parallel": parallel,
+         "scorer": {"url": "http://x/score", "threshold": 0.4}}]})
+    state = daemon.MonitorState()
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+    frames = [f"/f{i}.jpg" for i in range(8)]
+    barrier = threading.Barrier(parallel, timeout=5)
+    lock = threading.Lock()
+    active = peak = 0
+
+    def score(frame):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        barrier.wait()
+        time.sleep(0.01)
+        with lock:
+            active -= 1
+        return 0.9 if frame == frames[-1] else 0.1
+
+    def fetch(c, start, span=None, out_dir=None, on_frame=None, **kw):
+        if on_frame:
+            for frame in frames:
+                on_frame(frame)
+        return frames
+
+    monkeypatch.setattr(daemon, "score_for", lambda c: score)
+    monkeypatch.setattr(daemon.recclip, "fetch_recording_frames", fetch)
+    monkeypatch.setattr(daemon, "_caption_describe", lambda *a, **k: "")
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda tok, chat, img, cap, **kw: sent.append(img) or True)
+    daemon.process_pending_sd(
+        app, {"a": object()}, state, now=1075,
+        secrets={"telegram_token": "t", "telegram_chat": "c", "groq_key": "k"},
+        snapshot_for=lambda c: (lambda cam, ev: None), time_str=lambda ev: "T",
+        **({"fetch_frames": fetch} if source == "sd" else {}))
+    assert (sent, peak) == ([frames[-1]], parallel)
+
+
 @pytest.mark.parametrize("source", ["recording", "sd"])
 def test_pending_recording_source_sends_sharpest(monkeypatch, source):
     # A recording-source camera: process_pending_sd must route through

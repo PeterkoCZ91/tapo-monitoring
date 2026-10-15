@@ -631,6 +631,13 @@ sd_fresh_guard: 60
   dense frames; the rest of a window after the recorder's early look keeps the normal
   spacing.
 
+- `sd_score_parallel` limits concurrent scoring uploads within each SD/recording
+  follow-up to 1–4 (default **1**). Sequential uploads keep dense opening frames from
+  competing for bandwidth and timing out on a slow uplink. On a fast link, increase
+  this to 2 or 4 to reduce batch time. It also limits scoring during local recording
+  extraction; live and sampler requests keep their own timeouts and can run alongside
+  the follow-up. More frames still mean more upload time, so leave `sd_dense_start`
+  off if a sequential batch delays follow-ups too much.
 - `sd_prefer_face` (default off) asks the scorer for faces (`?faces=1`). It needs a scorer
   with `TAPO_SCORER_FACE_MODEL`; see [operations](operations.md). When some of the
   above-threshold frames show a face on the chosen person (the face's centre is inside the

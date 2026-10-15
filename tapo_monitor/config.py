@@ -278,6 +278,8 @@ class CameraConfig:
     # Extra frames every 2 s over the event's first 12 s of the follow-up window. Unset in
     # the YAML it follows sd_frame_pick: on for "largest", off for "sharpest".
     sd_dense_start: bool = False
+    # Upload one follow-up frame at a time on slow links; fast links can opt into 2–4.
+    sd_score_parallel: int = 1
     # Ask the scorer for faces (``?faces=1``) and, among the follow-up's above-threshold
     # frames, pick only from those with a face on the chosen person when any has one. Needs
     # a scorer with TAPO_SCORER_FACE_MODEL; without faces in the answers nothing changes.
@@ -1230,6 +1232,11 @@ def _camera(data, index):
         sd_dense_start = sd_frame_pick in ("largest", "tallest")
     elif not isinstance(sd_dense_start, bool):
         raise ConfigError(f"{where}: 'sd_dense_start' must be true or false")
+    sd_score_parallel = data.get("sd_score_parallel", 1)
+    if isinstance(sd_score_parallel, bool) or not isinstance(sd_score_parallel, int):
+        raise ConfigError(f"{where}: 'sd_score_parallel' must be an integer")
+    if not 1 <= sd_score_parallel <= 4:
+        raise ConfigError(f"{where}: 'sd_score_parallel' must be between 1 and 4")
     sd_prefer_face = data.get("sd_prefer_face", False)
     if not isinstance(sd_prefer_face, bool):
         raise ConfigError(f"{where}: 'sd_prefer_face' must be true or false")
@@ -1439,6 +1446,7 @@ def _camera(data, index):
         follow_app_notifications=_check_bool(data.get("follow_app_notifications", False),
                                              "follow_app_notifications", where),
         sd_dense_start=sd_dense_start,
+        sd_score_parallel=sd_score_parallel,
         sd_prefer_face=sd_prefer_face,
         sd_early_look=_check_bool(data.get("sd_early_look", False), "sd_early_look", where),
         sd_early_span=sd_early_span,
