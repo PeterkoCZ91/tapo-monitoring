@@ -23,6 +23,8 @@ All notable changes to this project are documented here.
   those frames, because a smeared subject box is often the biggest in the clip.
 
 ### Fixed
+- Boot notifications retry transient DNS, connection and timeout failures up to
+  three times while the network starts, without depending on a particular VPN service.
 - A camera-card read whose first request fails with a transient session error (`-40214`
   or `Invalid authentication data`) gets one more try after 5 s, on a fresh login, for
   every camera. pytapo logs in again by itself only on `-40401`, so the same session stayed

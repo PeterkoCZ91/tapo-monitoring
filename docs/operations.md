@@ -239,7 +239,7 @@ short gap. To roll back, remove the `TAPO_SCORER_TOKEN*` lines from `scorer.env`
 restart the service; clients that still send a header are unaffected.
 
 The token only keeps casual or accidental callers out: it travels in clear text, so over
-anything but a private network (Tailscale, a LAN) put the scorer behind TLS as well.
+anything but a private network (a VPN, a LAN) put the scorer behind TLS as well.
 
 ### Swapping the detector model
 

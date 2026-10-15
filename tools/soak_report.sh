@@ -108,7 +108,7 @@ trap 'rm -rf "$tmpdir"' EXIT
 # line is `@@end`: a probe that dies half-way (dropped ssh, killed journalctl) therefore
 # has no end marker and the report says so instead of presenting partial counts as whole.
 # The journal is filtered on the host (audit lines and the few patterns the report needs)
-# so a busy day does not travel over a Tailscale link; the line total is counted before
+# so a busy day does not travel over a VPN link; the line total is counted before
 # filtering. Arguments: unit scope root python since-hours.
 remote_probe() {
     cat <<'PROBE'

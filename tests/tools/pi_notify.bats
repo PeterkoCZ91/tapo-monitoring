@@ -145,6 +145,7 @@ assert_curl_not_called() {
     assert_status 1
     assert_output_contains "Telegram send failed"
     assert_file_absent "$LOCK"
+    [[ "$(wc -l <"$CURL_LOG")" -eq 1 ]]
 }
 
 @test "a send without a service name is never suppressed" {
@@ -156,4 +157,41 @@ assert_curl_not_called() {
 
     assert_status 0
     assert_file_contains "$CURL_LOG" "text=one-off message"
+}
+
+@test "temporary network startup failure is retried before arming cooldown" {
+    stub_command sleep <<'STUB'
+exit 0
+STUB
+    stub_command curl <<'STUB'
+printf '%s\n' "$*" >>"$TEST_TMP/curl.log"
+if [[ ! -f "$TEST_TMP/network-ready" ]]; then
+    touch "$TEST_TMP/network-ready"
+    exit 6
+fi
+echo '{"ok":true,"result":{"message_id":1}}'
+STUB
+
+    run "$SCRIPT" "unit online" "$SERVICE"
+
+    assert_status 0
+    [[ "$(wc -l <"$CURL_LOG")" -eq 2 ]]
+    [[ -f "$LOCK" ]]
+}
+
+@test "persistent network failure stops after three attempts without cooldown" {
+    stub_command sleep <<'STUB'
+exit 0
+STUB
+    stub_command curl <<'STUB'
+printf '%s\n' "$*" >>"$TEST_TMP/curl.log"
+exit 7
+STUB
+
+    run "$SCRIPT" "unit online" "$SERVICE"
+
+    assert_status 1
+    assert_output_contains "Telegram send failed"
+    [[ "$(wc -l <"$CURL_LOG")" -eq 3 ]]
+    assert_file_absent "$LOCK"
 }

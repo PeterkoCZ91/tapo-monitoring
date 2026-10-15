@@ -34,7 +34,24 @@ if [ -n "$SERVICE" ]; then
   fi
 fi
 
-RESPONSE=$(curl -fsS --connect-timeout 5 --max-time 10 -X POST "https://api.telegram.org/bot${auth_value}/sendMessage"   --data-urlencode "chat_id=${CHAT}"   --data-urlencode "text=${MSG}"   --data-urlencode "parse_mode=HTML" 2>/dev/null) || RESPONSE=""
+# Network-online can precede working DNS or the route used for notifications.
+# Retry startup connectivity failures briefly; an API refusal is final.
+RESPONSE=""
+for attempt in 1 2 3; do
+  if RESPONSE=$(curl -fsS --connect-timeout 5 --max-time 10 -X POST "https://api.telegram.org/bot${auth_value}/sendMessage"   --data-urlencode "chat_id=${CHAT}"   --data-urlencode "text=${MSG}"   --data-urlencode "parse_mode=HTML" 2>/dev/null); then
+    break
+  else
+    curl_status=$?
+    RESPONSE=""
+  fi
+  case "$curl_status" in
+    5|6|7|28)
+      [ "$attempt" -lt 3 ] || break
+      sleep 5
+      ;;
+    *) break ;;
+  esac
+done
 
 case "$RESPONSE" in
   *'"ok":true'*)

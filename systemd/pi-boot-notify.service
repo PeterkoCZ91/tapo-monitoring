@@ -1,6 +1,6 @@
 [Unit]
 Description=Telegram boot notification
-After=network-online.target tailscaled.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
