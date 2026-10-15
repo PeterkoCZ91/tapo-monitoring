@@ -1182,7 +1182,44 @@ happens on the guard's first poll, not at startup — so `selfcheck` passes with
 package while the guard sits inert, logging a warning every poll. Install it on every
 host where `pan_limit` is enabled.
 
-Each intervention archives the out-of-bounds frame — the view the recall is about to
+#### Predictive stop instead of recall
+
+An opt-in `mode: stop` observes pan on a separate thread and sends ONVIF Stop before a
+selected preset boundary. It then disables native tracking using the monitor's existing
+camera session. Slow scoring or clip reads do not set the observation cadence.
+
+```yaml
+pan_limit:
+  enabled: true
+  mode: stop
+  right_preset: "4"       # measured usable rightmost view
+  left_preset: null       # no software limit on the left
+  stop_margin: 0.15       # stop this far inside the boundary, in ONVIF pan units
+  stop_poll_interval: 0.15
+  stop_cooldown: 30
+  onvif_user_env: CAM_ONVIF_USER
+  onvif_password_env: CAM_ONVIF_PASSWORD
+```
+
+The selected presets must exist. Every configured day/night return preset must lie
+strictly inside the trigger range, including the stopping margin. Unrelated presets do
+not widen this range. `right_preset` is required; `left_preset` optionally adds a second
+side. This mode currently limits pan only.
+
+A trip latches tracking off, including later configuration writes. The normal control
+pass may return to its configured safe home preset. Tracking can resume only after the
+cooldown, fresh stable interior observations and a verified tracking disable. An unread
+position inhibits tracking; known privacy suspends pose reads and motor commands. There
+is no second native camera login for the observer.
+
+Calibrate the margin from actual motion, stopping distance and network delay on each
+camera. `stop_poll_interval` is a requested cadence, not a guaranteed response time.
+This remains a software guard: lost connectivity or camera firmware behavior can defeat
+it. It does not install a firmware motor limit, restrict manual app access, or guarantee
+startup calibration stays within the range. Verify the view with infrared enabled before
+selecting the boundary. Begin with a single camera pilot.
+
+In the default `mode: recall`, each intervention archives the out-of-bounds frame — the view the recall is about to
 erase — into a `panlimit-log` directory beside the review log or sent log, kept for
 2 days (see [Inspecting alert frames](operations.md#inspecting-alert-frames)). And
 because a recall physically removes the subject a held marginal motion frame was waiting

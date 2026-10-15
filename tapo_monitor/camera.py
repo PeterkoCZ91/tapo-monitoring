@@ -145,6 +145,15 @@ def close_client(client):
     23 hours and could no longer reach its camera or Telegram. Closing the loop when a
     client is dropped makes the count independent of who still holds a reference.
     """
+    if getattr(client, "_tapo_session_guard", None) is not None:
+        from .sessionguard import retire_client
+
+        retire_client(client, lambda: _close_client_loop(client))
+        return
+    _close_client_loop(client)
+
+
+def _close_client_loop(client):
     handler = getattr(client, "asyncHandler", None)
     loop = getattr(handler, "_loop", None)
     if loop is None:

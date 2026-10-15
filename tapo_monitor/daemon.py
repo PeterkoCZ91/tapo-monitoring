@@ -67,6 +67,7 @@ from . import (
     sentlog,
     snapshot,
     statusd,
+    stopcontrol,
     tracking,
     twin,
     weather,
@@ -347,10 +348,16 @@ def _recall_preset(cam, preset, camera=None) -> bool:
     """
     key = (camera, str(preset))
     where = f" on {camera}" if camera else ""
+    controller = getattr(cam, "_rotation_stop_control", None)
+    if controller is not None and not controller.prepare_recall(preset):
+        log.info("rotation stop: preset %s return deferred%s", preset, where)
+        return False
     try:
         cam.setPreset(preset)
     except Exception as first:  # noqa: BLE001 - a camera control failure must not stop polling
         try:
+            if controller is not None and not controller.prepare_recall(preset):
+                return False
             cam.setPreset(preset)
         except Exception as exc:  # noqa: BLE001 - same, after the retry also failed
             should_log, suppressed = recall_failure_repeat(
@@ -850,6 +857,10 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
                     linked["repaired"] = repaired
                 if lens_read is not None:
                     linked["lenses"] = lens_read
+                controller = getattr(cam, "_rotation_stop_control", None)
+                if controller is not None:
+                    plan = controller.control_plan(plan)
+                    plans[cfg.name] = plan
                 if not apply_plan(cam, plan, app.reliability,
                                   repair_failures=repair_failures, camera=cfg.name,
                                   privacy_on=privacy_on,
@@ -970,6 +981,7 @@ class MonitorState:
     groups: dict = field(default_factory=dict)
     scene_coordinator: scene.SceneCoordinator = field(default_factory=scene.SceneCoordinator)
     pan_guard: dict = field(default_factory=dict)   # per-camera ONVIF pan-limit state
+    stop_controls: dict = field(default_factory=dict)
     # Per camera, the privacy switch as the last control pass read it (True/False); absent
     # when unread, so the twin's probe applies (see parked_lenses).
     privacy_seen: dict = field(default_factory=dict)
@@ -4576,7 +4588,7 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
     parked = parked_lenses(state)
     for cfg in app.cameras:
         pl = cfg.pan_limit
-        if not pl.enabled:
+        if not pl.enabled or pl.mode == "stop":
             continue
         g = state.pan_guard.setdefault(cfg.name, {})
         if g.get("last_poll") is not None and now - g["last_poll"] < pl.poll_interval:
@@ -5122,6 +5134,11 @@ def shutdown(state: MonitorState, *, now, sd_worker=None, hub_worker=None):
     longer than the whole stop timeout): its entry is on the saved queue and is read again
     after the start, and the next start clears the job's temp dir.
     """
+    for controller in state.stop_controls.values():
+        try:
+            controller.close()
+        except Exception:  # noqa: BLE001 - continue shutdown; never expose camera replies
+            log.warning("rotation stop shutdown failed")
     if sd_worker is not None:
         if sd_worker.in_flight():
             log.info("stopping with %d SD follow-up(s) being read; queued for the restart",
@@ -5445,6 +5462,22 @@ def _connect_camera(cam_clients, state=None, now=None):
                 log.warning("connect %s failed (#%d): %s; backing off %ds", name, fails, err, wait)
         if client is not None:
             cam_clients[name] = client
+            if state is not None and stopcontrol.enabled(cfg):
+                controller = state.stop_controls.get(name)
+                if controller is None:
+                    controller = stopcontrol.StopControl(
+                        cfg, lambda: cam_clients.get(name),
+                        suspended=lambda: name in parked_lenses(state))
+                    state.stop_controls[name] = controller
+                controller.attach(client)
+                client._rotation_stop_control = controller
+                try:
+                    controller.start()
+                except Exception as exc:  # noqa: BLE001 - inhibit tracking until verified
+                    log.warning("rotation stop %s: initialization failed (%s)",
+                                name, type(exc).__name__)
+                    if not controller.disable_tracking():
+                        log.warning("rotation stop %s: tracking OFF unconfirmed", name)
         return client, err
 
     return connect

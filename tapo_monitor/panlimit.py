@@ -61,11 +61,16 @@ def limit_target(x, bounds, margin=0.01):
 
 # ── ONVIF I/O (thin; not unit-tested) ────────────────────────────────────────
 
-def build_ptz(host, port, user, password):  # pragma: no cover - network I/O
+def build_ptz(host, port, user, password, timeout=None):  # pragma: no cover - network I/O
     """Return ``(ptz_service, profile_token)`` for a camera's ONVIF PTZ, or raise."""
     from onvif import ONVIFCamera
 
-    cam = ONVIFCamera(host, int(port), user, password)
+    options = {}
+    if timeout is not None:
+        from zeep.transports import Transport
+
+        options["transport"] = Transport(timeout=timeout, operation_timeout=timeout)
+    cam = ONVIFCamera(host, int(port), user, password, **options)
     profile_token = cam.create_media_service().GetProfiles()[0].token
     return cam.create_ptz_service(), profile_token
 

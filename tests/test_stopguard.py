@@ -1,0 +1,403 @@
+"""Replay boundary races without camera connections or wall-clock sleeps."""
+
+import threading
+import time
+
+import pytest
+
+from tapo_monitor.stopguard import StopGuard
+
+
+class Clock:
+    now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds=0.2):
+        self.now += seconds
+
+
+def guard_for(positions, **kwargs):
+    clock = Clock()
+    trace = []
+    poses = iter(positions)
+    guard = StopGuard(lambda: next(poses), lambda: trace.append("stop"),
+                      lambda: trace.append("off") or True,
+                      right_limit=0.8, margin=0.1, clock=clock, **kwargs)
+    return guard, clock, trace
+
+
+def await_off(guard):
+    # This is waiting for an injected in-process callback, never network I/O.
+    thread = guard._disable_thread
+    if thread is not None:
+        thread.join(1)
+        assert not thread.is_alive()
+
+
+def test_startup_requires_two_stable_fresh_samples_and_left_is_unlimited():
+    guard, clock, trace = guard_for([-0.95, -0.95, -0.95])
+    assert not guard.snapshot().tracking_allowed
+    guard.poll_once()
+    assert not guard.snapshot().tracking_allowed
+    clock.advance()
+    guard.poll_once()
+    assert guard.snapshot().tracking_allowed
+    assert not trace
+    clock.advance(1.1)
+    assert not guard.snapshot().tracking_allowed
+    guard.poll_once()
+    assert not guard.snapshot().tracking_allowed  # stale gap breaks stability
+    guard.close()
+
+
+def test_latch_precedes_stop_and_off_cannot_block_observer():
+    callback_entered, release = threading.Event(), threading.Event()
+    positions = iter([0.5, 0.5, 0.71, 0.72])
+    clock = Clock()
+    stops = []
+    guard = None
+
+    def stop():
+        assert guard.snapshot().latched
+        stops.append(guard.snapshot().tracking_allowed)
+
+    def off():
+        callback_entered.set()
+        release.wait(2)
+        return True
+
+    guard = StopGuard(lambda: next(positions), stop, off, right_limit=0.8, margin=0.1, clock=clock)
+    try:
+        for _ in range(3):
+            guard.poll_once()
+            clock.advance()
+        assert callback_entered.wait(1)
+        assert guard.snapshot().latched
+        assert guard.snapshot().disable_pending
+        guard.poll_once()  # continues while native OFF is blocked
+        assert stops == [False, False]
+        assert guard._disable_thread is not None
+    finally:
+        release.set()
+        guard.close()
+
+
+def test_inward_recovery_not_stopped_and_rearm_needs_stability_cooldown_and_off():
+    guard, clock, trace = guard_for([0.71, 0.70, 0.6, 0.6, 0.6])
+    guard.poll_once()
+    await_off(guard)
+    assert trace == ["stop", "off"]
+    clock.advance()
+    guard.poll_once()  # still outside inner range, but moving inward
+    assert trace.count("stop") == 1
+    clock.advance()
+    guard.poll_once()
+    assert not guard.rearm()
+    clock.advance()
+    guard.poll_once()
+    assert not guard.rearm()  # stable, but cooldown still active
+    clock.advance(2)
+    guard.poll_once()
+    assert not guard.rearm()  # long gap needs a second fresh sample
+    guard.read_position = lambda: 0.6
+    clock.advance()
+    guard.poll_once()
+    assert guard.rearm()
+    assert guard.snapshot().tracking_allowed
+    guard.close()
+
+
+def test_stationary_unsafe_pose_repeats_stop_at_bounded_rate():
+    guard, clock, trace = guard_for([0.75] * 4)
+    guard.poll_once()
+    await_off(guard)
+    guard.poll_once()
+    assert trace.count("stop") == 1
+    clock.advance()
+    guard.poll_once()
+    assert trace.count("stop") == 2
+    guard.close()
+
+
+@pytest.mark.parametrize("value", [None, float("nan"), float("inf")])
+def test_bad_pose_latches_and_requests_stop_and_off(value):
+    guard, _, trace = guard_for([value])
+    guard.poll_once()
+    await_off(guard)
+    assert guard.snapshot().latched
+    assert not guard.snapshot().healthy
+    assert sorted(trace) == ["off", "stop"]
+    assert not guard.rearm()
+    guard.close()
+
+
+def test_read_failure_disables_tracking_without_leaking_exception(caplog):
+    def fail():
+        raise OSError("sensitive camera endpoint")
+
+    guard, _, trace = guard_for([])
+    guard.read_position = fail
+    guard.poll_once()
+    await_off(guard)
+    assert not guard.snapshot().tracking_allowed
+    assert guard.snapshot().reason == "pose_unavailable"
+    assert "sensitive" not in caplog.text
+    assert sorted(trace) == ["off", "stop"]
+    guard.close()
+
+
+def test_slow_read_is_not_accepted_as_fresh():
+    guard, clock, _ = guard_for([])
+
+    def slow():
+        clock.advance(1.1)
+        return 0.5
+
+    guard.read_position = slow
+    guard.poll_once()
+    assert not guard.snapshot().healthy
+    assert guard.snapshot().latched
+    guard.close()
+
+
+def test_failed_off_is_retried_without_parallel_jobs_or_rearm():
+    guard, clock, trace = guard_for([0.75, 0.5, 0.5, 0.5])
+    calls = []
+    guard.disable_tracking = lambda: calls.append(1) or False
+    guard.poll_once()
+    await_off(guard)
+    for _ in range(2):
+        clock.advance()
+        guard.poll_once()
+    assert len(calls) == 1
+    assert not guard.rearm()
+    clock.advance(2)
+    guard.poll_once()
+    await_off(guard)
+    assert len(calls) == 2
+    assert not guard.rearm()
+    assert trace.count("stop") == 1
+    guard.close()
+
+
+def test_optional_left_boundary_stops_outward_but_allows_inward():
+    guard, clock, trace = guard_for([0.05, 0.08, 0.08], left_limit=0.0)
+    guard.poll_once()
+    await_off(guard)
+    clock.advance()
+    guard.poll_once()
+    assert trace.count("stop") == 1
+    clock.advance()
+    guard.poll_once()
+    assert trace.count("stop") == 2
+    guard.close()
+
+
+def test_worker_close_has_bounded_join_even_when_off_callback_stalls():
+    entered, release = threading.Event(), threading.Event()
+
+    def off():
+        entered.set()
+        release.wait(2)
+        return True
+
+    guard = StopGuard(lambda: 0.75, lambda: None, off, right_limit=0.8, margin=0.1,
+                      poll_interval=0.01).start()
+    try:
+        assert entered.wait(1)
+        started = time.monotonic()
+        assert guard.close(timeout=0.05) is False
+        assert time.monotonic() - started < 0.5
+        assert not guard.snapshot().tracking_allowed
+        with pytest.raises(RuntimeError):
+            guard.start()
+    finally:
+        release.set()
+        guard.close()
+
+
+@pytest.mark.parametrize("kwargs", [{"margin": 0}, {"margin": float("nan")},
+                                    {"left_limit": 0.65}, {"stable_samples": 1},
+                                    {"poll_interval": 0}])
+def test_invalid_configuration_rejected(kwargs):
+    defaults = dict(right_limit=0.8, margin=0.1)
+    defaults.update(kwargs)
+    with pytest.raises(ValueError):
+        StopGuard(lambda: 0, lambda: None, lambda: True, **defaults)
+
+
+def test_safe_movement_does_not_disarm_an_established_tracker():
+    guard, clock, trace = guard_for([0.3, 0.3, 0.4, 0.5, 0.6])
+    guard.poll_once()
+    clock.advance()
+    guard.poll_once()
+    assert guard.snapshot().tracking_allowed
+    for _ in range(3):
+        clock.advance()
+        guard.poll_once()
+        assert guard.snapshot().tracking_allowed
+    assert not trace
+    guard.close()
+
+
+def test_privacy_suspension_prevents_reads_and_stops_then_requires_fresh_resume():
+    suspended = [False]
+    guard, clock, trace = guard_for([0.4, 0.4, 0.4, 0.4], suspended=lambda: suspended[0])
+    for _ in range(2):
+        guard.poll_once()
+        clock.advance()
+    assert guard.snapshot().tracking_allowed
+    original_read = guard.read_position
+    reads = []
+    guard.read_position = lambda: reads.append(1) or 0.9
+    suspended[0] = True
+    guard.poll_once()
+    assert not reads
+    assert not trace  # no motor Stop or pointless repeated native disable
+    state = guard.snapshot()
+    assert not state.healthy and not state.tracking_allowed
+    assert state.reason == "suspended"
+    suspended[0] = False
+    guard.read_position = original_read
+    guard.poll_once()
+    assert not guard.snapshot().tracking_allowed
+    clock.advance()
+    guard.poll_once()
+    assert guard.snapshot().tracking_allowed
+    suspended[0] = True
+    guard.close()
+    assert "stop" not in trace
+
+
+def test_suspension_during_read_does_not_issue_motor_stop():
+    suspended = [False]
+    guard, _, trace = guard_for([], suspended=lambda: suspended[0])
+
+    def read():
+        suspended[0] = True
+        return 0.9
+
+    guard.read_position = read
+    guard.poll_once()
+    assert not trace
+    assert guard.snapshot().reason == "suspended"
+    guard.close()
+    assert "stop" not in trace
+
+
+def test_suspended_callback_error_suppresses_motor_and_pose_reads():
+    def unknown_privacy():
+        raise RuntimeError("private endpoint")
+
+    guard, _, trace = guard_for([], suspended=unknown_privacy)
+    guard.poll_once()  # would exhaust the pose iterator if it were called
+    assert not trace
+    assert guard.snapshot().reason == "suspended"
+    guard.close()
+    assert "stop" not in trace
+
+
+def test_existing_trip_stays_latched_across_suspension():
+    suspended = [False]
+    guard, clock, trace = guard_for([0.9, 0.4, 0.4], suspended=lambda: suspended[0])
+    guard.poll_once()
+    await_off(guard)
+    suspended[0] = True
+    clock.advance(3)
+    guard.poll_once()
+    assert guard.snapshot().latched
+    assert not guard.rearm()
+    suspended[0] = False
+    for _ in range(2):
+        clock.advance()
+        guard.poll_once()
+    assert guard.snapshot().latched
+    assert guard.rearm()
+    assert trace.count("stop") == 1
+    guard.close()
+
+
+def test_worker_finally_does_not_stop_suspended_lens():
+    waited = threading.Event()
+    trace = []
+
+    def wait(_):
+        waited.set()
+        return True
+
+    guard = StopGuard(lambda: trace.append("read") or 0.9,
+                      lambda: trace.append("stop"), lambda: True,
+                      right_limit=0.8, margin=0.1, suspended=lambda: True, wait=wait).start()
+    assert waited.wait(1)
+    guard.close()
+    assert not trace
+
+
+def test_recovery_permit_allows_acceleration_then_inward_motion():
+    guard, clock, trace = guard_for([0.75, 0.75, 0.73, 0.65])
+    guard.poll_once()
+    await_off(guard)
+    assert guard.prepare_recovery(0.5)
+    for _ in range(3):
+        clock.advance()
+        guard.poll_once()
+        assert guard.snapshot().latched
+        assert not guard.snapshot().tracking_allowed
+    assert trace.count("stop") == 1
+    guard.close()
+
+
+def test_recovery_permit_outward_motion_forces_stop_and_cancels_permit():
+    guard, clock, trace = guard_for([0.75, 0.76, 0.76])
+    guard.poll_once()
+    await_off(guard)
+    assert guard.prepare_recovery(0.5)
+    clock.advance(0.01)  # safety cancellation bypasses normal Stop rate limit
+    guard.poll_once()
+    assert trace.count("stop") == 2
+    clock.advance()
+    guard.poll_once()
+    assert trace.count("stop") == 3
+    guard.close()
+
+
+def test_expired_recovery_permit_resumes_stop_at_stationary_unsafe_pose():
+    guard, clock, trace = guard_for([0.75, 0.75, 0.75])
+    guard.poll_once()
+    await_off(guard)
+    assert guard.prepare_recovery(0.5, timeout=0.3)
+    clock.advance()
+    guard.poll_once()
+    assert trace.count("stop") == 1
+    clock.advance()
+    guard.poll_once()
+    assert trace.count("stop") == 2
+    guard.close()
+
+
+def test_recovery_permit_requires_verified_off_and_safe_target():
+    guard, _, _ = guard_for([0.75])
+    guard.disable_tracking = lambda: False
+    guard.poll_once()
+    await_off(guard)
+    assert not guard.prepare_recovery(0.5)
+    guard.close()
+    guard, _, _ = guard_for([0.75])
+    guard.poll_once()
+    await_off(guard)
+    assert not guard.prepare_recovery(0.75)
+    assert not guard.prepare_recovery(0.5, timeout=3)
+    guard.suspended = lambda: True
+    assert not guard.prepare_recovery(0.5)
+    guard.close()
+
+
+def test_close_reports_only_verified_completed_native_off():
+    guard, _, trace = guard_for([])
+    assert guard.close() is True
+    assert trace == ["off"]
+    guard, _, _ = guard_for([])
+    guard.disable_tracking = lambda: False
+    assert guard.close() is False

@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+- Opt-in predictive pan stops at explicit preset boundaries, including a right-only
+  limit. A separate position observer stops before the boundary and inhibits native
+  tracking until verified safe recovery, without a second camera login.
+
 ## [0.10.2] - 2026-10-15
 
 ### Fixed

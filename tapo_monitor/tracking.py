@@ -86,6 +86,9 @@ def set_autotrack(cam, enabled, back_time=None):
     write the dwell would sit in exactly that gap. A camera that refuses the combined
     payload still gets tracking asserted by the ordinary path below.
     """
+    controller = getattr(cam, "_rotation_stop_control", None)
+    if enabled and controller is not None and not controller.allowed():
+        enabled, back_time = False, None
     if back_time is not None and not _back_time_already_set(cam, back_time):
         want = {"enabled": "on" if enabled else "off", "back_time": str(int(back_time))}
         try:
@@ -149,12 +152,15 @@ def ensure_autotrack(cam, enabled, sleep=None, back_time=None):
     """
     if sleep is None:
         sleep = _time.sleep
-    if not set_autotrack(cam, enabled, back_time=back_time):
+    controller = getattr(cam, "_rotation_stop_control", None)
+    def desired():
+        return enabled and (controller is None or controller.allowed())
+    if not set_autotrack(cam, desired(), back_time=back_time):
         return False
     sleep(1)
-    if verify_autotrack(cam, enabled, back_time=back_time):
+    if verify_autotrack(cam, desired(), back_time=back_time):
         return True
     sleep(3)
-    set_autotrack(cam, enabled, back_time=back_time)
+    set_autotrack(cam, desired(), back_time=back_time)
     sleep(2)
-    return verify_autotrack(cam, enabled, back_time=back_time)
+    return verify_autotrack(cam, desired(), back_time=back_time)

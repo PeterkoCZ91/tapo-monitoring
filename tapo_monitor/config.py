@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import difflib
 import logging
+import math
 import os
 import re
 from dataclasses import dataclass, field, fields, is_dataclass
@@ -206,6 +207,14 @@ class PanLimitConfig:
     # While a track_hold keeps the lens on a subject, the guard waits this long of
     # continuous out-of-bounds before recalling (0 = recall at once, as before).
     hold_grace: int = 20
+    # Opt-in predictive stop: explicit presets define each restricted side; an omitted
+    # side is unrestricted. Separate from the legacy span-and-recall guard.
+    mode: str = "recall"
+    right_preset: str | None = None
+    left_preset: str | None = None
+    stop_margin: float = 0.15
+    stop_poll_interval: float = 0.15
+    stop_cooldown: float = 30.0
 
 
 @dataclass
@@ -1047,6 +1056,34 @@ def _pan_limit(data, where):
         raise ConfigError(f"{where}: pan_limit tilt_min/tilt_max must be numbers") from None
     if tilt_min is not None and tilt_max is not None and tilt_min >= tilt_max:
         raise ConfigError(f"{where}: pan_limit tilt_min must be below tilt_max")
+    mode = d.get("mode", "recall")
+    if mode not in ("recall", "stop"):
+        raise ConfigError(f"{where}: pan_limit mode must be recall or stop")
+    sides = {}
+    for key in ("right_preset", "left_preset"):
+        value = d.get(key)
+        if value is not None and (isinstance(value, bool) or not str(value).strip()):
+            raise ConfigError(f"{where}: pan_limit {key} must be a preset token")
+        sides[key] = None if value is None else str(value).strip()
+    try:
+        stop_margin = float(d.get("stop_margin", 0.15))
+        stop_poll_interval = float(d.get("stop_poll_interval", 0.15))
+        stop_cooldown = float(d.get("stop_cooldown", 30))
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}: pan_limit stop settings must be numbers") from None
+    if not math.isfinite(stop_margin) or not 0 < stop_margin < 1:
+        raise ConfigError(f"{where}: pan_limit stop_margin must be between 0 and 1")
+    if not math.isfinite(stop_poll_interval) or not 0.05 <= stop_poll_interval <= 1:
+        raise ConfigError(f"{where}: pan_limit stop_poll_interval must be 0.05..1 seconds")
+    if not math.isfinite(stop_cooldown) or stop_cooldown < 1:
+        raise ConfigError(f"{where}: pan_limit stop_cooldown must be >= 1 second")
+    if mode == "stop":
+        if sides["right_preset"] is None:
+            raise ConfigError(f"{where}: pan_limit stop mode needs right_preset")
+        if sides["right_preset"] == sides["left_preset"]:
+            raise ConfigError(f"{where}: pan_limit stop presets must differ")
+        if d.get("tilt", False):
+            raise ConfigError(f"{where}: pan_limit stop mode currently supports pan only")
     return PanLimitConfig(
         enabled=bool(d.get("enabled", False)),
         margin=margin,
@@ -1058,6 +1095,11 @@ def _pan_limit(data, where):
         tilt_min=tilt_min,
         tilt_max=tilt_max,
         hold_grace=hold_grace,
+        mode=mode,
+        **sides,
+        stop_margin=stop_margin,
+        stop_poll_interval=stop_poll_interval,
+        stop_cooldown=stop_cooldown,
     )
 
 
