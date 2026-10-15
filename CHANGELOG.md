@@ -4,7 +4,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-15
+
 ### Added
+- Documentation: [Running the scorer on a CPU](docs/operations.md#running-the-scorer-on-a-cpu)
+  (thread budget, INT8 YOLOX-m, OpenVINO in containers) and a week of live shadow scoring
+  of four detectors in the [detector comparison](docs/measurements.md#a-week-of-shadow-scoring-on-live-cameras).
 - `TAPO_SCORER_THREADS` sets the ONNX Runtime intra-op thread count of the detector
   (including CPU fallback) and of the face detector. Unset keeps the runtime's automatic
   thread selection.

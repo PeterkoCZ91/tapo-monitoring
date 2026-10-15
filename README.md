@@ -54,7 +54,12 @@ see [camera reports](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/do
 
 ## What's new
 
-Recent highlights — an optional outbox delivers alerts lost to an internet outage once
+**0.10.0:** the follow-up photo skips frames smeared by a pan/tilt swing and can prefer one
+that shows a face, card reads retry on a fresh login, follow-up scoring no longer floods
+slow uplinks, and the scorer gets a thread budget for CPUs. A week-long comparison of four
+detectors on live cameras is in the [measurements](docs/measurements.md#a-week-of-shadow-scoring-on-live-cameras).
+
+Earlier highlights — an optional outbox delivers alerts lost to an internet outage once
 Telegram is back (English or Czech texts), and the TC46 joins the tested cameras. Compare
 up to four shadow detectors, each optionally rate-limited, without changing live alerts,
 review individual model boxes and missed-person candidates, and use optional scorer
@@ -63,7 +68,7 @@ subjects visible; unscored sampler alerts are marked for review. Home Assistant 
 dual-lens C545D support, off/privacy notices and incident-based labeling remain available. Full per-version
 detail and upgrade notes are in the
 [CHANGELOG](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/CHANGELOG.md).
-For existing installations, [Upgrading to 0.9.0](docs/upgrading.md) lists changed
+For existing installations, [Upgrading to 0.10.0](docs/upgrading.md) lists changed
 defaults, optional features and the scorer-first deployment sequence.
 
 ## Why this project exists
@@ -220,24 +225,45 @@ The YAML contains environment-variable **names**, never secret values. `cameras.
 
 ```mermaid
 flowchart LR
-    CAM["Tapo camera"] -->|"getEvents"| DAEMON["tapo-monitor daemon"]
-    CAM -->|"RTSP / SD recording"| MEDIA["frame selection"]
-    DAEMON --> MEDIA
-    MEDIA -->|"optional HTTP"| SCORE["local scorer"]
-    SCORE --> DECIDE["alert decision"]
-    MEDIA --> DECIDE
-    DECIDE -->|"optional caption"| GROQ["Groq"]
-    DECIDE --> TG["Telegram"]
-
-    DAEMON --> HEALTH["uptime + layered health"]
-    DAEMON --> TWIN["Digital Twin + drift"]
-    DAEMON --> LEDGER["Shadow audit ledger"]
-    REC["independent recorder/scorer"] --> LEDGER
+    subgraph SRC["Cameras"]
+        CAM["Tapo camera<br/>PTZ, dual lens"]
+        HUB["H200 hub<br/>battery cameras"]
+    end
+    subgraph EVT["Event path"]
+        EV["event poll<br/>getEvents / hubpoll"]
+        LIVE["live frame<br/>RTSP"]
+        FU["SD-card / recorder follow-up<br/>tallest, not smeared, face"]
+        SC["local scorer (HTTP)<br/>YOLOX or RF-DETR, failover list"]
+        DEC["alert decision<br/>thresholds, zones, cooldown"]
+    end
+    subgraph OUTP["Delivery"]
+        TG["Telegram"]
+        OB["outbox<br/>late delivery after an outage"]
+        HA["Home Assistant<br/>MQTT, publish-only"]
+    end
+    subgraph HLT["Health"]
+        HE["layered health<br/>+ digital twin"]
+        WD["dead-man's switch"]
+    end
+    CAM --> EV
+    HUB --> EV
+    EV --> LIVE --> SC
+    EV --> FU --> SC
+    SC --> DEC
+    DEC --> TG
+    DEC -.->|"send failed"| OB -.-> TG
+    DEC --> HA
+    SC -.->|"opt-in"| SH["shadow models<br/>side-by-side audit"]
+    CAM --> HE --> TG
+    WD --> TG
 ```
 
-The fast event path and slower control/reconnect path are intentionally separate. A
-camera that is pingable can still have a broken API, stale events or failed RTSP, so those
-layers are observed independently. See [Architecture](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/architecture.md) for timing,
+An event takes the left-to-right path: the camera reports it, the daemon grabs a live frame
+and, when that misses the person, frames from the camera's own recording; the scorer checks
+each candidate and the decision sends the best one. Groq captions are optional. The fast
+event path and the slower control/reconnect path are intentionally separate. A camera that
+is pingable can still have a broken API, stale events or failed RTSP, so those layers are
+observed independently. See [Architecture](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/architecture.md) for timing,
 failure containment and persistence.
 
 ## Event decision flow

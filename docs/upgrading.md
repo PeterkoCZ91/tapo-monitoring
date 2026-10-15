@@ -1,3 +1,31 @@
+# Upgrading to 0.10.0
+
+This guide covers the changes since 0.9.0; the 0.9.0 guide follows below. Nothing needs
+configuring: install the new package on the monitor hosts and the scorer as usual.
+
+## Why upgrade
+
+- **Better follow-up photos.** Frames smeared by the camera's own pan/tilt swing are set
+  aside before the photo is picked, so `largest`/`tallest` stop choosing a blurred frame.
+  An opt-in face preference (`sd_prefer_face` with a scorer face model) picks a frame that
+  shows the person's face when there is one.
+- **Fewer lost card reads.** A card read whose first request fails with a transient
+  session error gets one more try on a fresh login, on every camera.
+- **Slow uplinks stop timing out.** Follow-up frames are scored one at a time by default.
+- **Scorer on a CPU.** `TAPO_SCORER_THREADS` bounds the detector's and face detector's
+  threads to the CPUs the service gets; see
+  [Running the scorer on a CPU](operations.md#running-the-scorer-on-a-cpu) and the
+  [detector comparison](measurements.md#a-week-of-shadow-scoring-on-live-cameras).
+
+## Changes to existing behavior
+
+| Change | Effect | Setting |
+| --- | --- | --- |
+| Smeared follow-up frames | A frame below 0.4x the clip's median detail is skipped while a steady candidate remains. | Always on. |
+| Follow-up scoring concurrency | SD and recording follow-up frames are uploaded to the scorer one at a time (before: up to four at once). A batch can take a little longer on a fast link. | `sd_score_parallel: 2` or `4` per camera restores parallel uploads. |
+| Card-read retry | Every camera retries a transient `-40214` / `Invalid authentication data` once, 5 s later, on a new login (before: only with `sd_early_look`). | Always on. |
+| Boot notification | Retries transient network errors up to three times while the network starts and no longer waits for a specific VPN service. | `systemd/pi-boot-notify.service` |
+
 # Upgrading to 0.9.0
 
 This guide covers the changes since 0.8.1. For the full feature list, see the
