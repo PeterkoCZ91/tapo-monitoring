@@ -4,7 +4,7 @@ import logging
 import os
 from dataclasses import replace
 
-from . import camera, panlimit, sessionguard, stopguard
+from . import camera, panlimit, ptzrpc, sessionguard, stopguard
 
 log = logging.getLogger(__name__)
 
@@ -74,8 +74,9 @@ class StopControl:
             if preset is not None and not self.safe_preset(preset):
                 raise ValueError("scheduled preset is not inside the stop guard range")
         guard = self.guard_factory(
-            lambda: panlimit.read_pan_x(ptz, token),
-            lambda: ptz.Stop({"ProfileToken": token, "PanTilt": True, "Zoom": True}),
+            lambda: ptzrpc.call(ptz, lambda: panlimit.read_pan_x(ptz, token)),
+            lambda: ptzrpc.call(ptz, lambda: ptz.Stop(
+                {"ProfileToken": token, "PanTilt": True, "Zoom": True})),
             self.disable_tracking, right_limit=right, left_limit=left,
             margin=pl.stop_margin, poll_interval=pl.stop_poll_interval,
             stop_interval=pl.stop_poll_interval, cooldown=pl.stop_cooldown,

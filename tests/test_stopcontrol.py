@@ -3,6 +3,7 @@
 from types import SimpleNamespace as NS
 
 import pytest
+from requests.exceptions import ConnectTimeout
 
 from tapo_monitor import camera, config, daemon, stopcontrol
 from tapo_monitor.stopguard import GuardSnapshot
@@ -110,6 +111,31 @@ def test_explicit_right_boundary_ignores_unrelated_extreme_presets():
     assert controller.guard.read() == 0.0
     controller.guard.stop()
     assert ptz.stops == [{"ProfileToken": "profile", "PanTilt": True, "Zoom": True}]
+
+
+@pytest.mark.parametrize("operation", ["GetStatus", "Stop"])
+def test_observer_retries_a_wrapped_connection_timeout_without_losing_the_operation(operation):
+    controller, _, ptz = harness()
+    original = getattr(ptz, operation)
+    calls = []
+
+    def flaky(request):
+        calls.append(request)
+        if len(calls) == 1:
+            try:
+                raise ConnectTimeout("connect deadline")
+            except ConnectTimeout as exc:
+                raise RuntimeError("ONVIF wrapper") from exc
+        return original(request)
+
+    setattr(ptz, operation, flaky)
+    controller.start()
+    if operation == "Stop":
+        controller.guard.stop()
+        assert len(ptz.stops) == 1
+    else:
+        assert controller.guard.read() == 0.0
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize("scheduled", ["day_preset", "night_preset"])
