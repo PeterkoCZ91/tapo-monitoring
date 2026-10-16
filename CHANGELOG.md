@@ -5,6 +5,8 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Optional `TAPO_REVIEW_DIGEST_PROBLEMS_ONLY=1` skips healthy daily review summaries
+  and their photos while retaining digests for degraded or unknown fleet health.
 - Opt-in predictive pan stops at explicit preset boundaries, including a right-only
   limit. A separate position observer stops before the boundary and inhibits native
   tracking until verified safe recovery, without a second camera login.

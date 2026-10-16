@@ -1403,7 +1403,14 @@ alerts. A failed send retries on the next tick; nothing here can raise into the 
 ```bash
 export TAPO_REVIEW_DIGEST_TIME=20:45      # off when unset
 export TAPO_REVIEW_DIGEST_MAX_PHOTOS=4    # optional, default 4
+export TAPO_REVIEW_DIGEST_PROBLEMS_ONLY=1 # optional: skip healthy daily digests and photos
 ```
+
+With `TAPO_REVIEW_DIGEST_PROBLEMS_ONLY=1`, a healthy fleet stays silent. Degraded or
+unknown fleet health still produces the scheduled daily digest; delivery failures retry.
+The daily scorer baseline advances on silent days too. Detection alerts and separate
+outage/recovery notices keep their existing behavior. This option does not turn the
+daily digest into an immediate fault alarm.
 
 **It is also the only message that says the fleet is alive.** Every other Telegram message
 the daemon sends is a transition — camera lost, camera back, tick stalled, drift found — so

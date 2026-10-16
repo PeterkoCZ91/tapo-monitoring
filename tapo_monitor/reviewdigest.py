@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 
 ENV_TIME = "TAPO_REVIEW_DIGEST_TIME"
 ENV_MAX_PHOTOS = "TAPO_REVIEW_DIGEST_MAX_PHOTOS"
+ENV_PROBLEMS_ONLY = "TAPO_REVIEW_DIGEST_PROBLEMS_ONLY"
 ENV_EXPECTED_FINGERPRINT = "TAPO_EXPECTED_FINGERPRINT"
 DEFAULT_MAX_PHOTOS = 4
 # Scorer failures below this share of requests are noise (a handful of timeouts in
@@ -726,6 +727,14 @@ def run_if_due(*, env=None, now=None, send_text, send_photo, health=None, ledger
                       "logs": sentlog.log_usage(env),
                       "ledger_storage": ledger.storage_usage(ledger_path)}
         fleet = fleet_lines(health)
+        if ((env.get(ENV_PROBLEMS_ONLY) or "").strip().lower() in ("1", "true", "yes", "on")
+                and fleet and fleet[0].startswith("💚 Fleet OK")):
+            # Advance the daily baseline even on silent days: later failures must not
+            # be diluted by weeks of successful requests. Unknown health still sends.
+            mark_sent(review_dir, now)
+            _save_scorer_baseline(review_dir, raw_scorer)
+            log.info("review digest skipped: fleet healthy (problems only)")
+            return False
         cache_path = env.get("TAPO_NETWORK_SUMMARY_FILE")
         network = (network_context_lines(now, path=cache_path) if cache_path
                    else network_context_lines(now))

@@ -1004,3 +1004,37 @@ def test_radio_digest_labels_stale_unsupported_and_unknown_fields():
         {'at': 1000, 'interfaces': [{'interface': 'wlan0', 'signal_dbm': -256,
                                     'power_save': None}]}, 1030))
     assert 'signal unknown, link unknown, power save unknown' in text
+
+
+def test_problems_only_digest_suppresses_healthy_summary_and_photos(tmp_path):
+    now = _local_ts(2026, 8, 13, 21, 0)
+    _write_entry(str(tmp_path), 'hold.jpg', now - 60, 'front', 0.6)
+    env = dict(_env(tmp_path), TAPO_REVIEW_DIGEST_PROBLEMS_ONLY='1')
+    texts, photos = [], []
+    result = reviewdigest.run_if_due(
+        env=env, now=now, health={'cameras': {'front': {'reachable': True, 'events': True}},
+                                 'scorer': {'ok': True, 'requests': 100, 'failed': 0}},
+        send_text=lambda t: texts.append(t) or True,
+        send_photo=lambda p, c: photos.append(p) or True)
+    assert result is False
+    assert texts == photos == []
+    assert reviewdigest.last_sent_day(str(tmp_path)) == time.strftime('%Y-%m-%d', time.localtime(now))
+    assert reviewdigest._scorer_baseline(str(tmp_path)) == (100, 0)
+
+
+def test_problems_only_digest_keeps_faults_unknown_health_and_delivery_retry(tmp_path):
+    now = _local_ts(2026, 8, 13, 21, 0)
+    env = dict(_env(tmp_path), TAPO_REVIEW_DIGEST_PROBLEMS_ONLY='1')
+    for health in (None, {'cameras': {'front': {'reachable': False, 'events': False}}},
+                   {'cameras': {'front': {'reachable': True, 'control_health': None}}}):
+        texts = []
+        assert reviewdigest.run_if_due(
+            env=env, now=now, health=health, send_text=lambda t, texts=texts: texts.append(t) or False,
+            send_photo=lambda p, c: True) is False
+        assert len(texts) == 1
+        assert reviewdigest.last_sent_day(str(tmp_path)) is None
+    texts = []
+    assert reviewdigest.run_if_due(
+        env=env, now=now, health={'cameras': {'front': {'reachable': False}}},
+        send_text=lambda t: texts.append(t) or True, send_photo=lambda p, c: True) is True
+    assert 'Fleet degraded' in texts[0]
