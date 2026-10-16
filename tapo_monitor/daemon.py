@@ -4458,8 +4458,22 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
         current_keys = twin.alertable_keys(evaluation)
         alerted = set(state.twin_alerted.get(cfg.name, set()))
         if app.observability.drift_alerts:
+            # A virtual stop deliberately turns native tracking OFF while it owns the
+            # camera. Treat that state as expected for notification purposes; otherwise
+            # a routine safety stop looks like critical configuration drift. Keep the
+            # full desired/actual comparison in the twin snapshot for diagnostics.
+            controller = getattr(cam, "_rotation_stop_control", None)
+            tracking_inhibited = (controller is not None and not controller.allowed())
+            inhibited_keys = {
+                str(item["key"])
+                for item in evaluation.get("drift", {}).get("results", [])
+                if isinstance(item, Mapping)
+                and item.get("path") == "tracking.auto.enabled"
+                and item.get("key")
+            } if tracking_inhibited else set()
             new_results = [item for item in twin.alertable_results(evaluation)
-                           if item["key"] not in alerted]
+                           if item["key"] not in alerted
+                           and item["key"] not in inhibited_keys]
             if new_results:
                 details = ", ".join(
                     f"{item['path']} expected={item['expected']} actual={item['actual']}"
@@ -4475,6 +4489,12 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
                     log.info("drift alert sent for %s: %d drift(s)",
                              cfg.name, len(new_results))
             recovered = alerted - current_keys
+            # If an earlier probe alerted just before the stopguard acquired the
+            # tracking switch, clear that alert silently too: the OFF is owned by the
+            # safety guard, not a camera setting that needs a recovery announcement.
+            if inhibited_keys:
+                recovered.difference_update(inhibited_keys)
+                alerted.difference_update(inhibited_keys)
             if recovered and notify.send_operational(
                 secrets["telegram_token"], secrets["telegram_chat"],
                 f"✅ camera '{cfg.name}' configuration drift recovered",
