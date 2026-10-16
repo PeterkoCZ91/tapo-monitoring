@@ -542,8 +542,11 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
     # filter, so auto-track followed any motion (including cars). Nothing may run between
     # apply_smarttrack and ensure_autotrack — setSmartTrackConfig clears the auto-track
     # master switch, so ensure_autotrack (setAutoTrackTarget) has to stay truly last.
-    if plan.autotrack_on and _repair_allowed(reliability_config, "smarttrack"):
-        _repair("smarttrack", lambda: tracking.apply_smarttrack(cam, plan.smarttrack),
+    # Clear the separate tracking filters when parked as well: switching the master
+    # off alone leaves the previous night's people-following filter enabled.
+    if _repair_allowed(reliability_config, "smarttrack"):
+        kinds = plan.smarttrack if plan.autotrack_on else ()
+        _repair("smarttrack", lambda: tracking.apply_smarttrack(cam, kinds),
                 repair_failures)
     return tracking.ensure_autotrack(cam, plan.autotrack_on, back_time=plan.back_time)
 
