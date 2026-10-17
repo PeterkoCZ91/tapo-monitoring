@@ -837,7 +837,7 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
                 if cfg.detection_notice and detection_seen is not None:
                     detection_read = (detection_from_lenses(lens_read, profile)
                                       if lens_read is not None else read_detection(cam))
-                if cfg.follow_app_notifications and app_push_seen is not None:
+                if (cfg.follow_app_notifications or cfg.app_notifications_notice) and app_push_seen is not None:
                     pushes = read_app_notifications(cam, cfg.name)
                     if pushes is not None:
                         app_push_seen[cfg.name] = pushes
@@ -997,6 +997,7 @@ class MonitorState:
     detection_seen: dict = field(default_factory=dict)
     detection_announced: dict = field(default_factory=dict)
     app_push_seen: dict = field(default_factory=dict)
+    app_push_announced: dict = field(default_factory=dict)
     # Wall time of the last pan_limit recall per camera (the tick's own `now`, so it is
     # directly comparable to the sampler's): lets an expiring hold tell "no second frame
     # ever came" from "the guard yanked the subject out of view mid-corroboration".
@@ -4374,6 +4375,36 @@ def detection_notice_pass(app, state, *, secrets, now=None, send_text=None):
                             cfg.name)
 
 
+def app_notifications_notice_pass(app, state, *, secrets, send_text=None):
+    """Announce the camera's app notification switch, independently of photo delivery.
+
+    Unknown reads leave the last announced state intact. A fresh enabled camera is
+    quiet; a fresh disabled one is reported. Persist only successful announcements
+    so failed deliveries retry on the next control pass.
+    """
+    send_text = send_text or (lambda text: notify.send_operational(
+        secrets["telegram_token"], secrets["telegram_chat"], text))
+    for cfg in app.cameras:
+        if not cfg.app_notifications_notice:
+            continue
+        seen = state.app_push_seen.get(cfg.name)
+        if not isinstance(seen, bool):
+            continue
+        previous = state.app_push_announced.get(cfg.name)
+        if previous == seen or (previous is None and seen is True):
+            state.app_push_announced[cfg.name] = seen
+            continue
+        text = (f"🔔 camera '{cfg.name}': Tapo app notifications are back on" if seen
+                else f"🔕 camera '{cfg.name}': Tapo app notifications are switched off")
+        if send_text(text):
+            state.app_push_announced[cfg.name] = seen
+            log.info("app notification notice sent for %s: %s", cfg.name,
+                     "on" if seen else "off")
+        else:
+            log.warning("app notification notice for %s not delivered; retrying next pass",
+                        cfg.name)
+
+
 # Cameras whose Tapo app notifications are off right now (follow_app_notifications),
 # rebuilt from ``MonitorState.app_push_seen`` after every control pass. Module-level
 # because every delivery path funnels into send_alert_photo, which is handed the camera's
@@ -4962,7 +4993,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
         # Passed only when a camera opts in, so every other control call is unchanged.
         if any(c.detection_notice for c in app.cameras):
             extra["detection_seen"] = state.detection_seen
-        if any(c.follow_app_notifications for c in app.cameras):
+        if any(c.follow_app_notifications or c.app_notifications_notice for c in app.cameras):
             extra["app_push_seen"] = state.app_push_seen
         previous_repairs = dict(state.repair_failures)
         plans = run_control(app, now=now, connect=connect_factory(cam_clients, state, now),
@@ -4981,6 +5012,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
         privacy_notice(app, state, secrets=secrets)
         detection_notice(app, state, secrets=secrets, now=now)
         sync_app_silence(app, state)
+        app_notifications_notice_pass(app, state, secrets=secrets)
         # Privacy and detection switches as this pass read them (no-op without mqtt:).
         mqtt.observe(app, state)
         last_control = now

@@ -260,6 +260,7 @@ Per-camera switches:
     telegram_alerts: false          # decide and record every alert as usual, send no photo
     privacy_notice: true            # one Telegram message when privacy mode goes on / off
     detection_notice: true          # one message when motion/person detection goes off / on
+    app_notifications_notice: true # announce changes to the app notification switch
     follow_app_notifications: true  # no alert photos while the Tapo app's notifications are off
 ```
 
@@ -293,6 +294,12 @@ Per-camera switches:
     pan/tilt lens — switched it back on").
 
   The last announced state is kept in the runtime state; a failed send is retried.
+- `app_notifications_notice: true` reports when the camera's Tapo app notification
+  switch goes off or comes back on, without changing Telegram photo delivery. Keep
+  `follow_app_notifications: false` for notice-only behavior. It reads the same local
+  API switch described below, not the phone's Do Not Disturb mode or an app-only
+  schedule. Unknown readings do not trigger a notice. A fresh start reports only off;
+  successful announcements survive a restart, and failed sends retry next pass.
 - `follow_app_notifications: true` reads the Tapo app's notification switch for the
   camera (`getMsgPushConfig`, `chn1_msg_push_info.notification_enabled`) on every control
   pass. While it is `off`, alert photos are handled exactly as with

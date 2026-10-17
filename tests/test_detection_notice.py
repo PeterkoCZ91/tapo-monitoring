@@ -290,3 +290,93 @@ def test_an_unread_or_unfollowed_app_switch_still_sends(tmp_path, monkeypatch):
     assert daemon.sync_app_silence(other, daemon.MonitorState(
         app_push_seen={"front": False})) == set()
     assert len(_send(other.cameras[0], tmp_path, monkeypatch)[1]) == 1
+
+
+# Notice-only mode must observe the app switch without suppressing alert photos.
+def test_app_notification_notice_is_opt_in_and_strictly_boolean():
+    assert _app().cameras[0].app_notifications_notice is False
+    with pytest.raises(cfg.ConfigError, match='app_notifications_notice'):
+        _app(app_notifications_notice='true')
+
+
+def _push_notice(app, state, sent, seen, ok=True):
+    state.app_push_seen = {} if seen is None else {'front': seen}
+    daemon.app_notifications_notice_pass(
+        app, state, secrets={}, send_text=lambda text: sent.append(text) or ok)
+
+
+def test_app_switch_notices_deduplicate_retry_and_survive_restart(tmp_path):
+    app = _app(app_notifications_notice=True)
+    state, sent = daemon.MonitorState(), []
+    _push_notice(app, state, sent, True)              # healthy initial state is quiet
+    assert sent == []
+    _push_notice(app, state, sent, False, ok=False)  # unsuccessful notice must retry
+    _push_notice(app, state, sent, False)
+    assert len(sent) == 2
+    path = tmp_path / 'runtime.json'
+    assert runtime_state.save(path, runtime_state.snapshot(state), now=1000)
+    restarted = daemon.MonitorState()
+    runtime_state.load(path, restarted, now=1010)
+    _push_notice(app, restarted, sent, False)
+    _push_notice(app, restarted, sent, None)         # unread is not a return to enabled
+    assert len(sent) == 2
+    _push_notice(app, restarted, sent, True)
+    _push_notice(app, restarted, sent, True)
+    assert len(sent) == 3
+    assert 'switched off' in sent[1] and 'back on' in sent[2]
+
+
+def test_fresh_off_notice_does_not_mute_photos(tmp_path, monkeypatch):
+    app = _app(app_notifications_notice=True, follow_app_notifications=False)
+    state, sent = daemon.MonitorState(), []
+    _push_notice(app, state, sent, False)
+    assert len(sent) == 1
+    assert daemon.sync_app_silence(app, state) == set()
+    ok, posted = _send(app.cameras[0], tmp_path, monkeypatch)
+    assert ok and len(posted) == 1
+
+
+def test_unsubscribed_and_unknown_app_notices_are_quiet():
+    state, sent = daemon.MonitorState(), []
+    _push_notice(_app(), state, sent, False)
+    _push_notice(_app(app_notifications_notice=True), state, sent, None)
+    assert sent == [] and state.app_push_announced == {}
+
+
+def test_notice_only_reads_notification_switch_during_control():
+    seen = {}
+    app = _static(app_notifications_notice=True, follow_app_notifications=False)
+    daemon.run_once(app, now=1000,
+                    connect=lambda c: (Cam(pushes={'notification_enabled': 'off'}), None),
+                    is_night=lambda: False, is_raining=lambda *a, **k: False,
+                    app_push_seen=seen)
+    assert seen == {'front': False}
+
+
+def test_control_loop_reads_and_announces_notice_only_switch(monkeypatch):
+    app = _static(app_notifications_notice=True, follow_app_notifications=False)
+    state, sent = daemon.MonitorState(), []
+    monkeypatch.setattr(daemon.notify, 'send_operational',
+                        lambda _token, _chat, text: sent.append(text) or True)
+    def control(_app, **kwargs):
+        kwargs['app_push_seen']['front'] = False
+    def noop(*a, **k):
+        return None
+    daemon.loop_step(app, {}, state, now=1000,
+                     secrets={'telegram_token': 'test', 'telegram_chat': 'test'},
+                     last_control=0, control_interval=60, run_control=control,
+                     watchdog=noop, monitor=noop, drain=noop, sample=noop,
+                     is_night=lambda: False, guard=noop, inspect=noop, digest=noop,
+                     hubpoll=noop, privacy_notice=noop, detection_notice=noop, late=noop)
+    assert state.app_push_announced == {'front': False}
+    assert len(sent) == 1 and 'switched off' in sent[0]
+    assert daemon._app_silenced == set()
+
+
+def test_invalid_persisted_app_switch_does_not_become_a_false_notice(tmp_path):
+    state = daemon.MonitorState(app_push_announced={'front': 'off', 'other': False})
+    path = tmp_path / 'runtime.json'
+    assert runtime_state.save(path, runtime_state.snapshot(state), now=1000)
+    restarted = daemon.MonitorState()
+    runtime_state.load(path, restarted, now=1010)
+    assert restarted.app_push_announced == {'other': False}

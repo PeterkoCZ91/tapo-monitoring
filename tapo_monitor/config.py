@@ -323,6 +323,8 @@ class CameraConfig:
     # with telegram_alerts: false. System notices still go out. An unreadable switch
     # never silences anything.
     follow_app_notifications: bool = False
+    # Announce changes to the app notification switch without changing photo delivery.
+    app_notifications_notice: bool = False
     # Optional AI person-detection sensitivity (0-100) re-asserted every control tick.
     # None leaves the camera's value unchanged; lower = fewer false AI-person detections.
     person_sensitivity: int | None = None
@@ -1485,6 +1487,8 @@ def _camera(data, index):
         privacy_notice=bool(data.get("privacy_notice", False)),
         detection_notice=_check_bool(data.get("detection_notice", False),
                                      "detection_notice", where),
+        app_notifications_notice=_check_bool(data.get("app_notifications_notice", False),
+                                              "app_notifications_notice", where),
         follow_app_notifications=_check_bool(data.get("follow_app_notifications", False),
                                              "follow_app_notifications", where),
         sd_dense_start=sd_dense_start,

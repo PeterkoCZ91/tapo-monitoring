@@ -86,6 +86,9 @@ def snapshot(state, logger=None):
         "privacy_announced": {str(k): bool(v)
                               for k, v in (getattr(state, "privacy_announced", None)
                                            or {}).items()},
+        "app_push_announced": {str(k): v
+                               for k, v in (getattr(state, "app_push_announced", None)
+                                            or {}).items() if isinstance(v, bool)},
         "detection_announced": _detection_announced(
             getattr(state, "detection_announced", None)),
     }
@@ -202,6 +205,10 @@ def load(path, state, now, logger=None, max_age=MAX_AGE):
     if isinstance(announced, dict) and hasattr(state, "privacy_announced"):
         state.privacy_announced.update(
             {str(k): v for k, v in announced.items() if isinstance(v, bool)})
+    app_push = payload.get("app_push_announced") or {}
+    if isinstance(app_push, dict) and hasattr(state, "app_push_announced"):
+        state.app_push_announced.update(
+            {str(k): v for k, v in app_push.items() if isinstance(v, bool)})
     detection = payload.get("detection_announced") or {}
     if isinstance(detection, dict) and hasattr(state, "detection_announced"):
         state.detection_announced.update(_detection_announced(detection))
