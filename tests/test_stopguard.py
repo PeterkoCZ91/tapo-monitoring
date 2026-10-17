@@ -178,7 +178,7 @@ def test_failed_off_is_retried_without_parallel_jobs_or_rearm():
     await_off(guard)
     assert len(calls) == 2
     assert not guard.rearm()
-    assert trace.count("stop") == 1
+    assert trace.count("stop") == 4  # keep stopping while OFF remains unverified
     guard.close()
 
 
@@ -508,7 +508,7 @@ def test_left_limit_peak_and_episodes_reset_after_rearm(caplog):
     assert "beyond_limit=True" in first.getMessage()
     assert "peak_at=+0.20s" in first.getMessage()
     assert "beyond_limit=False" in second.getMessage()
-    assert "stops=1 stops_failed=0" in second.getMessage()
+    assert "stops=2 stops_failed=0" in second.getMessage()  # OFF retry was still pending
     guard.close()
     assert len(episode_lines(caplog)) == 2  # shutdown alone is not a trip
 
@@ -549,3 +549,74 @@ def test_close_with_off_in_flight_logs_once_and_keeps_unverified_result(caplog):
         await_off(guard)
     guard.close()
     assert len(episode_lines(caplog)) == 1
+
+
+def test_failed_stop_is_retried_when_pose_recovers_inside_the_limit():
+    guard, clock, trace = guard_for([0.5, 0.5, float('nan'), 0.5, 0.5])
+    attempts = []
+    def stop():
+        attempts.append(clock())
+        if len(attempts) == 1:
+            raise ConnectionError('temporary transport failure')
+    guard.stop = stop
+    try:
+        for _ in range(3):
+            guard.poll_once()
+            clock.advance()
+        await_off(guard)
+        assert guard.snapshot().latched and len(attempts) == 1
+        guard.poll_once()                       # recovered read must not abandon Stop
+        assert len(attempts) == 2
+        assert guard._episode.first_stop_ok is not None
+        clock.advance()
+        guard.poll_once()
+        assert len(attempts) == 2               # verified OFF + ACK: no needless Stop
+        assert not guard.snapshot().tracking_allowed
+    finally:
+        guard.close()
+
+
+def test_tracking_off_in_flight_keeps_stopping_even_inside_the_boundary():
+    guard, clock, trace = guard_for([0.71, 0.6, 0.6])
+    release, entered = threading.Event(), threading.Event()
+    def off():
+        entered.set()
+        release.wait(2)
+        return True
+    guard.disable_tracking = off
+    try:
+        guard.poll_once()
+        assert entered.wait(1)
+        clock.advance()
+        guard.poll_once()
+        assert trace.count('stop') == 2
+        release.set()
+        await_off(guard)
+        clock.advance()
+        guard.poll_once()
+        assert trace.count('stop') == 2
+    finally:
+        release.set()
+        guard.close()
+
+
+def test_retry_after_failed_stop_still_respects_verified_inward_recovery():
+    guard, clock, trace = guard_for([0.71, 0.6, 0.5])
+    attempts = []
+    def stop():
+        attempts.append(clock())
+        if len(attempts) == 1:
+            raise ConnectionError('temporary transport failure')
+    guard.stop = stop
+    try:
+        guard.poll_once()
+        await_off(guard)
+        assert guard.prepare_recovery(0.4)
+        clock.advance()
+        guard.poll_once()
+        assert len(attempts) == 1
+        clock.advance(2.1)
+        guard.poll_once()
+        assert len(attempts) == 2
+    finally:
+        guard.close()

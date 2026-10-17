@@ -14,6 +14,7 @@ encapsulates this so callers can't get the order wrong.
 
 import logging
 import time as _time
+from collections.abc import Mapping
 
 log = logging.getLogger(__name__)
 
@@ -58,9 +59,30 @@ def smarttrack_payload(kinds):
     return {"smart_track": {"smart_track_info": info}}
 
 
+def guard_setting_matches(cam, getter, expected):
+    """Read before rewriting a setting on an endstop-owned camera.
+
+    Other cameras retain their existing control behavior. Missing fields, unsupported
+    getters and failures require the ordinary repair rather than trusting a cache.
+    """
+    if getattr(cam, "_rotation_stop_control", None) is None:
+        return False
+    def matches(actual, wanted):
+        if isinstance(wanted, Mapping):
+            return isinstance(actual, Mapping) and all(
+                key in actual and matches(actual[key], value) for key, value in wanted.items())
+        return actual is not None and str(actual) == str(wanted)
+    try:
+        return matches(getattr(cam, getter)(), expected)
+    except Exception:
+        return False
+
+
 def apply_smarttrack(cam, kinds):
     """Enable only the requested SmartTrack kinds (people/vehicle/pet/baby)."""
-    cam.executeFunction("setSmartTrackConfig", smarttrack_payload(kinds))
+    payload = smarttrack_payload(kinds)
+    if not guard_setting_matches(cam, "getSmartTrackConfig", payload):
+        cam.executeFunction("setSmartTrackConfig", payload)
 
 
 _BACK_TIME_WARNED: set = set()  # cameras already warned about a refused back_time write
@@ -155,6 +177,12 @@ def ensure_autotrack(cam, enabled, sleep=None, back_time=None):
     controller = getattr(cam, "_rotation_stop_control", None)
     def desired():
         return enabled and (controller is None or controller.allowed())
+    want = desired()
+    expected = {"enabled": "on" if want else "off"}
+    if back_time is not None:
+        expected["back_time"] = str(int(back_time))
+    if guard_setting_matches(cam, "getAutoTrackTarget", expected) and desired() == want:
+        return True
     if not set_autotrack(cam, desired(), back_time=back_time):
         return False
     sleep(1)

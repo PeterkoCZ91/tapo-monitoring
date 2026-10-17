@@ -38,6 +38,16 @@ class StopControl:
 
     def attach(self, client):
         sessionguard.protect_client(client, self.allowed)
+        client._rotation_stop_host = camera.active_host(self.cfg)
+
+    def inhibition(self):
+        """Describe a safety-owned OFF at observation time, never a later guess."""
+        if self.guard is None:
+            return {"active": True, "reason": "starting", "healthy": False}
+        snap = self.guard.snapshot()
+        if snap.tracking_allowed:
+            return None
+        return {"active": True, "reason": snap.reason, "healthy": snap.healthy}
 
     def disable_tracking(self):
         client = self.get_client()

@@ -261,6 +261,16 @@ def fleet_lines(health):
         age, limit = control.get("age_s"), control.get("max_age_s")
         fresh = (isinstance(age, (int, float)) and isinstance(limit, (int, float))
                  and math.isfinite(age) and math.isfinite(limit) and 0 <= age <= limit)
+        if fresh:
+            inhibition = control.get("tracking_inhibition")
+            if isinstance(inhibition, dict) and inhibition.get("active") is True:
+                reason = inhibition.get("reason", "unknown")
+                if reason == "pose_unavailable":
+                    problems.append(f"{name} endstop hold after position loss")
+                elif reason == "starting" or (inhibition.get("healthy") is False and reason != "suspended"):
+                    problems.append(f"{name} endstop position unverified")
+                else:
+                    detail.append(f"{name} endstop safety hold ({reason})")
         if not fresh:
             unknown.append(name)
         elif control.get("status") not in (None, "unknown", "ok") or control.get("drift", 0):

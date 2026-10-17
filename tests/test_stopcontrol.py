@@ -318,3 +318,140 @@ def test_off_diagnostics_distinguish_missing_retired_and_request_error(caplog):
     sessionguard.retire_client(client, lambda: None)
     assert controller.disable_tracking() is False
     assert "result=retired client_unavailable=True" in caplog.messages[-1]
+
+
+def _native_session(monkeypatch):
+    app = app_config()
+    cfg = app.cameras[0]
+    controller, client, _ = harness(cfg)
+    clients, state, logins = {}, daemon.MonitorState(), []
+    controller.get_client = lambda: clients.get(cfg.name)
+    monkeypatch.setattr(camera, 'ping_reachable', lambda host: True)
+    monkeypatch.setattr(camera, 'tapo_factory', lambda *args: object())
+    def login(factory):
+        logins.append(True)
+        return client, None
+    monkeypatch.setattr(camera, 'connect', login)
+    monkeypatch.setattr(stopcontrol, 'StopControl', lambda *a, **k: controller)
+    connect = daemon._connect_camera(clients, state, now=1000)
+    assert connect(cfg)[0] is client
+    state.events_reachable[cfg.name] = True
+    return app, controller, client, clients, state, logins
+
+
+def test_healthy_stop_session_is_reused_without_a_second_login(monkeypatch):
+    app, controller, client, clients, state, logins = _native_session(monkeypatch)
+    assert daemon._connect_camera(clients, state, now=1060)(app.cameras[0])[0] is client
+    assert len(logins) == 1
+    assert not client._tapo_session_guard.retired
+    assert controller.disable_tracking()
+
+
+def test_control_pass_keeps_the_emergency_off_session_available(monkeypatch):
+    app, controller, client, clients, state, logins = _native_session(monkeypatch)
+    calls = []
+    def control(app, *, connect, **kwargs):
+        # This is the old missing-client window, before the new control pass connects.
+        calls.append(controller.disable_tracking())
+        assert connect(app.cameras[0])[0] is client
+        return {}
+    def noop(*a, **k):
+        return None
+    daemon.loop_step(app, clients, state, now=1060, secrets={}, last_control=1000,
+                     control_interval=60, run_control=control, watchdog=noop, inspect=noop,
+                     monitor=noop, drain=noop, sample=noop, guard=noop, digest=noop,
+                     hubpoll=noop, late=noop, privacy_notice=noop, detection_notice=noop,
+                     is_night=lambda: True)
+    assert calls == [True] and len(logins) == 1
+    assert clients[app.cameras[0].name] is client
+
+
+@pytest.mark.parametrize('failure', ['events', 'host', 'retired'])
+def test_unusable_stop_session_is_retired_before_replacement(monkeypatch, failure):
+    app, controller, old, clients, state, _ = _native_session(monkeypatch)
+    cfg = app.cameras[0]
+    if failure == 'events':
+        state.events_reachable[cfg.name] = False
+    elif failure == 'host':
+        old._rotation_stop_host = 'old-address'
+    else:
+        camera.close_client(old)
+    new = NativeClient()
+    def login(factory):
+        assert old._tapo_session_guard.retired
+        assert cfg.name not in clients
+        return new, None
+    monkeypatch.setattr(camera, 'connect', login)
+    assert daemon._connect_camera(clients, state, now=1060)(cfg)[0] is new
+    assert clients[cfg.name] is new
+    assert controller.disable_tracking()
+
+
+def test_unreachable_camera_does_not_leave_a_cached_session_in_event_polling(monkeypatch):
+    app, _, old, clients, state, _ = _native_session(monkeypatch)
+    monkeypatch.setattr(camera, 'ping_reachable', lambda host: False)
+    client, err = daemon._connect_camera(clients, state, now=1060)(app.cameras[0])
+    assert client is None and isinstance(err, ConnectionError)
+    assert not clients and old._tapo_session_guard.retired
+
+
+def _observe_guard_drift(monkeypatch, *, allowed=False, expected=True, actual='off'):
+    from tests.test_twin import _snapshot
+    app = app_config()
+    app.observability.digital_twin = True
+    app.observability.drift_alerts = True
+    controller, client, _ = harness(app.cameras[0])
+    controller.start()
+    controller.guard.allowed = allowed
+    client._rotation_stop_control = controller
+    state = daemon.MonitorState()
+    state.desired_plans[app.cameras[0].name] = daemon.CameraPlan(expected, False, 60, (), None)
+    sent = []
+    monkeypatch.setattr(daemon.notify, 'send_operational',
+                        lambda token, chat, text: sent.append(text) or True)
+    daemon.process_digital_twin(app, {app.cameras[0].name: client}, state, now=1000,
+                               secrets={'telegram_token': 't', 'telegram_chat': 'c'},
+                               probe=lambda *a, **k: _snapshot(auto=actual))
+    return app, controller, state, sent
+
+
+def test_expected_safety_off_has_one_context_for_immediate_notice_and_digest(monkeypatch):
+    from tapo_monitor import twin
+    app, controller, state, sent = _observe_guard_drift(monkeypatch)
+    observed = state.twin_fleet[app.cameras[0].name]
+    assert len(twin.alertable_results(observed)) == 1     # raw diagnostics survive
+    assert twin.actionable_results(observed) == []
+    assert observed['tracking_inhibition']['reason'] == 'boundary'
+    assert sent == []
+    # A later rearm must not reinterpret this older observation as spontaneous drift.
+    controller.guard.allowed = True
+    snap = daemon.fleet_health_snapshot(app, state, now=1001)
+    health = snap['cameras'][app.cameras[0].name]['control_health']
+    assert health['drift'] == 0 and health['tracking_inhibition']['active']
+
+
+def test_tracking_on_against_a_safety_off_plan_remains_a_critical_notice(monkeypatch):
+    app, _, state, sent = _observe_guard_drift(monkeypatch, expected=False, actual='on')
+    assert len(sent) == 1 and 'tracking.auto.enabled' in sent[0]
+    health = daemon.fleet_health_snapshot(app, state, now=1001)
+    control = health['cameras'][app.cameras[0].name]['control_health']
+    assert control['drift'] == 1 and control['tracking_inhibition']['active']
+
+
+def test_unexpected_off_with_an_armed_guard_still_alerts(monkeypatch):
+    app, _, state, sent = _observe_guard_drift(monkeypatch, allowed=True)
+    assert len(sent) == 1
+    control = daemon.fleet_health_snapshot(app, state, now=1001)
+    assert control['cameras'][app.cameras[0].name]['control_health']['drift'] == 1
+
+
+def test_position_loss_is_visible_even_when_the_control_plan_already_requested_off(monkeypatch):
+    app, controller, state, sent = _observe_guard_drift(monkeypatch, expected=False)
+    name = app.cameras[0].name
+    state.twin_fleet[name]['tracking_inhibition']['reason'] = 'pose_unavailable'
+    assert sent == []
+    health = daemon.fleet_health_snapshot(app, state, now=1001)
+    from tapo_monitor import reviewdigest
+    headline = reviewdigest.fleet_lines(health)[0]
+    assert 'endstop hold after position loss' in headline
+    assert 'Fleet degraded' in headline

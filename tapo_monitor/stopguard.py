@@ -308,6 +308,13 @@ class StopGuard:
                 self._stop_if_due()
             self._request_disable()
         elif latched:
+            # A readable interior pose does not acknowledge a failed Stop. Nor can
+            # one Stop prevent native tracking resuming while OFF is still pending.
+            with self._lock:
+                needs_stop = (not self._disable_ok or (self._episode is not None
+                              and self._episode.first_stop_ok is None))
+            if needs_stop:
+                self._stop_if_due()   # retains the verified inward-recovery permit
             self._request_disable()
 
     def prepare_recovery(self, target, timeout=2.0):

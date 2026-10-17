@@ -309,6 +309,19 @@ def alertable_results(evaluation):
     )
 
 
+def actionable_results(evaluation):
+    """Exclude only an observed OFF owned by the guard when this probe was taken.
+
+    Keep the raw drift report intact. In particular ON when OFF was requested is
+    never an expected safety state and must remain alertable.
+    """
+    inhibition = evaluation.get("tracking_inhibition")
+    owned = isinstance(inhibition, Mapping) and inhibition.get("active") is True
+    return [item for item in alertable_results(evaluation)
+            if not (owned and item.get("path") == "tracking.auto.enabled"
+                    and item.get("expected") is True and item.get("actual") is False)]
+
+
 def _probe_value(snapshot, group, name):
     try:
         result = snapshot["groups"][group][name]

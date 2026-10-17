@@ -5,6 +5,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pytest
+
 from tapo_monitor import reviewdigest, sentlog
 
 
@@ -1038,3 +1040,26 @@ def test_problems_only_digest_keeps_faults_unknown_health_and_delivery_retry(tmp
         env=env, now=now, health={'cameras': {'front': {'reachable': False}}},
         send_text=lambda t: texts.append(t) or True, send_photo=lambda p, c: True) is True
     assert 'Fleet degraded' in texts[0]
+
+
+@pytest.mark.parametrize('reason, healthy, expected', [
+    ('pose_unavailable', True, 'endstop hold after position loss'),
+    ('pose_unavailable', False, 'endstop hold after position loss'),
+    ('starting', False, 'endstop position unverified'),
+])
+def test_safety_position_failures_remain_degraded_instead_of_becoming_control_drift(reason, healthy, expected):
+    control = {'status': 'ok', 'drift': 0, 'age_s': 20, 'max_age_s': 600,
+               'tracking_inhibition': {'active': True, 'reason': reason, 'healthy': healthy}}
+    lines = reviewdigest.fleet_lines(_control_snapshot(control))
+    assert 'Fleet degraded' in lines[0] and expected in lines[0]
+    assert 'control drift' not in '\n'.join(lines)
+
+
+def test_normal_boundary_safety_hold_is_information_and_other_drift_remains_degraded():
+    control = {'status': 'ok', 'drift': 0, 'age_s': 20, 'max_age_s': 600,
+               'tracking_inhibition': {'active': True, 'reason': 'boundary', 'healthy': True}}
+    lines = reviewdigest.fleet_lines(_control_snapshot(control))
+    assert 'Fleet OK' in lines[0]
+    assert 'endstop safety hold (boundary)' in '\n'.join(lines)
+    control['drift'] = 1
+    assert 'control drift' in reviewdigest.fleet_lines(_control_snapshot(control))[0]

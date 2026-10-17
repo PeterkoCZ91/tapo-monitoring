@@ -3,7 +3,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tapo_monitor import tracking
+from types import SimpleNamespace
+
+import pytest
+
+from tapo_monitor import daemon, tracking
 
 # ── decide_tracking ──────────────────────────────────────────────────────────
 
@@ -224,3 +228,135 @@ def test_refused_back_time_warns_only_once_per_camera(caplog):
         tracking.set_autotrack(cam, True, back_time=180)
         tracking.set_autotrack(cam, True, back_time=180)
     assert caplog.text.count("refused the combined") == 1
+
+
+class _GuardCamera:
+    """Firmware model: a SmartTrack write resets the auto-track master switch."""
+    def __init__(self):
+        self._rotation_stop_control = SimpleNamespace(allowed=lambda: True)
+        self.values = {
+            'motion': {'digital_sensitivity': '60'}, 'person': {'enabled': 'on'},
+            'vehicle': {'enabled': 'off'}, 'lamp': {'wtl_force_time': '60'},
+            'night': 'on', 'smart': tracking.smarttrack_payload(('people',)),
+            'auto': {'enabled': 'on'},
+        }
+        self.writes = []
+        self.broken = None
+
+    def read(self, key):
+        if key == self.broken:
+            raise ConnectionError('unreadable setting')
+        return self.values[key]
+
+    def getMotionDetection(self):
+        return self.read('motion')
+
+    def getPersonDetection(self):
+        return self.read('person')
+
+    def getVehicleDetection(self):
+        return self.read('vehicle')
+
+    def getWhitelampConfig(self):
+        return self.read('lamp')
+
+    def getDayNightMode(self):
+        return self.read('night')
+
+    def getSmartTrackConfig(self):
+        return self.read('smart')
+
+    def getAutoTrackTarget(self):
+        return self.read('auto')
+
+    def setMotionDetection(self, **kwargs):
+        self.writes.append('motion')
+        self.values['motion'] = {'digital_sensitivity': str(kwargs['sensitivity'])}
+
+    def setPersonDetection(self, enabled, **kwargs):
+        self.writes.append('person')
+        self.values['person'] = {'enabled': 'on' if enabled else 'off', **kwargs}
+
+    def setVehicleDetection(self, enabled):
+        self.writes.append('vehicle')
+        self.values['vehicle'] = {'enabled': 'on' if enabled else 'off'}
+
+    def setWhitelampConfig(self, **kwargs):
+        self.writes.append('lamp')
+        self.values['lamp'] = {'wtl_force_time': str(kwargs['forceTime'])}
+
+    def setDayNightMode(self, mode):
+        self.writes.append('night')
+        self.values['night'] = mode
+
+    def executeFunction(self, method, params):
+        assert method == 'setSmartTrackConfig'
+        self.writes.append('smart')
+        self.values['smart'] = params
+        self.values['auto'] = {'enabled': 'off'}
+
+    def setAutoTrackTarget(self, enabled):
+        self.writes.append('auto')
+        self.values['auto'] = {'enabled': 'on' if enabled else 'off'}
+
+
+def _guard_plan():
+    return daemon.CameraPlan(True, False, 60, ('people',), None,
+                             night_vision='on', whitelamp_force_time=60)
+
+
+def test_stable_endstop_camera_is_read_without_rewriting_firmware(monkeypatch):
+    cam = _GuardCamera()
+    monkeypatch.setattr(tracking._time, 'sleep', lambda _: None)
+    assert daemon.apply_plan(cam, _guard_plan())
+    assert cam.writes == []
+    assert cam.values['auto']['enabled'] == 'on'
+
+
+@pytest.mark.parametrize('setting', ['motion', 'person', 'vehicle', 'lamp', 'night', 'smart', 'auto'])
+def test_endstop_camera_repairs_real_drift_and_reasserts_auto_last(monkeypatch, setting):
+    cam = _GuardCamera()
+    cam.values[setting] = {} if isinstance(cam.values[setting], dict) else 'off'
+    monkeypatch.setattr(tracking._time, 'sleep', lambda _: None)
+    assert daemon.apply_plan(cam, _guard_plan())
+    assert cam.writes == ([setting, 'auto'] if setting == 'smart' else [setting])
+    assert cam.values['auto']['enabled'] == 'on'
+
+
+@pytest.mark.parametrize('setting', ['motion', 'person', 'vehicle', 'lamp', 'night', 'smart'])
+def test_unreadable_settings_keep_the_original_repair_path(monkeypatch, setting):
+    cam = _GuardCamera()
+    cam.broken = setting
+    monkeypatch.setattr(tracking._time, 'sleep', lambda _: None)
+    assert daemon.apply_plan(cam, _guard_plan())
+    assert setting in cam.writes
+
+
+def test_a_partial_detection_read_cannot_skip_the_requested_sensitivity(monkeypatch):
+    cam = _GuardCamera()
+    plan = _guard_plan()
+    plan.person_sensitivity = 40
+    monkeypatch.setattr(tracking._time, 'sleep', lambda _: None)
+    assert daemon.apply_plan(cam, plan)
+    assert cam.writes == ['person']
+
+
+def test_guard_trip_during_the_read_does_not_leave_tracking_enabled():
+    cam = _GuardCamera()
+    allowed = [True]
+    cam._rotation_stop_control.allowed = lambda: allowed[0]
+    def reading():
+        allowed[0] = False
+        return cam.values['auto']
+    cam.getAutoTrackTarget = reading
+    assert tracking.ensure_autotrack(cam, True, sleep=lambda _: None)
+    assert cam.writes == ['auto']
+    assert cam.values['auto']['enabled'] == 'off'
+
+
+def test_cameras_without_an_endstop_keep_their_existing_write_policy(monkeypatch):
+    cam = _GuardCamera()
+    cam._rotation_stop_control = None
+    monkeypatch.setattr(tracking._time, 'sleep', lambda _: None)
+    assert daemon.apply_plan(cam, _guard_plan())
+    assert cam.writes == ['motion', 'night', 'person', 'vehicle', 'lamp', 'smart', 'auto']

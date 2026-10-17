@@ -1216,8 +1216,22 @@ side. This mode currently limits pan only.
 A trip latches tracking off, including later configuration writes. The normal control
 pass may return to its configured safe home preset. Tracking can resume only after the
 cooldown, fresh stable interior observations and a verified tracking disable. An unread
-position inhibits tracking; known privacy suspends pose reads and motor commands. There
-is no second native camera login for the observer.
+position inhibits tracking; Stop continues after position reads recover until a Stop
+is acknowledged and tracking OFF is verified. A verified inward-recovery permit is
+still honored. Known privacy suspends pose reads and motor commands. There
+is no second native camera login for the observer. Healthy stop-mode sessions survive
+routine control passes, so the observer retains its native OFF path. A failed event API,
+retired session or changed camera address requires a fresh connection; a stale client
+is closed before the replacement logs in. On stop-mode cameras the control pass also
+reads motion/person/vehicle settings, day/night mode, lamp timing, SmartTrack and the
+tracking switch before rewriting them. Matching values need no write; a missing or
+unreadable value still takes the ordinary repair path. This avoids repeatedly resetting
+a correctly configured SmartTrack master switch while the guard is observing motion.
+
+The twin keeps the raw desired/actual comparison and records safety ownership at probe
+time. A guard-owned tracking OFF is not unexpected control drift. The digest still
+reports a hold caused by lost position or an unverified guard; a normal boundary hold
+is informational. Tracking ON when OFF was requested remains critical drift.
 
 Calibrate the margin from actual motion, stopping distance and network delay on each
 camera. `stop_poll_interval` is a requested cadence, not a guaranteed response time.

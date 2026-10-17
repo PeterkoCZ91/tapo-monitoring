@@ -421,7 +421,8 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
     motion sensitivity, person detection and vehicle-off are repaired per lens with
     ``chn_id`` — only on the lenses that drifted or could not be read — because a setter
     without ``chn_id`` reaches the wide lens alone. Without it (every single-lens camera)
-    the calls are exactly the chn-less ones sent every pass.
+    the calls are chn-less. Endstop-owned cameras first read supported settings and
+    repair only mismatches or unreadable values; other cameras keep their write policy.
     """
     if lenses is not None:
         _repair_lenses(cam, lenses, "motion_sensitivity",
@@ -432,7 +433,8 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
                        lambda chn: cam.setMotionDetection(
                            sensitivity=int(plan.motion_sensitivity), chn_id=chn),
                        None, camera)
-    else:
+    elif not tracking.guard_setting_matches(
+            cam, "getMotionDetection", {"digital_sensitivity": int(plan.motion_sensitivity)}):
         try:
             cam.setMotionDetection(sensitivity=int(plan.motion_sensitivity))
         except Exception:
@@ -442,7 +444,8 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
     # runs a faster shutter, so the event frame is sharper. Re-asserted every tick so it
     # follows the day/night schedule. Left before apply_smarttrack (safe zone): SmartTrack
     # and auto-track re-assert last, so this cannot leave the tracking filter wiped.
-    if plan.night_vision is not None:
+    if (plan.night_vision is not None
+            and not tracking.guard_setting_matches(cam, "getDayNightMode", plan.night_vision)):
         try:
             cam.setDayNightMode(plan.night_vision)
         except Exception as exc:  # noqa: BLE001 - a camera control failure must not stop polling
@@ -469,12 +472,16 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
                 and repaired is not None):
             repaired.add("person_detection")
     elif _repair_allowed(reliability_config, "person_detection"):
+        person_expected = {"enabled": "on"}
+        if plan.person_sensitivity is not None:
+            person_expected["sensitivity"] = str(plan.person_sensitivity)
         def _person():
             if plan.person_sensitivity is not None:
                 cam.setPersonDetection(True, sensitivity=plan.person_sensitivity)
             else:
                 cam.setPersonDetection(True)
-        if _repair("person_detection", _person, repair_failures) and repaired is not None:
+        if (not tracking.guard_setting_matches(cam, "getPersonDetection", person_expected)
+                and _repair("person_detection", _person, repair_failures) and repaired is not None):
             repaired.add("person_detection")
     # Keep the camera following people, not cars: the C560WS auto-track swings after any
     # AI-detected target, so vehicle detection is re-asserted OFF every tick (SmartTrack
@@ -484,7 +491,8 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
                        lambda lens: lens.get("enabled") != "off",
                        lambda chn: cam.setVehicleDetection(False, chn_id=chn),
                        repair_failures, camera)
-    elif _repair_allowed(reliability_config, "vehicle_detection"):
+    elif (_repair_allowed(reliability_config, "vehicle_detection")
+          and not tracking.guard_setting_matches(cam, "getVehicleDetection", {"enabled": "off"})):
         _repair("vehicle_detection", lambda: cam.setVehicleDetection(False),
                 repair_failures)
     if plan.ldc is not None and _repair_allowed(reliability_config, "ldc"):
@@ -505,7 +513,13 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
                 if plan.whitelamp_intensity is not None:
                     kwargs["intensityLevel"] = plan.whitelamp_intensity
                 cam.setWhitelampConfig(**kwargs)
-            _repair("whitelamp_config", _wtl, repair_failures)
+            lamp_expected = {}
+            if plan.whitelamp_force_time is not None:
+                lamp_expected["wtl_force_time"] = plan.whitelamp_force_time
+            if plan.whitelamp_intensity is not None:
+                lamp_expected["wtl_intensity_level"] = plan.whitelamp_intensity
+            if not tracking.guard_setting_matches(cam, "getWhitelampConfig", lamp_expected):
+                _repair("whitelamp_config", _wtl, repair_failures)
     if plan.night_vision_mode is not None and hasattr(cam, "setNightVisionModeConfig"):
         _apply_night_vision_mode(cam, plan.night_vision_mode, camera, repair_failures)
     # A refused recall must be visible: the camera answers configuration calls happily
@@ -4489,25 +4503,20 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
             state.twin_last_probe[cfg.name] = now
             continue
 
+        controller = getattr(cam, "_rotation_stop_control", None)
+        if controller is not None:
+            inhibition = controller.inhibition()
+            if inhibition is not None:
+                evaluation["tracking_inhibition"] = inhibition
         current_keys = twin.alertable_keys(evaluation)
         alerted = set(state.twin_alerted.get(cfg.name, set()))
         if app.observability.drift_alerts:
-            # A virtual stop deliberately turns native tracking OFF while it owns the
-            # camera. Treat that state as expected for notification purposes; otherwise
-            # a routine safety stop looks like critical configuration drift. Keep the
-            # full desired/actual comparison in the twin snapshot for diagnostics.
-            controller = getattr(cam, "_rotation_stop_control", None)
-            tracking_inhibited = (controller is not None and not controller.allowed())
-            inhibited_keys = {
-                str(item["key"])
-                for item in evaluation.get("drift", {}).get("results", [])
-                if isinstance(item, Mapping)
-                and item.get("path") == "tracking.auto.enabled"
-                and item.get("key")
-            } if tracking_inhibited else set()
-            new_results = [item for item in twin.alertable_results(evaluation)
-                           if item["key"] not in alerted
-                           and item["key"] not in inhibited_keys]
+            # The same capture-time context is used by immediate notices and the
+            # daily digest; a later guard state cannot reinterpret an older probe.
+            actionable = twin.actionable_results(evaluation)
+            actionable_keys = {str(item["key"]) for item in actionable if item.get("key")}
+            inhibited_keys = current_keys - actionable_keys
+            new_results = [item for item in actionable if item["key"] not in alerted]
             if new_results:
                 details = ", ".join(
                     f"{item['path']} expected={item['expected']} actual={item['actual']}"
@@ -4790,14 +4799,18 @@ def fleet_health_snapshot(app: AppConfig, state: MonitorState, *, now,
                     and (state.repair_last_failure_at is None
                          or captured >= state.repair_last_failure_at)):
                 observed_health = observed.get("health")
-                entry["control_health"] = {
+                control_view: dict = {
                     "status": (observed_health.get("status", "unknown")
                                if isinstance(observed_health, Mapping) else "unknown"),
-                    "drift": len(twin.alertable_results(observed)),
+                    "drift": len(twin.actionable_results(observed)),
                     "age_s": max(0.0, now - captured),
                     "max_age_s": max(2 * app.observability.probe_interval,
                                      app.alerts.outage_threshold),
                 }
+                inhibition = observed.get("tracking_inhibition")
+                if isinstance(inhibition, Mapping) and inhibition.get("active") is True:
+                    control_view["tracking_inhibition"] = dict(inhibition)
+                entry["control_health"] = control_view
         if hasattr(state, "scene_coordinator") and state.scene_coordinator is not None:
             clock_offset = state.scene_coordinator.clock_offset(cfg.name)
             if clock_offset is not None:
@@ -4958,8 +4971,9 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     always snapped an empty scene) to one poll interval (~seconds), without re-logging in
     each poll — repeated logins are what risk the C560WS lockout.
 
-    ``cam_clients`` is rebuilt by the control pass and reused (not cleared) on the fast
-    polls between control passes. Collaborators are injectable for testing. Returns the
+    Healthy stop-mode clients remain available across control passes so the guard
+    always has its existing native OFF session. Other clients are rebuilt as before;
+    all are reused on the fast polls between control passes. Collaborators are injectable for testing. Returns the
     (possibly advanced) ``last_control``.
 
     ``sd_worker`` (:class:`sdworker.SdWorker`) reads SD/recording follow-ups in the
@@ -4983,9 +4997,14 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     is_night = is_night or scheduling.is_night
     night = is_night()                    # one source of truth for this tick's night gate
     if control_due(last_control, now, control_interval):
-        for client in cam_clients.values():
-            camera.close_client(client)
-        cam_clients.clear()
+        # A healthy stop-mode session is also the guard's emergency OFF path.
+        # Retiring it every minute created a blind window and needless camera logins.
+        retained = {c.name for c in app.cameras if stopcontrol.enabled(c)
+                    and state.events_reachable.get(c.name) is not False}
+        for name, client in list(cam_clients.items()):
+            if name not in retained:
+                camera.close_client(client)
+                cam_clients.pop(name, None)
         # Only a dual-lens camera whose firmware is moving its pan/tilt lens adds this;
         # everything else sees the control call it always did.
         linked = cameras_under_linkage(app, state, now)
@@ -5477,15 +5496,31 @@ def _connect_camera(cam_clients, state=None, now=None):
                 if was_reachable is not False:
                     log.warning("network %s unreachable", name)
         if not reachable:
+            previous = cam_clients.pop(name, None)
+            if previous is not None:
+                camera.close_client(previous)
             return None, ConnectionError("camera did not answer ping")
 
         if state is not None and now is not None:
             if now < state.connect_backoff_until.get(name, 0):
                 return None, "backoff"
 
-        user, password, cloud = resolve_camera_credentials(cfg)
-        factory = camera.tapo_factory(camera.active_host(cfg), user, password, cloud)
-        client, err = camera.connect(factory)
+        previous = cam_clients.get(name)
+        session = getattr(previous, "_tapo_session_guard", None)
+        reusable = (previous is not None and stopcontrol.enabled(cfg)
+                    and getattr(previous, "_rotation_stop_host", None) == camera.active_host(cfg)
+                    and session is not None and not session.retired
+                    and state is not None and state.events_reachable.get(name) is not False)
+        if reusable:
+            client, err = previous, None
+        else:
+            # Never open a second native session alongside a stale cached client.
+            if previous is not None:
+                camera.close_client(previous)
+                cam_clients.pop(name, None)
+            user, password, cloud = resolve_camera_credentials(cfg)
+            factory = camera.tapo_factory(camera.active_host(cfg), user, password, cloud)
+            client, err = camera.connect(factory)
         if client is not None and state is not None and len(camera.candidate_hosts(cfg)) > 1:
             if switched_from is not None:
                 if not _confirm_switch(cfg, state, client, switched_from, now or 0):
