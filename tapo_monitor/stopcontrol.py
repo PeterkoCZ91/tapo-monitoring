@@ -33,6 +33,15 @@ class StopControl:
         self.inner_low = self.inner_high = None
         self.last_reason = None
 
+    def _note(self, kind, detail):
+        # Debug trace only; a guard without it (or failing to take it) never matters.
+        note = getattr(self.guard, "note", None)
+        if note is not None:
+            try:
+                note(kind, detail)
+            except Exception:  # noqa: BLE001
+                pass
+
     def allowed(self):
         return self.guard is not None and self.guard.snapshot().tracking_allowed
 
@@ -111,12 +120,15 @@ class StopControl:
     def prepare_recall(self, preset):
         """Permit only a configured safe destination while the stop latch is active."""
         if not self.safe_preset(preset):
+            self._note("recall_refused", f"preset={preset} unsafe")
             return False
         if self.guard is None:
             return False
         if not self.guard.snapshot().latched:
             return True
-        return self.guard.prepare_recovery(self.positions[str(preset)])
+        permitted = self.guard.prepare_recovery(self.positions[str(preset)])
+        self._note("recall_permit" if permitted else "recall_refused", f"preset={preset}")
+        return permitted
 
     def control_plan(self, plan):
         """Keep the latch authoritative over stale plans and recover only inward."""
@@ -136,6 +148,7 @@ class StopControl:
                       self.cfg.tracking.night_preset)
         home = next((p for p in candidates if p is not None and self.safe_preset(p)), None)
         preset = home if home is not None and self.safe_preset(home) else None
+        self._note("plan_override", f"autotrack=off preset={preset}")
         return replace(plan, autotrack_on=False, preset=preset, back_time=None)
 
     def close(self):

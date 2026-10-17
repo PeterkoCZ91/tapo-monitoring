@@ -620,3 +620,69 @@ def test_retry_after_failed_stop_still_respects_verified_inward_recovery():
         assert len(attempts) == 2
     finally:
         guard.close()
+
+
+def test_pose_loss_trace_names_cause_and_pre_trip_reads(caplog):
+    caplog.set_level("INFO", logger="tapo_monitor.stopguard")
+    clock = Clock()
+    reads = iter([0.5, 0.5, None])
+
+    def read():
+        value = next(reads)
+        clock.advance(0.2)
+        if value is None:
+            error = TimeoutError("slow")
+            error.rpc_diag = {"attempts": 3, "errors": ["ReadTimeout/read"] * 3, "elapsed_s": 0.8}
+            raise error
+        return value
+
+    guard = StopGuard(read, lambda: None, lambda: True, right_limit=0.8, margin=0.1,
+                      clock=clock, name="cam")
+    for _ in range(3):
+        guard.poll_once()
+        clock.advance()
+    await_off(guard)
+    clock.advance(3)
+    for _ in range(2):  # fail-closed pose never rearms; a fresh pair of reads does
+        guard.poll_once()
+    reads = iter([0.5, 0.5])
+    guard._latched = True
+    guard.poll_once()
+    guard.poll_once()
+    await_off(guard)
+    assert guard.rearm()
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "reason=pose_unavailable" in text and "cause=TimeoutError (attempts=3" in text
+    trace = next(r.getMessage() for r in caplog.records if "stop guard trace" in r.getMessage())
+    assert "cause=TimeoutError" in trace and "readfail=TimeoutError" in trace
+    assert "pre=[" in trace and "0.5000/0.20s" in trace and "stop=ok" in trace
+    assert "off=ok" in trace and "rearm" in trace
+    guard.close()
+
+
+def test_trace_is_bounded_and_records_blocked_rearm_once(caplog):
+    caplog.set_level("INFO", logger="tapo_monitor.stopguard")
+    guard, clock, _ = guard_for([0.5, 0.5] + [0.75] * 400)
+    for _ in range(402):
+        guard.poll_once()
+        clock.advance(0.2)
+        guard.rearm()
+        guard.rearm()
+    await_off(guard)
+    episode = guard._episode
+    assert episode is not None and len(episode.trace) <= 80
+    assert [k for _, k, _ in episode.trace].count("rearm_blocked") <= 3
+    guard.close()
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "stop guard trace" in text and "cause=boundary" in text
+
+
+def test_read_statistics_line_is_periodic(caplog):
+    caplog.set_level("INFO", logger="tapo_monitor.stopguard")
+    guard, clock, _ = guard_for([0.5] * 8)
+    for _ in range(8):
+        guard.poll_once()
+        clock.advance(200)
+    stats = [r.getMessage() for r in caplog.records if "stop guard stats" in r.getMessage()]
+    assert stats and "reads=" in stats[0] and "failed=0" in stats[0]
+    guard.close()

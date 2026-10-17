@@ -1228,6 +1228,13 @@ tracking switch before rewriting them. Matching values need no write; a missing 
 unreadable value still takes the ordinary repair path. This avoids repeatedly resetting
 a correctly configured SmartTrack master switch while the guard is observing motion.
 
+Each trip logs its `cause` (the exception type and RPC attempt phases of a failed pose
+read). Every closed episode adds one `PTZ stop guard trace` line: the last reads before
+the trip with their latency, then a bounded timeline of position changes, Stop and OFF
+results, refused rearm reasons and recall permits. A `PTZ stop guard stats` line every
+ten minutes summarises read count, failures, slow reads and Stop failures. These lines
+are diagnostic only and never influence the guard.
+
 The twin keeps the raw desired/actual comparison and records safety ownership at probe
 time. A guard-owned tracking OFF is not unexpected control drift. The digest still
 reports a hold caused by lost position or an unverified guard; a normal boundary hold

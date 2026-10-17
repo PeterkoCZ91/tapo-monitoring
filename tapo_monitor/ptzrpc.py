@@ -29,10 +29,12 @@ def call(ptz, operation, *, budget=0.8, clock=time.monotonic):
     timeouts combined; failure is still propagated to the guard's latch.
     Only the observer thread owns this transport. Restore its timeout afterwards.
     """
-    deadline = clock() + budget
+    started = clock()
+    deadline = started + budget
     transport = ptz.zeep_client.transport
     original = transport.operation_timeout
     phase = None
+    diag = {"attempts": 0, "errors": []}
     try:
         for attempt in range(4):
             remaining = deadline - clock()
@@ -43,15 +45,25 @@ def call(ptz, operation, *, budget=0.8, clock=time.monotonic):
                 connect = remaining - min(0.05, remaining / 4)
             read = min(0.25, remaining - connect) if attempt < 3 else remaining - connect
             transport.operation_timeout = (connect, read)
+            diag["attempts"] = attempt + 1
             try:
                 result = operation()
             except Exception as exc:
                 phase = _transport_phase(exc)
+                diag["errors"].append(f"{type(exc).__name__}/{phase or 'other'}")
                 if attempt == 3 or phase is None:
                     raise
             else:
                 if clock() > deadline:
                     raise TimeoutError("PTZ RPC deadline exceeded")
                 return result
+    except Exception as exc:
+        # Debug context for the guard's trace: how many attempts, which phase failed.
+        diag["elapsed_s"] = round(clock() - started, 3)
+        try:
+            exc.rpc_diag = diag
+        except Exception:  # noqa: BLE001 - exceptions without __dict__ keep no context
+            pass
+        raise
     finally:
         transport.operation_timeout = original

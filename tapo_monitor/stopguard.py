@@ -10,9 +10,16 @@ import logging
 import math
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 log = logging.getLogger(__name__)
+
+_TRACE_LIMIT = 80        # events kept per episode
+_TRACE_MOVE = 0.004      # pan change that earns a position entry in the trace
+_TRACE_HEARTBEAT = 5.0   # seconds between position entries while the pose is steady
+_SLOW_READ = 0.4         # a pose read slower than this is counted in the stats
+_STATS_EVERY = 600.0     # seconds between read-statistics lines
 
 
 @dataclass(frozen=True)
@@ -41,6 +48,23 @@ class _Episode:
     first_stop_ok: float | None = None
     off: float | None = None
     off_failed: int = 0
+    # Debug context, never used for decisions: the pre-trip samples and a bounded
+    # timeline of observed position changes and guard/camera events.
+    pre: list = field(default_factory=list)
+    trace: list = field(default_factory=list)
+    trace_dropped: int = 0
+    stops_traced: int = 0
+    last_traced_x: float | None = None
+    last_traced_at: float = -math.inf
+    cause: str = "none"
+
+
+def _diag_text(diag):
+    """Compact text for a failed RPC's attempt log (``ptzrpc.call`` diagnostics)."""
+    if not isinstance(diag, dict):
+        return ""
+    errors = ",".join(str(e) for e in diag.get("errors", ())) or "none"
+    return f" (attempts={diag.get('attempts', 0)} errors={errors} rpc={diag.get('elapsed_s', 0)}s)"
 
 
 class StopGuard:
@@ -97,6 +121,60 @@ class StopGuard:
         self._trip_at = self._last_stop = self._last_disable = -math.inf
         self._recovery_until = -math.inf
         self._recovery_direction = 0
+        # Debug-only state: recent reads for the pre-trip context, the cause of the
+        # last failed read, the last refused rearm and periodic read statistics.
+        self._recent: deque = deque(maxlen=14)
+        self._last_cause = "none"
+        self._rearm_block = None
+        self._stats_at = None
+        self._stats = {"reads": 0, "failed": 0, "slow": 0, "max": 0.0, "sum": 0.0,
+                       "stops": 0, "stops_failed": 0}
+
+    def note(self, kind, detail=""):
+        """Add a camera/daemon event (recall permit, plan) to the open episode's trace."""
+        with self._lock:
+            self._trace(kind, detail)
+
+    def _trace(self, kind, detail=""):
+        # Called with the guard lock held. Bounded: a long episode keeps its start.
+        episode = self._episode
+        if episode is None:
+            return
+        if len(episode.trace) >= _TRACE_LIMIT:
+            episode.trace_dropped += 1
+            return
+        episode.trace.append((self.clock() - episode.started, kind, detail))
+
+    def _record_read(self, position, read_s, cause=None):
+        # Called with the guard lock held after every poll that touched the camera.
+        now = self.clock()
+        stats = self._stats
+        stats["reads"] += 1
+        stats["sum"] += read_s
+        stats["max"] = max(stats["max"], read_s)
+        if cause is not None:
+            stats["failed"] += 1
+        elif read_s > _SLOW_READ:
+            stats["slow"] += 1
+        self._recent.append((now, position, round(read_s, 3), cause))
+        episode = self._episode
+        if episode is not None and cause is None and position is not None:
+            moved = (episode.last_traced_x is None
+                     or abs(position - episode.last_traced_x) > _TRACE_MOVE)
+            if moved or now - episode.last_traced_at >= _TRACE_HEARTBEAT:
+                episode.last_traced_x, episode.last_traced_at = position, now
+                self._trace("x", f"{position:.4f}")
+        if self._stats_at is None:
+            self._stats_at = now
+        elif now - self._stats_at >= _STATS_EVERY:
+            self._stats_at = now
+            reads = max(1, stats["reads"])
+            log.info("PTZ stop guard stats %s: reads=%d failed=%d slow>%.1fs=%d "
+                     "read_mean=%.3fs read_max=%.3fs stops=%d stops_failed=%d",
+                     self.name, stats["reads"], stats["failed"], _SLOW_READ, stats["slow"],
+                     stats["sum"] / reads, stats["max"], stats["stops"], stats["stops_failed"])
+            self._stats.update(reads=0, failed=0, slow=0, max=0.0, sum=0.0,
+                               stops=0, stops_failed=0)
 
     def _safe(self, position):
         return position < self.right_inner and (self.left_inner is None or position > self.left_inner)
@@ -138,11 +216,16 @@ class StopGuard:
     def _disable(self):
         with self._lock:
             episode = self._episode
+        began = self.clock()
+        error = "none"
         try:
             ok = self.disable_tracking() is True
-        except Exception:  # noqa: BLE001 - camera errors must not kill observation
+        except Exception as exc:  # noqa: BLE001 - camera errors must not kill observation
             ok = False
+            error = type(exc).__name__
         with self._lock:
+            if episode is not None and episode is self._episode:
+                self._trace("off", f"{'ok' if ok else 'FAIL ' + error} {self.clock() - began:.2f}s")
             warn = not ok and not self._disable_warned
             self._disable_ok = ok
             self._disable_warned = not ok
@@ -167,9 +250,14 @@ class StopGuard:
                 self._recovery_until = -math.inf
                 if reason != "closed":
                     self._episode = _Episode(self._trip_at, self._position)
+                    self._episode.pre = [(t - self._trip_at, x, rd, c)
+                                         for t, x, rd, c in self._recent]
+                    cause = self._last_cause if reason == "pose_unavailable" else reason
+                    self._episode.cause = cause
+                    self._rearm_block = None
                     age = "none" if self._observed_at is None else f"{self.clock() - self._observed_at:.3f}s"
-                    log.info("PTZ stop guard trip %s: reason=%s x=%s pose_age=%s",
-                             self.name, reason, self._position, age)
+                    log.info("PTZ stop guard trip %s: reason=%s x=%s pose_age=%s cause=%s",
+                             self.name, reason, self._position, age, cause)
             if self._episode is not None:
                 if reason not in self._episode.reasons:
                     self._episode.reasons.append(reason)
@@ -214,6 +302,18 @@ class StopGuard:
                 episode.stops, episode.stops_failed, offset(episode.first_stop_ok),
                 "unverified" if episode.off is None else "verified" + offset(episode.off),
                 episode.off_failed, offset(peak_at), pose(episode.low), pose(episode.high), end)
+        self._trace_episode(episode, end, level)
+
+    def _trace_episode(self, episode, end, level):
+        # One line per episode: what the pose reads looked like before the trip and
+        # what happened to the pose and the camera until the end. Debug context only.
+        pre = ";".join(f"{t:+.1f}s:{'ERR ' + c if c else format(x, '.4f')}/{rd:.2f}s"
+                       for t, x, rd, c in episode.pre[-10:])
+        events = ";".join(f"+{t:.1f}s:{kind}={detail}" if detail else f"+{t:.1f}s:{kind}"
+                          for t, kind, detail in episode.trace)
+        dropped = f" dropped={episode.trace_dropped}" if episode.trace_dropped else ""
+        log.log(level, "PTZ stop guard trace %s: cause=%s end=%s pre=[%s] events=[%s]%s",
+                self.name, episode.cause, end, pre, events, dropped)
 
     def _stop_if_due(self, *, force=False):
         if self._is_suspended():
@@ -228,16 +328,27 @@ class StopGuard:
             episode = self._episode
             if episode is not None:
                 episode.stops += 1
+        began = self.clock()
         try:
             self.stop()
             with self._lock:
-                if episode is not None and episode is self._episode and episode.first_stop_ok is None:
-                    episode.first_stop_ok = self.clock() - episode.started
+                self._stats["stops"] += 1
+                if episode is not None and episode is self._episode:
+                    if episode.first_stop_ok is None:
+                        episode.first_stop_ok = self.clock() - episode.started
+                    if episode.stops_traced < 3:
+                        episode.stops_traced += 1
+                        self._trace("stop", f"ok {self.clock() - began:.2f}s")
             self._stop_warned = False
         except Exception as exc:  # noqa: BLE001 - never expose exception text/credentials
+            diag = getattr(exc, "rpc_diag", None)
             with self._lock:
+                self._stats["stops"] += 1
+                self._stats["stops_failed"] += 1
                 if episode is not None and episode is self._episode:
                     episode.stops_failed += 1
+                    self._trace("stop", f"FAIL {type(exc).__name__} {self.clock() - began:.2f}s"
+                                f"{_diag_text(diag)}")
             if not self._stop_warned:
                 log.warning("PTZ stop guard Stop failed name=%s error=%s", self.name, type(exc).__name__)
             self._stop_warned = True
@@ -259,15 +370,20 @@ class StopGuard:
             position = float(self.read_position())
             if not math.isfinite(position) or self.clock() - started > self.stale_after:
                 raise ValueError("unusable pose")
-        except Exception:  # noqa: BLE001 - fail closed on unavailable or stale position
+        except Exception as exc:  # noqa: BLE001 - fail closed on unavailable or stale position
+            read_s = self.clock() - started
+            cause = f"{type(exc).__name__}{_diag_text(getattr(exc, 'rpc_diag', None))}"
             with self._lock:
                 self._healthy = False
                 self._safe_samples = 0
                 self._recovery_until = -math.inf
+                self._last_cause = cause
+                self._record_read(None, read_s, cause)
             self._trip("pose_unavailable")
             with self._lock:
                 if self._episode is not None:
                     self._episode.reads_failed += 1
+                    self._trace("readfail", f"{cause} {read_s:.2f}s")
             self._stop_if_due()
             return
         # Privacy may have changed while a bounded network read was in flight.
@@ -276,6 +392,7 @@ class StopGuard:
             return
         now = self.clock()
         with self._lock:
+            self._record_read(position, now - started)
             if self._reason == "suspended" and not self._latched:
                 self._reason = "starting"
             previous = self._position if self._observed_at is not None and now - self._observed_at <= self.stale_after else None
@@ -339,10 +456,19 @@ class StopGuard:
         """Explicitly release the latch only after fresh stable interior observations."""
         with self._lock:
             state = self.snapshot()
-            if (not state.healthy or self._safe_samples < self.stable_samples
-                    or not self._safe(self._position) or state.disable_pending
-                    or (self._latched and (not self._disable_ok or self.clock() - self._trip_at < self.cooldown))):
+            blocked = ("unhealthy" if not state.healthy
+                       else "unstable" if self._safe_samples < self.stable_samples
+                       else "unsafe" if not self._safe(self._position)
+                       else "off_pending" if state.disable_pending
+                       else "off_unverified" if self._latched and not self._disable_ok
+                       else "cooldown" if self._latched and self.clock() - self._trip_at < self.cooldown
+                       else None)
+            if blocked is not None:
+                if self._latched and blocked != self._rearm_block:
+                    self._rearm_block = blocked
+                    self._trace("rearm_blocked", f"{blocked} x={self._position}")
                 return False
+            self._trace("rearm")
             self._latched, self._reason, self._armed = False, "armed", True
             self._disable_ok = False
             self._recovery_until = -math.inf

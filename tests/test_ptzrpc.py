@@ -125,3 +125,18 @@ def test_delayed_syn_ack_can_use_remaining_budget_after_fast_connect_failures():
     assert ptzrpc.call(ptz, operation, clock=clock) == "acknowledged"
     assert len(calls) == 4
     assert clock.now < .8
+
+
+def test_failure_carries_attempt_diagnostics_for_the_guard_trace():
+    ptz, transport, clock = harness()
+
+    def operation():
+        clock.now += transport.operation_timeout[1]
+        raise ReadTimeout("still unavailable")
+
+    with pytest.raises(ReadTimeout) as caught:
+        ptzrpc.call(ptz, operation, budget=.5, clock=clock)
+    diag = caught.value.rpc_diag
+    assert diag["attempts"] == 4
+    assert diag["errors"] == ["ReadTimeout/read"] * 4
+    assert 0 < diag["elapsed_s"] <= .5
