@@ -401,3 +401,151 @@ def test_close_reports_only_verified_completed_native_off():
     guard, _, _ = guard_for([])
     guard.disable_tracking = lambda: False
     assert guard.close() is False
+
+
+def episode_lines(caplog):
+    return [r for r in caplog.records if "stop guard episode" in r.getMessage()]
+
+
+def test_episode_summary_counts_every_stop_failure_despite_deduplicated_warning(caplog):
+    clock = Clock()
+    poses = iter([0.5, 0.5, 0.75, 0.83, 0.86, 0.6, 0.6, 0.6])
+    stops = iter([OSError, OSError, None, None])
+
+    def stop():
+        exc = next(stops)
+        if exc is not None:
+            raise exc("lost")
+
+    guard = StopGuard(lambda: next(poses), stop, lambda: True, name="cam",
+                      right_limit=0.8, margin=0.1, cooldown=0.5, clock=clock)
+    caplog.set_level("INFO", logger="tapo_monitor.stopguard")
+    for _ in range(8):
+        guard.poll_once()
+        await_off(guard)
+        clock.advance()
+    warnings = [r.getMessage() for r in caplog.records if "Stop failed" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "error=OSError" in warnings[0] and "lost" not in warnings[0]
+    assert guard.rearm()
+    [line] = episode_lines(caplog)
+    message = line.getMessage()
+    assert line.levelname == "WARNING"  # observed beyond the configured limit itself
+    assert "cam" in message and "reason=boundary" in message
+    assert "trip_x=0.7500" in message and "peak_x=0.8600" in message
+    assert "beyond_limit=True" in message
+    assert "stops=3 stops_failed=2" in message
+    assert "first_stop_ok=+0.40s" in message
+    assert "off=verified+" in message
+    guard.close()
+
+
+def test_pose_loss_episode_without_motion_is_info_and_counts_reads(caplog):
+    clock = Clock()
+    reads = iter([0.5, 0.5, None, None, 0.5, 0.5, 0.5])
+
+    def read():
+        value = next(reads)
+        if value is None:
+            raise TimeoutError("late")
+        return value
+
+    guard = StopGuard(read, lambda: None, lambda: True, right_limit=0.8, margin=0.1,
+                      cooldown=0.5, clock=clock)
+    caplog.set_level("INFO", logger="tapo_monitor.stopguard")
+    for _ in range(7):
+        guard.poll_once()
+        await_off(guard)
+        clock.advance()
+    assert guard.rearm()
+    [line] = episode_lines(caplog)
+    message = line.getMessage()
+    assert line.levelname == "INFO"
+    assert "reason=pose_unavailable" in message and "reads_failed=2" in message
+    assert "trip_x=0.5000" in message and "peak_x=0.5000" in message
+    assert "beyond_limit=False" in message and "stops_failed=0" in message
+    guard.close()
+
+
+def test_episode_without_any_confirmed_stop_is_a_warning(caplog):
+    clock = Clock()
+    poses = iter([0.5, 0.5, 0.75])
+
+    def stop():
+        raise OSError("lost")
+
+    guard = StopGuard(lambda: next(poses), stop, lambda: False, right_limit=0.8,
+                      margin=0.1, clock=clock)
+    caplog.set_level("INFO", logger="tapo_monitor.stopguard")
+    for _ in range(3):
+        guard.poll_once()
+        await_off(guard)
+        clock.advance()
+    guard.close()
+    [line] = episode_lines(caplog)
+    assert line.levelname == "WARNING"
+    assert "first_stop_ok=none" in line.getMessage()
+    assert "off=unverified" in line.getMessage()
+    assert "end=closed" in line.getMessage()
+
+
+def test_left_limit_peak_and_episodes_reset_after_rearm(caplog):
+    guard, clock, _ = guard_for([-0.55, -0.65, 0.4, 0.4, 0.75, 0.4, 0.4],
+                                left_limit=-0.6, cooldown=0)
+    caplog.set_level("INFO", logger="tapo_monitor.stopguard")
+    for _ in range(4):
+        guard.poll_once()
+        await_off(guard)
+        clock.advance()
+    assert guard.rearm()
+    for _ in range(3):
+        guard.poll_once()
+        await_off(guard)
+        clock.advance()
+    assert guard.rearm()
+    first, second = episode_lines(caplog)
+    assert "peak_x=-0.6500" in first.getMessage()
+    assert "beyond_limit=True" in first.getMessage()
+    assert "peak_at=+0.20s" in first.getMessage()
+    assert "beyond_limit=False" in second.getMessage()
+    assert "stops=1 stops_failed=0" in second.getMessage()
+    guard.close()
+    assert len(episode_lines(caplog)) == 2  # shutdown alone is not a trip
+
+
+def test_missing_startup_pose_and_unverified_off_are_not_reported_healthy(caplog):
+    guard, _, _ = guard_for([])
+    guard.disable_tracking = lambda: False
+    caplog.set_level("INFO", logger="tapo_monitor.stopguard")
+    guard.poll_once()
+    await_off(guard)
+    guard.close()
+    [line] = episode_lines(caplog)
+    assert line.levelname == "WARNING"
+    assert "trip_x=none peak_x=none" in line.getMessage()
+    assert "reads_failed=1" in line.getMessage()
+    assert "off=unverified off_failed=1" in line.getMessage()
+
+
+def test_close_with_off_in_flight_logs_once_and_keeps_unverified_result(caplog):
+    entered, release = threading.Event(), threading.Event()
+    guard, _, _ = guard_for([0.85])
+
+    def off():
+        entered.set()
+        assert release.wait(2)
+        return True
+
+    guard.disable_tracking = off
+    caplog.set_level("INFO", logger="tapo_monitor.stopguard")
+    try:
+        guard.poll_once()
+        assert entered.wait(1)
+        assert guard.close(timeout=0) is False
+        [line] = episode_lines(caplog)
+        assert "off=unverified" in line.getMessage()
+    finally:
+        release.set()
+        await_off(guard)
+    guard.close()
+    assert len(episode_lines(caplog)) == 1

@@ -5,6 +5,11 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Virtual endstop episode summaries record observed peak positions, every failed
+  Stop callback and time to confirmed Stop and tracking OFF. OFF diagnostics separate
+  session availability, lock waiting and request time without logging exception text.
+- Soak reports flag endstop Stop failures, unverified tracking OFF and episodes with
+  observed limit crossings or no confirmed Stop, including warnings in remote journals.
 - Optional `TAPO_REVIEW_DIGEST_PROBLEMS_ONLY=1` skips healthy daily review summaries
   and their photos while retaining digests for degraded or unknown fleet health.
 - Opt-in predictive pan stops at explicit preset boundaries, including a right-only

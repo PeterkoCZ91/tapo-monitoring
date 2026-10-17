@@ -292,3 +292,29 @@ def test_recall_retry_rechecks_recovery_permission_after_failed_attempt():
 def test_invalid_stop_configuration_fails_before_any_camera_connection(settings):
     with pytest.raises(config.ConfigError):
         app_config(**settings)
+
+
+def test_off_diagnostics_distinguish_missing_retired_and_request_error(caplog):
+    from tapo_monitor import sessionguard
+
+    controller, client, _ = harness()
+    caplog.set_level("INFO", logger="tapo_monitor.stopcontrol")
+    assert controller.disable_tracking()
+    assert "result=verified client_unavailable=False" in caplog.messages[-1]
+    assert "lock_wait=" in caplog.messages[-1] and "request=" in caplog.messages[-1]
+    controller.get_client = lambda: None
+    assert controller.disable_tracking() is False
+    assert "result=missing client_unavailable=True" in caplog.messages[-1]
+    controller.get_client = lambda: client
+
+    def fail(_):
+        raise TimeoutError("sensitive credential text")
+
+    client.setAutoTrackTarget = fail
+    assert controller.disable_tracking() is False
+    assert "result=error client_unavailable=False" in caplog.messages[-1]
+    assert "error=TimeoutError" in caplog.messages[-1]
+    assert "sensitive" not in caplog.text
+    sessionguard.retire_client(client, lambda: None)
+    assert controller.disable_tracking() is False
+    assert "result=retired client_unavailable=True" in caplog.messages[-1]

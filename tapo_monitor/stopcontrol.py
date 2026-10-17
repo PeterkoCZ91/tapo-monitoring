@@ -41,7 +41,13 @@ class StopControl:
 
     def disable_tracking(self):
         client = self.get_client()
-        return client is not None and sessionguard.native_tracking_off(client)
+        diagnostics = {"result": "missing", "lock_wait_s": 0.0, "request_s": 0.0}
+        ok = client is not None and sessionguard.native_tracking_off(client, diagnostics=diagnostics)
+        log.info("PTZ stop guard tracking OFF %s: result=%s client_unavailable=%s "
+                 "lock_wait=%.3fs request=%.3fs error=%s", self.cfg.name,
+                 diagnostics["result"], diagnostics["result"] in {"missing", "retired"},
+                 diagnostics["lock_wait_s"], diagnostics["request_s"], diagnostics.get("error", "none"))
+        return ok
 
     def start(self):
         host = camera.active_host(self.cfg)
@@ -80,7 +86,7 @@ class StopControl:
             self.disable_tracking, right_limit=right, left_limit=left,
             margin=pl.stop_margin, poll_interval=pl.stop_poll_interval,
             stop_interval=pl.stop_poll_interval, cooldown=pl.stop_cooldown,
-            suspended=self.suspended)
+            suspended=self.suspended, name=self.cfg.name)
         self.host = host
         self.guard = guard
         guard.start()

@@ -33,6 +33,10 @@ MIN_ABS_ALERT_DELTA = 5
 UINT64_MAX = 2**64 - 1
 
 ERROR_RE = re.compile(r"Traceback|ERROR|CRITICAL")
+STOPGUARD_RE = re.compile(
+    r"PTZ stop guard (?:Stop failed|could not verify tracking OFF)"
+    r"|stop guard episode .* (?:beyond_limit=True|first_stop_ok=none|off=unverified)"
+    r"|rotation stop .*shutdown tracking OFF unconfirmed")
 START_RE = re.compile(r"systemd\[\d+\]: Started ")
 FAILED_RE = re.compile(r"systemd\[\d+\]: (Failed with result|.*Main process exited)")
 HUB_ERR_RE = re.compile(r"\bhub\b.*(failed|refused|error_code)", re.IGNORECASE)
@@ -175,7 +179,7 @@ def analyze(text, since_hours):
     if not journal_usable:
         # No journal evidence: report unknown instead of a comforting zero.
         for key in ("errors", "starts", "failures", "hub_errors", "outbox_lines",
-                    "outbox_problems", "host_switch", "audit_errors"):
+                    "outbox_problems", "host_switch", "audit_errors", "stopguard_problems"):
             stats[key] = None
         stats["error_signatures"] = []
     else:
@@ -187,6 +191,8 @@ def analyze(text, since_hours):
             findings.append(f"{stats['outbox_problems']} outbox problem line(s)")
         if stats["audit_errors"]:
             findings.append(f"{stats['audit_errors']} audit action=error line(s)")
+        if stats["stopguard_problems"]:
+            findings.append(f"{stats['stopguard_problems']} Stopguard problem line(s) (not physical overshoot counts)")
     out.update(stats)
 
     resources = _resources(props, sections)
@@ -199,7 +205,7 @@ def _journal_stats(lines):
     errors = 0
     signatures: Counter = Counter()
     starts = failures = hub_errors = outbox_lines = outbox_problems = 0
-    audit_errors = host_switch = 0
+    audit_errors = host_switch = stopguard_problems = 0
     sent: dict = {}
     first_age: dict = {}
     gates: dict = {}
@@ -238,6 +244,8 @@ def _journal_stats(lines):
         if ERROR_RE.search(line):
             errors += 1
             signatures[_signature(line)] += 1
+        if STOPGUARD_RE.search(line):
+            stopguard_problems += 1
         if START_RE.search(line):
             starts += 1
         if FAILED_RE.search(line):
@@ -269,6 +277,7 @@ def _journal_stats(lines):
         "outbox_problems": outbox_problems,
         "host_switch": host_switch,
         "audit_errors": audit_errors,
+        "stopguard_problems": stopguard_problems,
         "alerts": {"sent_ok": sent_ok, "sent_failed": sent_failed, "by_camera": sent},
         "first_alert": first_alert,
         "gates": {c: dict(v) for c, v in sorted(gates.items())},
@@ -338,7 +347,7 @@ def compare(base, cur, tolerance=DEFAULT_TOLERANCE):
     for key, label in (("errors", "Traceback/ERROR/CRITICAL lines"), ("starts", "starts"),
                        ("failures", "systemd failures"), ("hub_errors", "hub errors"),
                        ("outbox_problems", "outbox problems"), ("host_switch", "host_switch"),
-                       ("audit_errors", "audit errors")):
+                       ("audit_errors", "audit errors"), ("stopguard_problems", "Stopguard problem lines")):
         b, c = base.get(key), cur.get(key)
         if b is None or c is None:
             continue
@@ -416,6 +425,7 @@ def render_host(name, entry):
     lines.append(f"   journal    {_count(entry['journal']['lines'])} lines in {entry['since_hours']:g} h")
     lines.append(f"   errors     Traceback|ERROR|CRITICAL {_count(entry['errors'])}, "
                  f"systemd failures {_count(entry['failures'])}")
+    lines.append(f"   stopguard  {_count(entry.get('stopguard_problems'))} problem lines")
     for sig in entry["error_signatures"]:
         lines.append(f"              {sig['count']:>4}x {sig['text']}")
     if not entry["journal"]["usable"]:

@@ -254,3 +254,15 @@ def test_transport_guard_preserves_existing_request_denial():
     with pytest.raises(ValueError, match="Denied"):
         client.performRequest({"method": "denied"})
     assert not client.requests
+
+
+def test_off_diagnostics_separate_lock_wait_from_request_time(monkeypatch):
+    from tapo_monitor import sessionguard
+
+    client = Client()
+    protect_client(client, lambda: False)
+    clock = iter([10.0, 12.0, 15.0])
+    monkeypatch.setattr(sessionguard.time, "monotonic", lambda: next(clock))
+    diagnostics = {}
+    assert native_tracking_off(client, diagnostics=diagnostics)
+    assert diagnostics == {"result": "verified", "lock_wait_s": 2.0, "request_s": 3.0}

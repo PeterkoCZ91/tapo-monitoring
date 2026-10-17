@@ -124,3 +124,18 @@ teardown() { teardown_tools_test; }
     assert_status 0
     assert_output_not_contains "vs baseline"
 }
+
+@test "the remote filter keeps Stopguard warnings and episode failures" {
+    stub_command journalctl <<'STUB'
+printf '%s\n' \
+    'WARNING PTZ stop guard Stop failed name=cam error=TimeoutError' \
+    'WARNING PTZ stop guard could not verify tracking OFF' \
+    'WARNING PTZ stop guard episode cam: beyond_limit=True first_stop_ok=+0.10s off=verified+0.20s' \
+    'WARNING PTZ stop guard episode cam: beyond_limit=False first_stop_ok=none off=unverified' \
+    'WARNING rotation stop cam: shutdown tracking OFF unconfirmed' \
+    'INFO PTZ stop guard episode cam: beyond_limit=False first_stop_ok=+0.10s off=verified+0.20s'
+STUB
+    run "$SCRIPT" --json myhost
+    assert_status 1
+    printf '%s' "$output" | python3 -c 'import json,sys; r=json.load(sys.stdin)["hosts"]["myhost"]; assert r["stopguard_problems"] == 5; assert r["errors"] == 0; assert any("Stopguard" in f for f in r["findings"])'
+}

@@ -10,7 +10,7 @@ import logging
 import math
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +23,24 @@ class GuardSnapshot:
     tracking_allowed: bool
     disable_pending: bool
     reason: str
+
+
+@dataclass
+class _Episode:
+    started: float
+    trip_x: float | None
+    reasons: list[str] = field(default_factory=list)
+    low: float | None = None
+    high: float | None = None
+    low_at: float = 0.0
+    high_at: float = 0.0
+    beyond_limit: bool = False
+    reads_failed: int = 0
+    stops: int = 0
+    stops_failed: int = 0
+    first_stop_ok: float | None = None
+    off: float | None = None
+    off_failed: int = 0
 
 
 class StopGuard:
@@ -42,7 +60,7 @@ class StopGuard:
                  left_limit=None, poll_interval=0.15, stale_after=1.0,
                  stop_interval=0.15, cooldown=2.0, stable_samples=2,
                  retry_interval=1.0, stable_tolerance=0.002, suspended=None,
-                 clock=time.monotonic, wait=None):
+                 clock=time.monotonic, wait=None, name=""):
         values = (right_limit, margin, poll_interval, stale_after, stop_interval,
                   cooldown, retry_interval, stable_tolerance)
         if not all(math.isfinite(v) for v in values):
@@ -51,6 +69,9 @@ class StopGuard:
             raise ValueError("guard timing and margin must be positive")
         if stable_samples < 2:
             raise ValueError("at least two safe samples are required")
+        self.name = name
+        self.right_limit, self.left_limit = right_limit, left_limit
+        self._episode: _Episode | None = None
         self.right_inner = right_limit - margin
         self.left_inner = None if left_limit is None else left_limit + margin
         if self.left_inner is not None and (
@@ -115,6 +136,8 @@ class StopGuard:
             self._disable_thread.start()
 
     def _disable(self):
+        with self._lock:
+            episode = self._episode
         try:
             ok = self.disable_tracking() is True
         except Exception:  # noqa: BLE001 - camera errors must not kill observation
@@ -123,21 +146,74 @@ class StopGuard:
             warn = not ok and not self._disable_warned
             self._disable_ok = ok
             self._disable_warned = not ok
+            if episode is not None and episode is self._episode:
+                if ok and episode.off is None:
+                    episode.off = self.clock() - episode.started
+                elif not ok:
+                    episode.off_failed += 1
         if warn:
             log.warning("PTZ stop guard could not verify tracking OFF")
 
     def _trip(self, reason, *, dispatch=True):
         with self._lock:
-            if not self._latched:
+            new_trip = not self._latched
+            self._latched = True
+            self._armed = False
+            self._reason = reason
+            if new_trip:
                 self._trip_at = self.clock()
                 self._disable_ok = False
                 self._safe_samples = 0
                 self._recovery_until = -math.inf
-            self._latched = True
-            self._armed = False
-            self._reason = reason
+                if reason != "closed":
+                    self._episode = _Episode(self._trip_at, self._position)
+                    age = "none" if self._observed_at is None else f"{self.clock() - self._observed_at:.3f}s"
+                    log.info("PTZ stop guard trip %s: reason=%s x=%s pose_age=%s",
+                             self.name, reason, self._position, age)
+            if self._episode is not None:
+                if reason not in self._episode.reasons:
+                    self._episode.reasons.append(reason)
+                self._observe_episode()
         if dispatch:
             self._request_disable()
+
+    def _observe_episode(self):
+        # Called with the guard lock held. Peaks are observed positions, not a
+        # claim about motor travel during missing or stale reads.
+        episode, x = self._episode, self._position
+        if episode is None or x is None:
+            return
+        if episode.low is None or x < episode.low:
+            episode.low, episode.low_at = x, self.clock() - episode.started
+        if episode.high is None or x > episode.high:
+            episode.high, episode.high_at = x, self.clock() - episode.started
+        episode.beyond_limit |= x >= self.right_limit or (
+            self.left_limit is not None and x <= self.left_limit)
+
+    def _finish_episode(self, end):
+        episode = self._episode
+        if episode is None:
+            return
+        self._episode = None
+        def pose(x):
+            return "none" if x is None else f"{x:.4f}"
+        def offset(value):
+            return "none" if value is None else f"+{value:.2f}s"
+        # Select the largest outward excursion relative to either inner boundary.
+        peak, peak_at = episode.high, episode.high_at
+        if (self.left_inner is not None and episode.low is not None and episode.high is not None
+                and self.left_inner - episode.low > episode.high - self.right_inner):
+            peak, peak_at = episode.low, episode.low_at
+        level = logging.WARNING if (episode.beyond_limit or episode.first_stop_ok is None
+                                    or episode.off is None) else logging.INFO
+        log.log(level, "PTZ stop guard episode %s: reason=%s duration=%.2fs trip_x=%s peak_x=%s "
+                "beyond_limit=%s reads_failed=%d stops=%d stops_failed=%d first_stop_ok=%s "
+                "off=%s off_failed=%d peak_at=%s min_x=%s max_x=%s end=%s",
+                self.name, ",".join(episode.reasons), self.clock() - episode.started,
+                pose(episode.trip_x), pose(peak), episode.beyond_limit, episode.reads_failed,
+                episode.stops, episode.stops_failed, offset(episode.first_stop_ok),
+                "unverified" if episode.off is None else "verified" + offset(episode.off),
+                episode.off_failed, offset(peak_at), pose(episode.low), pose(episode.high), end)
 
     def _stop_if_due(self, *, force=False):
         if self._is_suspended():
@@ -149,12 +225,21 @@ class StopGuard:
             if not force and self.clock() - self._last_stop < self.stop_interval:
                 return
             self._last_stop = self.clock()
+            episode = self._episode
+            if episode is not None:
+                episode.stops += 1
         try:
             self.stop()
+            with self._lock:
+                if episode is not None and episode is self._episode and episode.first_stop_ok is None:
+                    episode.first_stop_ok = self.clock() - episode.started
             self._stop_warned = False
-        except Exception:  # noqa: BLE001 - retry on later observations; never expose credentials
+        except Exception as exc:  # noqa: BLE001 - never expose exception text/credentials
+            with self._lock:
+                if episode is not None and episode is self._episode:
+                    episode.stops_failed += 1
             if not self._stop_warned:
-                log.warning("PTZ stop guard Stop failed")
+                log.warning("PTZ stop guard Stop failed name=%s error=%s", self.name, type(exc).__name__)
             self._stop_warned = True
 
     def poll_once(self):
@@ -180,6 +265,9 @@ class StopGuard:
                 self._safe_samples = 0
                 self._recovery_until = -math.inf
             self._trip("pose_unavailable")
+            with self._lock:
+                if self._episode is not None:
+                    self._episode.reads_failed += 1
             self._stop_if_due()
             return
         # Privacy may have changed while a bounded network read was in flight.
@@ -192,6 +280,7 @@ class StopGuard:
                 self._reason = "starting"
             previous = self._position if self._observed_at is not None and now - self._observed_at <= self.stale_after else None
             self._position, self._observed_at, self._healthy = position, now, True
+            self._observe_episode()
             safe = self._safe(position)
             self._safe_samples = (self._safe_samples + 1 if safe and previous is not None
                                   and abs(position - previous) <= self.stable_tolerance else int(safe))
@@ -250,6 +339,7 @@ class StopGuard:
             self._latched, self._reason, self._armed = False, "armed", True
             self._disable_ok = False
             self._recovery_until = -math.inf
+            self._finish_episode("rearm")
             return True
 
     def _run(self):
@@ -287,4 +377,5 @@ class StopGuard:
                 worker.join(max(0.0, deadline - time.monotonic()))
         with self._lock:
             pending = self._disable_thread is not None and self._disable_thread.is_alive()
+            self._finish_episode("closed")
             return self._disable_ok and not pending

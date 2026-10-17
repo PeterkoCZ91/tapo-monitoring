@@ -131,7 +131,7 @@ echo "@@journal"
 "${jc[@]}" -u "$unit" --since "$since hours ago" --no-pager -o short-iso 2>&1 | awk '
     /^-- / { next }
     { n++ }
-    /audit |Traceback|ERROR|CRITICAL|outbox|hub |systemd\[[0-9]+\]: (Started|Failed|.*Main process exited)|No journal files|insufficient permissions/ { print }
+    /audit |Traceback|ERROR|CRITICAL|PTZ stop guard|rotation stop .*shutdown tracking OFF unconfirmed|outbox|hub |systemd\[[0-9]+\]: (Started|Failed|.*Main process exited)|No journal files|insufficient permissions/ { print }
     END { print "@@total " n + 0 }'
 echo "@@end"
 PROBE

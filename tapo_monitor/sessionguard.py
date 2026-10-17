@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
 from copy import deepcopy
 from inspect import iscoroutinefunction
@@ -106,7 +107,7 @@ def retire_client(client: Any, close_fn: Callable[[], Any]) -> None:
         close_fn()
 
 
-def native_tracking_off(client: Any) -> bool:
+def native_tracking_off(client: Any, *, diagnostics: dict | None = None) -> bool:
     """Disable and verify native tracking atomically on a protected session.
 
     Failure is deliberately quiet: protocol errors can contain authentication
@@ -114,13 +115,29 @@ def native_tracking_off(client: Any) -> bool:
     """
     state = getattr(client, "_tapo_session_guard", None)
     if state is None:
+        if diagnostics is not None:
+            diagnostics["result"] = "unprotected"
         return False
+    started = time.monotonic()
     with state.lock:
+        acquired = time.monotonic()
+        if diagnostics is not None:
+            diagnostics["lock_wait_s"] = acquired - started
         if state.retired:
+            if diagnostics is not None:
+                diagnostics["result"] = "retired"
             return False
         try:
             client.setAutoTrackTarget(False)
             result = client.getAutoTrackTarget()
-            return isinstance(result, dict) and result.get("enabled") == "off"
-        except Exception:
+            ok = isinstance(result, dict) and result.get("enabled") == "off"
+            if diagnostics is not None:
+                diagnostics["result"] = "verified" if ok else "unverified"
+            return ok
+        except Exception as exc:
+            if diagnostics is not None:
+                diagnostics.update(result="error", error=type(exc).__name__)
             return False
+        finally:
+            if diagnostics is not None:
+                diagnostics["request_s"] = time.monotonic() - acquired

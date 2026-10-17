@@ -150,3 +150,30 @@ def test_foreign_baseline_is_refused(tmp_path):
     path.write_text('{"version": 99}')
     with pytest.raises(SystemExit):
         soak.main([f"a={FIXTURES / 'host-a.raw'}", "--baseline", str(path)])
+
+
+@pytest.mark.parametrize("message", [
+    "PTZ stop guard Stop failed",
+    "PTZ stop guard Stop failed name=cam error=TimeoutError",
+    "PTZ stop guard could not verify tracking OFF",
+    "PTZ stop guard episode cam: beyond_limit=True first_stop_ok=+0.10s off=verified+0.20s",
+    "PTZ stop guard episode cam: beyond_limit=False first_stop_ok=none off=verified+0.20s",
+    "PTZ stop guard episode cam: beyond_limit=False first_stop_ok=+0.10s off=unverified",
+    "rotation stop cam: shutdown tracking OFF unconfirmed",
+])
+def test_stopguard_problems_fail_soak_even_at_warning_level(message):
+    text = (FIXTURES / "host-a.raw").read_text().replace("@@journal", "@@journal\nWARNING " + message)
+    rec = soak.analyze(text, 24)
+    assert rec["stopguard_problems"] == 1
+    assert soak.host_status(rec) == "ATTENTION"
+    assert any("Stopguard problem" in f for f in rec["findings"])
+    assert "Stopguard problem lines" in " ".join(soak.compare(probe("host-a"), rec))
+
+
+def test_safe_stopguard_episode_is_not_a_soak_problem():
+    text = (FIXTURES / "host-a.raw").read_text().replace("@@journal", "@@journal\nINFO "
+        "PTZ stop guard episode cam: beyond_limit=False first_stop_ok=+0.10s off=verified+0.20s")
+    rec = soak.analyze(text, 24)
+    assert rec["stopguard_problems"] == 0
+    assert rec["findings"] == []
+    assert probe("host-denied")["stopguard_problems"] is None
