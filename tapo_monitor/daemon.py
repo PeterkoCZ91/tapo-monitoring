@@ -27,6 +27,7 @@ import signal
 import subprocess
 import tempfile
 import time as _time
+import urllib.parse
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -5120,6 +5121,7 @@ def main(argv=None):  # pragma: no cover - thin entry point
     # Opt-in outbox (outbox: block): alerts Telegram did not take survive for a late send.
     configure_outbox(app)
     secrets = resolve_secrets(app)
+    watch_scorer_health(app, secrets)
     log.info("loaded %d camera(s); poll events every %ds, control every %ds; face_names=%d known",
              len(app.cameras), poll_interval, control_interval, len(secrets.get("face_names") or {}))
     log.info("health state %s: %s", "restored" if restored else "initialized", state.health_path)
@@ -5402,6 +5404,17 @@ def watch_scorer_switches(state):
         if state.health_path:
             health.save_state(state.health_path, state, logger=log)
     scorer.add_switch_listener(on_switch)
+
+
+def watch_scorer_health(app, secrets):
+    """Probe the scorers outside of scoring and tell the operator when one goes down or returns."""
+    def on_health(url, healthy):
+        host = urllib.parse.urlsplit(url).netloc
+        text = (f"🟢 Scorer {host} answers again" if healthy
+                else f"🟠 Scorer {host} is not answering /health; scoring uses another candidate")
+        notify.send_operational(secrets["telegram_token"], secrets["telegram_chat"], text)
+    scorer.add_health_listener(on_health)
+    scorer.start_probes([cfg.scorer for cfg in app.cameras])
 
 
 def _fail_over(cfg, state, cam_clients, now):

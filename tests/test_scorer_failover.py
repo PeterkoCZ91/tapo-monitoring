@@ -289,3 +289,69 @@ def test_audit_summary_ignores_the_scorer_switch_line():
     from tapo_monitor import audit
     line = "audit path=scorer action=scorer_switch etype=system start=1 scorer_index=1"
     assert audit.summarize([line]) == {}
+
+
+# -- background /health probe (outside of scoring) -----------------------------------------
+
+
+def test_probe_moves_off_a_dead_candidate_before_any_frame_is_scored(monkeypatch, caplog):
+    net = Net(monkeypatch, down={P})
+    pool = scorer.pool_for(_scorer_cfg([P, S, T]))
+    caplog.set_level(logging.WARNING, logger="tapo_monitor.scorer")
+    pool.probe_once()
+    assert pool.active == P                 # one failed round is not yet "down"
+    pool.probe_once()
+    assert pool.active == S
+    assert not net.posts                    # nothing was scored to find out
+    assert any("not answering /health" in r.getMessage() for r in caplog.records)
+
+
+def test_probe_returns_to_the_primary_when_it_answers_again(monkeypatch):
+    net = Net(monkeypatch, down={P})
+    pool = scorer.pool_for(_scorer_cfg([P, S]))
+    pool.probe_once()
+    pool.probe_once()
+    assert pool.active == S
+    net.down.clear()
+    pool.probe_once()
+    assert pool.active == P
+
+
+def test_probe_with_every_candidate_dead_keeps_the_active_url(monkeypatch):
+    Net(monkeypatch, down={P, S})
+    pool = scorer.pool_for(_scorer_cfg([P, S]))
+    for _ in range(3):
+        pool.probe_once()
+    assert pool.active == P
+
+
+def test_probe_reports_down_and_up_transitions_once(monkeypatch):
+    net = Net(monkeypatch, down={P})
+    events = []
+    scorer.add_health_listener(lambda url, healthy: events.append((url, healthy)))
+    pool = scorer.pool_for(_scorer_cfg([P, S]))
+    for _ in range(4):
+        pool.probe_once()
+    assert events == [(P, False)]
+    net.down.clear()
+    pool.probe_once()
+    pool.probe_once()
+    assert events == [(P, False), (P, True)]
+
+
+def test_start_probes_runs_in_the_background_and_stops_on_reset(monkeypatch):
+    import threading
+
+    net = Net(monkeypatch, down={P})
+    monkeypatch.setattr(scorer, "PROBE_FAILS", 1)
+    scorer.start_probes([_scorer_cfg([P, S])], interval=0.01)
+    pool = scorer.pool_for(_scorer_cfg([P, S]))
+    deadline = threading.Event()
+    for _ in range(200):
+        if pool.active == S:
+            break
+        deadline.wait(0.01)
+    assert pool.active == S and net.health
+    scorer.reset_pools()
+    pool.probe_thread.join(2)
+    assert not pool.probe_thread.is_alive()

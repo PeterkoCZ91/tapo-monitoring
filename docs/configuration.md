@@ -841,6 +841,14 @@ the sampler and SD paths, the crop, the scene probe and the shadow scan.
 - Return: while a non-primary URL is active, the primary's `/health` is checked at most
   every 5 minutes (by the next scoring request, no background thread) and the monitor
   switches back as soon as it answers.
+- Background probe: the daemon also checks every candidate's `/health` every 30 s, outside
+  of scoring. A candidate that misses two rounds in a row counts as down and one answer
+  brings it back; the active URL moves to the first live candidate (including back to the
+  primary) before a real frame has to find out. When none answers, the active URL is kept.
+  Down/up changes go to the operational Telegram destination once, and to the journal as a
+  `scorer candidate ... not answering /health` warning plus an `audit path=scorer
+  action=scorer_health reason=up|down` line. The request-failure path above stays as the
+  fallback for a service whose `/health` answers while scoring does not.
 - Visibility: one `scorer switch` warning per change (with both URLs, journal only) and one
   `audit path=scorer action=scorer_switch scorer_index=N` line (index, never an address).
   The choice is saved in the health state file (`active_scorers`, keyed by the primary URL)

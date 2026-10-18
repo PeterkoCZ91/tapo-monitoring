@@ -224,16 +224,23 @@ def _score_attempt(url, image_path, timeout, tiles, *, source_id=None, ignore_zo
 # candidates shares it), moves on after FAIL_THRESHOLD consecutive transport failures to the
 # first candidate whose /health answers, and goes back to the first (primary) candidate as
 # soon as its /health answers again, checked at most every PRIMARY_RECHECK_SECONDS. All of
-# it happens inside :func:`score`; nothing needs a background thread.
+# it happens inside :func:`score`. That path is reactive: the first requests after an outage
+# each wait out their timeout. :func:`start_probes` adds an opt-in background probe that
+# checks every candidate's /health outside of scoring, so a dead candidate is skipped
+# before a real frame has to find out.
 
 FAIL_THRESHOLD = 3
 PRIMARY_RECHECK_SECONDS = 300
 HEALTH_TIMEOUT = 2.0
+PROBE_INTERVAL = 30.0       # seconds between background /health rounds
+PROBE_FAILS = 2             # consecutive failed rounds before a candidate counts as down
 
 _clock = time.monotonic
 _pools: dict[tuple, "ScorerPool"] = {}
 _pools_lock = threading.Lock()
 _listeners: list = []
+_health_listeners: list = []
+_probe_stop = threading.Event()
 
 
 def health_url(url):
@@ -262,6 +269,9 @@ class ScorerPool:
         self.fails = 0
         self.next_primary_check = 0.0
         self.lock = threading.Lock()
+        self.alive = {url: True for url in self.urls}
+        self.probe_fails = {url: 0 for url in self.urls}
+        self.probe_thread = None
 
     @property
     def active(self):
@@ -298,6 +308,58 @@ class ScorerPool:
                 self._switch(0, "primary recovered")
         finally:
             self.lock.release()
+
+    def probe_once(self):
+        """One /health round over every candidate; moves to the first live one.
+
+        A candidate needs PROBE_FAILS failed rounds in a row to count as down, one
+        answer to count as up again. Down/up transitions go to the health listeners.
+        When none answers the active URL is left alone: there is nothing better to use.
+        """
+        results = {url: _health_ok(url) for url in self.urls}
+        changed = []
+        with self.lock:
+            for url, ok in results.items():
+                if ok:
+                    self.probe_fails[url] = 0
+                    if not self.alive[url]:
+                        self.alive[url] = True
+                        changed.append((url, True))
+                else:
+                    self.probe_fails[url] += 1
+                    if self.alive[url] and self.probe_fails[url] >= PROBE_FAILS:
+                        self.alive[url] = False
+                        changed.append((url, False))
+            target = next((i for i, url in enumerate(self.urls) if self.alive[url]), None)
+            if target is not None and target != self.index:
+                self._switch(target, "health probe")
+        for url, healthy in changed:
+            log.warning("scorer candidate %s: %s", health_url(url),
+                        "answers again" if healthy else "not answering /health")
+            log.info("audit path=scorer action=scorer_health etype=system start=%d "
+                     "reason=%s", int(time.time()), "up" if healthy else "down")
+            for listener in list(_health_listeners):
+                try:
+                    listener(url, healthy)
+                except Exception:  # noqa: BLE001 - a notice must never break probing
+                    log.warning("scorer health listener failed", exc_info=True)
+
+    def _probe_loop(self, interval):
+        while not _probe_stop.is_set():
+            try:
+                self.probe_once()
+            except Exception:  # noqa: BLE001 - probing is best effort
+                log.warning("scorer probe failed", exc_info=True)
+            if _probe_stop.wait(interval):
+                return
+
+    def start_probe(self, interval=PROBE_INTERVAL):
+        with self.lock:
+            if self.probe_thread is not None and self.probe_thread.is_alive():
+                return
+            self.probe_thread = threading.Thread(
+                target=self._probe_loop, args=(interval,), daemon=True, name="scorer-probe")
+            self.probe_thread.start()
 
     def _switch(self, index, reason):
         old, self.index, self.fails = self.index, index, 0
@@ -352,6 +414,20 @@ def score(scorer_cfg, image_path, **kwargs):
     return result
 
 
+def start_probes(scorer_cfgs, interval=PROBE_INTERVAL):
+    """Probe every candidate list that has alternatives in the background (opt-in)."""
+    _probe_stop.clear()
+    for scorer_cfg in scorer_cfgs:
+        pool = pool_for(scorer_cfg)
+        if pool is not None:
+            pool.start_probe(interval)
+
+
+def add_health_listener(callback):
+    """Call ``callback(url, healthy)`` when a candidate goes down or comes back."""
+    _health_listeners.append(callback)
+
+
 def add_switch_listener(callback):
     """Call ``callback(primary_url, index)`` after every switch (to persist it)."""
     _listeners.append(callback)
@@ -368,9 +444,11 @@ def restore_active(scorer_cfgs, active):
 
 def reset_pools():
     """Forget every pool and listener (tests; a fresh process starts on the primaries)."""
+    _probe_stop.set()
     with _pools_lock:
         _pools.clear()
     _listeners.clear()
+    _health_listeners.clear()
 
 
 # A person counts as inside an ignore zone when at least this share of its box is.
