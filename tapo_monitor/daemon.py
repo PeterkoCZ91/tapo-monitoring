@@ -5557,7 +5557,8 @@ def _connect_camera(cam_clients, state=None, now=None):
                 if controller is None:
                     controller = stopcontrol.StopControl(
                         cfg, lambda: cam_clients.get(name),
-                        suspended=lambda: name in parked_lenses(state))
+                        suspended=lambda: name in parked_lenses(state),
+                        recall=lambda client, preset, _n=name: _recall_preset(client, preset, _n))
                     state.stop_controls[name] = controller
                 controller.attach(client)
                 client._rotation_stop_control = controller

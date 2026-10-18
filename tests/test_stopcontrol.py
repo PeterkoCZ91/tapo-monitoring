@@ -455,3 +455,23 @@ def test_position_loss_is_visible_even_when_the_control_plan_already_requested_o
     headline = reviewdigest.fleet_lines(health)[0]
     assert 'endstop hold after position loss' in headline
     assert 'Fleet degraded' in headline
+
+
+def test_recover_home_recalls_only_a_safe_known_view_through_the_daemon_recall():
+    cfg = app_config().cameras[0]
+    client, ptz = NativeClient(), FakePTZ()
+    calls = []
+    controller = stopcontrol.StopControl(
+        cfg, lambda: client, build_ptz=lambda *args: (ptz, "profile"), guard_factory=FakeGuard,
+        recall=lambda c, preset: calls.append((c, preset)) or True)
+    controller.attach(client)
+    controller.start()
+    assert controller.guard.options["recover"] == controller.recover_home
+    controller._plan_preset = "right"          # unsafe plan view is never used
+    controller.recover_home()
+    assert all(preset != "right" for _, preset in calls)
+    controller._plan_preset = "home"
+    assert controller.recover_home() is True
+    assert calls[-1] == (client, "home")
+    controller.recall = None
+    assert controller.recover_home() is False

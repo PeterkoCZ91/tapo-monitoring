@@ -48,6 +48,7 @@ class _Episode:
     first_stop_ok: float | None = None
     off: float | None = None
     off_failed: int = 0
+    recoveries: int = 0
     # Debug context, never used for decisions: the pre-trip samples and a bounded
     # timeline of observed position changes and guard/camera events.
     pre: list = field(default_factory=list)
@@ -84,7 +85,8 @@ class StopGuard:
                  left_limit=None, poll_interval=0.15, stale_after=1.0,
                  stop_interval=0.15, cooldown=2.0, stable_samples=2,
                  retry_interval=1.0, stable_tolerance=0.002, suspended=None,
-                 clock=time.monotonic, wait=None, name=""):
+                 clock=time.monotonic, wait=None, name="", recover=None,
+                 recover_interval=5.0, recover_attempts=6):
         values = (right_limit, margin, poll_interval, stale_after, stop_interval,
                   cooldown, retry_interval, stable_tolerance)
         if not all(math.isfinite(v) for v in values):
@@ -123,6 +125,10 @@ class StopGuard:
         self._recovery_direction = 0
         # Debug-only state: recent reads for the pre-trip context, the cause of the
         # last failed read, the last refused rearm and periodic read statistics.
+        self.recover, self.recover_interval = recover, recover_interval
+        self.recover_attempts = recover_attempts
+        self._recover_thread = None
+        self._last_recover = -math.inf
         self._recent: deque = deque(maxlen=14)
         self._last_cause = "none"
         self._rearm_block = None
@@ -236,6 +242,41 @@ class StopGuard:
                     episode.off_failed += 1
         if warn:
             log.warning("PTZ stop guard could not verify tracking OFF")
+
+    def _maybe_recover(self):
+        """Send the camera home once OFF is verified while it stands outside the safe band.
+
+        Without this the lens waits for the next control pass (about a minute) next to
+        the limit. The callback is the daemon's ordinary safe-preset recall, so it
+        still needs the guard's verified inward-recovery permit. Bounded per episode.
+        """
+        if self.recover is None or self._is_suspended():
+            return
+        with self._lock:
+            episode = self._episode
+            pending = (self._recover_thread is not None and self._recover_thread.is_alive()) or (
+                self._disable_thread is not None and self._disable_thread.is_alive())
+            if (episode is None or not self._latched or not self._healthy or not self._disable_ok
+                    or pending or episode.recoveries >= self.recover_attempts
+                    or self._position is None or self._safe(self._position)
+                    or self.clock() - self._last_recover < self.recover_interval):
+                return
+            episode.recoveries += 1
+            self._last_recover = self.clock()
+            self._recover_thread = threading.Thread(target=self._recover, args=(episode,),
+                                                    daemon=True, name="ptz-stopguard-home")
+            self._recover_thread.start()
+
+    def _recover(self, episode):
+        began = self.clock()
+        try:
+            ok = self.recover() is True
+            error = "none"
+        except Exception as exc:  # noqa: BLE001 - a failed recall must not kill observation
+            ok, error = False, type(exc).__name__
+        with self._lock:
+            if episode is self._episode:
+                self._trace("home", f"{'ok' if ok else 'deferred ' + error} {self.clock() - began:.2f}s")
 
     def _trip(self, reason, *, dispatch=True):
         with self._lock:
@@ -424,6 +465,7 @@ class StopGuard:
             if not latched or not inward:
                 self._stop_if_due()
             self._request_disable()
+            self._maybe_recover()
         elif latched:
             # A readable interior pose does not acknowledge a failed Stop. Nor can
             # one Stop prevent native tracking resuming while OFF is still pending.

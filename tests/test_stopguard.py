@@ -686,3 +686,73 @@ def test_read_statistics_line_is_periodic(caplog):
     stats = [r.getMessage() for r in caplog.records if "stop guard stats" in r.getMessage()]
     assert stats and "reads=" in stats[0] and "failed=0" in stats[0]
     guard.close()
+
+
+def recovery_guard(positions, **kwargs):
+    clock = Clock()
+    poses = iter(positions)
+    homes = []
+    guard = StopGuard(lambda: next(poses), lambda: None, lambda: True, right_limit=0.8,
+                      margin=0.1, clock=clock, recover=lambda: homes.append(clock.now) or True,
+                      **kwargs)
+    return guard, clock, homes
+
+
+def await_home(guard):
+    thread = guard._recover_thread
+    if thread is not None:
+        thread.join(1)
+        assert not thread.is_alive()
+
+
+def test_verified_off_beyond_boundary_sends_home_without_waiting_for_control_pass(caplog):
+    caplog.set_level("INFO", logger="tapo_monitor.stopguard")
+    guard, clock, homes = recovery_guard([0.5, 0.5] + [0.85] * 8)
+    for _ in range(3):
+        guard.poll_once()
+        clock.advance()
+    await_off(guard)
+    guard.poll_once()                       # OFF is verified now; still outside the band
+    await_home(guard)
+    assert len(homes) == 1
+    clock.advance(1)
+    guard.poll_once()                       # inside the retry interval: no second recall
+    await_home(guard)
+    assert len(homes) == 1
+    clock.advance(5)
+    guard.poll_once()
+    await_home(guard)
+    assert len(homes) == 2
+    guard.close()
+    assert any("home=ok" in r.getMessage() for r in caplog.records)
+
+
+def test_pose_loss_at_a_safe_position_never_triggers_a_recall():
+    guard, clock, homes = recovery_guard([0.5, 0.5, None, 0.5, 0.5])
+
+    def read():
+        value = next(guard_poses)
+        if value is None:
+            raise TimeoutError("no pose")
+        return value
+
+    guard_poses = iter([0.5, 0.5, None, 0.5, 0.5, 0.5])
+    guard.read_position = read
+    for _ in range(6):
+        guard.poll_once()
+        clock.advance(6)
+        await_off(guard)
+    await_home(guard)
+    assert homes == []
+    guard.close()
+
+
+def test_recall_attempts_are_bounded_per_episode():
+    guard, clock, homes = recovery_guard([0.5, 0.5] + [0.85] * 40, recover_attempts=2)
+    for _ in range(42):
+        guard.poll_once()
+        await_off(guard)
+        clock.advance(6)
+        await_home(guard)
+    assert len(homes) == 2
+    guard.close()

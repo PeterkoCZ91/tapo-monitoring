@@ -261,8 +261,8 @@ def test_off_diagnostics_separate_lock_wait_from_request_time(monkeypatch):
 
     client = Client()
     protect_client(client, lambda: False)
-    clock = iter([10.0, 12.0, 15.0])
+    clock = iter([10.0, 12.0, 13.5, 15.0])
     monkeypatch.setattr(sessionguard.time, "monotonic", lambda: next(clock))
     diagnostics = {}
     assert native_tracking_off(client, diagnostics=diagnostics)
-    assert diagnostics == {"result": "verified", "lock_wait_s": 2.0, "request_s": 3.0}
+    assert diagnostics == {"result": "verified", "lock_wait_s": 2.0, "set_s": 1.5, "request_s": 3.0}

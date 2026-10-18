@@ -21,8 +21,11 @@ class StopControl:
     the operation, so reconnecting cannot revive a closed session.
     """
 
-    def __init__(self, cfg, get_client, *, build_ptz=None, guard_factory=None, suspended=None):
+    def __init__(self, cfg, get_client, *, build_ptz=None, guard_factory=None, suspended=None,
+                 recall=None):
         self.cfg, self.get_client = cfg, get_client
+        self.recall = recall            # recall(client, preset) -> bool; the daemon's safe recall
+        self._plan_preset = None
         self.build_ptz = build_ptz or (
             lambda *args: panlimit.build_ptz(*args, timeout=1))
         self.guard_factory = guard_factory or stopguard.StopGuard
@@ -58,14 +61,25 @@ class StopControl:
             return None
         return {"active": True, "reason": snap.reason, "healthy": snap.healthy}
 
+    def recover_home(self):
+        """Recall the verified safe home view now instead of at the next control pass."""
+        client = self.get_client()
+        if client is None or self.recall is None:
+            return False
+        candidates = (self._plan_preset, self.cfg.tracking.day_preset,
+                      self.cfg.tracking.night_preset)
+        home = next((p for p in candidates if p is not None and self.safe_preset(p)), None)
+        return home is not None and bool(self.recall(client, home))
+
     def disable_tracking(self):
         client = self.get_client()
         diagnostics = {"result": "missing", "lock_wait_s": 0.0, "request_s": 0.0}
         ok = client is not None and sessionguard.native_tracking_off(client, diagnostics=diagnostics)
         log.info("PTZ stop guard tracking OFF %s: result=%s client_unavailable=%s "
-                 "lock_wait=%.3fs request=%.3fs error=%s", self.cfg.name,
+                 "lock_wait=%.3fs request=%.3fs set=%.3fs error=%s", self.cfg.name,
                  diagnostics["result"], diagnostics["result"] in {"missing", "retired"},
-                 diagnostics["lock_wait_s"], diagnostics["request_s"], diagnostics.get("error", "none"))
+                 diagnostics["lock_wait_s"], diagnostics["request_s"],
+                 diagnostics.get("set_s", 0.0), diagnostics.get("error", "none"))
         return ok
 
     def start(self):
@@ -102,7 +116,7 @@ class StopControl:
             lambda: ptzrpc.call(ptz, lambda: panlimit.read_pan_x(ptz, token)),
             lambda: ptzrpc.call(ptz, lambda: ptz.Stop(
                 {"ProfileToken": token, "PanTilt": True, "Zoom": True})),
-            self.disable_tracking, right_limit=right, left_limit=left,
+            self.disable_tracking, right_limit=right, left_limit=left, recover=self.recover_home,
             margin=pl.stop_margin, poll_interval=pl.stop_poll_interval,
             stop_interval=pl.stop_poll_interval, cooldown=pl.stop_cooldown,
             suspended=self.suspended, name=self.cfg.name)
@@ -132,6 +146,7 @@ class StopControl:
 
     def control_plan(self, plan):
         """Keep the latch authoritative over stale plans and recover only inward."""
+        self._plan_preset = plan.preset
         if self.guard is not None:
             self.guard.rearm()
             snap = self.guard.snapshot()

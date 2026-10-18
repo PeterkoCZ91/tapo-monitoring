@@ -129,6 +129,8 @@ def native_tracking_off(client: Any, *, diagnostics: dict | None = None) -> bool
             return False
         try:
             client.setAutoTrackTarget(False)
+            if diagnostics is not None:
+                diagnostics["set_s"] = time.monotonic() - acquired
             result = client.getAutoTrackTarget()
             ok = isinstance(result, dict) and result.get("enabled") == "off"
             if diagnostics is not None:
