@@ -68,12 +68,23 @@ def test_connect_succeeds_after_transient_failures():
     def factory():
         calls["n"] += 1
         if calls["n"] < 3:
-            raise RuntimeError("Invalid authentication data")
+            raise RuntimeError("temporary client discovery failure")
         return "CAM"
     cam, err = camera.connect(factory, retries=3, sleep=_no_sleep)
     assert cam == "CAM"
     assert err is None
     assert calls["n"] == 3
+
+
+def test_authentication_error_detection_and_camera_retry_after():
+    auth_error = RuntimeError("Temporary Suspension: Try again in 240 seconds")
+    wrapped = RuntimeError("request failed")
+    wrapped.__cause__ = auth_error
+
+    assert camera.is_authentication_error(wrapped)
+    assert camera.authentication_retry_after(wrapped) == 240
+    assert not camera.is_authentication_error(TimeoutError("socket timeout"))
+    assert camera.authentication_retry_after(TimeoutError("socket timeout")) is None
 
 
 def test_connect_exhausts_and_returns_error():
@@ -361,3 +372,29 @@ def test_close_client_closes_the_pytapo_event_loop():
     assert loop.is_closed()
     camera.close_client(client)                 # idempotent
     camera.close_client(object())               # no handler: nothing to do, no error
+
+
+def test_close_client_closes_transport_and_tpap_http_session():
+    class Session:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    class Transport:
+        def __init__(self):
+            self.session = Session()
+
+    class Client:
+        def __init__(self):
+            self.transport = Transport()
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    client = Client()
+    camera.close_client(client)
+
+    assert client.closed
+    assert client.transport.session.closed

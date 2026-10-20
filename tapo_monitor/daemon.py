@@ -5484,6 +5484,32 @@ def _connect_camera(cam_clients, state=None, now=None):
     """
     from . import camera
 
+    def observe_client(client, name):
+        if state is None:
+            return
+
+        def auth_failure(failed_client, _error):
+            fails = state.connect_fails.get(name, 0) + 1
+            state.connect_fails[name] = fails
+            wait = max(backoff_seconds(fails),
+                       camera.authentication_retry_after(_error) or 0)
+            state.connect_backoff_until[name] = _time.time() + wait
+            log.warning("camera API authentication %s failed; backing off %ds",
+                        name, wait)
+            failed_client._tapo_auth_failed = True
+            if cam_clients.get(name) is failed_client:
+                cam_clients.pop(name, None)
+                camera.close_client(failed_client)
+
+        def api_success(_client):
+            fails = state.connect_fails.pop(name, 0)
+            state.connect_backoff_until.pop(name, None)
+            if fails:
+                log.info("camera API %s recovered after %d failure(s)", name, fails)
+
+        camera.observe_client_requests(
+            client, on_auth_failure=auth_failure, on_success=api_success)
+
     def connect(cfg: CameraConfig):
         name = cfg.name
         if "getevents" not in cfg.detection.sources and "hubpoll" in cfg.detection.sources:
@@ -5534,6 +5560,8 @@ def _connect_camera(cam_clients, state=None, now=None):
             user, password, cloud = resolve_camera_credentials(cfg)
             factory = camera.tapo_factory(camera.active_host(cfg), user, password, cloud)
             client, err = camera.connect(factory)
+        if client is not None:
+            observe_client(client, name)
         if client is not None and state is not None and len(camera.candidate_hosts(cfg)) > 1:
             if switched_from is not None:
                 if not _confirm_switch(cfg, state, client, switched_from, now or 0):
@@ -5550,13 +5578,26 @@ def _connect_camera(cam_clients, state=None, now=None):
             state.failover_rejected.setdefault(name, {})[tried] = (
                 (now or 0) + FAILOVER_REJECT_SECONDS)
             state.network_reachable[name] = False
+        auth_failed = bool(client is not None
+                           and getattr(client, "_tapo_auth_failed", False))
+        if auth_failed:
+            if switched_from is not None:
+                # An auth failure during device_identity() is caught by that helper
+                # and returns None. Do not mistake that for an unverifiable but
+                # usable candidate: without an authenticated identity, retain the
+                # original address and reject this candidate temporarily.
+                tried = camera.active_host(cfg)
+                camera.set_active_host(cfg, switched_from)
+                state.active_hosts.pop(name, None)
+                state.failover_rejected.setdefault(name, {})[tried] = (
+                    (now or 0) + FAILOVER_REJECT_SECONDS)
+                state.network_reachable[name] = False
+            camera.close_client(client)
+            client = None
+            err = camera.CameraAuthenticationBackoffError(
+                "camera authentication failed; retry deferred")
         if state is not None:
-            if client is not None:
-                fails = state.connect_fails.pop(name, 0)
-                state.connect_backoff_until.pop(name, None)
-                if fails:
-                    log.info("connect %s succeeded after %d failure(s)", name, fails)
-            else:
+            if client is None and not auth_failed:
                 fails = state.connect_fails.get(name, 0) + 1
                 state.connect_fails[name] = fails
                 wait = backoff_seconds(fails)

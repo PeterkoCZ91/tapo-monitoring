@@ -197,6 +197,40 @@ def test_unverifiable_identity_switches_but_says_so(monkeypatch, caplog):
     assert any("unverified" in r.getMessage() for r in caplog.records)
 
 
+def test_auth_failure_while_verifying_candidate_reverts_failover(monkeypatch):
+    cam = _cam([A, B])
+
+    class AuthFailingClient:
+        def performRequest(self, request):
+            raise RuntimeError("Invalid authentication data")
+
+        def getBasicInfo(self):
+            self.performRequest({"method": "getDeviceInfo"})
+
+    built = []
+    monkeypatch.setattr(camera, "ping_reachable", lambda host: host == B)
+    monkeypatch.setattr(camera, "find_alternate_host", lambda *a, **k: B)
+    monkeypatch.setattr(camera, "tapo_factory", lambda host, *a: lambda: (
+        built.append(host) or AuthFailingClient()))
+    state = daemon.MonitorState()
+    state.host_identity["c"] = "AA-BB"
+    clients = {}
+    connect = daemon._connect_camera(clients, state, now=100)
+
+    connect(cam)  # first primary miss
+    client, err = connect(cam)  # switch, then authentication fails during MAC read
+
+    assert client is None
+    assert isinstance(err, camera.CameraAuthenticationBackoffError)
+    assert built == [B]
+    assert camera.active_host(cam) == A
+    assert state.active_hosts == {}
+    assert state.network_reachable["c"] is False
+    assert B in state.failover_rejected["c"]
+    assert clients == {}
+    assert state.connect_backoff_until["c"] > 0
+
+
 # -- persistence -------------------------------------------------------------
 
 def test_active_host_survives_a_restart(tmp_path):

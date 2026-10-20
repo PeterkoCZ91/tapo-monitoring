@@ -4,10 +4,9 @@ pytapo is a thin API client; this adds the operational glue around it:
 
 * **Cheap reachability probe** — ping the device before creating an authenticated session,
   so a disconnected camera is distinct from an API/authentication failure.
-* **Lockout-aware connect** — the C560WS locks out a source IP for ~30 min after failed
-  logins, and the first login after a reconnect often fails with "Invalid authentication
-  data" before a retry succeeds. ``connect`` retries a few times with a delay so callers
-  don't rediscover this; ``sleep`` is injectable for tests.
+* **Lockout-aware API retry** — ``connect`` retries only client construction. API
+  authentication happens on the first request; the daemon observes definite auth errors,
+  retires that client and backs off before trying again.
 * **getEvents helpers** — pure filtering of new events since a watermark.
 
 The pytapo import is lazy (inside ``tapo_factory``) so the rest of the package — and the
@@ -15,6 +14,7 @@ tests — import without the dependency present.
 """
 
 import logging
+import re
 import socket
 import subprocess
 import time as _time
@@ -136,20 +136,124 @@ def tapo_factory(host, user, password, cloud_password=None):
     return make
 
 
-def close_client(client):
-    """Release a pytapo client's event loop; never raises.
+class CameraAuthenticationBackoffError(RuntimeError):
+    """A camera request was suppressed after an authentication failure."""
 
-    Every ``Tapo`` owns an asyncio loop (an epoll fd and a socket pair) that pytapo never
-    closes. The daemon replaces its clients on every control pass, so a client still
-    referenced anywhere keeps its loop open: one host ran out of file descriptors after
-    23 hours and could no longer reach its camera or Telegram. Closing the loop when a
-    client is dropped makes the count independent of who still holds a reference.
+
+def is_authentication_error(error):
+    """Recognize authentication failures across pytapo's wrapped exceptions."""
+    pending = [error]
+    seen = set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        code = getattr(current, "code", None)
+        if code == -40211:
+            return True
+        message = str(current).lower()
+        if ("invalid authentication data" in message
+                or "temporary suspension" in message
+                or "-40211" in message):
+            return True
+        pending.extend((getattr(current, "__cause__", None),
+                        getattr(current, "__context__", None)))
+    return False
+
+
+def authentication_retry_after(error):
+    """Return a camera-reported suspension duration, when the error includes one."""
+    pending = [error]
+    seen = set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        match = re.search(r"try again in\s+(\d+)\s+seconds", str(current), re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        pending.extend((getattr(current, "__cause__", None),
+                        getattr(current, "__context__", None)))
+    return None
+
+
+def observe_client_requests(client, *, on_auth_failure, on_success):
+    """Observe requests once, allowing callbacks to change as the daemon state advances."""
+    original = getattr(client, "performRequest", None)
+    if not callable(original):
+        return False
+    observer = getattr(client, "_tapo_monitor_request_observer", None)
+    if observer is not None:
+        observer["on_auth_failure"] = on_auth_failure
+        observer["on_success"] = on_success
+        return True
+
+    observer = {"on_auth_failure": on_auth_failure, "on_success": on_success}
+
+    def perform_request(request_data, *args, **kwargs):
+        if (getattr(client, "_tapo_monitor_client_closed", False)
+                or getattr(client, "_tapo_auth_failed", False)):
+            raise CameraAuthenticationBackoffError("camera client has been retired")
+        try:
+            result = original(request_data, *args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - preserve pytapo's public error
+            if is_authentication_error(exc):
+                observer["on_auth_failure"](client, exc)
+            raise
+        observer["on_success"](client)
+        return result
+
+    client._tapo_monitor_request_observer = observer
+    client.performRequest = perform_request
+    return True
+
+
+def close_client(client):
+    """Release a pytapo client's transport, HTTP session and event loop; never raises.
+
+    Every ``Tapo`` owns an asyncio loop (an epoll fd and a socket pair). The daemon
+    replaces ordinary clients on control passes, so transport resources must close before
+    the loop is closed; a client retained elsewhere must no longer be usable.
     """
+    if getattr(client, "_tapo_monitor_client_closed", False):
+        return
+    try:
+        client._tapo_monitor_client_closed = True
+    except Exception:  # noqa: BLE001 - third-party clients may use slots
+        pass
     if getattr(client, "_tapo_session_guard", None) is not None:
         from .sessionguard import retire_client
 
-        retire_client(client, lambda: _close_client_loop(client))
+        retire_client(client, lambda: _close_client_resources(client))
         return
+    _close_client_resources(client)
+
+
+def _close_client_resources(client):
+    """Close pytapo transport resources and its loop without allowing cleanup to raise."""
+    close = getattr(client, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:  # noqa: BLE001 - cleanup must not break a control pass
+            log.debug("closing a camera transport failed", exc_info=True)
+
+    owners = [client, getattr(client, "transport", None)]
+    owners.append(getattr(owners[-1], "transport", None))
+    seen = set()
+    for owner in owners:
+        session = getattr(owner, "session", None) if owner is not None else None
+        if session is None or id(session) in seen:
+            continue
+        seen.add(id(session))
+        session_close = getattr(session, "close", None)
+        if callable(session_close):
+            try:
+                session_close()
+            except Exception:  # noqa: BLE001 - cleanup must not break a control pass
+                log.debug("closing a camera HTTP session failed", exc_info=True)
     _close_client_loop(client)
 
 

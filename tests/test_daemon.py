@@ -1444,22 +1444,26 @@ def test_connect_camera_still_pings_during_api_backoff(monkeypatch):
     assert state.network_reachable["c"] is True
 
 
-def test_connect_camera_success_after_failures_logs_recovery(monkeypatch, caplog):
+def test_api_success_after_connect_failures_logs_recovery(monkeypatch, caplog):
     import logging
 
     from tapo_monitor import camera
+    class Client:
+        def performRequest(self, request):
+            return {"result": "ok"}
+
     monkeypatch.setattr(camera, "ping_reachable", lambda host: True)
-    monkeypatch.setattr(camera, "tapo_factory", lambda *a: lambda: "CAM")
+    monkeypatch.setattr(camera, "tapo_factory", lambda *a: lambda: Client())
     monkeypatch.setattr(camera, "connect", lambda factory: (factory(), None))
     state = daemon.MonitorState()
     state.connect_fails["c"] = 3
 
     with caplog.at_level(logging.INFO, logger="tapo_monitor.daemon"):
         client, err = daemon._connect_camera({}, state, now=100)(_cam())
+        assert client.performRequest({"method": "get"}) == {"result": "ok"}
 
-    assert client == "CAM"
     assert state.connect_fails == {}
-    assert "connect c succeeded after 3 failure(s)" in caplog.text
+    assert "camera API c recovered after 3 failure(s)" in caplog.text
 
 
 def test_connect_camera_api_failure_keeps_exponential_backoff(monkeypatch):
@@ -1476,6 +1480,55 @@ def test_connect_camera_api_failure_keeps_exponential_backoff(monkeypatch):
     assert state.network_reachable["c"] is True
     assert state.connect_fails["c"] == 1
     assert state.connect_backoff_until["c"] == 160
+
+
+def test_api_auth_failure_enters_backoff_before_next_control_connect(monkeypatch):
+    from tapo_monitor import camera
+
+    created = []
+
+    class Client:
+        def __init__(self, fail):
+            self.fail = fail
+            self.requests = 0
+
+        def performRequest(self, request):
+            self.requests += 1
+            if self.fail:
+                raise RuntimeError("Invalid authentication data")
+            return {"result": "ok"}
+
+    monkeypatch.setattr(camera, "ping_reachable", lambda host: True)
+    clock = [100]
+    monkeypatch.setattr(daemon._time, "time", lambda: clock[0])
+    monkeypatch.setattr(camera, "tapo_factory", lambda *args: lambda: created.append(
+        Client(fail=not created)) or created[-1])
+    monkeypatch.setattr(camera, "close_client", lambda client: None)
+    state = daemon.MonitorState()
+    clients = {}
+
+    client, err = daemon._connect_camera(clients, state, now=100)(_cam())
+    assert err is None
+    with pytest.raises(RuntimeError, match="Invalid authentication data"):
+        client.performRequest({"method": "get"})
+    with pytest.raises(camera.CameraAuthenticationBackoffError):
+        client.performRequest({"method": "get"})
+    assert client.requests == 1
+
+    # loop_step retires ordinary clients before the next control pass.
+    clients.pop("c", None)
+    next_client, err = daemon._connect_camera(clients, state, now=110)(_cam())
+
+    assert next_client is None
+    assert err == "backoff"
+    assert len(created) == 1
+
+    clock[0] = 160
+    recovered, err = daemon._connect_camera(clients, state, now=160)(_cam())
+    assert err is None
+    assert recovered.performRequest({"method": "get"}) == {"result": "ok"}
+    assert state.connect_fails == {}
+    assert state.connect_backoff_until == {}
 
 
 # ── resolve_secrets (monkeypatched env) ──────────────────────────────────────
