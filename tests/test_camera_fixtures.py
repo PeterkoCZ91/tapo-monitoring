@@ -169,3 +169,17 @@ def test_c260_report_uses_the_default_table():
     assert data["camera"]["lens_channels"] == []
     assert _classes(data) == ["motion"]
     assert "unknown events_1 bits: none" in report.summarize(data)
+
+
+def test_c216_report_keeps_typeless_events_as_scoring_candidates():
+    data = _fixture("c216-1.3.2.json")
+    assert data["camera"]["event_profile"] is None
+    assert data["camera"]["lens_channels"] == []
+    assert data["watch"]["errors"] == []
+    entries = _entries(data)
+    assert {entry["alarm_type"] for entry in entries} == {2, 6}
+    assert all(entry.get("events_1") is None for entry in entries)
+    # Without a confirmed model-specific mapping, neither type bypasses scoring.
+    assert set(_classes(data)) == {"motion"}
+    for stream in ("stream1", "stream2"):
+        assert data["rtsp"][stream]["state"] == "available"

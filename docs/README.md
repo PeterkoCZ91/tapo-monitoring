@@ -38,6 +38,8 @@ camera names, addresses, credentials, coordinates and observations do not belong
 6. [Observability](observability.md) — Camera Digital Twin and Shadow Detection Auditor.
 7. [Camera reports](camera-reports.md) — produce an anonymized report of your own camera
    model so it can be supported without the maintainers owning one.
+   [C216 model notes](c216.md) distinguish verified paths from open event-mapping,
+   SD-rescue and tracking-safety tests.
 8. [MQTT and Home Assistant](mqtt.md) — the opt-in, publish-only bridge: entities, topics,
    delivery guarantees and an example automation.
 9. [Labeling](labeling.md) — label collected sent/review-log frames and measure false

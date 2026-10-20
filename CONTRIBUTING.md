@@ -27,6 +27,13 @@ export TELEGRAM_TOKEN=... TELEGRAM_CHAT_ID=... GROQ_API_KEY=...
 
 **Never commit `cameras.yaml` or any `.env` file** — they are excluded by `.gitignore`.
 
+Keep deployment notes, account files, raw reports, captures and local assistant state
+under `private/` or the corresponding ignored local directories. The repository's
+ignore rules also cover configuration backups, private keys, local databases and
+media. They do not remove an already tracked file or replace a staged-diff review.
+Public example configurations and reviewed, anonymized report fixtures remain
+versioned; do not blanket-ignore Markdown, YAML or JSON files.
+
 ## Testing
 
 ```bash

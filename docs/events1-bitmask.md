@@ -29,10 +29,26 @@ the event's main code:
 | 9    | 8   | 256     | pet |
 | 20   | 19  | 524288  | face (see below) |
 | 21 / 22 | 20 / 21 | | unfamiliar face / unfamiliar person |
+| 23–28 | 22–27 | | baby camera: left bed, caregiver, asleep, awake, face covered, out of safe fence |
+| 29 / 30 | 28 / 29 | | safe fence moving / baby motion |
+| 31   | 30  | 2^30 | panoramic video |
+| 32   | 31  | 2^31 | loitering |
+| 33   | 32  | 2^32 | animal |
+| 36   | 35  | 2^35 | CO alarm |
 
 The app's list also has timing (1), baby cry (7), doorbell, bark, meow, glass break,
-smoke and CO alarms, package, anti-theft, panoramic and animal codes. A missing
-`alarm_type` is read as 2 by the app. Sources: a pytapo issue comment that took the list
+smoke alarm (14), package (15 / 16), doorbell and anti-theft (10, 17–19) codes. Codes 34
+and 35 are in none of its lists, and **there is no PIR event code**: in the app PIR is a
+configuration module, not an event type. A missing `alarm_type` is read as 2 by the app.
+Codes 23–36 above are from the Tapo Android app 3.22.105 only; none of them has been seen
+on our cameras.
+
+When `events_1` carries several codes, the app's timeline colours the event by the
+code that ranks first in its `AlarmTypePriority` (lowest value wins): baby-camera codes,
+anti-theft, doorbell, smoke / CO, glass break, package, intrusion, line crossing,
+person (120), vehicle, pet / animal, tamper, meow, bark, loitering, motion (190),
+panoramic; the face codes (1000+) rank last. Without `events_1`
+it uses `alarm_type`. The event list row's label always comes from `alarm_type`. Sources: a pytapo issue comment that took the list
 from the app ([JurajNyiri/pytapo#199](https://github.com/JurajNyiri/pytapo/issues/199)),
 and the labels an H500 hub shows next to the same codes
 ([Sujeom/tapo-h500-local-recordings](https://github.com/Sujeom/tapo-h500-local-recordings)).
@@ -84,6 +100,15 @@ The per-model reading is a small table, `EVENT_PROFILES` in
 `alarm_type=6` to `person`. The audit line `event ... alarm_type=... channels=...
 profile=...` shows the raw values next to the verdict, so a row can be amended when more
 samples disagree — a new model gets a new row rather than a change to `default`.
+
+The single-lens **C216 hardware 1.0 / firmware 1.3.2** also illustrates why missing
+fields and a model's event mapping must be treated separately: sampled type 2 and
+type 6 events have no usable `events_1` person bit (the raw field is absent or
+null in saved samples; the decoder treats that as zero for bit decoding and the
+audit log prints `events_1=0`). The default profile keeps them as motion
+candidates; type 6 has not been accepted as a C216 person mapping. See the
+[C216 integration limits](c216.md#events-and-automatic-sd-rescue), including the
+consequence for automatic SD rescue.
 
 ## Not yet ground-truthed
 

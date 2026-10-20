@@ -16,14 +16,15 @@ documented below as *available* but intentionally **not implemented** — see "A
 | Camera AI (`getEvents`) | Poll recent events | Person bit (events_1 bit 19), `face_id`, vehicle/pet classification. Logged to SD regardless of detection toggles. |
 | Hub clip index (`hubpoll`) | Poll the hub a battery camera records to | A sleeping battery camera keeps no event index of its own; clips are read off the hub and the alert frame comes from a go2rtc sidecar. See [battery cameras on a hub](battery-cameras-on-a-hub.md). |
 | Motion detection | Camera setting / classifier support | `digital_sensitivity` 0–100 (or low/normal/high). Tunable per weather; not a standalone daemon event source today. |
-| Person detection | AI, separate sensitivity | Drives people-only auto-tracking. |
-| Person class (alarm code 6) | `events_1` bit 5 / `alarm_type` 6 | The camera's person class, earlier read as a PIR sensor; see [the `events_1` bitmask](events1-bitmask.md). |
+| Person detection | AI, separate sensitivity | Can drive people-only tracking where the model's category controls have been validated. |
+| Model-specific person signals | `events_1` and/or `alarm_type` | Meanings depend on the model and selected profile; see [the `events_1` bitmask](events1-bitmask.md). A bare type 6 is not a universal person mapping. |
 | Other (available, unused) | line-crossing, package, glass-break, bark / baby-cry / meow | Exposed by the firmware; not wired into this stack. |
 
 ## 2. Reaction & tracking
 
 - **Auto-tracking** master switch + **SmartTrack** category selection (people / vehicle
-  / pet / baby) — track only what you care about.
+  / pet / baby), where supported. Returned category fields and successful setters
+  require behavioral validation before claiming selective tracking on a new model.
 - **PTZ presets** — park the camera at a fixed view (static role) or return after tracking.
 - **Soft pan-limit** (optional, per camera) — `pan_limit` keeps auto-track within the span
   of the camera's presets. The local Tapo API has no angular limit or motor-position
@@ -243,6 +244,11 @@ last alarm's time and a coarse type (a person was reported as `motion`).
 every model. `checkDetectEventState` and `getInfLampCapability` are on the client
 deny-list (`tapo_monitor/apiguard.py`): the package's clients refuse to send them to any
 camera, and a twin probe naming one is recorded as `unknown` / `denied_method`.
+
+For the record, `checkDetectEventState` is not presence detection: in the Tapo Android
+app 3.22.105 it takes an event `timestamp` and returns `is_event_finish` /
+`is_video_ready`, and the app calls it after a notification is opened, to wait until that
+event's recording can be played. It stays on the deny-list.
 
 ### Events
 

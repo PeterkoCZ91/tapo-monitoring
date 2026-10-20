@@ -10,21 +10,43 @@ tapo-camera.env
 
 # Real deployment config (coordinates, hosts, camera layout) — never published.
 cameras.yaml
+cameras.yml
 # go2rtc.yaml embeds the camera's cloud password in its tapo:// source URL
 go2rtc.yaml
+go2rtc.yml
+go2rtc.yaml.*
+go2rtc.yml.*
 cameras.*.yaml
+cameras.*.yml
+cameras-*.yaml
+cameras-*.yml
 # Same hole, same reason: `cameras.yaml.bak-cropnative-20260807` is the live convention.
 cameras.yaml.*
+cameras.yml.*
+cameras.*.yaml.*
+cameras.*.yml.*
 !cameras.example.yaml
 !cameras.minimal.yaml
 # Local Compose file copied from docker-compose.example.yml (host paths, image pins).
 docker-compose.yml
+docker-compose.yaml
+docker-compose.yml.*
+docker-compose.yaml.*
 compose.yaml
+compose.yml
+compose.yaml.*
+compose.yml.*
+.envrc
+.envrc.*
+.direnv/
+!.envrc.example
 
 # Python
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 # Coverage writes its data file and HTML report into the checkout.
 .coverage
 .coverage.*
@@ -52,7 +74,16 @@ docs/tapo-research-tasks/
 *tapo*onvif*triggered*.jsonl
 # Local assistant/tooling state and private archives
 AGENTS.md
+CLAUDE.md
+MEMORY.md
+.agents/
+.codex/
 .claude/
+.claude-pro/
+skills-lock.json
+# Keep the shared ignore stub, but never publish the local code index.
+/.codegraph/*
+!/.codegraph/.gitignore
 private/
 docs/superpowers/
 *reinstall*.md
@@ -70,6 +101,48 @@ docs/production-readiness-review-*.md
 *.png
 *.mp4
 *.mov
+*.webp
+*.heic
+*.heif
+*.mkv
+*.webm
+*.avi
+*.m4v
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+# Transport-stream captures belong in these directories; do not ignore TypeScript.
+/recordings/
+/snapshots/
+/sent-log/
+/review-log/
+/state/
+/reports/
+/tapo-report*.json
+
+# Local state databases, exported backups and private key containers
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+*.db
+*.db-*
+*.tar
+*.tar.gz
+*.tar.xz
+*.tgz
+*.zip
+*.7z
+*.key
+*.pem
+*.p12
+*.pfx
+id_rsa
+id_ecdsa
+id_dsa
+id_ed25519
 # Generic probe/discovery JSON outputs
 *tapo_api_probe*.json
 *discovery*.json
@@ -77,6 +150,12 @@ docs/production-readiness-review-*.md
 
 # Local drafts and patch backups
 *.orig
+*.bak
+*.bak-*
+*.bak.*
+*.backup
+*.backup-*
+*.backup.*
 ha-forum-post.md
 
 # Stray GPU/kernel compiler debug dumps (e.g. from OpenVINO iGPU work), not repo content
@@ -85,3 +164,4 @@ kernel.errors.txt
 
 # setuptools build output
 build/
+dist/

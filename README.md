@@ -43,6 +43,7 @@ Telegram (and, if you want, to Home Assistant over MQTT).
 | --- | --- | --- |
 | C560WS | reference model, runs the whole pipeline | `event_profile: default` |
 | TC46 | `getEvents` with an SD card | `event_profile: default`; same getters and event bits as the C560WS; [anonymized report](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/tests/fixtures/cameras/tc46-1.1.10.json) |
+| C216 | SD event index, RTSP snapshots and ONVIF PTZ tested in the lab | firmware 1.3.2; sampled events use `event_profile: default` as motion candidates; automatic SD rescue and tracking safety remain open; see [model notes](docs/c216.md) and the [anonymized report](tests/fixtures/cameras/c216-1.3.2.json) |
 | C260 | `getEvents` with an SD card | `event_profile: default`; [anonymized report](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/tests/fixtures/cameras/c260-1.2.3.json) |
 | C545D (dual lens) | `getEvents` with an SD card, per-lens RTSP streams | needs `event_profile: c545d`; see [dual-lens cameras](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/configuration.md#dual-lens-cameras-c545d) |
 | C410 / C460 on an H200 hub | `hubpoll` reads detections off the hub | see [battery cameras on a hub](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/battery-cameras-on-a-hub.md) |

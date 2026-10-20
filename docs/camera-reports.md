@@ -22,11 +22,12 @@ command line.
 
 ```sh
 export TAPO_USER=... TAPO_PASSWORD=...        # or let it prompt
-tapo-monitor report --host 192.0.2.10 --out my-camera.json
+mkdir -p private/reports
+tapo-monitor report --host 192.0.2.10 --out private/reports/my-camera.json
 # walk past the camera during a two-minute watch, and probe the RTSP streams:
-tapo-monitor report --host 192.0.2.10 --out my-camera.json --watch 120 --rtsp
+tapo-monitor report --host 192.0.2.10 --out private/reports/my-camera.json --watch 120 --rtsp
 # offline digest of any report:
-tapo-monitor report --summarize my-camera.json
+tapo-monitor report --summarize private/reports/my-camera.json
 ```
 
 | option | meaning |
@@ -55,6 +56,18 @@ tapo-monitor report --summarize my-camera.json
   `seen_at_s` from the start of the watch.
 - `rtsp` — ffprobe results, if asked for.
 - `redacted_keys` — the path of every value that was withheld.
+
+## What a report does not establish
+
+`event_profile: default` means the default decoder was used, not that every media,
+tracking or recovery path is validated for the model. An absent or null `events_1`
+is not a zero mask supplied by the camera; "unknown bits: none" is not evidence of
+complete event mapping when no mask was present. The [C216 notes](c216.md) give a
+concrete example with working direct SD reads but unverified automatic SD rescue.
+
+Watch entries include changed versions of the same event. Compare their relative
+start times before counting independent passages or class examples. Getter success,
+setter readback, real-world detection, and a completed soak are separate evidence.
 
 ## How it is anonymized
 

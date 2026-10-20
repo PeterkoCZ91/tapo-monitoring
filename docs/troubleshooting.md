@@ -53,6 +53,13 @@ Checklist:
 4. stop other integrations that may be creating concurrent sessions;
 5. wait for the lockout/backoff window instead of restarting repeatedly.
 
+This error does not always mean a wrong password. A tested C216 and C260 that had
+worked with this daemon later advertised `encryption: 4`; the pinned pytapo login
+then kept reporting `Invalid authentication data`, while the same password succeeded
+through the newer TPAP login. Third-Party Compatibility was enabled in the app
+throughout, and what triggered the switch is not known. Check the camera's
+advertised encryption before resetting the password.
+
 The daemon retries conservatively and then applies exponential backoff. Do not reduce the
 control interval to work around auth errors; that usually makes the condition worse.
 

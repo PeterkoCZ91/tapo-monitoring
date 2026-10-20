@@ -22,10 +22,15 @@ one model. Every finding says where it was seen and how sure we are. Treat each 
 | **C545D** | Tapo C545D (dual lens), HW 1.0, EU | 1.1.7 Build 260421 | 3.4.18 | 2026-09 |
 | **C560WS** | Tapo C560WS (two cameras) | 1.1.10 Build 260330 | 3.4.14 | 2026-06 |
 | **C260** | Tapo C260 | 1.1.12 Build 260128 | 3.4.14 | 2026-06 |
+| **C216** | Tapo C216, HW 1.0 | 1.3.2 Build 260820 Rel.65461n | 3.4.18 | 2026-10 |
 
 Confidence words used below: **reproduced** (seen on repeated, deliberate tries),
 **n=…** (number of independent observations), **seen once** (a single sample — a lead,
 not a fact).
+
+The [C216 model notes](c216.md) cover its event-mask absence, unsupported vehicle
+operation, sensitivity side effects, black RTSP frames in privacy mode and the
+limits of the controlled tracking tests. These are scoped to its tested firmware.
 
 > [!WARNING]
 > **Dangerous calls — read this first.**
@@ -125,11 +130,48 @@ pytapo's `const.py` names most codes; this is what they meant in practice.
 | `-40214` | *(not in pytapo)* | undocumented. Seen for a valid search that has nothing to return (empty window), right after a white-lamp switch (C560WS, transient), on the first `getCloudInfo` of a session (C560WS), and once as a top-level error while a second client was polling (C545D) | retry once after a pause; do not read it as "unsupported" |
 | `-40401` | Invalid stok value | the session expired or the API restarted | pytapo logs in again by itself |
 | `-64303` | MOTOR_BUSY | the motor is busy | note pytapo's automatic `setCruise(False)` (see the warning box) |
+| `-64304` | MOTOR_LOCKED_ROTOR | app (3.22.105) text: pan/tilt "has reached the maximum extent in this direction" — a direction limit, or a blocked rotor | stop pushing that way; it is not the busy code |
+| `-64305` | PRESET_ADD_MOVING | app: busy while adding a preset during a move | retry once the motor is idle |
+| `-64306` | PRESET_SATURATED | app: preset slots full | delete a preset first |
+| `-64336` | MOTOR_PRIVATE_AREA | app: no UI text; by name, the move targets a privacy area | — |
+| `-64324` | Privacy mode is ON | pytapo only, not in the app's list | turn privacy mode off before moving |
 | `-71101` / `-71102` | USER_ID_FULL / USER_ID_EMPLOYED | playback user slots full / taken | pytapo retries with a fresh `getUserID` |
 | `-71103` / `-71105` | USER_ID_INVALID / PLAYBACK_SEARCH_FAILED | the playback user id expired, or the search failed | pytapo refreshes `getUserID` and retries |
 | `-71112` | *(not in pytapo)* | playback search refused: extra keys in `search_detection_list` on the C260, and the video searches on the C560WS (§5); also when `searchEventList` had nothing to return | send exactly the documented keys |
 | `-71114` | STORAGE_NOT_EXIST | no SD card, so there is no event or recording index | insert a card, or use `getLastAlarmInfo` (§6) |
 | connection refused on 443 | — | the HTTP API process is down: a restart after a dangerous call (see the box) or a firmware upgrade | wait 10–120 s and log in again |
+
+The `-64304`…`-64336` names and texts come from the Tapo Android app 3.22.105 and
+pytapo's `const.py`, not from captures of each code; we have not seen `-64305`, `-64306`
+or `-64336` on a camera.
+
+Observed on a C216 (firmware 1.3.2): with privacy mode on, native moves and preset recalls
+return `-64303` MOTOR_BUSY, not `-64324`, and every ONVIF PTZ call fails with a malformed
+HTTP 500 reply instead of a SOAP fault, while ONVIF `GetStatus` keeps working. A native
+`relativeMove` past the pan limit returns `-64304`; `motorMove` and ONVIF relative or
+continuous moves stop at the limit without an error.
+
+### Motor state and stream notifications — limits
+
+From the Tapo Android app 3.22.105 (app-derived, not a firmware guarantee):
+
+- **No call reads the current pan/tilt position.** The motor getters are
+  `getMotorFov`, `getMotorAngleRange` (ranges, not position), `getCalibratedParams`
+  (lens calibration) and `getPresetConfig` (preset coordinates). ONVIF PTZ `GetStatus` is
+  the only position source we know of.
+- **Motor state is a push in the stream session**, not an RPC: a `channel_motor_status`
+  notification (`status`: `idle` / `moving`, plus `direction`) arrives as a JSON part of
+  the same multipart media session as live view. We found no separate subscribe request
+  for it; a client that opens no stream session does not get it.
+- **A Stop ACK (`error_code: 0`) does not prove the lens stopped.** `channel_motor_status`
+  is not a Stop confirmation either, and for cruise and calibration the app shows its
+  "moving" overlay on a timer (the returned `time`, or per-model defaults).
+- **pytapo 3.4.18 drops stream notifications** that have no `session`/`seq`, and its
+  `Streamer` ignores JSON parts. An empty result from pytapo's stream code does not mean
+  the camera sent nothing.
+- **Stream port:** the app's local preconnect uses 28800 when the matching media
+  security is on and 8800 otherwise. Not verified per firmware; the C216 on 1.3.2 used
+  8800.
 
 An earlier probe of the C260 reported face-gallery methods (`getFaceManagement`,
 `searchFaceList`, `getFaceDB`, …) as "Connection aborted". A later capture of the raw
@@ -234,6 +276,14 @@ What `getEvents()` sends:
 {"start_time": 1700000000, "end_time": 1700000054, "alarm_type": 2,
  "events_1": 524290, "event_info": []}
 ```
+
+A single lens does not guarantee this shape. **C216 hardware 1.0 / firmware 1.3.2**
+returned type 2 and type 6 events with the raw `events_1` field absent or null
+(treated as zero by the bit decoder, with `events_1=0` in the audit log).
+Neither the missing usable mask nor type 6 alone establishes the person mapping
+used by another model. The current default decoder treats those entries as
+motion candidates, with
+[consequences for automatic SD rescue](c216.md#events-and-automatic-sd-rescue).
 
 **Dual-lens event** (C545D) — there is **no top-level `events_1`**; each lens that fired
 reports its own bitmask under `chn_events` (`"1"` = fixed wide lens, `"2"` = pan/tilt

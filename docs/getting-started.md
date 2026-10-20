@@ -91,7 +91,8 @@ where you are in view, and sends it.
   (send the bot a message first; a bot cannot start a chat with you).
 - `STORAGE_NOT_EXIST` in the log: the camera has no SD card, so `getEvents` has nothing
   to read. Insert one, or see [battery cameras on a hub](battery-cameras-on-a-hub.md).
-- `Invalid authentication data` or a lockout: wrong account or password — stop and read
-  [credentials](credentials.md); do not keep retrying.
+- `Invalid authentication data` or a lockout: wrong account or password, or a camera that
+  switched to the newer TPAP login — stop and read [credentials](credentials.md)
+  and [troubleshooting](troubleshooting.md#invalid-authentication-data); do not keep retrying.
 
 [@BotFather]: https://t.me/BotFather
