@@ -16,6 +16,11 @@ All notable changes to this project are documented here.
   limit. A separate position observer stops before the boundary and inhibits native
   tracking until verified safe recovery, without a second camera login.
 
+### Fixed
+- `events_1` bit 8 is no longer decoded as `linecrossing`: in the app's code table it is
+  pet (code 9), and line crossing is bit 3. It is reported in `unknown_bits` again, like
+  bits 3 and 7. Nothing alerted on it, so alerts do not change.
+
 ## [0.10.2] - 2026-10-15
 
 ### Fixed

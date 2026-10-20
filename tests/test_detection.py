@@ -50,7 +50,7 @@ def test_decode_unknown_with_person():
 def test_decode_garbage_is_all_false():
     f = detection.decode_events_1(None)
     assert f == {"raw": 0, "motion": False, "pir": False, "person": False,
-                 "linecrossing": False, "unknown_bits": []}
+                 "unknown_bits": []}
 
 
 # ── classify_onvif ───────────────────────────────────────────────────────────
@@ -127,17 +127,23 @@ def test_getevent_nonperson_motion_bit_kept_when_not_strict():
     assert detection.classify_getevent(None, events_1=2, strict_people=False) == "motion"
 
 
-def test_decode_events_1_bit8_is_linecrossing_not_unknown():
+def test_decode_events_1_bit8_is_unknown_not_linecrossing():
+    # Bit 8 is the app's pet code (9); line crossing is bit 3. Neither is ground-truthed.
     f = detection.decode_events_1(256)
-    assert f["linecrossing"] is True
-    assert f["unknown_bits"] == []
+    assert "linecrossing" not in f
+    assert f["unknown_bits"] == [8]
     assert f["person"] is False and f["motion"] is False and f["pir"] is False
 
 
 def test_decode_events_1_bit8_does_not_imply_person():
     f = detection.decode_events_1(256 | 2)
-    assert f["linecrossing"] and f["motion"] and not f["person"]
+    assert f["motion"] and not f["person"] and f["unknown_bits"] == [8]
     assert detection.has_person_bit(256) is False
+
+
+def test_decode_events_1_c545d_bit8_is_unknown():
+    f = detection.decode_events_1(256 | 34, "c545d", 9)
+    assert f["person"] and f["unknown_bits"] == [8]
 
 
 # ── vehicle alerts (opt-in per camera) ───────────────────────────────────────

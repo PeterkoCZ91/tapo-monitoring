@@ -298,8 +298,8 @@ def test_summarize_lists_getters_unknown_bits_and_profile(tmp_path, capsys):
     assert "getMotionDetection" in out
     assert "getPetDetection (-40210)" in out
     assert "none matches" in out
-    # 130 = bits 1 + 7, 264 = bits 3 + 8 (8 is linecrossing in the default table).
-    assert "unknown events_1 bits: 3 (value 8), 7 (value 128)" in out
+    # 130 = bits 1 + 7, 264 = bits 3 + 8.
+    assert "unknown events_1 bits: 3 (value 8), 7 (value 128), 8 (value 256)" in out
 
 
 def test_summarize_matches_event_profile():
