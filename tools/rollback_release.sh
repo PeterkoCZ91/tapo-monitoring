@@ -5,6 +5,10 @@
 # a bad deploy is re-pointing the `current` symlink and restarting — seconds, not a hunt
 # for the right tarball while the unit crash-loops.
 #
+# Code only: the venv is shared by every release, so dependencies a deploy installed with
+# --sync-deps stay installed. The restore command for them is in that release's
+# deps-before.txt (releases/<name>/deps-before.txt on the host).
+#
 # usage: rollback_release.sh <ssh-host> [release-name] [options]
 #   release-name         a directory name from the listing (e.g. 20260901T101500Z-3f9c2d81a0b4).
 #                        Omit it to list the releases the host has, newest last.

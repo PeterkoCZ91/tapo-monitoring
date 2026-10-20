@@ -25,16 +25,36 @@ setup() {
     printf 'cameras: []\n' >"$ROOT/cameras.yaml"
     printf 'TAPO_TEST_CREDENTIAL=from-env-file\n' >"$TEST_TMP/monitor.env"
 
+    # The real interpreter, for the stub below to hand the lock parsing to.
+    REAL_PYTHON3="$(command -v python3)"
+    export REAL_PYTHON3
     stub_command ssh <<'STUB'
 shift              # the host: everything below runs on this machine instead
 exec bash -c "$*"  # stdin — the tar stream or the remote heredoc — passes through
 STUB
-    # The workstation's interpreter, fingerprinting the staged tree.
+    # The workstation's interpreter, fingerprinting the staged tree. `-I -` is the
+    # uv.lock reader, which runs for real.
     stub_command python3 <<'STUB'
+[[ "${1:-}" == -I ]] && exec "$REAL_PYTHON3" "$@"
 echo "package abc123def456"
 STUB
-    # The host's venv interpreter. Fails the selfcheck when the test asks it to.
+    # The host's venv interpreter. Fails the selfcheck when the test asks it to; reports
+    # installed versions from $TEST_TMP/installed ("name version" lines) and logs pip.
     stub_command venv-python <<'STUB'
+if [[ "${1:-}" == -I && "${2:-}" == -c ]]; then
+    shift 3
+    for name; do
+        version="$(awk -v n="$name" '$1 == n {print $2}' "$TEST_TMP/installed" 2>/dev/null)"
+        echo "$name ${version:--}"
+    done
+    exit 0
+fi
+if [[ "${1:-}" == -m && "${2:-}" == pip ]]; then
+    [[ "${3:-}" == --version ]] && exit 0
+    echo "pip $*" >>"$TEST_TMP/order"
+    [[ -f "$TEST_TMP/pip-fails" ]] && exit 1
+    exit 0
+fi
 case "${3:-}" in
     version)
         echo "package ${STUB_HOST_FINGERPRINT:-abc123def456}"
@@ -43,6 +63,7 @@ case "${3:-}" in
         printf '%s\n%s\n' "${4:-}" "${TAPO_TEST_CREDENTIAL:-<unset>}" \
             >"$TEST_TMP/selfcheck-context"
         printf '%s\n' "$PWD" >>"$TEST_TMP/selfcheck-cwd"
+        echo selfcheck >>"$TEST_TMP/order"
         if [[ -f "$TEST_TMP/selfcheck-fails" ]]; then
             echo "selfcheck: config rejected"
             exit 1
@@ -366,4 +387,139 @@ STUB
         echo "the default health check did not query the system manager"
         return 1
     }
+}
+
+# ── dependency drift between the host venv and the workstation's uv.lock ──────────────
+
+# A lock that has moved past what the host venv was installed with: pytapo is newer, the
+# rest matches. The staged pyproject names these four as [project].dependencies.
+seed_lock_and_venv() {
+    cat >"$TEST_TMP/uv.lock" <<'LOCK'
+version = 1
+
+[[package]]
+name = "aiofiles"
+version = "25.1.0"
+
+[[package]]
+name = "astral"
+version = "3.2"
+
+[[package]]
+name = "pytapo"
+version = "3.4.28"
+
+[[package]]
+name = "pyyaml"
+version = "6.0.3"
+LOCK
+    printf '%s\n' "aiofiles 25.1.0" "astral 3.2" "pytapo 3.4.18" "pyyaml 6.0.3" \
+        >"$TEST_TMP/installed"
+}
+
+@test "dependency drift is reported but does not stop the deploy" {
+    seed_lock_and_venv
+
+    deploy --env-file "$TEST_TMP/monitor.env" --lock "$TEST_TMP/uv.lock"
+
+    assert_status 0
+    assert_output_contains "host venv differs from the workstation's uv.lock"
+    assert_output_matches 'pytapo +3\.4\.18 +3\.4\.28'
+    assert_output_not_contains "pyyaml           6.0.3"
+    assert_output_contains "rerun with --sync-deps"
+    assert_output_contains "verified — current runs package $FINGERPRINT"
+    if grep -q '^pip' "$TEST_TMP/order"; then
+        echo "pip ran without --sync-deps"
+        return 1
+    fi
+}
+
+@test "a venv that matches the lock says so" {
+    seed_lock_and_venv
+    sed -i 's/^pytapo .*/pytapo 3.4.28/' "$TEST_TMP/installed"
+
+    deploy --env-file "$TEST_TMP/monitor.env" --lock "$TEST_TMP/uv.lock"
+
+    assert_status 0
+    assert_output_contains "dependencies match the lock (4 checked)"
+    assert_output_not_contains "WARNING"
+}
+
+@test "without a lock the dependency check is skipped with a note" {
+    deploy --env-file "$TEST_TMP/monitor.env" --lock "$TEST_TMP/no-such.lock"
+
+    assert_status 0
+    assert_output_contains "dependency versions on the host are not checked"
+}
+
+@test "--sync-deps without a lock refuses before anything is shipped" {
+    deploy --env-file "$TEST_TMP/monitor.env" --lock "$TEST_TMP/no-such.lock" --sync-deps
+
+    assert_status 1
+    assert_output_contains "--sync-deps needs expected versions"
+    assert_file_absent "$ROOT/releases"
+}
+
+@test "--sync-deps installs the drifted pins before the selfcheck and prints the way back" {
+    seed_lock_and_venv
+    sed -i '/^astral /d' "$TEST_TMP/installed"
+
+    deploy --env-file "$TEST_TMP/monitor.env" --lock "$TEST_TMP/uv.lock" --sync-deps
+
+    assert_status 0
+    # Only what drifted, exactly pinned — and before the selfcheck that has to prove it.
+    [[ "$(head -n1 "$TEST_TMP/order")" == "pip -m pip install"*" pytapo==3.4.28 astral==3.2" ]] || {
+        printf 'order of host calls:\n%s\n' "$(cat "$TEST_TMP/order")"
+        return 1
+    }
+    [[ "$(sed -n 2p "$TEST_TMP/order")" == selfcheck ]] || {
+        printf 'order of host calls:\n%s\n' "$(cat "$TEST_TMP/order")"
+        return 1
+    }
+    # No rollback undoes the install, so the previous state is spelled out as commands.
+    assert_output_contains "no rollback undoes this"
+    assert_output_contains "-m pip install 'pytapo==3.4.18'"
+    assert_output_contains "-m pip uninstall -y astral"
+    assert_file_contains "$ROOT/current/deps-before.txt" "'pytapo==3.4.18'"
+}
+
+@test "--sync-deps whose pip install fails never switches current" {
+    seed_lock_and_venv
+    touch "$TEST_TMP/pip-fails"
+
+    deploy --env-file "$TEST_TMP/monitor.env" --lock "$TEST_TMP/uv.lock" --sync-deps
+
+    [[ "$status" -ne 0 ]] || {
+        printf 'expected a non-zero exit\n--- output ---\n%s\n' "$output"
+        return 1
+    }
+    assert_output_contains "pip install FAILED"
+    assert_file_absent "$ROOT/current"
+    if grep -q '^selfcheck' "$TEST_TMP/order"; then
+        echo "the selfcheck ran after a failed install"
+        return 1
+    fi
+}
+
+@test "a health-check rollback after --sync-deps names the venv it left behind" {
+    seed_previous_release
+    stub_user_unit_host
+    seed_lock_and_venv
+    stub_command python3 <<'STUB'
+[[ "${1:-}" == -I ]] && exec "$REAL_PYTHON3" "$@"
+echo "package feed0000face"
+STUB
+
+    # The system manager does not have the unit, so the health check fails and rolls back.
+    run "$SCRIPT" "$HOST" HEAD --python "$STUB_BIN/venv-python" --env-file "$TEST_TMP/monitor.env" \
+        --restart-cmd "systemctl --user restart tapo-monitor.service" --health-wait 1 \
+        --lock "$TEST_TMP/uv.lock" --sync-deps </dev/null
+
+    [[ "$status" -ne 0 ]] || {
+        printf 'expected a non-zero exit\n--- output ---\n%s\n' "$output"
+        return 1
+    }
+    assert_output_contains "rolling back to releases/$PREVIOUS"
+    assert_output_contains "the venv still has the versions --sync-deps installed"
+    assert_output_contains "'pytapo==3.4.18'"
 }

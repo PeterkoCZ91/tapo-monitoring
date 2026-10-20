@@ -52,7 +52,7 @@ STUB
 
 @test "an option without its value is an error, not a silent default" {
     local flag
-    for flag in --unit --python --restart-cmd --env-file; do
+    for flag in --unit --python --restart-cmd --env-file --lock; do
         run "$SCRIPT" "$HOST" "$flag"
 
         assert_status 1

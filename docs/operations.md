@@ -973,6 +973,38 @@ loop `is-active` hides), the fingerprint, `selfcheck`, and the journal since the
 It reports rather than asserts liveness: the daemon logs per decision, not per poll, so a
 quiet camera is not a failure.
 
+### Dependency drift
+
+The release directories carry only our code; the venv the unit runs (`--python`, default
+`~/tapo-env/bin/python`) is installed once and shared by every release. Each deploy
+therefore compares the venv's installed versions of pyproject's `[project].dependencies`
+against the workstation's `uv.lock` (gitignored; `--lock FILE` for another one) and,
+before the switch, prints a table of every mismatch:
+
+```text
+deploy_release: WARNING: host venv differs from the workstation's uv.lock:
+  package          host           expected
+  pytapo           3.4.18         3.4.28
+```
+
+That is a warning only — the deploy goes ahead. Without a lock the check is skipped with a
+note. Bump the lock first (`uv lock --upgrade-package pytapo`, then the tests) if the goal
+is a newer dependency: the lock is the expectation, not PyPI.
+
+```bash
+tools/deploy_release.sh <ssh-host> --sync-deps           # also install the lock's versions
+```
+
+`--sync-deps` runs `<python> -m pip install 'pkg==version'` for the drifted packages
+before the selfcheck, so the selfcheck proves the new code on the new dependencies, and
+a failed install stops the deploy before the switch. It needs pip in the venv (a
+`python -m venv` venv has it, a `uv venv` does not) and no sudo for a user-owned venv.
+The install changes the venv under the release that is still running, and **no rollback
+undoes it**: the health-check rollback and `rollback_release.sh` re-point code only. The
+deploy prints the previous versions as a ready `pip install` / `pip uninstall` command,
+repeats it after a health-check rollback, and keeps it in the release's
+`deps-before.txt`.
+
 To rehearse the deploy path without a production host, point the script at any
 ssh-reachable account whose `~/tapo-monitor` is expendable, seed a `cameras.yaml` and an
 env file carrying the credential vars it names, and pass `--restart-cmd true

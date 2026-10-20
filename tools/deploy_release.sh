@@ -35,6 +35,23 @@
 #                        active and not crash-looping; if it is not, re-point `current`
 #                        at the release that was live before and restart again
 #                        (default 30, 0 disables; skipped for --restart-cmd true)
+#   --lock FILE          uv.lock holding the dependency versions the host venv is held
+#                        against (default: uv.lock in this checkout; without one the
+#                        dependency check is skipped with a note)
+#   --sync-deps          install the lock's exact versions of the runtime dependencies
+#                        into the host venv (`<python> -m pip install 'pkg==ver'`, no sudo
+#                        for a user venv) BEFORE the selfcheck, so the selfcheck proves
+#                        the new code on the new dependencies. Without it a mismatch is
+#                        only reported.
+#
+# Dependency drift: the venv is installed once and shared by every release, so only our
+# code moves with a deploy. Each deploy therefore compares the venv's installed versions of
+# pyproject's [project].dependencies against the workstation's uv.lock and prints the
+# mismatches — a warning, never a failure. --sync-deps fixes them, and that change is NOT
+# covered by any rollback: the health-check rollback and rollback_release.sh re-point
+# code, the venv keeps the new versions. The deploy prints the previous versions as a
+# ready `pip install` command (and keeps it in the release's deps-before.txt) for a
+# manual downgrade.
 #
 # Manual dry run (nothing needs to be a production host): point it at any ssh-reachable
 # account whose ~/tapo-monitor is expendable, seed ~/tapo-monitor/cameras.yaml and an env
@@ -49,7 +66,7 @@ die() { echo "deploy_release: $*" >&2; exit 1; }
 # shellcheck disable=SC2088  # the tilde is deliberately literal here: the remote side
 # expands it against the host's $HOME, not the workstation's.
 host="" ref="" unit="tapo-monitor.service" python_bin="~/tapo-env/bin/python"
-restart_cmd="" env_file="" health_wait=30 sd_scope=""
+restart_cmd="" env_file="" health_wait=30 sd_scope="" lock_file="" sync_deps=0
 while (($#)); do
     case "$1" in
         --unit)        unit="${2:?--unit needs a value}"; shift 2 ;;
@@ -57,6 +74,8 @@ while (($#)); do
         --restart-cmd) restart_cmd="${2:?--restart-cmd needs a value}"; shift 2 ;;
         --env-file)    env_file="${2:?--env-file needs a value}"; shift 2 ;;
         --health-wait) health_wait="${2:?--health-wait needs a value}"; shift 2 ;;
+        --lock)        lock_file="${2:?--lock needs a value}"; shift 2 ;;
+        --sync-deps)   sync_deps=1; shift ;;
         --user)        sd_scope="--user"; shift ;;
         -*)            die "unknown option $1" ;;
         # "$ref is still empty" is the test for "no ref given yet": using the default
@@ -95,6 +114,61 @@ fingerprint="$(cd "$stage" && python3 -m tapo_monitor.cli version | awk '/^packa
 release="$(date -u +%Y%m%dT%H%M%SZ)-$fingerprint"
 echo "deploy_release: shipping $ref as releases/$release to $host"
 
+# ── expected dependency versions: what the workstation resolved ───────────────────────
+# Names come from the staged pyproject (the dependencies of the code being shipped),
+# versions from uv.lock. One `name==version` per line; a name the lock resolves to more
+# than one version (per-Python markers) cannot be pinned for a host whose Python we do
+# not know here, so it is named and left out rather than guessed.
+lock_file="${lock_file:-$repo/uv.lock}"
+expected_deps=""
+if [[ -f "$lock_file" ]]; then
+    expected_deps="$(python3 -I - "$stage/pyproject.toml" "$lock_file" <<'PY' || true
+import re
+import sys
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        sys.exit("deploy_release: NOTE: no tomllib/tomli on the workstation — dependency check skipped")
+
+
+def norm(name):
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+with open(sys.argv[1], "rb") as fh:
+    deps = tomllib.load(fh).get("project", {}).get("dependencies", [])
+with open(sys.argv[2], "rb") as fh:
+    packages = tomllib.load(fh).get("package", [])
+versions = {}
+for pkg in packages:
+    versions.setdefault(norm(pkg["name"]), set()).add(pkg.get("version"))
+for dep in deps:
+    match = re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", dep)
+    if not match:
+        continue
+    name = norm(match.group(0))
+    found = versions.get(name, set()) - {None}
+    if len(found) == 1:
+        print(f"{name}=={found.pop()}")
+    else:
+        why = "missing from" if not found else "resolved to several versions in"
+        print(f"deploy_release: NOTE: {name} {why} the lock — not checked", file=sys.stderr)
+PY
+)"
+    # Keep only well-formed lines: whatever else came back is not a version to install.
+    expected_deps="$(grep -E '^[a-z0-9][a-z0-9.-]*==[A-Za-z0-9.+!_-]+$' <<<"$expected_deps" || true)"
+    [[ -n "$expected_deps" ]] \
+        || echo "deploy_release: NOTE: no dependency versions read from $lock_file — dependency check skipped"
+else
+    echo "deploy_release: NOTE: no $lock_file — dependency versions on the host are not checked"
+fi
+((sync_deps == 0)) || [[ -n "$expected_deps" ]] \
+    || die "--sync-deps needs expected versions from a uv.lock (--lock FILE); nothing was shipped"
+
 # ── transfer: full package into its own directory, touching nothing that runs ─────────
 # shellcheck disable=SC2029  # the release name is generated locally on purpose; only
 # $HOME stays escaped for the host.
@@ -103,12 +177,15 @@ tar -C "$stage" -cf - . | ssh "$host" "set -e
     mkdir -p \"\$dir\" && tar -C \"\$dir\" -xf -"
 
 # ── on the host: snapshot config+env, selfcheck inside the release, atomic switch ─────
-remote_args="$(printf ' %q' "$release" "$unit" "$python_bin" "$env_file" "$sd_scope")"
+remote_args="$(printf ' %q' "$release" "$unit" "$python_bin" "$env_file" "$sd_scope" \
+    "$expected_deps" "$sync_deps")"
 # shellcheck disable=SC2029  # client-side expansion is the point: the arguments are
 # %q-quoted (or a literal command) composed here and executed on the host.
 ssh "$host" "bash -s --$remote_args" <<'REMOTE'
 set -euo pipefail
 release="$1" unit="$2" python_bin="$3" env_file="$4" sd_scope="$5"
+expected_deps="$6" sync_deps="$7"
+python_arg="$python_bin"   # as the operator wrote it, for commands printed to them
 root="$HOME/tapo-monitor"
 release_dir="$root/releases/$release"
 python_bin="${python_bin/#~\//$HOME/}"
@@ -141,6 +218,74 @@ else
     echo "deploy_release: NOTE: unit $unit names no EnvironmentFile; snapshot holds only cameras.yaml"
 fi
 chmod 600 "$snapshot"/*
+
+# Dependency drift: the venv is shared by every release and never moves with a deploy.
+# Report each runtime dependency whose installed version differs from the lock; with
+# --sync-deps install the expected versions first, so the selfcheck below runs the new
+# code on the new dependencies. That install is not undone by any rollback, so the
+# previous versions go to the output and to deps-before.txt as a ready pip command.
+installed_versions() {   # name... -> "name version" lines, "-" when not installed
+    "$python_bin" -I -c '
+import sys
+from importlib import metadata
+for name in sys.argv[1:]:
+    try:
+        print(name, metadata.version(name))
+    except metadata.PackageNotFoundError:
+        print(name, "-")
+' "$@"
+}
+if [[ -n "$expected_deps" ]]; then
+    declare -A want=() have=()
+    names=()
+    while IFS='=' read -r name _ version; do
+        want[$name]="$version"; names+=("$name")
+    done <<<"$expected_deps"
+    while read -r name version; do
+        [[ -n "${name:-}" ]] && have[$name]="$version"
+    done < <(installed_versions "${names[@]}" || true)
+    drifted=()
+    for name in "${names[@]}"; do
+        [[ "${have[$name]:-?}" == "${want[$name]}" ]] || drifted+=("$name")
+    done
+    if ((${#drifted[@]} == 0)); then
+        echo "deploy_release: dependencies match the lock (${#names[@]} checked)"
+    else
+        echo "deploy_release: WARNING: host venv differs from the workstation's uv.lock:"
+        printf '  %-16s %-14s %s\n' package host expected
+        for name in "${drifted[@]}"; do
+            printf '  %-16s %-14s %s\n' "$name" "${have[$name]:-?}" "${want[$name]}"
+        done
+        if ((sync_deps)); then
+            pins=() restore=() remove=()
+            for name in "${drifted[@]}"; do
+                pins+=("$name==${want[$name]}")
+                # "-" = not installed before (undo is an uninstall); "?" = the version
+                # query itself failed, so there is nothing known to restore to.
+                case "${have[$name]:-?}" in
+                    -)     remove+=("$name") ;;
+                    "?")   ;;
+                    *)     restore+=("$name==${have[$name]}") ;;
+                esac
+            done
+            undo=""
+            ((${#restore[@]} == 0)) || undo="$python_arg -m pip install$(printf " '%s'" "${restore[@]}")"
+            if ((${#remove[@]})); then
+                undo="${undo:+$undo; }$python_arg -m pip uninstall -y$(printf ' %s' "${remove[@]}")"
+            fi
+            printf '%s\n' "$undo" > "$release_dir/deps-before.txt"
+            echo "deploy_release: --sync-deps: no rollback undoes this; to restore the previous versions run on the host:"
+            echo "  ${undo:-(previous versions unknown — the version query failed)}"
+            "$python_bin" -m pip --version >/dev/null 2>&1 \
+                || { echo "deploy_release: --sync-deps: the venv at $python_arg has no pip — install the versions by hand; 'current' was not switched" >&2; exit 1; }
+            "$python_bin" -m pip install --disable-pip-version-check --quiet "${pins[@]}" \
+                || { echo "deploy_release: --sync-deps: pip install FAILED — 'current' was not switched; the venv may be partly changed (restore command above)" >&2; exit 1; }
+            echo "deploy_release: --sync-deps: installed$(printf ' %s' "${pins[@]}")"
+        else
+            echo "deploy_release: deploying anyway; rerun with --sync-deps to install the expected versions"
+        fi
+    fi
+fi
 
 # Selfcheck FROM INSIDE the release (with -m, the cwd package wins over any installed
 # copy) and under the env the unit will see — a release that cannot pass here must
@@ -216,6 +361,10 @@ if ((health_wait > 0)) && [[ "$restart_cmd" != "true" ]]; then
                     mv -T .current.rollback.\$\$ current"
                 # shellcheck disable=SC2029
                 ssh "$host" "$restart_cmd"
+                # The venv is not part of a release: what --sync-deps installed stays.
+                # shellcheck disable=SC2029
+                undo="$(ssh "$host" "cat \"\$HOME/tapo-monitor/releases/$release/deps-before.txt\" 2>/dev/null" || true)"
+                [[ -z "$undo" ]] || echo "deploy_release: the venv still has the versions --sync-deps installed; to restore the previous ones run on the host: $undo" >&2
                 die "rolled back to releases/$prev_release; the failed release is kept in releases/$release"
             fi
             die "no previous release to roll back to; $unit needs attention on $host"

@@ -15,6 +15,12 @@ All notable changes to this project are documented here.
 - Opt-in predictive pan stops at explicit preset boundaries, including a right-only
   limit. A separate position observer stops before the boundary and inhibits native
   tracking until verified safe recovery, without a second camera login.
+- `deploy_release.sh` compares the host venv's installed runtime dependencies
+  (pyproject `[project].dependencies`) against the workstation's `uv.lock` before the
+  switch and prints every mismatch as a warning; the deploy still proceeds. `--sync-deps`
+  installs the lock's exact versions into the venv before the selfcheck and prints the
+  previous versions as a restore command, since no rollback downgrades the venv.
+  `--lock FILE` names another lock.
 
 ### Fixed
 - `events_1` bit 8 is no longer decoded as `linecrossing`: in the app's code table it is

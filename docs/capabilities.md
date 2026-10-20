@@ -177,6 +177,8 @@ Rain makes auto-tracking cameras chase raindrops and IR reflections. Using open-
   URL too), so a dead host is noticed by a machine other than itself.
 - Release deploys (`tools/deploy_release.sh`): fingerprinted release directories behind a
   `current` symlink, selfcheck before the switch, rollback by re-pointing the link.
+  Each deploy warns when the host venv's dependencies differ from `uv.lock`;
+  `--sync-deps` installs the locked versions.
   `tapo-monitor version` and `tapo-monitor selfcheck` state what a host runs and whether
   it can run.
 - systemd templates for the monitor daemon and shared scorer service.
