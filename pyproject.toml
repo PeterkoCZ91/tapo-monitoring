@@ -29,7 +29,7 @@ classifiers = [
     "Topic :: System :: Monitoring",
 ]
 dependencies = [
-    "pytapo",
+    "pytapo>=3.4.28",
     # pytapo's media_stream Downloader (SD-card clip download) imports aiofiles at
     # runtime but does not declare it — without it, sd_snapshot fails on a clean install.
     "aiofiles",
