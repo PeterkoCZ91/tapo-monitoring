@@ -115,16 +115,21 @@ def read_preset_bounds(ptz, profile_token):  # pragma: no cover - network I/O
     return bounds_from_presets(pairs)
 
 
-# Markers of a motor that answered and said no, as opposed to a transport that failed:
-# a lens parked by privacy mode refuses every move with MOTOR_BUSY (-64304).
-_MOTOR_REFUSAL_MARKERS = ("motor_busy", "-64304", "privacy", "lens mask", "lens_mask")
+# Markers of a lens parked by privacy mode refusing a move, as opposed to a transport
+# that failed. The 2026-08-29 incident logged MOTOR_BUSY from privacy-parked cameras
+# (the code was not recorded), so that word stays. pytapo and the Tapo app name -64303
+# MOTOR_BUSY and -64324 "Privacy mode is ON, not able to execute". -64304 is
+# MOTOR_LOCKED_ROTOR, a pan/tilt endstop, and is deliberately not a marker. The exact
+# shape of the ONVIF GotoPreset fault under privacy mode has not been captured yet.
+_MOTOR_REFUSAL_MARKERS = ("motor_busy", "-64324", "privacy mode is on", "privacy",
+                          "lens mask", "lens_mask")
 
 
 def is_motor_refusal(exc):
     """True when ``exc`` is the camera refusing a move, not a failed transport. Pure.
 
     A socket, timeout or connection error is always transport (the client must be
-    rebuilt); anything else counts as a refusal only when it names a busy/parked motor.
+    rebuilt); anything else counts as a refusal only when it names privacy mode or a busy motor.
     """
     if isinstance(exc, (OSError, TimeoutError, ConnectionError)):
         return False

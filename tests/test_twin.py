@@ -46,7 +46,7 @@ def test_evaluate_snapshot_reports_critical_and_warning_drift():
 
 def test_privacy_mode_is_critical_drift():
     # Privacy mode parks the lens: the camera records nothing, detects nothing and
-    # answers every motor call with MOTOR_BUSY. Two cameras sat like that for nine
+    # refuses every motor call. Two cameras sat like that for nine
     # hours on 2026-08-29 and nothing in the system could say so, because nothing
     # read the setting. Somebody switching it on is legitimate — being unable to
     # tell that they did is not.

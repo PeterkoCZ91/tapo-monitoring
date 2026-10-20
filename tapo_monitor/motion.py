@@ -9,7 +9,7 @@ privacy mode with moves it could only refuse.
 
 The order, highest first:
 
-1. privacy — a parked lens answers every motor call with MOTOR_BUSY; nobody moves it;
+1. privacy — a parked lens refuses every motor call; nobody moves it;
 2. linkage — the firmware of a dual-lens camera (C545D ``dualCamLinkage``) is turning
    its pan/tilt lens after a subject the fixed lens saw; neither our recall nor the
    guard moves it until the event on that lens is ``linkage_hold`` seconds old. Like

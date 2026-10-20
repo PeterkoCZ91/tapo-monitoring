@@ -20,6 +20,9 @@ All notable changes to this project are documented here.
 - `events_1` bit 8 is no longer decoded as `linecrossing`: in the app's code table it is
   pet (code 9), and line crossing is bit 3. It is reported in `unknown_bits` again, like
   bits 3 and 7. Nothing alerted on it, so alerts do not change.
+- The pan guard no longer counts `-64304` (MOTOR_LOCKED_ROTOR, a pan/tilt endstop) as
+  a privacy-parked lens; it matches privacy mode (`-64324`) and MOTOR_BUSY instead, and
+  an endstop error rebuilds the ONVIF client like any other failure.
 
 ## [0.10.2] - 2026-10-15
 

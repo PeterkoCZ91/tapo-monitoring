@@ -317,7 +317,7 @@ def recall_failure_repeat(state, key, message, now, repeat_after=RECALL_REPEAT_S
 
     A camera that refuses every recall wrote the same warning once a control pass: 1104
     identical lines in ten hours, on two cameras someone had simply switched to privacy
-    mode, which parks the lens and answers every motor call with MOTOR_BUSY. Dropping the
+    mode, which parks the lens and refuses every motor call. Dropping the
     warning is the wrong repair — it exists because a silently refused recall once left a
     camera aimed at the ground for two days. So the first refusal is logged, identical
     ones are counted rather than printed, and the count rides along the next line, which
@@ -527,8 +527,8 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
     # while sitting off-target, so a silent failure here is indistinguishable from a
     # healthy camera. One sat aimed at the ground for two days (2026-08-20) while this
     # very call was re-sent every tick.
-    # ...unless the lens is parked. Privacy mode answers every motor call with
-    # MOTOR_BUSY, so the recall cannot land however often it is re-sent: two cameras
+    # ...unless the lens is parked. Privacy mode refuses every motor call, so the
+    # recall cannot land however often it is re-sent: two cameras
     # spent ten hours refusing it 1140 times on 2026-08-29. Skipping is safe precisely
     # because it is narrow — only a privacy state actually read (this pass, else by the
     # twin) turns it off, an unknown one still recalls, and the aim is restored on the

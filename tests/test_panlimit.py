@@ -67,10 +67,22 @@ def test_bounds_window_is_inclusive_at_its_edges():
     assert panlimit.bounds_from_presets(tilts, low=-1.0, high=-0.6) == (-1.0, "1", -0.6, "2")
 
 
-def test_motor_busy_is_a_refusal_and_transport_errors_are_not():
-    assert panlimit.is_motor_refusal(Exception("Error: MOTOR_BUSY, Error Code: -64304"))
-    assert panlimit.is_motor_refusal(RuntimeError("fault: -64304"))
-    assert not panlimit.is_motor_refusal(ConnectionError("MOTOR_BUSY"))
+def test_privacy_mode_is_a_refusal_and_transport_errors_are_not():
+    assert panlimit.is_motor_refusal(Exception(
+        'Error: Privacy mode is ON, not able to execute, Response: '
+        '{"method": "multipleRequest", "result": {}, "error_code": -64324}'))
+    assert panlimit.is_motor_refusal(RuntimeError("fault: -64324"))
+    assert panlimit.is_motor_refusal(Exception("Error: MOTOR_BUSY"))
+    assert not panlimit.is_motor_refusal(ConnectionError("privacy mode is on"))
     assert not panlimit.is_motor_refusal(TimeoutError("timed out"))
     assert not panlimit.is_motor_refusal(OSError("connection reset"))
     assert not panlimit.is_motor_refusal(Exception("Unknown error: 401"))
+
+
+def test_endstop_is_not_a_privacy_refusal():
+    # -64304 MOTOR_LOCKED_ROTOR is the pan/tilt endstop; counting it as a parked lens
+    # would hide a real guard failure.
+    assert not panlimit.is_motor_refusal(Exception(
+        'Error: MOTOR_LOCKED_ROTOR, Response: '
+        '{"method": "multipleRequest", "result": {}, "error_code": -64304}'))
+    assert not panlimit.is_motor_refusal(RuntimeError("fault: -64304"))

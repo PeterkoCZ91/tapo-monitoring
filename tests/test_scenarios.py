@@ -94,7 +94,7 @@ def test_a_subject_that_never_leaves_still_gets_the_preset_back(monkeypatch, tmp
 def test_a_lens_parked_by_privacy_gets_no_motor_calls_once_a_control_pass_saw_it(
         monkeypatch, tmp_path):
     # Privacy mode parks the lens (here outside the pan span) and answers every motor call
-    # with MOTOR_BUSY. Between control passes the guard still tries — and its refusals are
+    # with -64324. Between control passes the guard still tries — and its refusals are
     # counted, not treated as ONVIF failures; from the control pass that reads the switch
     # on, neither path sends a thing. When it goes off again, the first control pass
     # restores the aim, and the twin keeps reporting the state on its own probes.
@@ -197,7 +197,7 @@ def test_a_failed_privacy_read_falls_back_to_the_twin(monkeypatch, tmp_path):
 
 def test_a_guard_goto_refused_by_a_parked_lens_keeps_the_onvif_client(monkeypatch, tmp_path):
     # Privacy goes on between control passes, so the guard still tries its GotoPreset and
-    # the parked lens answers MOTOR_BUSY. That is a refusal, not a transport failure: it is
+    # the parked lens answers -64324. That is a refusal, not a transport failure: it is
     # counted as one and the ONVIF client is kept, not rebuilt every poll. From the next
     # control pass on the guard does not even try; after privacy goes off it restores the
     # aim on the next control pass.

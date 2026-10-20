@@ -35,8 +35,8 @@ _SAFE_PROBES = (
     ("alerts", "event_types", "getAlertEventType"),
     ("alerts", "led", "getLED"),
     # The one switch that stops a camera watching altogether: privacy mode parks the
-    # lens and the camera records nothing, detects nothing and answers every motor
-    # call with MOTOR_BUSY. Two cameras sat like that for nine hours on 2026-08-29
+    # lens and the camera records nothing, detects nothing and refuses every motor
+    # call (-64324, "Privacy mode is ON"). Two cameras sat like that for nine hours on 2026-08-29
     # and nothing in the system could say so, because nothing read it.
     ("privacy", "lens_mask", "getPrivacyMode"),
     ("detection", "motion", "getMotionDetection"),

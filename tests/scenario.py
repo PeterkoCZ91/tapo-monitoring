@@ -50,7 +50,9 @@ MOTION_BIT = 2                   # bare motion, no person, no PIR
 # Pan positions of the camera's own presets; the outermost two are the guard's span.
 DEFAULT_PRESETS = {"1": 0.39, "2": 0.50, "3": 0.61}
 
-MOTOR_BUSY = "Exception: Error: MOTOR_BUSY, Error Code: -64304"
+# pytapo's error format for a refused call; -64324 is "Privacy mode is ON".
+PRIVACY_REFUSAL = ('Error: Privacy mode is ON, not able to execute, Response: '
+                   '{"method": "multipleRequest", "result": {}, "error_code": -64324}')
 
 
 def person(at, **extra):
@@ -162,7 +164,7 @@ class FakeCamera:
         self._record(("recall", self.name, str(preset)))
         self._require_online()
         if self.privacy:
-            raise Exception(MOTOR_BUSY)
+            raise Exception(PRIVACY_REFUSAL)
         if self.motor_refusal is not None:
             raise self.motor_refusal
         self.pan_x = self.presets[str(preset)]
@@ -398,7 +400,7 @@ class Scenario:
         self._record(("goto", cam.name, str(preset)))
         cam._require_online()
         if cam.privacy:
-            raise Exception(MOTOR_BUSY)
+            raise Exception(PRIVACY_REFUSAL)
         cam.pan_x = cam.presets[str(preset)]
 
     def _snapshot_for(self, cfg):

@@ -1188,7 +1188,7 @@ The guard reads current/preset pan positions over ONVIF and recalls the nearest 
 preset when auto-track moves outside their span. It does not create a hard motor limit.
 ONVIF errors are isolated from the event loop. While privacy mode is known to be on (read
 by the last control pass, else by the twin), the guard does not poll at all: a parked lens
-can only answer `MOTOR_BUSY`. A `GotoPreset` the motor refuses between control passes is
+can only refuse the move (`-64324`, "Privacy mode is ON"). A `GotoPreset` the motor refuses between control passes is
 counted as a privacy refusal and keeps the ONVIF client; only transport errors rebuild it.
 
 The guard needs the `onvif-zeep` package: `pip install -e ".[onvif]"` (or

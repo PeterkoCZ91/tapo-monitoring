@@ -877,7 +877,7 @@ def test_apply_plan_logs_preset_recall_failure(monkeypatch, caplog):
 
 
 def test_apply_plan_skips_preset_recall_in_privacy_mode(monkeypatch):
-    # Privacy mode parks the lens and answers every motor call with MOTOR_BUSY, so the
+    # Privacy mode parks the lens and refuses every motor call, so the
     # recall cannot land: two cameras produced 1140 refusals in ten hours on 2026-08-29.
     # The twin already reads the switch, so the control pass must spend no call at all on
     # a camera that physically cannot move.
@@ -2883,7 +2883,7 @@ def test_pan_guard_recalls_at_once_after_the_hold_expires(monkeypatch):
 
 
 def test_pan_guard_leaves_a_parked_lens_alone(monkeypatch):
-    # Privacy mode answers every motor call with MOTOR_BUSY; the guard re-sent it every
+    # Privacy mode refuses every motor call; the guard re-sent its recall every
     # poll. It now does not even open ONVIF while the twin reads privacy as on.
     app = cfg.load_config_from_dict({"cameras": [_raw_cam_dict()]})
     monkeypatch.setattr(daemon.panlimit, "build_ptz",
