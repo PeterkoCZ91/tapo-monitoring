@@ -38,7 +38,7 @@ jobs:
             suffix: "-scorer"
             latest: scorer
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Resolve image name and version
         id: meta
