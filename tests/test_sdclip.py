@@ -741,3 +741,35 @@ def test_download_main_reads_the_lookup_retry_option(monkeypatch):
     sdclip.download_main(base + ["lookup_retry=1"])
     sdclip.download_main(base + ["lookup_retry=0"])
     assert [k["lookup_retry"] for k in seen] == [True, True, False]   # on by default
+
+
+# ── Downloader kwargs pin the pytapo 3.4.18 behaviour ─────────────────────────────
+
+def test_download_segment_pins_playback_downloader(monkeypatch, tmp_path):
+    """pytapo 3.4.28 changed Downloader defaults (method="download" fetches lens 0 only,
+    progress throttled to 1 s); the SD clip keeps the old playback of both channels."""
+    import pytapo.media_stream.downloader as pytapo_downloader
+
+    captured = {}
+
+    class FakeDownloader:
+        FRESH_RECORDING_TIME_SECONDS = 0
+
+        def __init__(self, *args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+
+        async def download(self):
+            return
+            yield  # pragma: no cover - makes this an async generator
+
+    class FakeClient:
+        def getUserID(self):
+            return 1
+
+    monkeypatch.setattr(pytapo_downloader, "Downloader", FakeDownloader)
+    assert sdclip._download_segment(FakeClient(), 100, 130, 0, str(tmp_path)) is None
+    assert captured["kwargs"] == {
+        "overwriteFiles": True, "window_size": 50, "fileName": "sd_100.mp4",
+        "method": "playback", "output": "mp4", "progressInterval": 0,
+    }

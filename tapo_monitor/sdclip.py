@@ -222,8 +222,11 @@ def _download_segment(client, start, end, time_correction, out_dir,
         # higher values camera sometimes stops sending data", and its internal retry
         # drops to 50. The C560WS mostly returned an empty segment at 200 (2 of 3 live
         # downloads failed with no data); 50 is the camera-friendly value.
+        # pytapo 3.4.28 defaults to the app's fast "download" (lens 0 only); keep the
+        # 3.4.18 playback of channels [0, 1], mp4 remux and per-chunk progress checks.
         downloader = Downloader(client, start, end, time_correction, out_dir + "/",
-                                overwriteFiles=True, window_size=50, fileName=file_name)
+                                overwriteFiles=True, window_size=50, fileName=file_name,
+                                method="playback", output="mp4", progressInterval=0)
         if guard is not None:
             downloader.FRESH_RECORDING_TIME_SECONDS = int(guard)
 
