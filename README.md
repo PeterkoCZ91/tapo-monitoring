@@ -55,7 +55,8 @@ see [camera reports](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/do
 
 ## What's new
 
-**0.10.2** keeps a clip from going out unscored when one frame failed during a scorer
+**0.11.0** connects to cameras that switched to the newer TPAP login (pytapo 3.4.28)
+and stops re-logging in every minute after an auth failure; **0.10.2** keeps a clip from going out unscored when one frame failed during a scorer
 switch; **0.10.1** stops one walk from alerting twice when the camera reports its person
 event late. **0.10.0:** the follow-up photo skips frames smeared by a pan/tilt swing and can prefer one
 that shows a face, card reads retry on a fresh login, follow-up scoring no longer floods

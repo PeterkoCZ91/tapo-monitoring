@@ -1,4 +1,22 @@
-# Upgrading to 0.10.0
+# Upgrading to 0.11.0
+
+Install the new package on the monitor hosts. **pytapo must be 3.4.28 or newer**: a plain
+`pip install -U tapo-monitor` pulls it in, but a release deploy into an existing venv does
+not, so upgrade pytapo in that venv too (`tools/deploy_release.sh --sync-deps` does it
+from `uv.lock`).
+
+- **Cameras on the TPAP login connect again.** A camera that switched to `encryption: 4`
+  failed every login with `Invalid authentication data` on older pytapo, even with the
+  right password. See [troubleshooting](troubleshooting.md#invalid-authentication-data).
+- **No login loop after an auth failure.** A failure during the control pass now waits out
+  the connect backoff instead of logging in again every minute.
+- **Opt-in predictive pan stop** (`pan_limit.mode: stop`): stops native tracking before a
+  preset boundary. Experimental — observed positions still crossed the limit in tests;
+  nothing changes unless configured. See
+  [configuration](configuration.md#predictive-stop-instead-of-recall).
+- `events_1` bit 8 is reported in `unknown_bits` instead of `linecrossing`.
+
+## Upgrading to 0.10.0
 
 This guide covers the changes since 0.9.0; the 0.9.0 guide follows below. Nothing needs
 configuring: install the new package on the monitor hosts and the scorer as usual.

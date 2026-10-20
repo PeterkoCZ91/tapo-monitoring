@@ -4,7 +4,20 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-20
+
+### Changed
+- Requires pytapo 3.4.28. Cameras whose firmware switched to the newer TPAP login
+  (`encryption: 4`, seen on a C216 and a C260) failed every login with
+  `Invalid authentication data` on 3.4.18 even with the right password; they connect
+  again. Cameras on the older login keep using it.
+
 ### Added
+- C216 hardware 1.0 / firmware 1.3.2 camera report fixture and model notes covering
+  verified API, media and control paths, with event mapping, automatic SD rescue
+  and tracking safety explicitly left open.
+- A weekly workflow opens an issue when PyPI has a dependency release newer than the
+  one recorded in `.github/tested-versions.txt`; Dependabot watches the GitHub Actions.
 - Virtual endstop episode summaries record observed peak positions, every failed
   Stop callback and time to confirmed Stop and tracking OFF. OFF diagnostics separate
   session availability, lock waiting and request time without logging exception text.
@@ -28,7 +41,22 @@ All notable changes to this project are documented here.
   bits 3 and 7. Nothing alerted on it, so alerts do not change.
 - The pan guard no longer counts `-64304` (MOTOR_LOCKED_ROTOR, a pan/tilt endstop) as
   a privacy-parked lens; it matches privacy mode (`-64324`) and MOTOR_BUSY instead, and
-  an endstop error rebuilds the ONVIF client like any other failure.
+  an endstop error rebuilds the ONVIF client like any other failure. On a C216 a
+  privacy-parked lens answered native moves with `-64303` MOTOR_BUSY.
+- An authentication failure during the control pass now starts the same connect backoff
+  as a failed connect, instead of a new login every minute that could lock the camera
+  out. Closing a camera client also closes its HTTP session.
+- SD clip downloads keep pytapo's playback request for both lens channels; 3.4.28
+  defaults to a download of lens 0 only, which would drop a dual-lens camera's second view.
+
+### Documentation
+- `Invalid authentication data` can come from a camera that switched to the newer TPAP
+  login (`encryption: 4`), not only from a wrong password.
+- Notes from the Tapo Android app 3.22.105: motor error codes `-64304`…`-64336` and
+  pytapo's `-64324`, event codes 23–36 and the app's label priority, what
+  `checkDetectEventState` really does, and the limits of motor state (no position read,
+  stream-only `channel_motor_status`, Stop ACK is not a stop) and of pytapo's stream
+  notifications. Motor errors observed on a C216 under privacy mode and at the pan limit.
 
 ## [0.10.2] - 2026-10-15
 
