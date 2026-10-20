@@ -1,0 +1,8 @@
+version: 2
+updates:
+  # Python dependencies are not covered here: they are unpinned and the lock file is not
+  # tracked, so Dependabot has no current version to move. dependency-watch.yml handles them.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

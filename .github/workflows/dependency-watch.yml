@@ -1,0 +1,52 @@
+name: Dependency watch
+
+# pytapo is unpinned in pyproject.toml and the lock file is not tracked, so neither pip nor
+# Dependabot ever reports a new release: six went by unnoticed between 3.4.18 and 3.4.28.
+# Once a week this compares PyPI with .github/tested-versions.txt and keeps one open issue
+# per dependency while a newer release exists, closing it once the file catches up.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Compare tested versions with PyPI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          for spec in $(grep -Ev '^\s*(#|$)' .github/tested-versions.txt); do
+            name="${spec%%==*}"
+            tested="${spec#*==}"
+            latest="$(curl -fsS "https://pypi.org/pypi/${name}/json" | jq -r .info.version)"
+            title="Dependency update: ${name}"
+            issue="$(gh issue list --state open --search "in:title \"${title}\"" --json number,title \
+              | jq -r --arg t "$title" '.[] | select(.title == $t) | .number' | head -n1)"
+            newest="$(printf '%s\n%s\n' "$tested" "$latest" | sort -V | tail -n1)"
+            if [ "$latest" = "$tested" ] || [ "$newest" = "$tested" ]; then
+              echo "${name}: ${tested} is current"
+              if [ -n "$issue" ]; then
+                gh issue close "$issue" --comment "${name} ${tested} is now the tested version."
+              fi
+              continue
+            fi
+            echo "::warning::${name} ${latest} is out, tested is ${tested}"
+            body="$(printf '%s\n\n%s\n\n%s\n' \
+              "PyPI has **${name} ${latest}**; the fleet has been tested with **${tested}** (\`.github/tested-versions.txt\`)." \
+              "Changes: https://pypi.org/project/${name}/#history" \
+              "Soak the new release on the fleet, then bump the line in \`.github/tested-versions.txt\`; the next run closes this issue.")"
+            if [ -n "$issue" ]; then
+              gh issue edit "$issue" --body "$body"
+            else
+              gh issue create --title "$title" --body "$body"
+            fi
+          done

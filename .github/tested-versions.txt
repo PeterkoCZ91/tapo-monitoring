@@ -1,0 +1,4 @@
+# The newest release of each dependency this repo is tested against. The weekly
+# dependency-watch workflow opens an issue when PyPI has something newer than this.
+# Bump a line once the new release has soaked on the fleet, not before.
+pytapo==3.4.28
