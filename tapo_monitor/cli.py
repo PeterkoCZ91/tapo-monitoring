@@ -49,11 +49,18 @@ def package_fingerprint(package_dir=None):
     """
     package_dir = package_dir or os.path.dirname(os.path.abspath(__file__))
     digest = hashlib.sha256()
-    for name in sorted(os.listdir(package_dir)):
-        if not name.endswith(".py"):
-            continue
-        path = os.path.join(package_dir, name)
-        with open(path, "rb") as module_file:
+    names = []
+    for root, dirs, files in os.walk(package_dir):
+        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        for file_name in files:
+            if file_name.endswith(".py"):
+                rel = os.path.relpath(os.path.join(root, file_name), package_dir)
+                names.append(rel.replace(os.sep, "/"))
+    # A flat package yields bare file names in the same sorted order as before, so the
+    # value other hosts and tools/*.sh compare against does not change; nested modules
+    # are hashed under their relative path.
+    for name in sorted(names):
+        with open(os.path.join(package_dir, name), "rb") as module_file:
             digest.update(name.encode())
             digest.update(module_file.read())
     return digest.hexdigest()[:12]
@@ -146,7 +153,7 @@ def _selfcheck(path):
         print(f"  config: ok ({len(app.cameras)} camera(s))")
     except Exception as exc:  # noqa: BLE001 - a config error is a finding, not a crash
         failures.append("config")
-        print(f"  config: FAILED ({type(exc).__name__}: {exc})")
+        print(f"  config: FAILED ({type(exc).__name__})")
 
     if app is not None:
         from .config import resolve_camera_credentials
@@ -226,6 +233,23 @@ def _check(path):
         print(f"  - {cam.name} @ {cam.host} "
               f"[{cam.role}, schedule={cam.schedule}, weather={cam.weather.strategy}]")
     return 0
+
+
+def _use_saved_host(cfg):
+    """Point ``cfg`` at the address the daemon failed over to (saved health state), if any."""
+    from . import camera as camera_mod
+    from . import health
+
+    if len(camera_mod.candidate_hosts(cfg)) < 2:
+        return
+    state = types.SimpleNamespace(active_hosts={}, active_scorers={})
+    try:
+        health.load_state(health.default_state_path(), state)
+    except Exception:  # noqa: BLE001 - an unreadable state file means "use the primary"
+        return
+    saved = state.active_hosts.get(cfg.name)
+    if saved in camera_mod.candidate_hosts(cfg):
+        cfg.active_host = saved
 
 
 def _status(path=None, *, now=None):
@@ -314,8 +338,9 @@ def _probe_camera(cfg, night):
     from . import camera as camera_mod
     from . import capabilities, daemon, detection, twin
 
+    _use_saved_host(cfg)
     factory = camera_mod.tapo_factory(
-        cfg.host,
+        camera_mod.active_host(cfg),
         os.environ.get(cfg.user_env or "", ""),
         os.environ.get(cfg.password_env or "", ""),
         os.environ.get(cfg.cloud_password_env or "", "") or None,
@@ -366,7 +391,8 @@ def _probe(argv):
             fleet[cam.name] = _probe_camera(cam, night)
         except Exception as exc:  # noqa: BLE001 - one unreachable camera must not hide the rest
             failed.append(cam.name)
-            print(f"{cam.name}: probe failed: {exc}", file=sys.stderr)
+            # Class only: the text of a pytapo/requests failure carries the camera address.
+            print(f"{cam.name}: probe failed: {type(exc).__name__}", file=sys.stderr)
 
     if args.json_output:
         print(json.dumps({"version": twin.SCHEMA_VERSION, "cameras": fleet},
@@ -519,8 +545,9 @@ def _learn_face(argv):
         return 2
 
     print(f"Connecting to {cam_cfg.name} ({cam_cfg.host})...", file=sys.stderr)
+    _use_saved_host(cam_cfg)
     factory = camera_mod.tapo_factory(
-        cam_cfg.host,
+        camera_mod.active_host(cam_cfg),
         os.environ.get(cam_cfg.user_env or "", ""),
         os.environ.get(cam_cfg.password_env or "", ""),
         os.environ.get(cam_cfg.cloud_password_env or "", "") or None,
@@ -534,20 +561,30 @@ def _learn_face(argv):
     print("Please look directly into the camera lens.", file=sys.stderr)
     start = time.time()
     seen_fid = None
-    while time.time() - start < args.timeout:
-        now_ts = int(time.time())
-        try:
-            events = client.getEvents(startTime=now_ts - 45, endTime=now_ts + 15)
-            for ev in (events if isinstance(events, list) else []):
-                fids = monitor.face_ids(ev)
-                if fids:
-                    seen_fid = fids[0]
-                    break
-        except Exception:
-            pass
-        if seen_fid is not None:
-            break
-        time.sleep(1.0)
+    try:
+        while time.time() - start < args.timeout:
+            now_ts = int(time.time())
+            try:
+                events = client.getEvents(startTime=int(start) - 1, endTime=now_ts + 15)
+                for ev in (events if isinstance(events, list) else []):
+                    # Only a face seen after the command started: an earlier visitor
+                    # would otherwise be enrolled under the operator's name.
+                    try:
+                        if float(ev.get("start_time")) < start - 1:
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                    fids = monitor.face_ids(ev)
+                    if fids:
+                        seen_fid = fids[0]
+                        break
+            except Exception:
+                pass
+            if seen_fid is not None:
+                break
+            time.sleep(1.0)
+    finally:
+        camera_mod.close_client(client)
 
     if seen_fid is not None:
         print(f"SUCCESS: Captured face ID {seen_fid} for '{args.name}'")

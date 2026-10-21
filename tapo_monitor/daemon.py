@@ -36,6 +36,7 @@ from datetime import datetime
 from typing import Any
 
 from . import (
+    alarminfo,
     camera,
     capabilities,
     cli,
@@ -436,16 +437,20 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
                        None, camera)
     elif not tracking.guard_setting_matches(
             cam, "getMotionDetection", {"digital_sensitivity": int(plan.motion_sensitivity)}):
-        try:
-            cam.setMotionDetection(sensitivity=int(plan.motion_sensitivity))
-        except Exception:
-            pass
+        _repair("motion_sensitivity",
+                lambda: cam.setMotionDetection(sensitivity=int(plan.motion_sensitivity)),
+                repair_failures)
     # Force IR night vision when configured (night_vision: ir). The camera otherwise stays
     # in colour mode under a streetlight, whose slow shutter smears any moving subject; IR
     # runs a faster shutter, so the event frame is sharper. Re-asserted every tick so it
     # follows the day/night schedule. Left before apply_smarttrack (safe zone): SmartTrack
     # and auto-track re-assert last, so this cannot leave the tracking filter wiped.
-    if (plan.night_vision is not None
+    if plan.night_vision is not None and lenses is not None:
+        _repair_lens_setting(cam, lenses, "day_night_mode",
+                             lambda value: value != plan.night_vision,
+                             lambda chn: cam.setDayNightMode(plan.night_vision, chn_id=chn),
+                             repair_failures, camera)
+    elif (plan.night_vision is not None
             and not tracking.guard_setting_matches(cam, "getDayNightMode", plan.night_vision)):
         try:
             cam.setDayNightMode(plan.night_vision)
@@ -493,6 +498,7 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
                        lambda chn: cam.setVehicleDetection(False, chn_id=chn),
                        repair_failures, camera)
     elif (_repair_allowed(reliability_config, "vehicle_detection")
+          and not capabilities.absent_vehicle_detection(cam)
           and not tracking.guard_setting_matches(cam, "getVehicleDetection", {"enabled": "off"})):
         _repair("vehicle_detection", lambda: cam.setVehicleDetection(False),
                 repair_failures)
@@ -500,12 +506,52 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
         if hasattr(cam, "setLensDistortionCorrection"):
             _repair("ldc", lambda: cam.setLensDistortionCorrection(plan.ldc),
                     repair_failures)
-    if plan.tamper_detection is not None and _repair_allowed(reliability_config, "tamper_detection"):
+    if (plan.tamper_detection is not None and lenses is not None
+            and _repair_allowed(reliability_config, "tamper_detection")):
+        if hasattr(cam, "setTamperDetection"):
+            def _norm(sens):
+                return "medium" if sens == "normal" else sens
+            want_enabled = "on" if plan.tamper_detection else "off"
+            want_sens = _norm(plan.tamper_sensitivity or "normal")
+
+            def _tamper_drifted(lens):
+                if not isinstance(lens, Mapping) or str(lens.get("enabled")) != want_enabled:
+                    return True
+                return bool(plan.tamper_detection) and _norm(lens.get("sensitivity")) != want_sens
+            _repair_lens_setting(
+                cam, lenses, "tamper_detection", _tamper_drifted,
+                lambda chn: cam.setTamperDetection(
+                    plan.tamper_detection, plan.tamper_sensitivity or "normal", chn_id=chn),
+                repair_failures, camera)
+    elif plan.tamper_detection is not None and _repair_allowed(reliability_config, "tamper_detection"):
         if hasattr(cam, "setTamperDetection"):
             def _tamper():
                 cam.setTamperDetection(plan.tamper_detection, plan.tamper_sensitivity or "normal")
             _repair("tamper_detection", _tamper, repair_failures)
-    if (plan.whitelamp_force_time is not None or plan.whitelamp_intensity is not None) and _repair_allowed(reliability_config, "whitelamp_config"):
+    if ((plan.whitelamp_force_time is not None or plan.whitelamp_intensity is not None)
+            and lenses is not None and _repair_allowed(reliability_config, "whitelamp_config")):
+        if hasattr(cam, "setWhitelampConfig"):
+            def _lamp_drifted(lens):
+                if not isinstance(lens, Mapping):
+                    return True
+                if "wtl_force_time" not in lens and "wtl_intensity_level" not in lens:
+                    return False        # this lens has no lamp: nothing to drift
+                if (plan.whitelamp_force_time is not None
+                        and str(lens.get("wtl_force_time")) != str(plan.whitelamp_force_time)):
+                    return True
+                return (plan.whitelamp_intensity is not None
+                        and str(lens.get("wtl_intensity_level")) != str(plan.whitelamp_intensity))
+
+            def _lamp_lenses(chn):
+                kwargs = {}
+                if plan.whitelamp_force_time is not None:
+                    kwargs["forceTime"] = plan.whitelamp_force_time
+                if plan.whitelamp_intensity is not None:
+                    kwargs["intensityLevel"] = plan.whitelamp_intensity
+                cam.setWhitelampConfig(chn_id=chn, **kwargs)
+            _repair_lens_setting(cam, lenses, "whitelamp_config", _lamp_drifted,
+                                 _lamp_lenses, repair_failures, camera)
+    elif (plan.whitelamp_force_time is not None or plan.whitelamp_intensity is not None) and _repair_allowed(reliability_config, "whitelamp_config"):
         if hasattr(cam, "setWhitelampConfig"):
             def _wtl():
                 kwargs = {}
@@ -521,7 +567,14 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
                 lamp_expected["wtl_intensity_level"] = plan.whitelamp_intensity
             if not tracking.guard_setting_matches(cam, "getWhitelampConfig", lamp_expected):
                 _repair("whitelamp_config", _wtl, repair_failures)
-    if plan.night_vision_mode is not None and hasattr(cam, "setNightVisionModeConfig"):
+    if (plan.night_vision_mode is not None and lenses is not None
+            and hasattr(cam, "setNightVisionModeConfig")):
+        _repair_lens_setting(
+            cam, lenses, "night_vision_mode",
+            lambda value: value != plan.night_vision_mode,
+            lambda chn: cam.setNightVisionModeConfig(plan.night_vision_mode, chn_id=chn),
+            repair_failures, camera)
+    elif plan.night_vision_mode is not None and hasattr(cam, "setNightVisionModeConfig"):
         _apply_night_vision_mode(cam, plan.night_vision_mode, camera, repair_failures)
     # A refused recall must be visible: the camera answers configuration calls happily
     # while sitting off-target, so a silent failure here is indistinguishable from a
@@ -627,7 +680,22 @@ def read_detection(cam):
 _LENS_READS = (("motion", "getMotionDetection"), ("person", "getPersonDetection"),
                ("vehicle", "getVehicleDetection"))
 _LENS_KIND = {"motion_sensitivity": "motion", "person_detection": "person",
-              "vehicle_detection": "vehicle"}
+              "vehicle_detection": "vehicle", "day_night_mode": "day_night",
+              "tamper_detection": "tamper", "whitelamp_config": "whitelamp",
+              "night_vision_mode": "night_vision_mode"}
+_read_lens_setting = camera.read_lens_setting
+
+
+def _repair_lens_setting(cam, lenses, name, drifted, write, failures, camera_name):
+    """:func:`_repair_lenses` for a setting :func:`read_lenses` does not read per pass.
+
+    Reads ``name``'s setting on every lens first (:func:`tapo_monitor.camera.read_lens_setting`)
+    and writes, with ``chn_id``, only to the lenses that drifted or could not be read.
+    """
+    kind = _LENS_KIND[name]
+    channels = tuple(lenses.get("channels", ()))
+    view = {"channels": channels, kind: _read_lens_setting(cam, kind, channels)}
+    return _repair_lenses(cam, view, name, drifted, write, failures, camera_name)
 
 
 def read_lenses(cam, channels):
@@ -658,6 +726,9 @@ def read_lenses(cam, channels):
     return out
 
 
+UNREAD_REPAIR_SECONDS = 600
+
+
 def _repair_lenses(cam, lenses, name, drifted, write, failures, camera):
     """Send one self-heal to the lenses that drifted or could not be read.
 
@@ -669,6 +740,22 @@ def _repair_lenses(cam, lenses, name, drifted, write, failures, camera):
     reading = lenses.get(_LENS_KIND[name]) or {}
     targets = [c for c in lenses.get("channels", ())
                if c not in reading or drifted(reading[c])]
+    # A lens that cannot be read is written blind; at most once per 10 minutes per client.
+    unread = [c for c in targets if c not in reading]
+    if unread:
+        seen = getattr(cam, "_tapo_unread_writes", None)
+        if not isinstance(seen, dict):
+            seen = {}
+            try:
+                cam._tapo_unread_writes = seen
+            except AttributeError:
+                pass
+        now_m = _time.monotonic()
+        held = [c for c in unread if now_m - seen.get((name, c), -1e9) < UNREAD_REPAIR_SECONDS]
+        for c in unread:
+            if c not in held:
+                seen[(name, c)] = now_m
+        targets = [c for c in targets if c not in held]
     if not targets:
         return False
     drift = [c for c in targets if c in reading]
@@ -773,8 +860,9 @@ def parked_lenses(state):
     switch (``state.privacy_seen``), which is never older than the probe: the twin only
     probes on control passes, right after that read. A ``None`` read keeps the twin value.
     """
-    parked = twin.cameras_in_privacy(state.twin_fleet)
-    for name, seen in (state.privacy_seen or {}).items():
+    # Guard threads read these dicts while the daemon mutates them: iterate copies.
+    parked = twin.cameras_in_privacy(dict(state.twin_fleet or {}))
+    for name, seen in list((state.privacy_seen or {}).items()):
         if seen is True:
             parked.add(name)
         elif seen is False:
@@ -968,6 +1056,13 @@ class MonitorState:
     active_scorers: dict = field(default_factory=dict)
     host_identity: dict = field(default_factory=dict)
     failover_rejected: dict = field(default_factory=dict)
+    # Return to the primary host: when the active address last changed, and consecutive
+    # successful TCP probes of the primary while failed over (memory only).
+    host_switched_at: dict = field(default_factory=dict)
+    # Consecutive "that address is another device" refusals per camera and candidate.
+    reject_streak: dict = field(default_factory=dict)
+    primary_ok: dict = field(default_factory=dict)
+    primary_probe_at: dict = field(default_factory=dict)
     connect_fails: dict = field(default_factory=dict)
     connect_backoff_until: dict = field(default_factory=dict)
     health_path: str | None = None
@@ -996,6 +1091,7 @@ class MonitorState:
     ledger_handler: ledger.AuditLedgerHandler | None = None
     retention_maintenance: sentlog.RetentionMaintenance | None = None
     pending_sd: list = field(default_factory=list)
+    lastalarm_clients: dict = field(default_factory=dict)   # camera -> alarminfo.LastAlarmClient
     groups: dict = field(default_factory=dict)
     scene_coordinator: scene.SceneCoordinator = field(default_factory=scene.SceneCoordinator)
     pan_guard: dict = field(default_factory=dict)   # per-camera ONVIF pan-limit state
@@ -1227,8 +1323,9 @@ def _default_snapshot(cfg: CameraConfig, stream=None, recorder_fallback=False):
         image = snapshot.with_lens(grab(), lens)
         if image or not recorder_fallback:
             return image or None
-        image = snapshot.latest_recording_frame(cfg.host, timeout=cfg.rtsp_timeout,
-                                                rotate=cfg.rotate)
+        image = snapshot.latest_recording_frame(
+            camera.recording_hosts(cfg) if cfg.hosts else cfg.host,
+            timeout=cfg.rtsp_timeout, rotate=cfg.rotate)
         if image:
             log.info("snapshot %s: live RTSP failed, using recorder fallback", cfg.name)
         return image
@@ -1660,16 +1757,30 @@ def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_f
             y = min(max(0, y), max_h - ch)
             rect = (x, y, cw, ch)
             crop_target = source
-    out_path = os.path.join(out_dir or "/tmp", f"crop_{int(_time.time() * 1000)}.jpg")
+    out_path = _unique_jpg(out_dir, "crop_")
     try:
         (run_ffmpeg or _run_crop_ffmpeg)(crop_target, out_path, rect)
     except Exception:
         log.debug("crop_to_subject: ffmpeg failed for %s", crop_target, exc_info=True)
+        _safe_unlink(out_path)
         return image
     if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
         log.info("crop_to_subject %s: zoomed to %s", cfg.name, rect)
         return out_path
+    _safe_unlink(out_path)
     return image
+
+
+def _unique_jpg(out_dir, prefix):
+    """A fresh, collision-free ``.jpg`` path (created empty) in ``out_dir``.
+
+    Millisecond-stamped names collided between threads; ``mkstemp`` cannot. Without an
+    ``out_dir`` the process temp dir is used, never a hard-coded ``/tmp``. The caller
+    unlinks it when the render fails.
+    """
+    fd, path = tempfile.mkstemp(prefix=prefix, suffix=".jpg", dir=out_dir or None)
+    os.close(fd)
+    return path
 
 
 def _run_downscale(src, out_path):
@@ -1687,13 +1798,17 @@ def _reduced(src, out_dir, run=None, width=None):
         width = snapshot.image_width(src)
     if width and width <= snapshot.DELIVERY_WIDTH:
         return None
-    out_path = os.path.join(out_dir or "/tmp", f"small_{int(_time.time() * 1000000)}.jpg")
+    out_path = _unique_jpg(out_dir, "small_")
     try:
         (run or _run_downscale)(src, out_path)
     except Exception:
         log.debug("downscale failed for %s", src, exc_info=True)
+        _safe_unlink(out_path)
         return None
-    return out_path if os.path.exists(out_path) and os.path.getsize(out_path) > 0 else None
+    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        return out_path
+    _safe_unlink(out_path)
+    return None
 
 
 def _archive_copy(image, out_dir):
@@ -1706,14 +1821,17 @@ def _archive_copy(image, out_dir):
     native = getattr(image, "native", None)
     if not native:
         return None
-    out_path = os.path.join(out_dir or "/tmp", f"archive_{int(_time.time() * 1000000)}.jpg")
+    out_path = _unique_jpg(out_dir, "archive_")
     try:
         _run_ffmpeg(snapshot.archive_args(native, out_path))
     except Exception:
         log.debug("archive copy failed for %s", native, exc_info=True)
         _safe_unlink(out_path)
         return None
-    return out_path if os.path.exists(out_path) and os.path.getsize(out_path) > 0 else None
+    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        return out_path
+    _safe_unlink(out_path)
+    return None
 
 
 def send_alert_photo(cfg, secrets, image, caption, downscale=None, score=None,
@@ -2034,12 +2152,24 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
     time_str = time_str or _default_time_str
     cooldown = app.alerts.cooldown
     for cfg in app.cameras:
-        if "getevents" not in cfg.detection.sources:
+        lastalarm = ("lastalarm" in cfg.detection.sources
+                     and "getevents" not in cfg.detection.sources)
+        if "getevents" not in cfg.detection.sources and not lastalarm:
             continue
         cam = cam_clients.get(cfg.name)
         if cam is None:
             continue
         last_seen = state.last_seen.get(cfg.name, 0)
+        if lastalarm:
+            # Card-less camera: getLastAlarmInfo stands in for getEvents (one wrapper and
+            # one SeenAlarms per camera, so pacing and dedupe survive across passes).
+            wrapper = state.lastalarm_clients.get(cfg.name)
+            if wrapper is None:
+                wrapper = alarminfo.LastAlarmClient(cam, alarminfo.SeenAlarms())
+                state.lastalarm_clients[cfg.name] = wrapper
+            wrapper.cam = cam
+            wrapper.last_seen = last_seen
+            cam = wrapper
         name = cfg.name
 
         can_alert, gate_on_alert = alert_gate(state, name, cooldown, now)
@@ -2129,7 +2259,8 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
                 entry["rest_span"] = first_span     # read the remainder if the look is empty
             state.pending_sd.append(entry)
             return True
-        defer_fn = defer if cfg.sd_snapshot else None
+        # A lastalarm camera has no SD card: live frame only, never an SD follow-up.
+        defer_fn = defer if (cfg.sd_snapshot and not lastalarm) else None
         raw_snapshot = snapshot_for(cfg)
         raw_score = score_for(cfg)
 
@@ -4482,7 +4613,8 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
             )
             if app.reliability.enabled and app.reliability.storage_health:
                 recorder = reliability.recorder_health(
-                    os.getenv("RECORDING_ROOT"), cfg.host, now=now,
+                    os.getenv("RECORDING_ROOT"),
+                    camera.recording_key(cfg, os.getenv("RECORDING_ROOT")), now=now,
                     max_age=app.reliability.recorder_max_age,
                 )
                 state.recorder_health[cfg.name] = recorder
@@ -5286,7 +5418,8 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
         event, _ = update_outage(state, cfg.name, ok, now, app.alerts.outage_threshold)
         if not ok and now - state.fail_since[cfg.name] >= app.alerts.outage_threshold:
             state.outage_preserver.submit(
-                os.getenv("RECORDING_ROOT"), cfg.host,
+                os.getenv("RECORDING_ROOT"),
+                camera.recording_key(cfg, os.getenv("RECORDING_ROOT")),
                 outage_at=state.fail_since[cfg.name], observed_at=now,
             )
         if event == "alert":
@@ -5315,7 +5448,7 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
     for cfg in app.cameras:
         if camera_muted(cfg, night, now):
             continue
-        if "getevents" not in cfg.detection.sources:
+        if not {"getevents", "lastalarm"} & set(cfg.detection.sources):
             continue
         name = cfg.name
         event_ok = state.events_reachable.get(name)
@@ -5379,6 +5512,7 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
 FAILOVER_AFTER_FAILS = 2
 # A candidate that answered TCP but is another device is not retried for this long.
 FAILOVER_REJECT_SECONDS = 600
+PRIMARY_PROBE_INTERVAL = 60    # seconds between TCP probes of a failed-over camera's primary
 
 
 def apply_active_hosts(cameras, state):
@@ -5387,6 +5521,8 @@ def apply_active_hosts(cameras, state):
         host = state.active_hosts.get(cfg.name)
         if host and host in camera.candidate_hosts(cfg):
             cfg.active_host = host
+            # The hold-down before a return to the primary is memory only: restart it.
+            state.host_switched_at[cfg.name] = _time.time()
 
 
 def apply_active_scorers(cameras, state):
@@ -5436,6 +5572,67 @@ def _fail_over(cfg, state, cam_clients, now):
     return old
 
 
+def _maybe_return_to_primary(cfg, state, cam_clients, now):
+    """Probe the primary while failed over; switch back after a stable streak.
+
+    Returns the address left (to be passed on as ``switched_from`` so the MAC check in
+    :func:`_confirm_switch` runs on the primary), or None when staying.
+    """
+    name = cfg.name
+    if now is None or camera.host_index(cfg) == 0:
+        state.primary_ok.pop(name, None)
+        return None
+    if now < state.connect_backoff_until.get(name, 0):
+        return None          # a switch would be undone by the backoff; wait it out
+    primary = camera.candidate_hosts(cfg)[0]
+    rejected_until = state.failover_rejected.get(name, {}).get(primary, 0)
+    if now < rejected_until or now - state.host_switched_at.get(name, 0) < \
+            camera.PRIMARY_RETURN_MIN_SECONDS:
+        return None
+    # One short probe per interval, not per control pass: a primary that is still down
+    # would otherwise cost a connect timeout on the main loop every pass.
+    if now - state.primary_probe_at.get(name, 0) < PRIMARY_PROBE_INTERVAL:
+        return None
+    state.primary_probe_at[name] = now
+    if camera.tcp_reachable(primary, timeout=1):
+        state.primary_ok[name] = state.primary_ok.get(name, 0) + 1
+    else:
+        state.primary_ok.pop(name, None)
+        return None
+    if not camera.should_return_to_primary(
+            cfg, now, state.host_switched_at.get(name, 0), state.primary_ok[name],
+            rejected_until):
+        return None
+    state.primary_ok.pop(name, None)
+    old = camera.active_host(cfg)
+    camera.set_active_host(cfg, primary)
+    stale = cam_clients.pop(name, None)
+    if stale is not None:
+        camera.close_client(stale)
+    return old
+
+
+FAILOVER_AUTH_REJECT_SECONDS = 3600
+FAILOVER_REJECT_MAX_SECONDS = 6 * 3600
+
+
+def _reject_seconds(state, name, host):
+    """Rejection time for a candidate that was another device: 600 s, doubling from the
+    third consecutive refusal (600, 600, 1200, 2400 ... up to 6 h)."""
+    streak = state.reject_streak.setdefault(name, {})
+    streak[host] = streak.get(host, 0) + 1
+    extra = max(0, streak[host] - 2)
+    return min(FAILOVER_REJECT_SECONDS * (2 ** extra), FAILOVER_REJECT_MAX_SECONDS)
+
+
+def _revert_return(cfg, state, switched_from, tried_host, now, seconds):
+    """Undo a return to the primary: back to the working address, primary rejected for a
+    while. Saved choice and connect counters of the working camera are left alone."""
+    camera.set_active_host(cfg, switched_from)
+    state.failover_rejected.setdefault(cfg.name, {})[tried_host] = now + seconds
+    state.host_switched_at[cfg.name] = now
+
+
 def _confirm_switch(cfg, state, client, old, now):
     """After a login on a new address: keep the switch if it is the same camera.
 
@@ -5448,7 +5645,9 @@ def _confirm_switch(cfg, state, client, old, now):
     seen = camera.device_identity(client)
     if known and seen and known != seen:
         camera.set_active_host(cfg, old)
-        state.failover_rejected.setdefault(name, {})[new] = now + FAILOVER_REJECT_SECONDS
+        state.failover_rejected.setdefault(name, {})[new] = (
+            now + _reject_seconds(state, name, new))
+        state.host_switched_at[name] = now
         camera.close_client(client)
         log.warning("host switch %s -> %s refused: that address is a different device",
                     old, new)
@@ -5459,12 +5658,21 @@ def _confirm_switch(cfg, state, client, old, now):
         verified = "unverified (no MAC to compare)"
         if seen:
             state.host_identity[name] = seen
-    state.active_hosts[name] = new
+    state.reject_streak.get(name, {}).pop(new, None)
     index = camera.candidate_hosts(cfg).index(new)
+    returned = index == 0
+    if returned:
+        state.active_hosts.pop(name, None)
+    else:
+        state.active_hosts[name] = new
+    state.host_switched_at[name] = now
+    state.primary_ok.pop(name, None)
     log.warning("host switch %s: %s -> %s (%s)", name, old, new, verified)
-    log.info("audit camera=%s path=network action=host_switch etype=system start=%s "
-             "reason=unreachable host_index=%d identity=%s",
-             name, int(now), index, "mac" if known and seen else "unverified")
+    log.info("audit camera=%s path=network action=%s etype=system start=%s "
+             "reason=%s host_index=%d identity=%s",
+             name, "host_return" if returned else "host_switch", int(now),
+             "primary_back" if returned else "unreachable",
+             index, "mac" if known and seen else "unverified")
     if state.health_path:
         health.save_state(state.health_path, state, logger=log)
     return True
@@ -5518,10 +5726,14 @@ def _connect_camera(cam_clients, state=None, now=None):
             return None, "hubpoll"
         reachable = camera.ping_reachable(camera.active_host(cfg))
         switched_from = None
+        returning = False
         if (not reachable and state is not None and len(camera.candidate_hosts(cfg)) > 1
                 and state.network_fails.get(name, 0) + 1 >= FAILOVER_AFTER_FAILS):
             switched_from = _fail_over(cfg, state, cam_clients, now if now is not None else 0)
             reachable = switched_from is not None
+        elif reachable and state is not None and len(camera.candidate_hosts(cfg)) > 1:
+            switched_from = _maybe_return_to_primary(cfg, state, cam_clients, now)
+            returning = switched_from is not None
         if state is not None:
             was_reachable = state.network_reachable.get(name)
             state.network_reachable[name] = reachable
@@ -5542,26 +5754,53 @@ def _connect_camera(cam_clients, state=None, now=None):
 
         if state is not None and now is not None:
             if now < state.connect_backoff_until.get(name, 0):
+                if returning:         # never leave a half-finished return behind
+                    _revert_return(cfg, state, switched_from, camera.active_host(cfg),
+                                   now, FAILOVER_REJECT_SECONDS)
                 return None, "backoff"
 
-        previous = cam_clients.get(name)
-        session = getattr(previous, "_tapo_session_guard", None)
-        reusable = (previous is not None and stopcontrol.enabled(cfg)
-                    and getattr(previous, "_rotation_stop_host", None) == camera.active_host(cfg)
-                    and session is not None and not session.retired
-                    and state is not None and state.events_reachable.get(name) is not False)
-        if reusable:
-            client, err = previous, None
-        else:
+        def login():
+            previous = cam_clients.get(name)
+            session = getattr(previous, "_tapo_session_guard", None)
+            reusable = (previous is not None and stopcontrol.enabled(cfg)
+                        and getattr(previous, "_rotation_stop_host", None)
+                        == camera.active_host(cfg)
+                        and session is not None and not session.retired
+                        and state is not None and state.events_reachable.get(name) is not False)
+            if reusable:
+                return previous, None
             # Never open a second native session alongside a stale cached client.
             if previous is not None:
                 camera.close_client(previous)
                 cam_clients.pop(name, None)
             user, password, cloud = resolve_camera_credentials(cfg)
             factory = camera.tapo_factory(camera.active_host(cfg), user, password, cloud)
-            client, err = camera.connect(factory)
+            return camera.connect(factory)
+
+        client, err = login()
         if client is not None:
             observe_client(client, name)
+        if returning:
+            # A failed return is not an outage: the camera works at the address it left.
+            tried = camera.active_host(cfg)
+            outcome = None
+            if client is None:
+                outcome = FAILOVER_REJECT_SECONDS
+            elif getattr(client, "_tapo_auth_failed", False):
+                outcome = FAILOVER_AUTH_REJECT_SECONDS
+            elif not _confirm_switch(cfg, state, client, switched_from, now or 0):
+                outcome = 0          # refused and already reverted by _confirm_switch
+            if outcome is not None:
+                if outcome:
+                    if client is not None:
+                        camera.close_client(client)
+                    _revert_return(cfg, state, switched_from, tried, now or 0, outcome)
+                log.warning("return to primary %s refused; staying on the working address",
+                            name)
+                client, err = login()
+                if client is not None:
+                    observe_client(client, name)
+            switched_from = None
         if client is not None and state is not None and len(camera.candidate_hosts(cfg)) > 1:
             if switched_from is not None:
                 if not _confirm_switch(cfg, state, client, switched_from, now or 0):
@@ -5600,12 +5839,19 @@ def _connect_camera(cam_clients, state=None, now=None):
             if client is None and not auth_failed:
                 fails = state.connect_fails.get(name, 0) + 1
                 state.connect_fails[name] = fails
-                wait = backoff_seconds(fails)
+                wait = max(backoff_seconds(fails),
+                           camera.authentication_retry_after(err) or 0)
                 if now is not None:
                     state.connect_backoff_until[name] = now + wait
                 log.warning("connect %s failed (#%d): %s; backing off %ds", name, fails, err, wait)
         if client is not None:
             cam_clients[name] = client
+            try:
+                # Stable identity for per-camera locks (after a failover the same camera
+                # answers on another address).
+                client._tapo_camera_name = name
+            except (AttributeError, TypeError):
+                pass
             if state is not None and stopcontrol.enabled(cfg):
                 controller = state.stop_controls.get(name)
                 if controller is None:

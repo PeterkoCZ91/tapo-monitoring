@@ -761,6 +761,66 @@ def test_apply_plan_disables_vehicle_detection(monkeypatch):
     assert cam.vehicle is False
 
 
+@pytest.mark.parametrize("firmware,reading,should_repair", [
+    ("1.3.2 Build 260820 Rel.65461n", Exception('{"error_code": -40101}'), False),
+    ("1.3.2 Build 260820 Rel.65461n", {"enabled": "on"}, True),
+    ("1.3.2 Build 260820 Rel.65461n", TimeoutError(), True),
+    ("1.3.2 Build 260820 Rel.65461n", Exception('{"error_code": -40401}'), True),
+    ("1.3.3", Exception('{"error_code": -40101}'), True),
+])
+def test_apply_plan_skips_only_verified_absent_vehicle_off(
+        monkeypatch, firmware, reading, should_repair):
+    from tapo_monitor import tracking
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+
+    class Client:
+        basicInfo = {"device_info": {"basic_info": {
+            "device_model": "C216", "hw_version": "1.0", "sw_version": firmware,
+        }}}
+
+        def __init__(self):
+            self.vehicle_writes = []
+            self.person_writes = []
+            self.smart_writes = []
+
+        def getVehicleDetection(self):
+            if isinstance(reading, Exception):
+                raise reading
+            return reading
+
+        def setVehicleDetection(self, enabled):
+            self.vehicle_writes.append(enabled)
+
+        def setPersonDetection(self, enabled):
+            self.person_writes.append(enabled)
+
+        def setMotionDetection(self, **kwargs):
+            pass
+
+        def executeFunction(self, name, payload):
+            self.smart_writes.append((name, payload))
+            # A positive requested tracking feature still reaches the camera and its
+            # refusal remains a repair failure, even when vehicle detection is absent.
+            raise Exception('{"error_code": -40101}')
+
+        def setAutoTrackTarget(self, enabled):
+            pass
+
+        def getAutoTrackTarget(self):
+            return {"enabled": "on"}
+
+    cam = Client()
+    plan = daemon.plan_camera(_cam(tracking={"smarttrack": ["vehicle"]}),
+                              night=True, rain_active=False)
+    failures = {}
+    daemon.apply_plan(cam, plan, repair_failures=failures)
+    assert cam.vehicle_writes == ([False] if should_repair else [])
+    assert cam.person_writes == [True]
+    assert cam.smart_writes[0][0] == "setSmartTrackConfig"
+    assert cam.smart_writes[0][1]["smart_track"]["smart_track_info"]["vehicle_enabled"] == "on"
+    assert failures == {"smarttrack": 1}
+
+
 def test_apply_plan_enforces_ldc_tamper_and_whitelamp(monkeypatch):
     from tapo_monitor import tracking
     monkeypatch.setattr(tracking._time, "sleep", lambda _: None)

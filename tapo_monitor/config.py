@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 ROLES = {"tracking", "static"}
 SCHEDULES = {"astral", "always_night", "always_day"}
 WEATHER_STRATEGIES = {"none", "disable_tracking", "lower_sensitivity"}
-DETECTION_SOURCES = {"onvif", "getevents", "motion", "hubpoll"}
+DETECTION_SOURCES = {"onvif", "getevents", "motion", "hubpoll", "lastalarm"}
 SMARTTRACK_KINDS = {"people", "vehicle", "pet", "baby"}
 SNAPSHOT_SOURCES = {"rtsp", "sd"}
 LIGHT_TRIGGER_TYPES = {"person", "motion", "pet", "tamper", "vehicle"}
@@ -602,6 +602,30 @@ def _check_bool(value, key, where):
     return value
 
 
+def _check_number(section, key, default, where, minimum=1):
+    """Integer option of a section: reject non-numbers, bools and values below ``minimum``."""
+    value = section.get(key, default)
+    if isinstance(value, bool):
+        raise ConfigError(f"{where}.{key} must be an integer")
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ConfigError(f"{where}.{key} must be an integer, got {value!r}") from None
+    if number < minimum:
+        raise ConfigError(f"{where}.{key} must be >= {minimum}")
+    return number
+
+
+def _section(data, key):
+    """Top-level mapping section (``None`` -> empty); anything else is a config error."""
+    value = data.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError(f"'{key}' must be a mapping")
+    return value
+
+
 def _check_subset(values, allowed, key, where):
     if not isinstance(values, list):
         raise ConfigError(f"{where}: '{key}' must be a list")
@@ -725,6 +749,9 @@ def _detection(data, where):
     d = data or {}
     sources = d.get("sources", ["getevents"])
     _check_subset(sources, DETECTION_SOURCES, "detection.sources", where)
+    if "lastalarm" in sources and "getevents" in sources:
+        raise ConfigError(f"{where}: detection.sources: pick one of 'getevents' (SD card) "
+                          "or 'lastalarm' (no card), not both")
     # Do not coerce strings: bool("false") is True and would invert the policy.
     strict_people = d.get("strict_people", True)
     if not isinstance(strict_people, bool):
@@ -1087,13 +1114,13 @@ def _pan_limit(data, where):
         if d.get("tilt", False):
             raise ConfigError(f"{where}: pan_limit stop mode currently supports pan only")
     return PanLimitConfig(
-        enabled=bool(d.get("enabled", False)),
+        enabled=_check_bool(d.get("enabled", False), "enabled", f"{where}: pan_limit"),
         margin=margin,
         poll_interval=poll_interval,
         onvif_port=onvif_port,
         onvif_user_env=d.get("onvif_user_env"),
         onvif_password_env=d.get("onvif_password_env"),
-        tilt=bool(d.get("tilt", False)),
+        tilt=_check_bool(d.get("tilt", False), "tilt", f"{where}: pan_limit"),
         tilt_min=tilt_min,
         tilt_max=tilt_max,
         hold_grace=hold_grace,
@@ -1124,7 +1151,8 @@ def _light_trigger(data, where):
                 window = scheduling.parse_clock_window(raw_window)
             except ValueError as exc:
                 raise ConfigError(f"{where}: 'light_trigger.window' {exc}") from None
-        enabled = bool(data["enabled"]) if "enabled" in data else (window is not None)
+        enabled = (_check_bool(data["enabled"], "light_trigger.enabled", where)
+                   if "enabled" in data else (window is not None))
         raw_types = data.get("types", ("person", "motion"))
         if not isinstance(raw_types, (list, tuple)):
             raise ConfigError(f"{where}: 'light_trigger.types' must be a list")
@@ -1156,11 +1184,13 @@ def _reliability(data, where):
     except (TypeError, ValueError) as exc:
         raise ConfigError(str(exc)) from None
     return ReliabilityConfig(
-        enabled=bool(d.get("enabled", False)),
-        auto_fix=bool(d.get("auto_fix", True)),
+        enabled=_check_bool(d.get("enabled", False), "enabled", "reliability"),
+        auto_fix=_check_bool(d.get("auto_fix", True), "auto_fix", "reliability"),
         allowed_repairs=allowed_repairs,
-        storage_health=bool(d.get("storage_health", True)),
-        latency_metrics=bool(d.get("latency_metrics", True)),
+        storage_health=_check_bool(d.get("storage_health", True), "storage_health",
+                                   "reliability"),
+        latency_metrics=_check_bool(d.get("latency_metrics", True), "latency_metrics",
+                                    "reliability"),
         recorder_max_age=recorder_max_age,
     )
 
@@ -1315,7 +1345,7 @@ def _camera(data, index):
             quiet_hours = scheduling.parse_clock_window(quiet_hours_raw)
         except ValueError as exc:
             raise ConfigError(f"{where}: 'quiet_hours' {exc}") from None
-        if bool(data.get("night_only", False)):
+        if _check_bool(data.get("night_only", False), "night_only", where):
             raise ConfigError(f"{where}: 'quiet_hours' and 'night_only' are mutually "
                               f"exclusive (both mute the same Telegram traffic)")
     try:
@@ -1349,6 +1379,11 @@ def _camera(data, index):
     if crop_min_px < 0:
         raise ConfigError(f"{where}: 'crop_min_px' must be 0 or more")
     detection = _detection(data.get("detection"), where)
+    if "lastalarm" in detection.sources and (
+            data.get("sd_snapshot") or data.get("sd_motion")
+            or data.get("snapshot_source") == "recording"):
+        raise ConfigError(f"{where}: detection source 'lastalarm' is for cameras without an "
+                          "SD card; sd_snapshot / sd_motion / recording are not allowed")
     try:
         hub_poll_interval = int(data.get("hub_poll_interval", 20))
     except (TypeError, ValueError):
@@ -1483,7 +1518,7 @@ def _camera(data, index):
         sd_motion=bool(data.get("sd_motion", False)),
         sd_jobs_per_tick=sd_jobs_per_tick,
         sd_frame_pick=sd_frame_pick,
-        telegram_alerts=bool(data.get("telegram_alerts", True)),
+        telegram_alerts=_check_bool(data.get("telegram_alerts", True), "telegram_alerts", where),
         privacy_notice=bool(data.get("privacy_notice", False)),
         detection_notice=_check_bool(data.get("detection_notice", False),
                                      "detection_notice", where),
@@ -1500,7 +1535,7 @@ def _camera(data, index):
         recording_ready_margin=recording_ready_margin,
         sd_fresh_guard=sd_fresh_guard,
         person_sensitivity=int(data["person_sensitivity"]) if data.get("person_sensitivity") is not None else None,
-        night_only=bool(data.get("night_only", False)),
+        night_only=_check_bool(data.get("night_only", False), "night_only", where),
         quiet_hours=quiet_hours,
         night_vision=night_vision,
         snapshot_source=snapshot_source,
@@ -1625,14 +1660,19 @@ def load_config_from_dict(data) -> AppConfig:
     loc = data.get("location") or {}
     location = Location(lat=loc.get("lat"), lon=loc.get("lon"), tz=loc.get("tz"))
 
-    alerts_raw = data.get("alerts") or {}
+    alerts_raw = _section(data, "alerts")
     alerts = AlertsConfig(
-        cooldown=int(alerts_raw.get("cooldown", 120)),
-        outage_threshold=int(alerts_raw.get("outage_threshold", 900)),
-        stall_threshold=int(alerts_raw.get("stall_threshold", 900)),
-        event_failure_threshold=int(alerts_raw.get("event_failure_threshold", 300)),
-        event_restart_threshold=int(alerts_raw.get("event_restart_threshold", 900)),
-        event_restart_enabled=bool(alerts_raw.get("event_restart_enabled", True)),
+        cooldown=_check_number(alerts_raw, "cooldown", 120, "alerts", minimum=0),
+        outage_threshold=_check_number(alerts_raw, "outage_threshold", 900, "alerts",
+                                       minimum=0),
+        stall_threshold=_check_number(alerts_raw, "stall_threshold", 900, "alerts",
+                                     minimum=0),
+        event_failure_threshold=_check_number(alerts_raw, "event_failure_threshold", 300,
+                                              "alerts", minimum=-10**9),
+        event_restart_threshold=_check_number(alerts_raw, "event_restart_threshold", 900,
+                                              "alerts", minimum=-10**9),
+        event_restart_enabled=_check_bool(alerts_raw.get("event_restart_enabled", True),
+                                          "event_restart_enabled", "alerts"),
     )
     if alerts.event_failure_threshold < 1:
         raise ConfigError("alerts.event_failure_threshold must be >= 1")
@@ -1641,13 +1681,13 @@ def load_config_from_dict(data) -> AppConfig:
             "alerts.event_restart_threshold must be >= event_failure_threshold"
         )
 
-    loop_raw = data.get("loop") or {}
+    loop_raw = _section(data, "loop")
     loop = LoopConfig(
-        event_interval=int(loop_raw.get("event_interval", 4)),
-        control_interval=int(loop_raw.get("control_interval", 60)),
+        event_interval=_check_number(loop_raw, "event_interval", 4, "loop", minimum=1),
+        control_interval=_check_number(loop_raw, "control_interval", 60, "loop", minimum=1),
     )
 
-    obs_raw = data.get("observability") or {}
+    obs_raw = _section(data, "observability")
     try:
         probe_interval = int(obs_raw.get("probe_interval", 900))
         retention_days = int(obs_raw.get("ledger_retention_days", 30))
@@ -1672,11 +1712,16 @@ def load_config_from_dict(data) -> AppConfig:
     status_bind = obs_raw.get("status_bind", "127.0.0.1")
     if not isinstance(status_bind, str) or not status_bind.strip():
         raise ConfigError("observability.status_bind must be a non-empty string")
+    if status_bind.strip() not in ("127.0.0.1", "localhost", "::1"):
+        log.warning("observability.status_bind %r is not loopback: the unauthenticated "
+                    "/status endpoint is reachable from the network", status_bind)
     observability = ObservabilityConfig(
-        digital_twin=bool(obs_raw.get("digital_twin", False)),
+        digital_twin=_check_bool(obs_raw.get("digital_twin", False), "digital_twin",
+                                 "observability"),
         probe_interval=probe_interval,
-        drift_alerts=bool(obs_raw.get("drift_alerts", False)),
-        ledger=bool(obs_raw.get("ledger", False)),
+        drift_alerts=_check_bool(obs_raw.get("drift_alerts", False), "drift_alerts",
+                                "observability"),
+        ledger=_check_bool(obs_raw.get("ledger", False), "ledger", "observability"),
         ledger_retention_days=retention_days,
         shadow_match_window=match_window,
         status_port=status_port,

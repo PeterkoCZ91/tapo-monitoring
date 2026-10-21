@@ -177,3 +177,26 @@ def test_safe_stopguard_episode_is_not_a_soak_problem():
     assert rec["stopguard_problems"] == 0
     assert rec["findings"] == []
     assert probe("host-denied")["stopguard_problems"] is None
+
+
+def test_stopguard_episode_counts_all_retries_when_warning_is_deduplicated():
+    text = (FIXTURES / "host-a.raw").read_text().replace(
+        "@@journal",
+        "@@journal\nWARNING PTZ stop guard Stop failed name=cam error=ONVIFError\n"
+        "INFO PTZ stop guard episode cam: reason=pose_unavailable duration=73.20s "
+        "beyond_limit=False reads_failed=13 stops=13 stops_failed=8 "
+        "first_stop_ok=+1.98s off=verified+1.33s off_failed=0",
+    )
+    rec = soak.analyze(text, 24)
+
+    assert rec["stopguard_problems"] == 1  # one deduplicated warning line
+    assert rec["stopguard_episodes"] == 1
+    assert rec["stopguard_reads_failed"] == 13
+    assert rec["stopguard_stop_attempts"] == 13
+    assert rec["stopguard_stop_failures"] == 8
+    assert rec["stopguard_off_failures"] == 0
+    assert any("8 Stop RPC failure(s)" in f for f in rec["findings"])
+    assert any("Stopguard failed Stop RPCs" in d
+               for d in soak.compare(probe("host-a"), rec))
+    rec["deviations"] = []
+    assert "8/13 Stop failures/attempts" in soak.render_host("host-a", rec)

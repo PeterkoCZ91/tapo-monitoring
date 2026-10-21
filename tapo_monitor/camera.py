@@ -4,9 +4,11 @@ pytapo is a thin API client; this adds the operational glue around it:
 
 * **Cheap reachability probe** — ping the device before creating an authenticated session,
   so a disconnected camera is distinct from an API/authentication failure.
-* **Lockout-aware API retry** — ``connect`` retries only client construction. API
-  authentication happens on the first request; the daemon observes definite auth errors,
-  retires that client and backs off before trying again.
+* **Lockout-aware API retry** — ``connect`` retries client construction, but not after an
+  authentication error. pytapo's constructor already logs in (and tries both passcodes),
+  so a wrong password fails there; the daemon backs off for the camera-reported
+  suspension time. Later authentication errors are observed per request, the client is
+  retired and the daemon backs off before trying again.
 * **getEvents helpers** — pure filtering of new events since a watermark.
 
 The pytapo import is lazy (inside ``tapo_factory``) so the rest of the package — and the
@@ -17,6 +19,7 @@ import logging
 import re
 import socket
 import subprocess
+import threading
 import time as _time
 
 from . import apiguard
@@ -85,6 +88,28 @@ def set_active_host(cfg, host):
     cfg.active_host = host
 
 
+# Return to the primary address only after it answered this many control passes in a row,
+# and not sooner than this many seconds after the last switch (no flapping).
+PRIMARY_RETURN_PASSES = 3
+PRIMARY_RETURN_MIN_SECONDS = 300
+
+
+def should_return_to_primary(cfg, now, switched_at, ok_streak, rejected_until=0):
+    """True when a failed-over camera should go back to its first configured address.
+
+    Pure: ``ok_streak`` is the number of consecutive successful TCP probes of the primary,
+    ``switched_at`` when the active address last changed, ``rejected_until`` the end of a
+    "that was another device" rejection of the primary.
+    """
+    if host_index(cfg) == 0 or now is None:
+        return False
+    if now < rejected_until:
+        return False
+    if now - (switched_at or 0) < PRIMARY_RETURN_MIN_SECONDS:
+        return False
+    return ok_streak >= PRIMARY_RETURN_PASSES
+
+
 def tcp_reachable(host, port=API_PORT, timeout=2, connect=socket.create_connection):
     """True when a TCP connection to ``host:port`` opens. No login, no payload."""
     try:
@@ -140,6 +165,12 @@ class CameraAuthenticationBackoffError(RuntimeError):
     """A camera request was suppressed after an authentication failure."""
 
 
+# pytapo const.py: Invalid login credentials, DEVICE_BLOCKED, SYSTEM_BLOCKED,
+# TPAP_AUTHENTICATION_FAILED.
+_AUTH_ERROR_CODES = (-40209, -40404, -40408, -40418)
+_AUTH_CODE_RE = re.compile(r"-(?:40209|40404|40408|40418)(?!\d)")
+
+
 def is_authentication_error(error):
     """Recognize authentication failures across pytapo's wrapped exceptions."""
     pending = [error]
@@ -150,12 +181,14 @@ def is_authentication_error(error):
             continue
         seen.add(id(current))
         code = getattr(current, "code", None)
-        if code == -40211:
+        if code in _AUTH_ERROR_CODES:
             return True
         message = str(current).lower()
+        # -40211 is deliberately absent: pytapo names it MISSING_NECESSARY_PARAMS (also the
+        # answer of TPAP firmware to the legacy login probe), not a credential failure.
         if ("invalid authentication data" in message
                 or "temporary suspension" in message
-                or "-40211" in message):
+                or _AUTH_CODE_RE.search(message)):
             return True
         pending.extend((getattr(current, "__cause__", None),
                         getattr(current, "__context__", None)))
@@ -190,19 +223,27 @@ def observe_client_requests(client, *, on_auth_failure, on_success):
         observer["on_success"] = on_success
         return True
 
-    observer = {"on_auth_failure": on_auth_failure, "on_success": on_success}
+    observer = {"on_auth_failure": on_auth_failure, "on_success": on_success,
+                "local": threading.local()}
 
     def perform_request(request_data, *args, **kwargs):
         if (getattr(client, "_tapo_monitor_client_closed", False)
                 or getattr(client, "_tapo_auth_failed", False)):
             raise CameraAuthenticationBackoffError("camera client has been retired")
+        # pytapo retries -40401 by calling self.performRequest again, i.e. through this
+        # wrapper: only the outermost call reports, so one failure counts once.
+        local = observer["local"]
+        local.depth = getattr(local, "depth", 0) + 1
         try:
             result = original(request_data, *args, **kwargs)
         except Exception as exc:  # noqa: BLE001 - preserve pytapo's public error
-            if is_authentication_error(exc):
+            if local.depth == 1 and is_authentication_error(exc):
                 observer["on_auth_failure"](client, exc)
             raise
-        observer["on_success"](client)
+        finally:
+            local.depth -= 1
+        if local.depth == 0:
+            observer["on_success"](client)
         return result
 
     client._tapo_monitor_request_observer = observer
@@ -272,6 +313,8 @@ def _close_client_loop(client):
 def connect(factory, retries=3, sleep=_time.sleep, delay=5):
     """Try ``factory()`` up to ``retries`` times. Returns (client, last_error).
 
+    An authentication error ends the attempts at once: pytapo's constructor already logs in.
+
     On success returns (client, None); on exhaustion (None, last_error).
     """
     last_err = None
@@ -280,6 +323,8 @@ def connect(factory, retries=3, sleep=_time.sleep, delay=5):
             return factory(), None
         except Exception as e:  # noqa: BLE001 - surface the last error to the caller
             last_err = e
+            if is_authentication_error(e):
+                break  # the constructor already logged in (twice); retrying risks a lockout
             if attempt < retries:
                 sleep(delay)
     return None, last_err
@@ -365,12 +410,52 @@ def whitelamp_seen(client, camera, event_start, *, now=None, force_time=None,
     return on
 
 
+_lamp_locks: dict = {}
+_lamp_locks_guard = threading.Lock()
+LAMP_LOCK_TIMEOUT = 20.0
+
+
+def _lamp_lock(client):
+    """One lock per physical camera, so read-then-toggle cannot interleave.
+
+    Keyed by the most stable identity the client carries: a camera name or MAC the daemon
+    attached, else the host. Without any, the lock lives on the client itself (no id() reuse).
+    """
+    for attr in ("_tapo_camera_name", "_tapo_device_mac", "host"):
+        value = getattr(client, attr, None)
+        if isinstance(value, str) and value:
+            key = (attr == "host" and "host" or "id", value)
+            with _lamp_locks_guard:
+                return _lamp_locks.setdefault(key, threading.Lock())
+    with _lamp_locks_guard:
+        lock = getattr(client, "_tapo_lamp_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            try:
+                client._tapo_lamp_lock = lock
+            except Exception:  # noqa: BLE001 - slots/frozen client: share one lock
+                lock = _lamp_locks.setdefault(("shared", ""), threading.Lock())
+        return lock
+
+
 def trigger_whitelamp(client, force_time=None):
     """Turn on the camera's white lamp if supported and not already on. Never raises.
 
     If force_time is given, set the automatic pulse duration (e.g. 30s instead of
-    firmware default 300s) before triggering.
+    firmware default 300s) before triggering. The read and the toggle (which is a
+    toggle, not a set) run under a per-camera lock, so two callers cannot switch it off again.
     """
+    lock = _lamp_lock(client)
+    if not lock.acquire(timeout=LAMP_LOCK_TIMEOUT):
+        log.warning("failed to trigger whitelamp: another lamp request is still running")
+        return False
+    try:
+        return _trigger_whitelamp_locked(client, force_time)
+    finally:
+        lock.release()
+
+
+def _trigger_whitelamp_locked(client, force_time):
     def lamp_on():
         status = client.getWhitelampStatus()
         if not isinstance(status, dict):
@@ -435,6 +520,61 @@ def set_tamper_detection(client, enabled: bool, sensitivity: str = "normal") -> 
     return False
 
 
+def _per_lens(raw, channels):
+    """Normalise a ``chn_id`` getter's answer to ``{chn: mapping-or-value}``.
+
+    pytapo answers a one-lens request with the bare value and a many-lens one with a dict
+    keyed by the channel as a string. A lens absent from the answer (or an answer that is
+    not keyed by channel at all, e.g. one shared switch) is "not known": left out.
+    """
+    chn = [int(c) for c in channels]
+    if raw is None:
+        return {}
+    if len(chn) == 1 and not (isinstance(raw, dict) and str(chn[0]) in raw):
+        if isinstance(raw, dict) and any(
+                str(k).isdigit() for k in raw if str(k) != str(chn[0])):
+            return {}  # keyed by another channel: this lens is unknown, not that value
+        return {chn[0]: raw}
+    if not isinstance(raw, dict):
+        return {}
+    return {c: raw.get(str(c), raw.get(c)) for c in chn
+            if raw.get(str(c), raw.get(c)) is not None}
+
+
+def read_lens_setting(client, kind: str, channels) -> dict:
+    """Read one setting on each lens of a dual-lens camera: ``{chn: value}``. Never raises.
+
+    ``kind`` is ``tamper`` (``{"enabled", "sensitivity"}``), ``day_night`` (``on``/``off``/
+    ``auto``), ``night_vision_mode`` (the firmware mode string) or ``whitelamp`` (the lamp
+    config mapping). A lens that could not be read is missing from the answer, so the
+    caller repairs it rather than trusting a guess. The day/night read asks the camera with
+    ``name: ["common"]`` as a LIST: the string form ignores ``chn_id`` (measured on a C545D).
+    """
+    chn = [int(c) for c in channels]
+    try:
+        if kind == "tamper":
+            return _per_lens(client.getTamperDetection(chn_id=chn), chn)
+        if kind == "whitelamp":
+            return _per_lens(client.getWhitelampConfig(chn_id=chn), chn)
+        if kind == "night_vision_mode":
+            raw = _per_lens(client.getNightVisionModeConfig(chn_id=chn), chn)
+            return {c: v.get("night_vision_mode") for c, v in raw.items()
+                    if isinstance(v, dict) and v.get("night_vision_mode") is not None}
+        if kind == "day_night":
+            if getattr(client, "childID", None):
+                return _per_lens(client.getDayNightMode(chn_id=chn), chn)
+            data = client.executeFunction(
+                "getLightFrequencyInfo", {"image": {"name": ["common"], "chn_id": chn}})
+            image = (data or {}).get("image", {})
+            common_chn = image.get("common_chn") or {}
+            return {c: common_chn[str(c)]["inf_type"] for c in chn
+                    if isinstance(common_chn.get(str(c)), dict)
+                    and common_chn[str(c)].get("inf_type") is not None}
+    except Exception as exc:  # noqa: BLE001 - an optional read must not stop the pass
+        log.debug("per-lens %s read failed: %s", kind, exc)
+    return {}
+
+
 def set_osd_safe(client, label: str = "", date_enabled: bool = True, week_enabled: bool = False) -> bool:
     """Safely set OSD using executeFunction to avoid raw performRequest IP lockout."""
     try:
@@ -468,3 +608,42 @@ def newest_start(events):
     """Largest start_time across events, or None when empty."""
     starts = [e.get("start_time", 0) for e in (events or [])]
     return max(starts) if starts else None
+
+
+def recording_hosts(cfg):
+    """Directory names the external recorder may use for this camera under RECORDING_ROOT.
+
+    The recorder tree is keyed by an address, not by the camera name, and the repo cannot
+    tell which candidate the recorder was configured with (the primary after a failover
+    is the common case, but a recorder pointed at the failover address is possible), so
+    every candidate is a possible key. The configured primary comes first.
+    """
+    return candidate_hosts(cfg)
+
+
+def recording_key(cfg, root=None):
+    """The single recorder directory name to use for ``cfg`` under ``root``.
+
+    Among the candidates whose directory exists, the one with the newest recording wins;
+    with no ``root`` or no existing directory it is the primary (first candidate).
+    """
+    import os
+
+    hosts = recording_hosts(cfg)
+    if not root or len(hosts) == 1:
+        return hosts[0]
+    from .snapshot import _newest_recording
+
+    best, best_mtime = hosts[0], None
+    for host in hosts:
+        cam_dir = os.path.join(root, host)
+        if not os.path.isdir(cam_dir):
+            continue
+        latest = _newest_recording(cam_dir)
+        try:
+            mtime = os.path.getmtime(latest) if latest else float("-inf")
+        except OSError:
+            mtime = float("-inf")
+        if best_mtime is None or mtime > best_mtime:
+            best, best_mtime = host, mtime
+    return best

@@ -1,4 +1,5 @@
 import json
+import time
 import types
 
 import pytest
@@ -371,7 +372,7 @@ def test_learn_face_success(tmp_path, capsys, monkeypatch):
 
     class MockClient:
         def getEvents(self, startTime=None, endTime=None):
-            return [{"start_time": 100, "event_info": [{"face_id": 68132274181}]}]
+            return [{"start_time": time.time() + 1, "event_info": [{"face_id": 68132274181}]}]
 
     monkeypatch.setattr(camera_mod, "connect", lambda factory, retries=1: (MockClient(), None))
 

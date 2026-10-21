@@ -2,6 +2,8 @@ import json
 import stat
 import types
 
+import pytest
+
 from tapo_monitor import drift, twin
 
 
@@ -89,6 +91,35 @@ def test_unknown_and_missing_probes_do_not_create_drift():
     assert statuses["detection.person.enabled"] == "unknown"
     assert statuses["tracking.auto.enabled"] == "unsupported"
     assert twin.alertable_keys(evaluation) == set()
+
+
+@pytest.mark.parametrize("firmware,error,status", [
+    ("1.3.2 Build 260820 Rel.65461n", {"error_code": -40101}, "unsupported"),
+    ("1.3.3", {"error_code": -40101}, "unknown"),
+    ("1.3.2 Build 260820 Rel.65461n", {"error_type": "TimeoutError"}, "unknown"),
+    ("1.3.2 Build 260820 Rel.65461n", {"error_code": -40401}, "unknown"),
+])
+def test_vehicle_probe_preserves_unsupported_or_unknown_semantics(firmware, error, status):
+    snapshot = _snapshot()
+    snapshot["groups"]["basic"] = {"info": {"state": "available", "value": {
+        "device_info": {"basic_info": {
+            "device_model": "C216", "hw_version": "1.0", "sw_version": firmware,
+        }},
+    }}}
+    snapshot["groups"]["detection"]["vehicle"] = {"state": "error", **error}
+    evaluation = twin.evaluate_snapshot("camera-a", _plan(), snapshot)
+    result = next(item for item in evaluation["drift"]["results"]
+                  if item["path"] == "detection.vehicle.enabled")
+    assert result["status"] == status
+    assert result["expected"] is False
+    assert evaluation["actual"]["detection.vehicle.enabled"] == status
+    # A future positive detection goal must remain visible as unmet/unverified too.
+    report = drift.evaluate_drift(
+        {"detection.vehicle.enabled": True},
+        {"detection.vehicle.enabled": twin._probe_value(snapshot, "detection", "vehicle")},
+    )
+    assert report.results[0].status == status
+    assert report.results[0].expected is True
 
 
 def test_state_round_trip_is_private_and_redacted(tmp_path):

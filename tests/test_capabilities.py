@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from tapo_monitor import capabilities
 
 
@@ -21,6 +23,41 @@ class PartialCamera:
 
     def getModuleSpec(self):
         raise AssertionError("unsafe raw-transport wrapper must never be called")
+
+
+@pytest.mark.parametrize("model,hardware,firmware,group,name,reading,expected", [
+    ("C216", "1.0", "1.3.2 Build 260820 Rel.65461n", "detection", "vehicle",
+     {"state": "error", "error_code": -40101}, True),
+    ("C560WS", "1.0", "1.3.2 Build 260820 Rel.65461n", "detection", "vehicle",
+     {"state": "error", "error_code": -40101}, False),
+    ("C216", "2.0", "1.3.2 Build 260820 Rel.65461n", "detection", "vehicle",
+     {"state": "error", "error_code": -40101}, False),
+    ("C216", "1.0", "1.3.3", "detection", "vehicle",
+     {"state": "error", "error_code": -40101}, False),
+    ("C216", "1.0", "1.3.2 Build 260820 Rel.65461n", "detection", "person",
+     {"state": "error", "error_code": -40101}, False),
+    ("C216", "1.0", "1.3.2 Build 260820 Rel.65461n", "detection", "vehicle",
+     {"state": "error", "error_type": "TimeoutError"}, False),
+    ("C216", "1.0", "1.3.2 Build 260820 Rel.65461n", "detection", "vehicle",
+     {"state": "available", "value": {"enabled": "on"}}, False),
+])
+def test_verified_absence_needs_exact_identity_operation_and_refusal(
+        model, hardware, firmware, group, name, reading, expected):
+    info = {"device_info": {"basic_info": {
+        "device_model": model, "hw_version": hardware, "sw_version": firmware,
+    }}}
+    assert capabilities.verified_unsupported_operation(info, group, name, reading) is expected
+
+
+def test_vehicle_absence_does_not_probe_an_unverified_camera():
+    class Client:
+        def getBasicInfo(self):
+            raise AssertionError("must use existing login identity only")
+
+        def getVehicleDetection(self):
+            raise AssertionError("must not add a probe to an unverified camera")
+
+    assert capabilities.absent_vehicle_detection(Client()) is False
 
 
 def test_snapshot_has_a_group_for_every_probe():

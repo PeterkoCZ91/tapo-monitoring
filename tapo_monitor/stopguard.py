@@ -20,6 +20,13 @@ _TRACE_MOVE = 0.004      # pan change that earns a position entry in the trace
 _TRACE_HEARTBEAT = 5.0   # seconds between position entries while the pose is steady
 _SLOW_READ = 0.4         # a pose read slower than this is counted in the stats
 _STATS_EVERY = 600.0     # seconds between read-statistics lines
+_BACKOFF_AFTER = 3       # consecutive failed reads/Stops before the retry rate slows
+_BACKOFF_CAP = 2.0       # slowest retry gap: Stop never goes silent for longer than this
+_READ_BACKOFF_FLOOR = 0.5  # first slowed gap after repeated non-transport (auth/fault) read errors
+_READ_BACKOFF_CAP = 1.0
+_OFF_BACKOFF_CAP = 10.0  # slowest tracking-OFF retry gap
+_OFF_FAILS_TO_UNVERIFY = 2
+_REVERIFY_EVERY = 30.0   # seconds between OFF re-checks while the latch is set
 
 
 @dataclass(frozen=True)
@@ -30,6 +37,8 @@ class GuardSnapshot:
     tracking_allowed: bool
     disable_pending: bool
     reason: str
+    thread_alive: bool = True
+    loop_errors: int = 0
 
 
 @dataclass
@@ -86,7 +95,7 @@ class StopGuard:
                  stop_interval=0.15, cooldown=2.0, stable_samples=2,
                  retry_interval=1.0, stable_tolerance=0.002, suspended=None,
                  clock=time.monotonic, wait=None, name="", recover=None,
-                 recover_interval=5.0, recover_attempts=6):
+                 recover_interval=5.0, recover_attempts=6, reverify_interval=_REVERIFY_EVERY):
         values = (right_limit, margin, poll_interval, stale_after, stop_interval,
                   cooldown, retry_interval, stable_tolerance)
         if not all(math.isfinite(v) for v in values):
@@ -123,6 +132,12 @@ class StopGuard:
         self._trip_at = self._last_stop = self._last_disable = -math.inf
         self._recovery_until = -math.inf
         self._recovery_direction = 0
+        self._recovery_target = 0.0
+        self.reverify_interval = reverify_interval
+        self._last_verified = -math.inf
+        self._read_failures = self._stop_failures = self._off_failures = 0
+        self._loop_errors = self._loop_streak = 0
+        self._loop_warned = False
         # Debug-only state: recent reads for the pre-trip context, the cause of the
         # last failed read, the last refused rearm and periodic read statistics.
         self.recover, self.recover_interval = recover, recover_interval
@@ -186,10 +201,17 @@ class StopGuard:
         return position < self.right_inner and (self.left_inner is None or position > self.left_inner)
 
     def _is_suspended(self):
-        try:
-            return bool(self.suspended())
-        except Exception:  # noqa: BLE001 - unknown privacy state cannot authorize movement
-            return True
+        for attempt in (0, 1):
+            try:
+                return bool(self.suspended())
+            except RuntimeError:
+                # A concurrently mutated registry (dict changed size) is transient:
+                # one retry, so a poll and its Stop are not dropped for a race.
+                if attempt:
+                    return True
+            except Exception:  # noqa: BLE001 - unknown privacy state cannot authorize movement
+                return True
+        return True
 
     def _note_suspended(self):
         with self._lock:
@@ -207,14 +229,19 @@ class StopGuard:
                        and self.clock() - self._observed_at <= self.stale_after)
             allowed = healthy and not self._latched and self._armed
             pending = self._disable_thread is not None and self._disable_thread.is_alive()
-            return GuardSnapshot(self._position, healthy, self._latched, allowed, pending, self._reason)
+            alive = self._thread is None or self._thread.is_alive()
+            return GuardSnapshot(self._position, healthy, self._latched, allowed, pending,
+                                 self._reason, alive, self._loop_errors)
 
     def _request_disable(self):
         with self._lock:
             pending = self._disable_thread is not None and self._disable_thread.is_alive()
-            if self._disable_ok or pending or self.clock() - self._last_disable < self.retry_interval:
+            now = self.clock()
+            stale = self._latched and now - self._last_verified >= self.reverify_interval
+            gap = min(_OFF_BACKOFF_CAP, self.retry_interval * 2 ** max(0, self._off_failures - 1))
+            if (self._disable_ok and not stale) or pending or now - self._last_disable < gap:
                 return
-            self._last_disable = self.clock()
+            self._last_disable = now
             self._disable_thread = threading.Thread(target=self._disable, daemon=True,
                                                     name="ptz-stopguard-off")
             self._disable_thread.start()
@@ -230,10 +257,18 @@ class StopGuard:
             ok = False
             error = type(exc).__name__
         with self._lock:
-            if episode is not None and episode is self._episode:
+            if episode is not None and episode is self._episode and (not ok or episode.off is None):
                 self._trace("off", f"{'ok' if ok else 'FAIL ' + error} {self.clock() - began:.2f}s")
             warn = not ok and not self._disable_warned
-            self._disable_ok = ok
+            if ok:
+                self._disable_ok = True
+                self._off_failures = 0
+                self._last_verified = self.clock()
+            else:
+                self._off_failures += 1
+                # One transient failed re-verify keeps an earlier verified OFF.
+                if not self._disable_ok or self._off_failures >= _OFF_FAILS_TO_UNVERIFY:
+                    self._disable_ok = False
             self._disable_warned = not ok
             if episode is not None and episode is self._episode:
                 if ok and episode.off is None:
@@ -289,6 +324,9 @@ class StopGuard:
                 self._disable_ok = False
                 self._safe_samples = 0
                 self._recovery_until = -math.inf
+                # The first Stop of a new episode is never held back by old failures.
+                self._stop_failures = self._off_failures = 0
+                self._last_stop = -math.inf
                 if reason != "closed":
                     self._episode = _Episode(self._trip_at, self._position)
                     self._episode.pre = [(t - self._trip_at, x, rd, c)
@@ -356,6 +394,32 @@ class StopGuard:
         log.log(level, "PTZ stop guard trace %s: cause=%s end=%s pre=[%s] events=[%s]%s",
                 self.name, episode.cause, end, pre, events, dropped)
 
+    @staticmethod
+    def _non_transport(exc):
+        errors = getattr(exc, "rpc_diag", None)
+        errors = errors.get("errors") if isinstance(errors, dict) else None
+        return bool(errors) and all(str(e).endswith("/other") for e in errors)
+
+    def _backoff(self, base, failures):
+        if failures < _BACKOFF_AFTER:
+            return base
+        return min(max(base, _BACKOFF_CAP), base * 2 ** (failures - _BACKOFF_AFTER + 1))
+
+    def _stop_gap(self):
+        # Called with the lock held. Repeated Stop failures (auth error, offline camera)
+        # slow down to a bounded rate; they never stop, and success resets the gap.
+        return self._backoff(self.stop_interval, self._stop_failures)
+
+    def _poll_delay(self):
+        with self._lock:
+            delay = self._backoff(self.poll_interval, self._loop_streak)
+            if self._read_failures >= _BACKOFF_AFTER:
+                # Only repeated non-transport errors (wrong credentials, SOAP faults) slow
+                # the reads; timeouts and connection loss keep the base rate.
+                step = self.poll_interval * 2 ** (self._read_failures - _BACKOFF_AFTER + 1)
+                delay = max(delay, min(_READ_BACKOFF_CAP, max(_READ_BACKOFF_FLOOR, step)))
+            return delay
+
     def _stop_if_due(self, *, force=False):
         if self._is_suspended():
             self._note_suspended()
@@ -363,7 +427,7 @@ class StopGuard:
         with self._lock:
             if not force and self.clock() < self._recovery_until:
                 return
-            if not force and self.clock() - self._last_stop < self.stop_interval:
+            if not force and self.clock() - self._last_stop < self._stop_gap():
                 return
             self._last_stop = self.clock()
             episode = self._episode
@@ -381,9 +445,12 @@ class StopGuard:
                         episode.stops_traced += 1
                         self._trace("stop", f"ok {self.clock() - began:.2f}s")
             self._stop_warned = False
+            with self._lock:
+                self._stop_failures = 0
         except Exception as exc:  # noqa: BLE001 - never expose exception text/credentials
             diag = getattr(exc, "rpc_diag", None)
             with self._lock:
+                self._stop_failures += 1
                 self._stats["stops"] += 1
                 self._stats["stops_failed"] += 1
                 if episode is not None and episode is self._episode:
@@ -419,6 +486,8 @@ class StopGuard:
                 self._safe_samples = 0
                 self._recovery_until = -math.inf
                 self._last_cause = cause
+                self._read_failures = (self._read_failures + 1
+                                       if self._non_transport(exc) else 0)
                 self._record_read(None, read_s, cause)
             self._trip("pose_unavailable")
             with self._lock:
@@ -434,6 +503,7 @@ class StopGuard:
         now = self.clock()
         with self._lock:
             self._record_read(position, now - started)
+            self._read_failures = 0
             if self._reason == "suspended" and not self._latched:
                 self._reason = "starting"
             previous = self._position if self._observed_at is not None and now - self._observed_at <= self.stale_after else None
@@ -446,6 +516,14 @@ class StopGuard:
             recovering = now < self._recovery_until
             recovery_outward = recovering and previous is not None and (
                 (position - previous) * self._recovery_direction < -1e-6)
+            inward = previous is not None and (
+                position < previous - 1e-6 if position >= self.right_inner else position > previous + 1e-6)
+            # The permit covers only a move toward the verified target: once the lens is
+            # past it (heading for the opposite boundary) the permit ends and Stop is forced.
+            overshoot = recovering and (position - self._recovery_target) * self._recovery_direction > (
+                max(self.stable_tolerance * 5, 0.01))
+            if overshoot:
+                recovery_outward = True
             if recovery_outward or previous is None:
                 self._recovery_until = -math.inf
             if previous is None:
@@ -453,15 +531,16 @@ class StopGuard:
             if safe and not latched and self._safe_samples >= self.stable_samples:
                 self._armed = True
                 self._reason = "armed"
+            # Latch in the same critical section as the decision, so a control-thread
+            # write checked between here and the Stop cannot see tracking_allowed.
+            if recovery_outward:
+                self._trip("recovery_outward", dispatch=False)
+            if not safe:
+                self._trip("boundary", dispatch=False)
         if recovery_outward:
-            self._trip("recovery_outward", dispatch=False)
             self._stop_if_due(force=True)
         if not safe:
-            # Latch before Stop so concurrent control cannot re-enable tracking.
-            self._trip("boundary", dispatch=False)
             # Stop before dispatching the slower native API work.
-            inward = previous is not None and (
-                position < previous - 1e-6 if position >= self.right_inner else position > previous + 1e-6)
             if not latched or not inward:
                 self._stop_if_due()
             self._request_disable()
@@ -491,6 +570,7 @@ class StopGuard:
                     or not self._disable_ok or not self._safe(target)):
                 return False
             self._recovery_direction = 1 if target > self._position else -1
+            self._recovery_target = target
             self._recovery_until = self.clock() + timeout
             return True
 
@@ -520,11 +600,35 @@ class StopGuard:
     def _run(self):
         try:
             while not self._exit.is_set():
-                self.poll_once()
-                if self._wait(self.poll_interval):
+                try:
+                    self.poll_once()
+                    with self._lock:
+                        self._loop_streak, self._loop_warned = 0, False
+                except Exception as exc:  # noqa: BLE001 - an unexpected error must not end observation
+                    self._loop_failed(exc)
+                if self._wait(self._poll_delay()):
                     break
         finally:
             self._stop_if_due()
+
+    def _loop_failed(self, exc):
+        # Fail closed: unknown guard state means no tracking, then keep observing.
+        with self._lock:
+            self._loop_errors += 1
+            self._loop_streak += 1
+            self._healthy = False
+            self._safe_samples = 0
+            self._recovery_until = -math.inf
+            warn = not self._loop_warned
+            self._loop_warned = True
+        if warn:
+            log.error("PTZ stop guard loop error %s: %s", self.name, type(exc).__name__,
+                      exc_info=exc)
+        try:
+            self._trip("guard_error")
+            self._stop_if_due()
+        except Exception:  # noqa: BLE001 - the loop itself must survive
+            pass
 
     def start(self):
         with self._lock:

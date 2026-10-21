@@ -7,6 +7,7 @@ de-duplication is stored. High-frequency detection state stays in memory.
 from __future__ import annotations
 
 import json
+import math
 import os
 import tempfile
 
@@ -107,6 +108,8 @@ def _validated(payload):
                     raise ValueError("reconnect_count values must be non-negative integers")
             elif isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
                 raise ValueError(f"health field {field_name!r} must contain non-negative numbers")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError(f"health field {field_name!r} must be finite")
             field[camera] = value
         clean[field_name] = field
     return clean
@@ -121,26 +124,38 @@ def restore(state, payload):
 
 
 def load_state(path, state, logger=None):
-    """Load health data into state; missing or invalid files leave it unchanged."""
+    """Load health data into state; missing or invalid files leave it unchanged.
+
+    The failed-over addresses and scorer choices are read on their own: one damaged
+    persisted field must not make a camera forget where it is running.
+    """
     try:
         with open(path, encoding="utf-8") as fh:
             payload = json.load(fh)
-        restore(state, payload)
-        hosts = payload.get("active_hosts")
-        if isinstance(hosts, dict) and hasattr(state, "active_hosts"):
-            state.active_hosts.update({k: v for k, v in hosts.items()
-                                       if isinstance(k, str) and isinstance(v, str)})
-        scorers = payload.get("active_scorers")
-        if isinstance(scorers, dict) and hasattr(state, "active_scorers"):
-            state.active_scorers.update({k: v for k, v in scorers.items()
-                                         if isinstance(k, str) and isinstance(v, int)})
-        return True
     except FileNotFoundError:
         return False
-    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, TypeError) as exc:
         if logger is not None:
             logger.warning("health state load failed: %s", exc)
         return False
+    if not isinstance(payload, dict):
+        return False
+    ok = True
+    try:
+        restore(state, payload)
+    except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+        ok = False
+        if logger is not None:
+            logger.warning("health state load failed: %s", exc)
+    hosts = payload.get("active_hosts")
+    if isinstance(hosts, dict) and hasattr(state, "active_hosts"):
+        state.active_hosts.update({k: v for k, v in hosts.items()
+                                   if isinstance(k, str) and isinstance(v, str)})
+    scorers = payload.get("active_scorers")
+    if isinstance(scorers, dict) and hasattr(state, "active_scorers"):
+        state.active_scorers.update({k: v for k, v in scorers.items()
+                                     if isinstance(k, str) and isinstance(v, int)})
+    return ok
 
 
 def save_state(path, state, logger=None):
@@ -171,7 +186,7 @@ def save_state(path, state, logger=None):
         os.replace(temp_path, path)
         temp_path = None
         return True
-    except OSError as exc:
+    except (OSError, TypeError, ValueError) as exc:
         if logger is not None:
             logger.warning("health state save failed: %s", exc)
         return False

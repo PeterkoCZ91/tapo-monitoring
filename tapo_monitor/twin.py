@@ -330,6 +330,14 @@ def _probe_value(snapshot, group, name):
     if not isinstance(result, Mapping):
         return drift.UNKNOWN
     if result.get("state") != "available":
+        try:
+            info = snapshot["groups"]["basic"]["info"]
+        except (KeyError, TypeError):
+            info = None
+        basic_info = info.get("value") if isinstance(info, Mapping) else None
+        if (isinstance(info, Mapping) and info.get("state") == "available"
+                and capabilities.verified_unsupported_operation(basic_info, group, name, result)):
+            return drift.UNSUPPORTED
         return drift.UNSUPPORTED if result.get("reason") == "missing_method" else drift.UNKNOWN
     return result.get("value", drift.UNKNOWN)
 
@@ -376,6 +384,10 @@ def _clock_synced(value, max_skew=5.0):
         value = value.get("seconds", value.get("time_correction", value.get("offset", drift.UNKNOWN)))
         if value in (drift.UNKNOWN, drift.UNSUPPORTED):
             return value
+    if isinstance(value, bool):
+        # pytapo's getTimeCorrection answers False for an unreadable clock; float(False)
+        # would read as a perfect 0.0 s offset.
+        return drift.UNKNOWN
     try:
         offset = float(value)
         return abs(offset) <= max_skew

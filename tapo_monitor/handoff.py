@@ -39,6 +39,10 @@ class HandoffManager:
         duration = _time(duration, "duration")
         if duration <= 0:
             raise ValueError("duration must be positive")
+        existing = self._leases.get(group)
+        if existing is not None:  # active, or expired but not yet collected by expire()
+            # Re-leasing must not make the temporary policy look like the one to restore.
+            previous_policy = existing.previous_policy
         lease = HandoffLease(group, source_camera, target_camera, preset, now,
                              now + duration, previous_policy)
         self._leases[group] = lease

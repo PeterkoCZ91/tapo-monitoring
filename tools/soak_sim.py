@@ -324,6 +324,10 @@ class Soak:
 
         mp.setattr(camera_api, "ping_reachable",
                    lambda host, *a, **k: by_host[host].online and host == by_host[host].address)
+        # The return-to-primary probe is a real TCP connect; the fake world answers it.
+        mp.setattr(camera_api, "tcp_reachable",
+                   lambda host, *a, **k: host in by_host and by_host[host].online
+                   and host == by_host[host].address)
         mp.setattr(camera_api, "tapo_factory", lambda host, *a, **k: functools.partial(login, host))
         mp.setattr(camera_api, "find_alternate_host",
                    lambda cfg, connect=None, skip=(): next(
