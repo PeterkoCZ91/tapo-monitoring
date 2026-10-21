@@ -236,7 +236,8 @@ Without an SD card `getEvents` (`searchDetectionList`) and the recordings list r
 -71114 STORAGE_NOT_EXIST: the event index lives on the card, so this camera needs one for
 `sources: [getevents]`. `getLastAlarmInfo` with `{"system": {"name":
 ["last_alarm_info"]}}` (not wrapped by pytapo) answers without a card, but only with the
-last alarm's time and a coarse type (a person was reported as `motion`).
+last alarm's time and a coarse type (a person was reported as `motion`). The daemon can
+use it via the opt-in `detection.sources: [lastalarm]` (live frame only, no SD).
 
 **Do not call:** `checkDetectEventState {}` — the HTTPS API refused connections for about
 10 s right after it. Keep calls at least ~1.5 s apart; closer ones return -40109
@@ -371,3 +372,9 @@ lacks:
   `getUserID()` before the download loop, and caps `window_size` at 50 (the C560WS stalls
   at pytapo's default 200). See
   [SD-card download returns no frames](troubleshooting.md#sd-card-download-returns-no-frames).
+
+- **Card-less event source (not wired in yet)** — `tapo_monitor/alarminfo.py` turns the
+  `getLastAlarmInfo` answer (last alarm type + time, no SD card needed) into
+  getEvents-shaped dicts (`start_time`, `end_time: None`, coarse `event_type`), drops
+  stale or unrecognised answers, and dedupes repeats through a small bounded set.
+  `events_without_sd(client, last_seen)` is the config-free entry point; the daemon does not call it.

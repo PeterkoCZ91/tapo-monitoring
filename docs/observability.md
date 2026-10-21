@@ -357,7 +357,8 @@ URL or camera address is ever included.
 The server binds `127.0.0.1` unless `status_bind` says otherwise, and that default is
 deliberate — the endpoint has no authentication, so making it reachable beyond the
 host must be the operator's explicit decision (a VPN interface address, say), not
-something the package does on its own. The endpoint also cannot cost the monitor loop
+something the package does on its own. A `status_bind` other than `127.0.0.1`, `localhost` or `::1` logs a warning at
+load saying the unauthenticated endpoint is reachable from the network. The endpoint also cannot cost the monitor loop
 anything: a port that will not bind is a startup warning, and a request that fails is
 a logged 500, never a dead server or a crashed daemon.
 

@@ -4,6 +4,41 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Stop repeatedly requesting vehicle detection OFF on the verified C216 hardware
+  and firmware when its getter confirms that the feature is absent. The digital
+  twin records it as unsupported instead of unknown; other models, firmware and
+  transient getter errors still retain normal repair attempts.
+- Dual-lens cameras repair day/night mode, tamper detection, white lamp and
+  night-vision mode per lens (read with `chn_id`, written only to a lens that drifted
+  or could not be read; an unreadable lens is written at most once per 10 minutes)
+  instead of only on the wide lens.
+
+### Changed
+- A quoted or otherwise non-boolean value for `night_only`, `telegram_alerts`,
+  `pan_limit.enabled`/`tilt`, `light_trigger.enabled`, the `reliability` and
+  `observability` switches and `alerts.event_restart_enabled` is a `ConfigError`
+  instead of being read as true. `loop.event_interval` and `loop.control_interval`
+  must be integers >= 1, `alerts.cooldown`/`outage_threshold`/`stall_threshold`
+  integers >= 0, and `alerts`, `loop` and `observability` must be mappings.
+  A non-loopback `observability.status_bind` logs a warning at load.
+- A camera that failed over to a backup `host` returns to the primary after three
+  successful probes in a row (at most one a minute), at least five minutes after
+  the last switch and subject to the same MAC check; the CLI commands follow the
+  address saved in the health state.
+- The scorer service refuses bodies over 32 MiB (`413`) and clamps `?tiles=` to 1..4.
+- `tools/recording_audit.py score` refuses to send the bearer token to a
+  non-loopback `http://` scorer unless `--allow-insecure` is given.
+- `tools/check_monitor_rollout.sh`, `host_watch.sh` and the host side of
+  `deploy_release.sh` read unit env files like systemd does (`tools/lib/envfile.sh`):
+  nothing is expanded or executed.
+
+### Added
+- `TAPO_LABEL_ALLOWED_HOSTS` adds extra hostnames the label server accepts in
+  `Host`/`Origin`.
+- `tools/suggest_ignore_zones.py` suggests `scorer.ignore_boxes` rects from person
+  boxes that repeat at the same place in the scorer logs (read-only).
+
 ## [0.11.0] - 2026-10-20
 
 ### Changed

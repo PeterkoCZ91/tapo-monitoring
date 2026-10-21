@@ -27,6 +27,12 @@ GET /health              -> {"ok": true}
 GET /metrics             -> aggregate request, candidate, failure and latency counters
 ```
 
+`POST /score` takes an optional `?tiles=N` query parameter. Values are clamped to 1..4
+(a grid of at most 4x4; a value that is not an integer means 1). The request body must
+carry a `Content-Length` and may be at most 32 MiB: a larger one is refused with
+`413 {"error": "body too large"}`, a missing, negative or zero length with
+`400 {"error": "bad length"}`; both are counted as failures in `/metrics`.
+
 The monitor gates person alerts on `person` only. `animal` is returned for audit and
 calibration, but an animal score can never pass a person-alert threshold. `/metrics`
 contains aggregate counts and durations only: it does not retain JPEGs, URLs, camera names
@@ -509,6 +515,8 @@ tapo-monitor label /srv/tapo-scorer/shadow/disagree
 The share of those frames with a real person says which model is right where they differ.
 The frames are camera images: keep the directory private and delete it afterwards.
 
+The label server checks the `Host` and `Origin` hostname (not the port) against `localhost`, `127.0.0.1`, `::1` and the bind address, so SSH port forwards work; add other names (for example a MagicDNS name) with `TAPO_LABEL_ALLOWED_HOSTS=name1,name2`.
+
 `tools/shadow_report.py` does the arithmetic on the log (stdlib only, read-only):
 
 ```bash
@@ -824,7 +832,8 @@ one segment and on a different day, from the most recent complete days (the newe
 still being written, the two oldest are about to be pruned). It prints the bytes to copy
 before anything is transferred; nothing on the recorder host is changed. `score` cuts a frame
 every `--every` seconds (default 5) and sends at most `--max-rate` frames per second
-(default 2) to each scorer; the token is sent to non-loopback scorers only. Rows of
+(default 2) to each scorer; the token is sent to non-loopback scorers only, and over `https://` only: with a token and a
+non-loopback `http://` scorer `score` fails with "refusing to send the token over plain http" unless you pass `--allow-insecure` (the example above with `--token-file` and an `http://` candidate needs it, or an `https://` URL). The token is also never re-sent to a redirect target. Rows of
 `scores.jsonl` carry a stratum: `cand` (any model at 0.25 or more), `lowrand` (a seeded
 random 150 of the frames both models rate below 0.25) and `lowrest` (the other low frames).
 `dataset` keeps the 400 highest candidates and the lowrand sample; the verdict shown in the
@@ -1022,6 +1031,15 @@ tools/rollback_release.sh <ssh-host> <release-name> --user --python ~/other-venv
 # then, on the host:
 ~/tapo-monitor/current/tools/check_monitor_rollout.sh --user <FINGERPRINT>
 ```
+
+Shell tools that read a unit's `EnvironmentFile` (`check_monitor_rollout.sh`, `host_watch.sh`,
+`deploy_release.sh` on the host) read it the way systemd does and never source it as shell
+(`tools/lib/envfile.sh`; `host_watch.sh` and the deploy keep an inlined copy because they
+run standalone). Blank lines and lines starting with `#` or `;` are skipped; a key must match
+`[A-Za-z_][A-Za-z0-9_]*` and other lines are ignored; whitespace around the line and key is
+trimmed; one pair of matching surrounding quotes is stripped from the value; nothing is
+expanded or executed, so `$`, backticks and `(` stay literal; the last assignment of a key wins;
+a missing or unreadable file is not an error.
 
 `--user` sends **every** systemctl/journalctl call on the host to the user manager: the
 `EnvironmentFile` lookup (so the snapshot and the `TAPO_EXPECTED_FINGERPRINT` update find
@@ -1236,6 +1254,24 @@ For rotating night cameras, parked cars should show up as motion/PIR events foll
 low scorer scores and no Telegram send. If they produce sends, inspect the frame before
 touching thresholds.
 
+## Suggesting ignore boxes
+
+`tools/suggest_ignore_zones.py` is a cheap second opinion for static false alarms. It reads
+the scorer shadow/score JSONL logs (person boxes per frame), clusters the boxes of each
+camera by IoU and reports clusters that repeat at the same place in many distinct frames on
+several days, with a padded rect, frame and day counts, score range and a paste-ready
+snippet with `ignore_boxes_mode: observe`. It is read-only and never edits a config.
+
+```bash
+tools/suggest_ignore_zones.py ~/tapo-scorer/shadow/shadow.jsonl --labels ~/tapo-dataset
+tools/suggest_ignore_zones.py shadow.jsonl --min-frames 40 --min-days 3 --camera cam1
+```
+
+Defaults: at least 20 frames on at least 2 days, box score at least 0.25, cluster IoU 0.7,
+padding 0.01. With `--labels` a cluster is dropped when any of its frames is labelled
+`person`. Look at the frames of a suggestion before using it, and soak it in `observe` mode
+first: static clusters are often people's routes.
+
 ## Soak report
 
 `tools/soak_report.sh` answers the questions of a soak test before a release in one
@@ -1344,6 +1380,15 @@ What it does not show: real network and camera timing, pytapo and ffmpeg themsel
 HTTP server thread and its socket, code that reads the wall clock instead of the `now` the
 loop hands down, and the behaviour of a real disk (full, slow). A clean run is a reason to
 start the real soak, not a replacement for it.
+
+## Verifier crop dataset
+
+`tools/build_verifier_dataset.py DATASET OUT [--log shadow.jsonl ...]` (roadmap 9.4, data only, no training) cuts the
+scorer's boxes out of the hand-labelled frames of a labelling dataset into `OUT/person/` and `OUT/no_person/` (padded,
+`--min-size`, optional `--resize N`) and writes `OUT/manifest.jsonl` (file, source sha256, camera, day, box, score, label,
+split). Boxes come from the index `boxes` field, else from `primary_boxes` in `--log` files; `unsure`/unlabelled frames
+are skipped. The train/val split is per camera-day (`--seed`, `--val-fraction`), never per frame. Labels are per frame,
+so person-frame crops may include non-person boxes; a class under 50 crops prints a warning.
 
 ## Inspecting alert frames
 
@@ -1763,3 +1808,13 @@ Keep local network measurement cadence independent from alert cadence. Configure
 `alerts.outage_threshold`, `alerts.stall_threshold` and
 `alerts.event_failure_threshold` explicitly when a shorter camera alert delay is
 needed; this does not change camera polling or reboot thresholds.
+
+## Recording a real getLastAlarmInfo answer
+
+Cameras without an SD card cannot use `getEvents`; `alarminfo.parse_last_alarm` reads
+`getLastAlarmInfo` instead, but its shape is not yet validated on real hardware. Stop the
+monitor first (a second session risks a lockout), then run
+`python3 tools/probe_last_alarm.py --config cameras.yaml --camera NAME --i-stopped-the-daemon`
+(`--count 3 --interval 5 --out answer.json`). It sends only `getLastAlarmInfo`, prints the
+redacted answer and the parse result, and exits 1 with "shape not recognised" if the
+answer needs to be shared (the printed JSON has hosts, MACs and serials removed).

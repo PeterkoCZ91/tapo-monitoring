@@ -159,6 +159,11 @@ loop:
 Keep `control_interval` substantially wider than `event_interval`; reducing it increases
 authentication pressure without improving event latency.
 
+Both must be integers of at least 1: `0`, a negative number, a boolean or text that is
+not a number is a `ConfigError` at load. A top-level section (`alerts`, `loop`,
+`observability`) that is not a mapping is a `ConfigError` too. `alerts.cooldown`,
+`outage_threshold` and `stall_threshold` must be integers >= 0.
+
 ## Camera fields
 
 ### Host failover (optional)
@@ -191,11 +196,22 @@ ONVIF, ping, the SD download and the scene probe.
   `audit ... action=host_switch host_index=N` line (index, never an address). `/status`
   shows `host_index` for such cameras. The choice is saved in the health state file and
   restored on restart if it is still in the list.
-- Not covered: the recorder paths (`RECORDING_ROOT/<host>`, outage clip preserver, shadow
-  scan) keep using the first configured `host`; the CLI commands (`report`, `twin` probes)
-  connect to the first address; MQTT and `hub_host` are separate settings. The camera
-  never switches back on its own: to go back to the primary, take the failed-over address
-  out of the list and restart (a saved choice that is still listed is restored).
+- Return to the primary: while failed over, the primary is probed (TCP, at most once a minute) once per control
+  pass. After three successful probes in a row, at least five minutes after the last switch
+  and unless the primary was rejected by the MAC check, the camera switches back; the same
+  MAC check applies to the return, the saved choice is cleared and the journal gets
+  `audit ... action=host_return`. A failed probe restarts the count.
+- Recorder paths (`RECORDING_ROOT/<host>`: snapshot fallback, recording clips, shadow scan,
+  recorder health, outage clip preserver) look in the directory of every candidate `host`
+  and use the newest recording, since the external recorder's directory name is not known
+  to tapo-monitor. Not covered: MQTT and `hub_host` are separate settings.
+  The CLI commands (`report`, `twin` probes) connect to the address saved in the health
+  state file, so they follow the daemon's choice.
+- MAC resolution helper (`tapo_monitor/macresolve.py`, not wired into the daemon yet): `resolve_via_ssh(mac, ssh_host)`
+  runs a fixed `ssh -o BatchMode=yes ip neigh show` on a host inside the camera's network (ARP does not cross a
+  subnet route) and `candidates_from_mac(...)` collects the IPs. Trust: the helper host and its neighbour table are
+  trusted, and the SSH key must already be authorized (no prompts); the result only yields candidate addresses,
+  so the MAC identity check above still applies. `ssh_host` must match `[A-Za-z0-9._@-]+`; stale/failed entries are ignored.
 
 ### Identity and role
 
@@ -251,6 +267,11 @@ configuration model for ongoing research but do not currently run as independent
 event sources; never configure them as the only source. `strict_people: true` prioritizes
 camera-confirmed people while still allowing bare motion to enter the scorer/follow-up
 funnel where configured.
+
+`lastalarm` (opt-in, never combined with `getevents` or any SD option) is for a camera
+without an SD card: each pass polls `getLastAlarmInfo` (at most one call per 1.5 s) and
+turns a fresh, not yet seen alarm into an event. Alerts use the live frame only (no SD
+follow-up). The camera reports a person as coarse `motion`, which follows `strict_people`.
 
 ### Data collection, privacy and detection notices
 
@@ -342,9 +363,12 @@ every camera had before. `c545d`:
   overridden by the label), person detection on (with `person_sensitivity` when set) and
   vehicle detection off. A lens that cannot be read is written anyway. A camera in tune
   gets the three reads and no write; a single-lens camera keeps the chn-less writes it
-  always had. Tamper, LDC, day/night, night-vision mode and white lamp are still sent
-  without `chn_id` and reach the wide lens only; SmartTrack and auto-track are
-  device-wide.
+  always had. Day/night mode, tamper detection, white lamp and night-vision mode are
+  repaired per lens the same way: each is read per lens (`chn_id: [1, 2]`) just before
+  its repair and written only to a lens that drifted or could not be read. A lens that
+  cannot be read is written blind at most once per 10 minutes per client and setting.
+  LDC is still sent without `chn_id` and reaches the wide lens only; SmartTrack and
+  auto-track are device-wide.
 
 Events of either shape are normalized for every camera: a `chn_events` entry becomes a
 top-level `events_1` (OR of the lenses) plus `channels`, which audit lines show as
@@ -1499,6 +1523,17 @@ Unknown keys are rejected: the load fails naming the full key path plus the clos
 key (`cameras[0].scorer.treshold: unknown key (did you mean 'threshold'?)`), derived from
 the config dataclasses so the check cannot rot. A mistyped key would otherwise silently
 take its default — a dropped `rotate` costs roughly a third of the person score.
+
+Boolean options are not coerced. A quoted value such as `"false"` (a non-empty string,
+true in Python) used to be read as on; for the options listed here it now fails the load
+with `'<key>' must be true or false`: `night_only`, `telegram_alerts`, `pan_limit.enabled`
+and `pan_limit.tilt`, `light_trigger.enabled`, `reliability.enabled`, `auto_fix`,
+`storage_health` and `latency_metrics`, `alerts.event_restart_enabled`,
+`observability.digital_twin`, `drift_alerts` and `ledger`, plus the options that were
+already strict (`mqtt.tls`, `mqtt.publish_images`, `detection_notice`, `hub_clip_worker`,
+`sampler.keep_sampling_on_defer` and others). Write booleans bare (`true` / `false`).
+Integer ranges are checked the same way (for example `loop.event_interval` and
+`loop.control_interval` must be >= 1, see [top-level sections](#top-level-sections)).
 
 Renamed keys are the exception. When a release renames a key, the old name keeps loading
 for that release: it is mapped to the new name and logs

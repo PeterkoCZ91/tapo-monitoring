@@ -37,7 +37,7 @@ alerts:
 # Loop cadence. Detections are polled fast (event_interval) on the already-connected
 # client so the live snapshot is taken while the subject is still in frame; camera
 # control + reconnect runs on the wider control_interval (frequent re-logins risk the
-# C560WS source-IP lockout).
+# C560WS source-IP lockout). Both are integers >= 1; anything else fails the load.
 loop:
   event_interval: 4        # seconds between getEvents detection polls
   control_interval: 60     # seconds between tracking/sensitivity/preset + reconnect
@@ -361,7 +361,7 @@ cameras:
   #   #                                 # and keep the larger subject (needs scorer.url)
   #   sd_snapshot: true
   #   detection:
-  #     sources: [getevents]
+  #     sources: [getevents]   # card-less camera: [lastalarm] instead (live frame only, no sd_*)
   #     strict_people: true
   #   tracking:
   #     day_preset:                     # no presets saved on the pan/tilt lens yet
