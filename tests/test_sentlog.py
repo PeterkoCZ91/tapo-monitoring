@@ -233,7 +233,7 @@ def test_archive_panlimit_frame_prunes_older_than_two_days(tmp_path):
     out = tmp_path / "panlimit-log"
     out.mkdir()
     now = 1785200000.0
-    stale = out / "panlimit_yard_pan+0.7000_old.jpg"
+    stale = out / "panlimit_yard_pan+0.7000_20200101-000000-000000.jpg"
     stale.write_bytes(b"old")
     os.utime(stale, (now - 3 * 86400, now - 3 * 86400))
 
@@ -468,7 +468,7 @@ def test_retention_maintenance_cleans_without_new_alerts_and_repeats_daily(tmp_p
     now = 1785200000.0
     archive = tmp_path / "sent"
     archive.mkdir()
-    old = archive / "expired.jpg"
+    old = archive / "20200101-000000-000000.jpg"
     old.write_bytes(b"old")
     os.utime(old, (now - 3 * 86400, now - 3 * 86400))
     (archive / sentlog.INDEX_NAME).write_text(json.dumps({"ts": now - 3 * 86400}) + "\n")

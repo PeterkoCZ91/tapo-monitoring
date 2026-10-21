@@ -65,7 +65,10 @@ _SENSITIVE_VALUE = re.compile(
     r"|[A-Za-z0-9+/]{16,}={1,2}"
     r"|(?=[A-Za-z0-9+/]{0,23}[+/])[A-Za-z0-9+/]{24,})"
 )
-_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.: -]{0,127}$")
+# Unicode letters/digits are fine (camera names like "Dvůr"); ``[^\W_]`` is "word char
+# minus underscore", so quotes, slashes, control characters and whitespace other than a
+# plain space stay out. Values are bound as SQL parameters regardless.
+_IDENTIFIER = re.compile(r"^[^\W_][\w.: -]{0,127}$")
 
 _SCHEMA = """
 BEGIN IMMEDIATE;

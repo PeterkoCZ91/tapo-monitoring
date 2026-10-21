@@ -77,6 +77,8 @@ def unwrap(raw):
         response = raw["result"]["responses"][0]
     except (TypeError, KeyError, IndexError):
         return None, {}
+    if not isinstance(response, dict):
+        return None, {}
     result = response.get("result")
     return response.get("error_code"), result if isinstance(result, dict) else {}
 

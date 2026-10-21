@@ -24,6 +24,9 @@ from pathlib import Path
 from . import ledger, notify, sentlog
 from .shadowscan import SUMMARY_MAX_AGE, SUMMARY_NAME
 
+# Seconds a producer clock may run ahead of ours before its timestamp is rejected.
+CLOCK_SKEW = 10
+
 log = logging.getLogger(__name__)
 
 ENV_TIME = "TAPO_REVIEW_DIGEST_TIME"
@@ -95,12 +98,15 @@ def last_sent_day(review_dir):
 
 def mark_sent(review_dir, now):
     """Record that today's digest went out (best-effort)."""
+    tmp = os.path.join(review_dir, STATE_NAME + ".tmp")
     try:
         os.makedirs(review_dir, exist_ok=True)
-        with open(os.path.join(review_dir, STATE_NAME), "w", encoding="utf-8") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             f.write(_day(now))
+        os.replace(tmp, os.path.join(review_dir, STATE_NAME))
     except OSError:
-        log.debug("review digest: could not write state", exc_info=True)
+        log.warning("review digest: could not write state; it will be resent",
+                    exc_info=True)
 
 
 def collect(review_dir, now, window=WINDOW_SECONDS):
@@ -396,7 +402,7 @@ def radio_context_lines(snapshot, now, *, gateway=False):
     try:
         at = snapshot["at"]
         if (isinstance(at, bool) or not isinstance(at, (int, float))
-                or not math.isfinite(at) or at > now):
+                or not math.isfinite(at) or at > now + CLOCK_SKEW):
             raise ValueError("invalid radio timestamp")
         if now - at > 600:
             return [f"{label}: stale observation"]
@@ -452,7 +458,7 @@ def network_context_lines(now, *, path=None):
             raise ValueError("oversized network cache")
         data = json.loads(raw)
         at = data["at"]
-        if not isinstance(at, (int, float)) or not math.isfinite(at) or at > now:
+        if not isinstance(at, (int, float)) or not math.isfinite(at) or at > now + CLOCK_SKEW:
             raise ValueError("invalid network cache timestamp")
         if now - at > 600:
             return ["ICMP 24h: stale summary; current measurements unknown"]
@@ -624,6 +630,22 @@ def scan_context_line(review_dir, now):
     return line
 
 
+def _review_file(review_dir, name):
+    """Real path of an index ``file`` when it is a file inside ``review_dir``, else None.
+
+    The index is data on disk: an absolute path or ``..`` must not make the digest upload
+    arbitrary files to Telegram.
+    """
+    try:
+        base = os.path.realpath(review_dir)
+        path = os.path.realpath(os.path.join(base, str(name)))
+        if os.path.commonpath([base, path]) != base or path == base:
+            return None
+        return path if os.path.isfile(path) else None
+    except (OSError, ValueError):
+        return None
+
+
 def pick_photos(entries, review_dir, limit):
     """The ``limit`` highest-scoring entries whose frame still exists on disk. Pure-ish.
 
@@ -641,7 +663,7 @@ def pick_photos(entries, review_dir, limit):
     for e in ranked:
         if len(picked) >= limit:
             break
-        if os.path.isfile(os.path.join(review_dir, str(e["file"]))):
+        if _review_file(review_dir, e.get("file")) is not None:
             picked.append(e)
     return picked
 
@@ -652,8 +674,13 @@ def photo_caption(entry):
     Shadow entries record ``ts`` as the (much later) scan-run time; the true observation
     time lives in ``event_ts`` when the shadow worker set it, so that takes priority.
     """
-    when = time.strftime(
-        "%H:%M", time.localtime(float(entry.get("event_ts", entry.get("ts", 0.0)))))
+    stamp = entry.get("event_ts")
+    if stamp is None:
+        stamp = entry.get("ts")
+    try:
+        when = time.strftime("%H:%M", time.localtime(float(stamp)))
+    except (TypeError, ValueError, OverflowError, OSError):
+        when = "?"
     try:
         score = f"p{float(entry.get('person', 0.0)):.2f}"
     except (TypeError, ValueError):
@@ -760,8 +787,14 @@ def run_if_due(*, env=None, now=None, send_text, send_photo, health=None, ledger
             return False
         photos = 0
         for entry in pick_photos(entries, review_dir, max_photos_from_env(env)):
-            send_photo(os.path.join(review_dir, str(entry["file"])), photo_caption(entry))
-            photos += 1
+            try:
+                path = _review_file(review_dir, entry.get("file"))
+                if path is None:
+                    continue
+                send_photo(path, photo_caption(entry))
+                photos += 1
+            except Exception:  # noqa: BLE001 - photos are best-effort on a delivered text
+                log.warning("review digest photo failed", exc_info=True)
         mark_sent(review_dir, now)
         _save_scorer_baseline(review_dir, raw_scorer)
         # Say it out loud. Only failures used to log, so a working digest was

@@ -54,7 +54,12 @@ def parse_segment_start(path):
     if not (base.startswith(_PREFIX) and base.endswith(_SUFFIX)):
         raise ValueError(f"not a segment name: {base}")
     stamp = base[len(_PREFIX):-len(_SUFFIX)]
-    return datetime.strptime(stamp, "%Y%m%dT%H%M%S").timestamp()
+    # Names are naive local time. In the repeated hour at a DST fall-back the same name
+    # occurs twice; fold=0 (the first occurrence) is chosen explicitly so the result is
+    # deterministic. Segments of the second pass are not distinguishable by name alone
+    # (fixing that needs the recorder to write UTC or an offset), so they resolve to the
+    # first pass -- a known limitation, one hour a year.
+    return datetime.strptime(stamp, "%Y%m%dT%H%M%S").replace(fold=0).timestamp()
 
 
 def _hour_dir(base_dir, host, ts):
@@ -74,12 +79,15 @@ def segment_for(base_dir, host, event_start, lister=None):
     still contains ``event_start``.
     """
     lister = lister or _default_lister
+    # ``host`` may be one directory name or a sequence of candidates (failover).
+    hosts = [host] if isinstance(host, str) else list(host)
     seen, files = set(), []
-    for ts in (event_start - 3600, event_start):
-        for f in lister(_hour_dir(base_dir, host, ts)):
-            if f not in seen:
-                seen.add(f)
-                files.append(f)
+    for h in hosts:
+        for ts in (event_start - 3600, event_start):
+            for f in lister(_hour_dir(base_dir, h, ts)):
+                if f not in seen:
+                    seen.add(f)
+                    files.append(f)
     best = None
     for f in files:
         try:
@@ -95,7 +103,8 @@ def segment_for(base_dir, host, event_start, lister=None):
 
 def _run_blurdetect(path):  # pragma: no cover - subprocess I/O
     p = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-i", path, "-vf", "blurdetect", "-f", "null", "-"],
+        ["ffmpeg", "-hide_banner", "-protocol_whitelist", "file", "-i", path,
+         "-vf", "blurdetect", "-f", "null", "-"],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30,
     )
     return p.stderr.decode("utf-8", "replace")
@@ -381,8 +390,13 @@ def early_span(span, early=RECORDING_EARLY_SPAN):
 
 
 def _run_ffmpeg(args):  # pragma: no cover - subprocess I/O
-    subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                   timeout=30, check=True)
+    try:
+        subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=30, check=True)
+    except BaseException:
+        # ffmpeg can die or time out after partly writing its output (the last argument).
+        snapshot.safe_unlink(args[-1])
+        raise
 
 
 def extract_frames(mkv, seg_start, event_start, span, every, out_dir, base, runner=None,
@@ -403,14 +417,17 @@ def extract_frames(mkv, seg_start, event_start, span, every, out_dir, base, runn
     for k, offset in enumerate(o for o in offsets if o < limit):
         out_path = os.path.join(out_dir, f"{base}_{k:02d}_at{int(seg_start + offset)}.jpg")
         try:
-            runner(["ffmpeg", "-y", "-ss", str(offset), "-i", mkv, "-frames:v", "1",
+            runner(["ffmpeg", "-y", "-ss", str(offset), "-protocol_whitelist", "file", "-i", mkv, "-frames:v", "1",
                     "-vf", vf, "-q:v", "2", "-update", "1", out_path])
         except Exception:
+            snapshot.safe_unlink(out_path)      # a custom runner may leave a partial file
             continue
         if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
             paths.append(out_path)
             if on_frame is not None:
                 on_frame(out_path)
+        else:
+            snapshot.safe_unlink(out_path)
     return paths
 
 
@@ -428,7 +445,7 @@ def fetch_recording_frames(cfg, event_start, span, out_dir,
     via ``fetch_frames=``. ``dense`` is passed to the extractor only when set.
     """
     base_dir = base_dir or os.getenv("RECORDING_ROOT", "")
-    host = getattr(cfg, "host", None)
+    host = getattr(cfg, "hosts", None) or getattr(cfg, "host", None)
     if not base_dir:
         print(f"recording fetch: RECORDING_ROOT unset for host={host}", file=sys.stderr)
         return []

@@ -354,6 +354,8 @@ class Bridge:
         for camera, key in due:
             self._set(self.topics.camera(camera, key), OFF)
 
+    _warned_plaintext = False
+
     def _make_client(self):
         client = self._client_factory(f"tapo-monitor-{self.topics.node}")
         client.will_set(self.topics.availability, "offline", qos=1, retain=True)
@@ -361,6 +363,10 @@ class Bridge:
         password = self._env.get(self.cfg.password_env, "") if self.cfg.password_env else ""
         if user:
             client.username_pw_set(user, password or None)
+            if not self.cfg.tls and not self._warned_plaintext:
+                self._warned_plaintext = True
+                log.warning("mqtt: broker credentials are configured with tls=false; the "
+                            "login is sent in clear text")
         if self.cfg.tls:
             client.tls_set()
         if hasattr(client, "max_queued_messages_set"):

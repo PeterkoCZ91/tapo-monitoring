@@ -18,6 +18,7 @@ import logging
 import math
 import os
 import random
+import re
 import shutil
 import tempfile
 import threading
@@ -93,6 +94,18 @@ def retention_days_from_env(env=None):
         return DEFAULT_RETENTION_DAYS
 
 
+_OWN_JPG = re.compile(r"(?:^|_)\d{8}-\d{6}(?:-\d{6})?\.jpg$")
+
+
+def _makedirs(path):
+    """Create ``path`` (and parents) owner-only: archived frames show people."""
+    os.makedirs(path, mode=0o700, exist_ok=True)
+
+
+def _opener(path, flags):
+    return os.open(path, flags, 0o600)
+
+
 def _stamp(now):
     whole = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
     return f"{whole}-{int((now % 1) * 1_000_000):06d}"
@@ -101,7 +114,8 @@ def _stamp(now):
 @contextmanager
 def _index_lock(archive_dir):
     # Lock a stable sidecar: replacing the index must not replace its lock inode.
-    with open(os.path.join(archive_dir, ".index.lock"), "a", encoding="utf-8") as lock:
+    with open(os.path.join(archive_dir, ".index.lock"), "a", encoding="utf-8",
+              opener=_opener) as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
             yield
@@ -111,7 +125,8 @@ def _index_lock(archive_dir):
 
 def _append_index(archive_dir, record):
     with _index_lock(archive_dir):
-        with open(os.path.join(archive_dir, INDEX_NAME), "a", encoding="utf-8") as index:
+        with open(os.path.join(archive_dir, INDEX_NAME), "a", encoding="utf-8",
+                  opener=_opener) as index:
             index.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
@@ -178,7 +193,7 @@ def prune_old(archive_dir, now, retention_days):
     except OSError:
         return 0
     for name in entries:
-        if not name.endswith(".jpg"):
+        if not _OWN_JPG.search(name):     # only frames this module wrote
             continue
         path = os.path.join(archive_dir, name)
         try:
@@ -250,7 +265,7 @@ def _write_unique(archive_dir, now, image_bytes):
         name = f"{_stamp(now + bump * 1e-6)}.jpg"
         path = os.path.join(archive_dir, name)
         try:
-            with open(path, "xb") as f:
+            with open(path, "xb", opener=_opener) as f:
                 f.write(image_bytes)
         except FileExistsError:
             continue
@@ -274,7 +289,7 @@ def archive_sent(archive_dir, image_bytes, caption, *, now,
     disk or a bad path degrades to "no archive", never a lost alert.
     """
     try:
-        os.makedirs(archive_dir, exist_ok=True)
+        _makedirs(archive_dir)
         name, path = _write_unique(archive_dir, now, image_bytes)
         record = {"ts": now, "file": name, "caption": caption, "delivered": bool(delivered)}
         if camera:
@@ -330,10 +345,10 @@ def archive_panlimit_frame(archive_dir, image_path, camera, axis, value, *, now)
     try:
         with open(image_path, "rb") as f:
             image_bytes = f.read()
-        os.makedirs(archive_dir, exist_ok=True)
+        _makedirs(archive_dir)
         name = f"panlimit_{camera}_{axis}{float(value):+.4f}_{_stamp(now)}.jpg"
         path = os.path.join(archive_dir, name)
-        with open(path, "wb") as f:
+        with open(path, "wb", opener=_opener) as f:
             f.write(image_bytes)
         prune_old(archive_dir, now, PANLIMIT_RETENTION_DAYS)
         return path
@@ -368,12 +383,12 @@ def archive_review_frame(archive_dir, image_bytes, meta, *, now, retention_days)
     without opening the index. Returns the saved path, or None on any failure (never raises).
     """
     try:
-        os.makedirs(archive_dir, exist_ok=True)
+        _makedirs(archive_dir)
         cam = str(meta.get("camera", "cam"))
         verdict = str(meta.get("verdict", "hold"))
         name = f"{cam}_{verdict}{_review_score_tag(meta)}_{_stamp(now)}.jpg"
         path = os.path.join(archive_dir, name)
-        with open(path, "wb") as f:
+        with open(path, "wb", opener=_opener) as f:
             f.write(image_bytes)
         record = {"ts": now, "file": name, **meta}
         _append_index(archive_dir, record)

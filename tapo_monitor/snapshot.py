@@ -216,6 +216,18 @@ def image_size(path):  # pragma: no cover - subprocess I/O
         return None, None
 
 
+def _unique_snap_path(out_dir):
+    """A fresh, empty ``snap_*.jpg`` path in ``out_dir``, unique even across threads.
+
+    Millisecond timestamps collide when two captures start in the same ms; mkstemp
+    reserves the name atomically. The empty placeholder is overwritten by the writer and
+    removed by the failure paths like any other partial output.
+    """
+    fd, path = tempfile.mkstemp(prefix="snap_", suffix=".jpg", dir=out_dir)
+    os.close(fd)
+    return path
+
+
 def capture_rtsp(rtsp_url, out_dir="/tmp", timeout=15, _run=subprocess.run, rotate=0,
                  scale=True):
     """Grab one frame from an RTSP stream. Returns the image path or None.
@@ -225,7 +237,7 @@ def capture_rtsp(rtsp_url, out_dir="/tmp", timeout=15, _run=subprocess.run, rota
     remove the orphan on every failure path, so repeated timeouts don't leak
     ``snap_*.jpg`` into /tmp until it fills.
     """
-    out_path = os.path.join(out_dir, f"snap_{int(_time.time() * 1000)}.jpg")
+    out_path = _unique_snap_path(out_dir)
     try:
         _run(
             ffmpeg_args(rtsp_url, out_path, rotate=rotate, scale=scale),
@@ -269,7 +281,7 @@ def capture_go2rtc(src, out_dir="/tmp", timeout=15, host=GO2RTC_HOST, port=GO2RT
     neither may leave a zero-byte ``snap_*.jpg`` behind, which is what once filled /tmp on
     the RTSP path.
     """
-    out_path = os.path.join(out_dir, f"snap_{int(_time.time() * 1000)}.jpg")
+    out_path = _unique_snap_path(out_dir)
     try:
         body = _fetch(go2rtc_frame_url(src, host=host, port=port), timeout)
     except Exception:  # noqa: BLE001 - a sleeping camera is a routine miss, not an error
@@ -314,6 +326,7 @@ def ts_frame_args(clip_path, out_path, rotate=0, skip=1.0):
         "-hide_banner",
         "-loglevel", "error",
         "-ss", f"{skip:g}",
+        "-protocol_whitelist", "file",
         "-i", clip_path,
         "-frames:v", "1",
         *(("-vf", vf) if vf else ()),
@@ -402,6 +415,70 @@ def _env_float(name, default):
         return default
 
 
+_REC_EXTS = (".mkv", ".mp4", ".ts")
+
+
+def _newest_recording(cam_dir):
+    """Newest-mtime recording under ``<cam_dir>/<date>/<hour>/``, or None.
+
+    Same answer as walking the whole tree, without reading the camera's whole history:
+    date and hour dirs sort chronologically by name, so we descend newest-first and stop
+    at the first hour dir that holds a segment. A recording's mtime can in theory lag its
+    dir name (a late write into an older hour), so the previous non-empty hour is
+    compared too; files outside the date/hour layout fall back to the full walk.
+    """
+    def subdirs(d):
+        try:
+            return sorted((e.name for e in os.scandir(d) if e.is_dir()), reverse=True)
+        except OSError:
+            return []
+
+    def segments(d):
+        out = []
+        try:
+            for e in os.scandir(d):
+                if e.is_file() and e.name.lower().endswith(_REC_EXTS):
+                    try:
+                        out.append((e.stat().st_mtime, e.path))
+                    except OSError:
+                        continue
+        except OSError:
+            pass
+        return out
+
+    try:
+        strays = segments(cam_dir)
+    except Exception:  # noqa: BLE001
+        strays = []
+    candidates = list(strays)
+    found = 0
+    for date in subdirs(cam_dir):
+        dpath = os.path.join(cam_dir, date)
+        candidates += segments(dpath)
+        for hour in subdirs(dpath):
+            hpath = os.path.join(dpath, hour)
+            files = segments(hpath)
+            for deeper in subdirs(hpath):
+                for dirpath, _d, names in os.walk(os.path.join(hpath, deeper)):
+                    for name in names:
+                        if name.lower().endswith(_REC_EXTS):
+                            p = os.path.join(dirpath, name)
+                            try:
+                                files.append((os.path.getmtime(p), p))
+                            except OSError:
+                                pass
+            if files:
+                candidates += files
+                found += 1
+                if found >= 2:
+                    break
+        if found >= 2:
+            break
+    if not candidates:
+        return None
+    return max(candidates, key=lambda c: c[0])[1]
+
+
 def latest_recording_frame(
     host, root=None, out_dir="/tmp", timeout=20, max_age=None, now=None,
     _run=subprocess.run, rotate=0
@@ -421,27 +498,35 @@ def latest_recording_frame(
         return None
     max_age = _env_float("RECORDING_MAX_AGE", 300.0) if max_age is None else max_age
     now = _time.time() if now is None else now
-    cam_dir = os.path.join(root, host)
-    if not os.path.isdir(cam_dir):
+    # ``host`` may be one directory name or a sequence of candidates (failover
+    # addresses); the newest recording across the existing directories wins.
+    hosts = [host] if isinstance(host, str) else list(host)
+    latest, latest_mtime = None, None
+    for cand in hosts:
+        cam_dir = os.path.join(root, cand)
+        if not os.path.isdir(cam_dir):
+            continue
+        found = _newest_recording(cam_dir)
+        if found is None:
+            continue
+        try:
+            found_mtime = os.path.getmtime(found)
+        except OSError:
+            continue
+        if latest_mtime is None or found_mtime > latest_mtime:
+            latest, latest_mtime, host = found, found_mtime, cand
+    if latest is None:
         return None
-    latest = None
-    latest_mtime = -1.0
-    for dirpath, _dirnames, filenames in os.walk(cam_dir):
-        for name in filenames:
-            if not name.lower().endswith((".mkv", ".mp4", ".ts")):
-                continue
-            path = os.path.join(dirpath, name)
-            try:
-                mtime = os.path.getmtime(path)
-            except OSError:
-                continue
-            if mtime > latest_mtime:
-                latest, latest_mtime = path, mtime
     if not latest:
         return None
     if max_age is not None and now - latest_mtime > max_age:
         return None
-    out_path = os.path.join(out_dir, f"snaprec_{host.replace('.', '_')}_{int(now * 1000)}.jpg")
+    try:
+        fd, out_path = tempfile.mkstemp(
+            prefix=f"snaprec_{host.replace('.', '_')}_", suffix=".jpg", dir=out_dir)
+        os.close(fd)
+    except OSError:
+        return None
     rot = rotate_filter(rotate)
     try:
         _run(
@@ -452,6 +537,8 @@ def latest_recording_frame(
                 "error",
                 "-sseof",
                 "-2",
+                "-protocol_whitelist",
+                "file",
                 "-i",
                 latest,
                 "-frames:v",

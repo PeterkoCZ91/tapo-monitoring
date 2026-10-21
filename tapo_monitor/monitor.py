@@ -6,9 +6,12 @@ watermark, it returns the new alertable detections and the advanced watermark. E
 with their side-effecting pieces injected so the orchestration stays testable.
 """
 
+import collections
+import inspect
 import logging
 import shlex
 import time as _time
+import weakref
 from datetime import datetime
 
 from . import camera, detection, enrich, notify, scheduling, sentlog, snapshot
@@ -21,22 +24,58 @@ log = logging.getLogger(__name__)
 _safe_unlink = snapshot.safe_unlink
 
 
+_SHAPES = weakref.WeakKeyDictionary()
+
+
+def _shape(fn, nargs, min_args, kwnames):
+    """Longest call shape (positional count, keyword names) ``fn`` accepts, or None.
+
+    Decided from the signature, once per callable, so a callback is invoked exactly once:
+    a TypeError raised inside its body is a real error, not a cue to call it again.
+    """
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return nargs, kwnames
+    for kw in (kwnames, ()):
+        for n in range(nargs, min_args - 1, -1):
+            try:
+                sig.bind(*range(n), **{k: None for k in kw})
+            except TypeError:
+                continue
+            return n, kw
+    return nargs, kwnames
+
+
+def _call_compat(fn, *args, min_args=None, **kw):
+    """Call ``fn`` once with the richest signature it accepts.
+
+    Drops optional trailing positionals down to ``min_args`` (default: all) and, failing
+    that, the keywords, so an older ``cb(a, b)`` keeps working next to ``cb(a, b, c)``.
+    """
+    min_args = len(args) if min_args is None else min_args
+    key = (len(args), min_args, tuple(kw))
+    try:
+        # Weak keys: a per-tick closure must not keep its camera or frames alive.
+        per_fn = _SHAPES.setdefault(fn, {})
+    except TypeError:                   # not weak-referenceable: no cache
+        per_fn = {}
+    if key not in per_fn:
+        per_fn[key] = _shape(fn, *key)
+    n, kwnames = per_fn[key]
+    return fn(*args[:n], **{k: kw[k] for k in kwnames})
+
+
 def _observe(observe, event, etype, sent, delivered=False):
     if observe is None:
         return
-    try:
-        observe(event, etype, sent, delivered)
-    except TypeError:
-        observe(event, etype, sent)
+    _call_compat(observe, event, etype, sent, delivered, min_args=3)
 
 
 def _health_observe(observe, ok, error=None):
     if observe is None:
         return
-    try:
-        observe(bool(ok), error)
-    except TypeError:
-        observe(bool(ok))
+    _call_compat(observe, bool(ok), error, min_args=1)
 
 
 def _latency_observe(observe, operation, seconds):
@@ -47,10 +86,7 @@ def _latency_observe(observe, operation, seconds):
 def _can_alert(can_alert, etype, event):
     if can_alert is None:
         return True
-    try:
-        return can_alert(etype, event)
-    except TypeError:
-        return can_alert(etype)
+    return _call_compat(can_alert, etype, event, min_args=1)
 
 
 def _on_alert(on_alert, etype, event, score=None, threshold=None):
@@ -61,10 +97,22 @@ def _on_alert(on_alert, etype, event, score=None, threshold=None):
     if score is not None and threshold is not None:
         on_alert(etype, event, score=score, threshold=threshold)
         return
-    try:
-        on_alert(etype, event)
-    except TypeError:
-        on_alert(etype)
+    _call_compat(on_alert, etype, event, min_args=1)
+
+
+_EVENT_FAILURES = collections.OrderedDict()
+_EVENT_FAILURES_MAX = 256
+EVENT_FAILURE_LIMIT = 3
+
+
+def _event_failed(cfg, event):
+    """Count one more failure of this event; True once it reached the skip limit."""
+    key = (cfg.name, event.get("start_time"))
+    count = _EVENT_FAILURES.pop(key, 0) + 1
+    _EVENT_FAILURES[key] = count
+    while len(_EVENT_FAILURES) > _EVENT_FAILURES_MAX:
+        _EVENT_FAILURES.popitem(last=False)
+    return count >= EVENT_FAILURE_LIMIT
 
 
 def vehicle_verdict(cfg, s):
@@ -93,12 +141,7 @@ def _defer(defer, event, etype, live_sent, **kw):
     A ``defer`` that takes no keywords gets the plain call; one that returns nothing
     counts as queued, as every defer did before it could answer.
     """
-    try:
-        queued = defer(event, etype, live_sent, **kw)
-    except TypeError:
-        if not kw:
-            raise
-        queued = defer(event, etype, live_sent)
+    queued = _call_compat(defer, event, etype, live_sent, **kw)
     return queued is not False
 
 
@@ -340,7 +383,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         profile=getattr(cfg, "event_profile", None), event_seen=event_seen)
     if mute:
         return watermark          # outside window: drain silently, no grab/score/alert
-    for event, etype in alertable:
+    def _process(event, etype):
         audit_event(cfg, event, etype, "getevents", "detect")
         mqtt_bridge.note_detect(cfg.name)       # no-op unless the mqtt: block is set
         lt = getattr(cfg, "light_trigger", None)
@@ -359,10 +402,8 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                     force_time = getattr(cfg, "whitelamp_force_time", None)
                     lamp_triggered = False
                     if force_time is not None:
-                        try:
-                            lamp_triggered = trigger_whitelamp(cam, force_time=force_time)
-                        except TypeError:
-                            lamp_triggered = trigger_whitelamp(cam)
+                        lamp_triggered = _call_compat(trigger_whitelamp, cam,
+                                                      force_time=force_time)
                     else:
                         lamp_triggered = trigger_whitelamp(cam)
                     if lamp_triggered:
@@ -385,7 +426,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             label = enrich.face_label(face_ids(event), face_names)
             log.info("skip %s: known face present (ignored: %s)", etype, label)
             audit_event(cfg, event, etype, "live", "ignore_known", reason="known_face")
-            continue
+            return
         cooled_open = False
         if not _can_alert(can_alert, etype, event):
             if etype != "motion" and has_known_face(event, face_names):
@@ -402,11 +443,11 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 log.info("skip %s: cooldown active", etype)
                 # Only this event is cooled down; a later event in the same poll may be new.
                 audit_event(cfg, event, etype, "live", "cooldown")
-                continue
+                return
         if not _can_alert(scene_alert, etype, event):
             log.info("skip %s: scene duplicate", etype)
             audit_event(cfg, event, etype, "live", "scene_duplicate", reason="same_scene")
-            continue
+            return
         image = snapshot(cam, event)
         if not image:
             # RTSP capture on a slow Pi (e.g. Pi Zero) fails transiently — one retry
@@ -433,7 +474,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 log.warning("skip %s: snapshot failed (after retry)", etype)
                 audit_event(cfg, event, etype, "live", "snapshot_failed")
                 _observe(observe, event, etype, False)
-            continue
+            return
         try:
             description = ""
             s = None
@@ -491,7 +532,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                             threshold=cfg.scorer.threshold if s is not None else None,
                             reason="open_burst_no_person")
                 _observe(observe, event, etype, False)
-                continue
+                return
             if cooled_open:
                 log.info("cooldown override %s: person in frame, follow-up still queued",
                          etype)
@@ -515,7 +556,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 # standing down for a look that may find nothing. Both cannot reach the
                 # phone - process_pending_sd asks the alert gate before it sends.
                 _observe(observe, event, etype, False)
-                continue
+                return
             if etype == "motion" and s is not None and corroborate is not None:
                 # Do not alert on a single marginal motion frame — an empty IR scene can
                 # hallucinate a person once and not on the next, while a real subject
@@ -533,7 +574,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                         sentlog.archive_review_if_configured(
                             image, sentlog.review_meta(cfg.name, "hold", etype, s, event))
                     _observe(observe, event, etype, False)
-                    continue
+                    return
                 if verdict == "drop":
                     log.info("drop %s: score %.2f below threshold %.2f",
                              etype, s, cfg.scorer.threshold)
@@ -541,7 +582,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                                 threshold=cfg.scorer.threshold, reason="below_threshold")
                     sample_drop(cfg, image, etype, s, "live", event)
                     _observe(observe, event, etype, False)
-                    continue
+                    return
                 empty = False   # verdict == "send": fall through to the send block
             if etype == "motion":
                 if empty:
@@ -557,7 +598,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                         log.info("drop %s: Groq reports empty scene", etype)
                         audit_event(cfg, event, etype, "live", "drop", reason="empty")
                     _observe(observe, event, etype, False)
-                    continue
+                    return
             elif empty and defer is not None:
                 if burst_sent is not None and burst_sent():
                     # A frame of this same passage already went out (e.g. a bare-motion
@@ -568,7 +609,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                                 threshold=cfg.scorer.threshold if score is not None else None,
                                 reason="burst_already_sent")
                     _observe(observe, event, etype, False)
-                    continue
+                    return
                 if _keeps_sampling(cfg) and score is not None:
                     # sampler.keep_sampling_on_defer: queue the follow-up and arm the
                     # cooldown as always, but leave the burst open. A group marked sent
@@ -589,14 +630,14 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                                     reason="followup_pending",
                                     extra={"keep_sampling": "true"})
                         _observe(observe, event, etype, False)
-                        continue
+                        return
                     log.info("defer %s: live empty, SD follow-up queued, burst kept open",
                              etype)
                     audit_event(cfg, event, etype, "live", "defer", score=s,
                                 threshold=cfg.scorer.threshold, reason="below_threshold",
                                 extra={"keep_sampling": "true"})
                     _observe(observe, event, etype, False)
-                    continue
+                    return
                 # Camera confirmed a person but the frame shows nothing — hand it to
                 # the SD follow-up (live_sent=False) instead of pinging a blank photo.
                 # Still record the alert so the per-type cooldown sees this person.
@@ -607,7 +648,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                             threshold=cfg.scorer.threshold if score is not None else None,
                             reason="below_threshold" if score is not None else "empty")
                 _observe(observe, event, etype, True)
-                continue
+                return
             elif empty:
                 # No SD path (sd_snapshot off): keep the always-send safety net — a
                 # confirmed person still goes out on a stale/empty frame so we never
@@ -655,4 +696,35 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                     _observe(observe, event, etype, False)
         finally:
             _safe_unlink(image)
+
+    for event, etype in alertable:
+        try:
+            _process(event, etype)
+        except Exception as exc:
+            # The daemon only advances its watermark when run_monitor returns, so the
+            # error must not escape (events that already alerted would replay). But a
+            # confirmed person must not be lost to a transient failure either: stop here,
+            # return the watermark just before this event and retry it next poll. After
+            # EVENT_FAILURE_LIMIT failures of the same event it is skipped. Class only:
+            # the text can carry a camera address or token.
+            name = type(exc).__name__
+            skip = _event_failed(cfg, event)
+            log.error("event processing failed (%s): %s %s event t=%s",
+                      name, "skipping" if skip else "will retry", etype,
+                      event.get("start_time"))
+            try:
+                audit_event(cfg, event, etype, "live", "error", reason=name)
+            except Exception:
+                pass
+            # No poll_observe(False) here: the event API answered, and a False would be
+            # reset by the next poll's True, so it could never build an outage duration.
+            # The audit line and the journal carry this failure.
+            if skip:
+                continue
+            try:
+                return max(last_seen, event["start_time"] - 1)
+            except (KeyError, TypeError):
+                return last_seen
+        else:
+            _EVENT_FAILURES.pop((cfg.name, event.get("start_time")), None)
     return watermark

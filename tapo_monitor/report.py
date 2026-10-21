@@ -266,7 +266,16 @@ def self_check(text, literals=()):
     lowered = text.lower()
     for literal in literals:
         literal = str(literal or "").strip()
-        if len(literal) >= 4 and literal.lower() in lowered:
+        if len(literal) >= 4:
+            hit = literal.lower() in lowered
+        elif len(literal) >= 2:
+            # Short values (camera usernames) only count as whole tokens, so "ab" does
+            # not flag every word that contains it.
+            hit = re.search(rf"(?<![0-9A-Za-z]){re.escape(literal)}(?![0-9A-Za-z])",
+                            text, re.IGNORECASE) is not None
+        else:
+            hit = False
+        if hit:
             found.append("a value you typed in (host or user)")
             break
     return found
@@ -498,6 +507,11 @@ def probe_rtsp(host, user, password, streams=RTSP_STREAMS, run=subprocess.run,
         return {"state": "skipped", "reason": "ffprobe_not_found"}
     from .snapshot import rtsp_url
 
+    # Known limitation: the credentials travel in the ffprobe argv (visible in
+    # /proc/<pid>/cmdline to local users for the probe's few seconds). ffprobe has no
+    # option or environment variable for RTSP credentials and -headers/-rtsp_flags do
+    # not carry Basic/Digest auth, so there is no clean alternative; the URL is never
+    # stored or printed.
     result = {}
     for stream in streams:
         argv = ["ffprobe", "-v", "error", "-rtsp_transport", "tcp", "-show_entries",

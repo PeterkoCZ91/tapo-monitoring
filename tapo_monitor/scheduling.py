@@ -26,23 +26,41 @@ DEFAULT_SUNRISE_OFFSET = 30
 # The daemon asks is_night() every poll (~4 s); an unset NIGHT_TZ would otherwise
 # repeat the same fallback warning ~20 000 times a day and drown the journal.
 _warned_fallback = None
+_warned_env = set()
 
 
 def _parse_hhmm(val, default_hour):
     val = str(val).strip()
-    if ":" in val:
-        h, m = val.split(":", 1)
-        return int(h) * 60 + int(m)
     if val == "":
         return default_hour * 60
-    return int(val) * 60
+    if ":" in val:
+        h, m = val.split(":", 1)
+        h, m = int(h), int(m)
+    else:
+        h, m = int(val), 0
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        raise ValueError(f"clock time out of range: {val!r}")
+    return h * 60 + m
+
+
+def _env_minutes(name, default_hour):
+    """NIGHT_START/NIGHT_END as minutes; an invalid value falls back to the default (log once)."""
+    raw = os.getenv(name, str(default_hour))
+    try:
+        return _parse_hhmm(raw, default_hour)
+    except ValueError:
+        if name not in _warned_env:
+            _warned_env.add(name)
+            print(f"[scheduling] invalid {name}={raw!r}, using {default_hour}:00",
+                  file=sys.stderr, flush=True)
+        return default_hour * 60
 
 
 def _is_night_hhmm(now=None):
     now = now or datetime.now()
     cur = now.hour * 60 + now.minute
-    start = _parse_hhmm(os.getenv("NIGHT_START", "22"), 22)
-    end = _parse_hhmm(os.getenv("NIGHT_END", "6"), 6)
+    start = _env_minutes("NIGHT_START", 22)
+    end = _env_minutes("NIGHT_END", 6)
     return cur >= start or cur < end
 
 
@@ -107,6 +125,8 @@ def parse_clock_window(spec):
     """
     try:
         start_s, end_s = str(spec).split("-", 1)
+        if not start_s.strip() or not end_s.strip():
+            raise ValueError("empty clock time")
         start = _parse_hhmm(start_s, 0)
         end = _parse_hhmm(end_s, 0)
     except (ValueError, IndexError):

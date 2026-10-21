@@ -30,7 +30,9 @@ import json
 import logging
 import os
 import re
+import threading
 import time
+import uuid
 from dataclasses import dataclass
 
 from . import incident as incident_mod
@@ -68,6 +70,9 @@ STALE_AFTER = 3600
 _IMAGE = ".jpg"
 _META = ".json"
 _TMP = ".tmp"
+# An ``announced`` flag never confirmed by a successful send (the process died between the
+# write and the send) is trusted for this long, then the summary goes out again.
+ANNOUNCE_CONFIRM_WAIT = 300
 
 
 @dataclass
@@ -84,6 +89,8 @@ class Entry:
     score: dict | None = None           # {"person", "animal", "persons"} or None
     send_path: str | None = None
     announced: bool = False             # a summary counting this entry went out
+    announce_started_at: float | None = None   # when that summary was about to be sent
+    announce_sent: bool = False         # ...and the send was confirmed
     attempts: int = 0                   # failed late sends so far
 
     @property
@@ -252,6 +259,13 @@ class Outbox:
         self.min_age = min_age
         self.last_ok_at: float | None = None
         self.next_probe_at = 0.0
+        self._locks_guard = threading.Lock()
+        self._key_locks: dict[str, threading.RLock] = {}
+
+    def _lock(self, key):
+        """One lock per entry: capture/update/remove are read-modify-write on its files."""
+        with self._locks_guard:
+            return self._key_locks.setdefault(key, threading.RLock())
 
     # ── storage ──────────────────────────────────────────────────────────────
     def _path(self, key, suffix):
@@ -260,12 +274,19 @@ class Outbox:
     def _write_atomic(self, path, data: bytes):
         # fsync before the rename: after a power cut the name must not point at an empty
         # file, which the next start would have to throw away as corrupt.
-        tmp = path + _TMP
-        with open(tmp, "wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        tmp = f"{path}.{uuid.uuid4().hex[:8]}{_TMP}"
+        try:
+            with open(tmp, "wb", opener=lambda p, f: os.open(p, f, 0o600)) as fh:
+                fh.write(data)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     def _write_meta(self, key, meta):
         self._write_atomic(self._path(key, _META),
@@ -308,8 +329,11 @@ class Outbox:
             log.warning("outbox: frame for %s unreadable, alert not kept", camera)
             return None
         key = entry_key(camera, incident, failed_at)
+        lock = None
         try:
-            os.makedirs(self.dir, exist_ok=True)
+            os.makedirs(self.dir, mode=0o700, exist_ok=True)
+            lock = self._lock(key)
+            lock.acquire()
             previous = self._read_meta(key) or {}
             event_start = None
             if incident:
@@ -324,12 +348,17 @@ class Outbox:
                     "incident": incident, "event_start": event_start, "etype": etype,
                     "score": stored_score, "send_path": send_path,
                     "announced": bool(previous.get("announced", False)),
+                    "announce_started_at": previous.get("announce_started_at"),
+                    "announce_sent": bool(previous.get("announce_sent", False)),
                     "attempts": int(previous.get("attempts", 0) or 0)}
             self._write_atomic(self._path(key, _IMAGE), frame)
             self._write_meta(key, meta)
         except OSError:
             log.warning("outbox: could not store the alert for %s", camera, exc_info=True)
             return None
+        finally:
+            if lock is not None:
+                lock.release()
         if not previous:
             log.info("outbox: kept undelivered %s alert for %s (%s)",
                      etype or "?", camera, incident or key)
@@ -337,13 +366,16 @@ class Outbox:
         return key
 
     def remove(self, key):
-        for suffix in (_META, _IMAGE):
-            try:
-                os.remove(self._path(key, suffix))
-            except FileNotFoundError:
-                pass
-            except OSError:
-                log.debug("outbox: could not remove %s%s", key, suffix, exc_info=True)
+        with self._lock(key):
+            for suffix in (_META, _IMAGE):
+                try:
+                    os.remove(self._path(key, suffix))
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    log.debug("outbox: could not remove %s%s", key, suffix, exc_info=True)
+        with self._locks_guard:       # the entry is gone: do not keep its lock forever
+            self._key_locks.pop(key, None)
 
     def resolve(self, incident, why="delivered by another path") -> bool:
         """Forget ``incident``: some path delivered it, or decided it must not go out."""
@@ -395,6 +427,10 @@ class Outbox:
                     etype=meta.get("etype"), score=meta.get("score"),
                     send_path=meta.get("send_path"),
                     announced=bool(meta.get("announced", False)),
+                    announce_started_at=(float(meta["announce_started_at"])
+                                         if meta.get("announce_started_at") is not None
+                                         else None),
+                    announce_sent=bool(meta.get("announce_sent", False)),
                     attempts=int(meta.get("attempts", 0) or 0)))
             except (KeyError, TypeError, ValueError):
                 log.warning("outbox: dropping malformed entry %s", key)
@@ -420,14 +456,15 @@ class Outbox:
 
     def update(self, entry: Entry, **changes):
         """Rewrite an entry's sidecar with ``changes`` (score, announced, attempts)."""
-        meta = self._read_meta(entry.key)
-        if meta is None:
-            return
-        meta.update(changes)
-        try:
-            self._write_meta(entry.key, meta)
-        except OSError:
-            log.debug("outbox: could not update %s", entry.key, exc_info=True)
+        with self._lock(entry.key):
+            meta = self._read_meta(entry.key)
+            if meta is None:
+                return
+            meta.update(changes)
+            try:
+                self._write_meta(entry.key, meta)
+            except OSError:
+                log.debug("outbox: could not update %s", entry.key, exc_info=True)
 
     def _enforce_cap(self):
         """Drop beyond ``max_entries``: the oldest non-person entries first, then persons."""
@@ -569,20 +606,39 @@ def drain(box: Outbox, *, now, known_cameras, send_text, send_photo, archive_rev
             continue
         flags = [is_person(e, threshold_for(camera, e.event_time)) for e in decided]
         phone, review = plan_batch(decided, flags, box.max_photos)
+        for e in decided:
+            if (e.announced and not e.announce_sent and e.announce_started_at is not None
+                    and now - e.announce_started_at > ANNOUNCE_CONFIRM_WAIT):
+                e.announced = False          # the send was never confirmed
         new = [e for e in decided if not e.announced]
         if box.summary and new:
             new_persons = sum(1 for e, f in zip(decided, flags, strict=True)
                               if f and not e.announced)
             to_phone = sum(1 for e in phone if not e.announced)
-            if not send_text(summary_text(camera, new, new_persons, to_phone, now,
-                                          review_enabled, lang=box.lang)):
+            # Persist the intent first: a crash between the send and the write would
+            # otherwise announce the same batch again (an unconfirmed flag expires after
+            # ANNOUNCE_CONFIRM_WAIT). A failed or raising send takes it back.
+            for entry in new:
+                box.update(entry, announced=True, announce_started_at=now,
+                           announce_sent=False)
+            try:
+                sent = send_text(summary_text(camera, new, new_persons, to_phone, now,
+                                              review_enabled, lang=box.lang))
+            except BaseException:
+                for entry in new:
+                    box.update(entry, announced=False, announce_started_at=None)
+                raise
+            if not sent:
+                for entry in new:
+                    box.update(entry, announced=False, announce_started_at=None)
                 box.note_failed(now)
                 report["stopped"] = True
                 return report
             report["summaries"] += 1
             for entry in new:
                 entry.announced = True
-                box.update(entry, announced=True)
+                entry.announce_sent = True
+                box.update(entry, announce_sent=True)
         for entry in review:
             archive_review(entry, review_meta(entry, now))
             box.remove(entry.key)

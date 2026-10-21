@@ -32,18 +32,32 @@ def default_path(env=None, home=None):
                         "runtime.json")
 
 
+def _copy(container, empty):
+    """A copy of a list/dict other threads may mutate; ``empty`` when it keeps changing."""
+    if not container:
+        return empty
+    kind = list if isinstance(container, list) else dict
+    for _ in range(5):
+        try:
+            return kind(container)
+        except RuntimeError:     # "changed size during iteration"
+            continue
+    return empty
+
+
 def _cooldowns(mapping):
     """``{(camera, key): ts}`` as JSON rows. Pure."""
-    return sorted([camera, key, ts] for (camera, key), ts in mapping.items())
+    return sorted([camera, key, ts]
+                  for (camera, key), ts in _copy(mapping, {}).items())
 
 
 def _serializable(entries, what, logger):
     """The entries that survive a JSON round trip; the rest are logged and left out."""
     out = []
-    for entry in entries:
+    for entry in _copy(entries, []):
         try:
             json.dumps(entry)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, RuntimeError) as exc:
             if logger is not None:
                 logger.warning("runtime state: %s entry for %s not saved: %s",
                                what, entry.get("camera") if isinstance(entry, dict) else "?",
@@ -59,9 +73,10 @@ _ANNOUNCED_FLAGS = ("motion", "person", "restored_unsent")
 def _detection_announced(raw):
     """Only the known, well-typed fields of ``detection_announced`` (per camera). Pure."""
     out = {}
-    for camera, entry in (raw or {}).items():
+    for camera, entry in _copy(raw, {}).items():
         if not isinstance(entry, dict):
             continue
+        entry = _copy(entry, {})
         kept = {k: entry[k] for k in _ANNOUNCED_FLAGS if isinstance(entry.get(k), bool)}
         at = entry.get("restored_at")
         if isinstance(at, (int, float)) and not isinstance(at, bool):
@@ -84,11 +99,11 @@ def snapshot(state, logger=None):
         "last_alert": _cooldowns(state.last_alert),
         "last_event_start": _cooldowns(state.last_event_start),
         "privacy_announced": {str(k): bool(v)
-                              for k, v in (getattr(state, "privacy_announced", None)
-                                           or {}).items()},
+                              for k, v in _copy(getattr(state, "privacy_announced", None),
+                                                {}).items()},
         "app_push_announced": {str(k): v
-                               for k, v in (getattr(state, "app_push_announced", None)
-                                            or {}).items() if isinstance(v, bool)},
+                               for k, v in _copy(getattr(state, "app_push_announced", None),
+                                                 {}).items() if isinstance(v, bool)},
         "detection_announced": _detection_announced(
             getattr(state, "detection_announced", None)),
     }

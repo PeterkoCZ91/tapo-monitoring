@@ -33,6 +33,9 @@ log = logging.getLogger(__name__)
 JOB_DIR_PREFIX = "sdjob_"
 # A job dir from before the pid was in the name is only cleared once it is this old.
 LEGACY_JOB_DIR_AGE = 3600
+# A job dir older than this is orphaned whatever its PID says: a job lasts minutes, and a
+# long-dead daemon's PID may since have been given to an unrelated process.
+JOB_DIR_MAX_AGE = 6 * 3600
 
 
 @dataclass
@@ -173,7 +176,10 @@ def clean_orphan_job_dirs(tmp=None, now=None, logger=None) -> int:
         owner, sep, _ = name[len(JOB_DIR_PREFIX):].partition("_")
         try:
             if sep and owner.isdigit():
-                if _pid_alive(int(owner)):
+                pid = int(owner)
+                if pid == os.getpid():
+                    continue
+                if _pid_alive(pid) and now - os.path.getmtime(path) < JOB_DIR_MAX_AGE:
                     continue
             elif now - os.path.getmtime(path) < LEGACY_JOB_DIR_AGE:
                 continue

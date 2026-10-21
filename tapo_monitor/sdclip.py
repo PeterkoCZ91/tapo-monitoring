@@ -19,6 +19,7 @@ of tests; the orchestrators take injectable collaborators so their logic is unit
 """
 
 import asyncio
+import glob
 import logging
 import os
 import re
@@ -164,7 +165,7 @@ def build_client(host, user, password, cloud_password):  # pragma: no cover - ne
     return apiguard.guard_client(Tapo(host, user, password, cloud_password or password))
 
 
-def _run_in_fresh_loop(make_coro, timeout=SD_DOWNLOAD_TIMEOUT):
+def _run_in_fresh_loop(make_coro, timeout=SD_DOWNLOAD_TIMEOUT, cleanup=None):
     """Run ``make_coro()`` to completion on a dedicated thread with its own event loop.
 
     The daemon triggers the SD download from the same thread its ``getEvents`` poller
@@ -174,8 +175,22 @@ def _run_in_fresh_loop(make_coro, timeout=SD_DOWNLOAD_TIMEOUT):
     awaited" warning) and the download silently fails. A brand-new thread has no
     current loop, so we create one there and run the coroutine in isolation. The
     coroutine is built *inside* the worker (via ``make_coro``) so it binds to that loop.
+
+    A thread cannot be killed, so after a timeout the download may still be running and
+    writing its file. ``cleanup`` (best effort, called with no arguments) is therefore run
+    once at the timeout and again when the abandoned worker finally ends, so its output
+    does not outlive the caller's interest.
     """
     box = {}
+    lock = threading.Lock()
+
+    def run_cleanup():
+        if cleanup is None:
+            return
+        try:
+            cleanup()
+        except Exception:  # noqa: BLE001 - best effort
+            pass
 
     def worker():
         loop = asyncio.new_event_loop()
@@ -195,11 +210,20 @@ def _run_in_fresh_loop(make_coro, timeout=SD_DOWNLOAD_TIMEOUT):
                 pass
             loop.close()
             asyncio.set_event_loop(None)
+            with lock:
+                abandoned = box.get("abandoned", False)
+            if abandoned:
+                run_cleanup()
 
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
     thread.join(timeout)
     if thread.is_alive():
+        with lock:
+            box["abandoned"] = True
+        run_cleanup()
+        if not thread.is_alive():      # it ended between the join and the flag
+            run_cleanup()
         raise TimeoutError(f"SD download did not finish within {timeout}s")
     if "error" in box:
         raise box["error"]
@@ -246,7 +270,7 @@ def _download_segment(client, start, end, time_correction, out_dir,
                 pass
 
         # Run on a dedicated thread+loop so the daemon poller's loop can't break it.
-        _run_in_fresh_loop(lambda: run())
+        _run_in_fresh_loop(lambda: run(), cleanup=lambda: _safe_unlink(out_path))
     except Exception:
         # DIAGNOSTIC (2026-06-22): the real download error was being swallowed into a
         # silent None, so the journal only ever showed "SD found no subject". Print the
@@ -254,6 +278,7 @@ def _download_segment(client, start, end, time_correction, out_dir,
         # parent and surfaced in the daemon journal (see fetch_sd_frames_subprocess).
         import traceback
         traceback.print_exc()
+        _safe_unlink(out_path)      # a failed/partial download must not leave its mp4
         return None
     exists = os.path.exists(out_path) and os.path.getsize(out_path) > 0
     if not exists:
@@ -296,14 +321,18 @@ def _extract_frames(mp4_path, out_dir, base, span, every, rotate=0,
         out_path = os.path.join(out_dir, f"{base}_{offset:02d}{stamp}.jpg")
         try:
             subprocess.run(
-                ["ffmpeg", "-y", "-ss", str(offset), "-i", mp4_path, "-frames:v", "1",
+                ["ffmpeg", "-y", "-ss", str(offset), "-protocol_whitelist", "file",
+                 "-i", mp4_path, "-frames:v", "1",
                  "-vf", vf, "-q:v", "2", "-update", "1", out_path],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, check=True,
             )
         except Exception:
+            _safe_unlink(out_path)      # ffmpeg may have written part of it before dying
             continue
         if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
             paths.append(out_path)
+        else:
+            _safe_unlink(out_path)
     return paths
 
 
@@ -476,6 +505,23 @@ def log_card_read(camera_name, stats_json, frames, total_seconds):
              num("download_s"), num("extract_s"), frames, total_seconds)
 
 
+def _remove_abandoned_downloads(out_dir, since):
+    """Unlink ``sd_*.mp4`` in ``out_dir`` written since ``since`` (epoch). Never raises.
+
+    A killed download subprocess leaves its partial mp4 behind. The mtime bound keeps a
+    shared ``out_dir`` safe from files of other reads that started earlier.
+    """
+    try:
+        for path in glob.glob(os.path.join(out_dir, "sd_*.mp4")):
+            try:
+                if os.path.getmtime(path) >= since - 2:
+                    _safe_unlink(path)
+            except OSError:
+                continue
+    except Exception:  # noqa: BLE001 - best effort
+        pass
+
+
 def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
                                every=None, run=None, python=None, timeout=None,
                                dense=None, offset=0, guard=None):
@@ -512,11 +558,13 @@ def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
     if guard is not None:
         argv.append(f"guard={int(guard)}")
     started = _time.monotonic()
+    started_wall = _time.time()
     camera_name = getattr(cfg, "name", "camera")
     log.info("SD transfer start %s: at=%.3f timeout=%ss", camera_name, _time.time(), timeout)
     try:
         proc = run(argv, capture_output=True, text=True, timeout=timeout)
     except Exception as exc:
+        _remove_abandoned_downloads(out_dir, started_wall)
         log.info("SD transfer finish %s: at=%.3f elapsed=%.1fs outcome=%s",
                  camera_name, _time.time(), _time.monotonic() - started, type(exc).__name__)
         log.warning("SD subprocess failed to run: %r", exc)

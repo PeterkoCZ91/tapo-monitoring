@@ -5,8 +5,10 @@ formatting helpers (``build_caption``, ``is_empty_scene``, ``outage_alert_due``)
 pure and tested.
 """
 
+import html
 import json
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -142,7 +144,6 @@ def send_operational(token, chat_id, text):
     one site's bot with another site's chat. With no override, retain the caller's
     existing destination. Labels are escaped because send_text uses Telegram HTML.
     """
-    import html
     import os
 
     override_token = os.environ.get("TAPO_OPS_TELEGRAM_TOKEN")
@@ -157,16 +158,36 @@ def send_operational(token, chat_id, text):
     return send_text(token, chat_id, text)
 
 
+def _post_text(token, chat_id, text, parse_mode):
+    fields = {"chat_id": chat_id, "text": text}
+    if parse_mode:
+        fields["parse_mode"] = parse_mode
+    urllib.request.urlopen(
+        urllib.request.Request(f"{_API}/bot{token}/sendMessage",
+                               data=urllib.parse.urlencode(fields).encode()),
+        timeout=10,
+    )
+
+
 def send_text(token, chat_id, text):
-    """Send a plain (HTML) Telegram message. Returns True on success."""
+    """Send a Telegram message as HTML. Returns True on success.
+
+    Callers pass either text already escaped for HTML (``outbox.summary_text``) or raw
+    text with dynamic parts such as ``<urlopen error ...>``. Escaping here would double
+    escape the first kind, so the message goes out as HTML first; when Telegram rejects
+    it as unparseable (HTTP 400) it is resent as plain text with entities decoded, so an
+    alert is never lost to a stray ``<``.
+    """
     try:
-        data = urllib.parse.urlencode({
-            "chat_id": chat_id, "text": text, "parse_mode": "HTML",
-        }).encode()
-        urllib.request.urlopen(
-            urllib.request.Request(f"{_API}/bot{token}/sendMessage", data=data),
-            timeout=10,
-        )
+        _post_text(token, chat_id, text, "HTML")
+        return True
+    except urllib.error.HTTPError as exc:
+        if exc.code != 400:
+            return False
+    except Exception:
+        return False
+    try:
+        _post_text(token, chat_id, html.unescape(text), None)
         return True
     except Exception:
         return False

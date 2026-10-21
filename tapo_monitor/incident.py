@@ -122,6 +122,33 @@ def format_chain(found):
     return "\n".join(lines)
 
 
+class _ReadOnlyLedger:
+    """The two ledger queries ``chain`` needs, over a ``mode=ro`` connection.
+
+    Unlike ``EventLedger`` it never creates the directory or file nor migrates the schema.
+    A missing ledger reads as empty.
+    """
+
+    def __init__(self, path):
+        self.path = path
+
+    def _read(self, camera, start, end):
+        from .ledger import read_camera_window
+        try:
+            return read_camera_window(self.path, start=start, end=end, cameras=[camera],
+                                      decision_paths=None)
+        except FileNotFoundError:
+            return [], []
+
+    def observations(self, *, camera, start, end):
+        return self._read(camera, start, end)[0]
+
+    def decisions(self, *, camera, start, end):
+        rows = self._read(camera, start, end)[1]
+        rows.sort(key=lambda row: (row["observed_at"], row["id"]))
+        return rows
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="tapo-monitor incident",
@@ -137,7 +164,8 @@ def main(argv=None) -> int:
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 2
-    from .ledger import EventLedger
-    found = chain(args.incident, EventLedger(args.ledger), args.sent_log)
+    from .ledger import default_ledger_path
+    found = chain(args.incident, _ReadOnlyLedger(args.ledger or default_ledger_path()),
+                  args.sent_log)
     print(json.dumps(found, sort_keys=True) if args.json else format_chain(found))
     return 0

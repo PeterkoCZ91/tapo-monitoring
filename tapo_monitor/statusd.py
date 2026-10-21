@@ -87,6 +87,32 @@ def publish(app, state):
         log.warning("status view not published: %s", type(exc).__name__)
 
 
+_FINGERPRINT_TTL = 300.0
+_fingerprint_cache = (None, float("-inf"))   # (value, monotonic time computed)
+_fingerprint_lock = threading.Lock()
+
+
+def _cached_fingerprint():
+    """Package fingerprint, recomputed at most every few minutes.
+
+    It hashes every module of the package; doing that per GET made an unauthenticated
+    endpoint a disk-read amplifier. The package only changes on a deploy, which restarts
+    the process anyway.
+    """
+    global _fingerprint_cache
+    with _fingerprint_lock:
+        value, computed = _fingerprint_cache
+        if time.monotonic() - computed < _FINGERPRINT_TTL:
+            return value
+        try:
+            from .cli import package_fingerprint
+            value = package_fingerprint()
+        except OSError:
+            value = None
+        _fingerprint_cache = (value, time.monotonic())
+        return value
+
+
 def status_snapshot(app, state, *, started_at, now=None, view=None):
     """Assemble the JSON payload ``/status`` serves. Contacts nothing.
 
@@ -94,11 +120,7 @@ def status_snapshot(app, state, *, started_at, now=None, view=None):
     ``state`` directly, which is only safe on the thread that owns it (tests, the CLI).
     """
     now = time.time() if now is None else now
-    try:
-        from .cli import package_fingerprint
-        fingerprint = package_fingerprint()
-    except OSError:
-        fingerprint = None
+    fingerprint = _cached_fingerprint()
     from . import __version__
 
     view = state_view(app, state) if view is None else view
@@ -124,6 +146,9 @@ def make_server(snapshot_fn, port=0, bind="127.0.0.1"):
     """
 
     class Handler(BaseHTTPRequestHandler):
+        # A client that connects and then stalls must not pin a handler thread forever.
+        timeout = 10
+
         def _reply(self, code, payload):
             body = json.dumps(payload).encode()
             try:

@@ -19,7 +19,7 @@ import sys
 import tempfile
 import time
 
-from . import recclip, scorer, sentlog
+from . import camera, recclip, scorer, sentlog
 
 log = logging.getLogger(__name__)
 
@@ -62,14 +62,19 @@ def resolve_date(arg, now=None):
 def segments_for_date(base_dir, host, date_str, lister=None):
     """(mkv_path, seg_start) for every segment of the date, sorted by start."""
     lister = lister or (lambda d: sorted(glob.glob(os.path.join(d, "zaznam_*.mkv"))))
-    day_dir = os.path.join(base_dir, host, date_str)
-    found = []
-    for hour in range(24):
-        for path in lister(os.path.join(day_dir, f"{hour:02d}")):
-            try:
-                found.append((path, recclip.parse_segment_start(path)))
-            except ValueError:
-                continue
+    hosts = [host] if isinstance(host, str) else list(host)  # failover candidates
+    found, seen = [], set()
+    for h in hosts:
+        day_dir = os.path.join(base_dir, h, date_str)
+        for hour in range(24):
+            for path in lister(os.path.join(day_dir, f"{hour:02d}")):
+                if path in seen:
+                    continue
+                seen.add(path)
+                try:
+                    found.append((path, recclip.parse_segment_start(path)))
+                except ValueError:
+                    continue
     return sorted(found, key=lambda item: item[1])
 
 
@@ -307,7 +312,7 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
         camera_started = clock()
         extract_deadline = camera_started + extract_left / cameras_left
         camera_frames = budget_left // cameras_left
-        segments = segments_for_date(root, cfg.host, date_str) if root else []
+        segments = segments_for_date(root, camera.recording_hosts(cfg), date_str) if root else []
         candidates, per_cam = [], {"segments": len(segments), "frames_scored": 0,
                                    "observations": 0, "matched": 0, "shadow_only": 0,
                                    "segments_skipped": 0, "segments_degraded": 0,
@@ -390,7 +395,7 @@ def run_scan(app, date_str, *, env=None, out_dir, budget=DEFAULT_BUDGET,
             # Keep every expected camera visible when scoring stops the run early.
             for pending in scannable[position + 1:]:
                 summary["cameras"][pending.name] = {
-                    "segments": len(segments_for_date(root, pending.host, date_str)) if root else 0,
+                    "segments": len(segments_for_date(root, camera.recording_hosts(pending), date_str)) if root else 0,
                     "frames_scored": 0, "coverage": "missing", "reason": "scan_aborted"}
             summary["coverage_incomplete"] = True
             break

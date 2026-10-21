@@ -14,22 +14,54 @@ On API error the last cached value is used (or False). Coordinates come from env
 """
 
 import json
+import math
 import os
+import stat
+import sys
+import tempfile
 import urllib.parse
 import urllib.request
 
+_warned_env = set()
+
+
+def _warn_env(name, raw, default):
+    # Once per variable: import-time config problems must not spam or crash.
+    if name not in _warned_env:
+        _warned_env.add(name)
+        print(f"[weather] invalid {name}={raw!r}, using {default!r}", file=sys.stderr, flush=True)
+
+
+def _env_number(name, default, cast):
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        val = cast(raw.strip())
+        if isinstance(val, float) and not math.isfinite(val):
+            raise ValueError(raw)
+        return val
+    except (ValueError, OverflowError):
+        _warn_env(name, raw, default)
+        return default
+
 
 def _env_coord(primary, fallback):
-    val = os.getenv(primary) or os.getenv(fallback)
-    return float(val) if val else None
+    name = primary if os.getenv(primary) else fallback
+    return _env_number(name, None, float)
 
 
 LAT = _env_coord("RAIN_LAT", "NIGHT_LAT")
 LON = _env_coord("RAIN_LON", "NIGHT_LON")
 TZ = os.getenv("RAIN_TZ") or os.getenv("NIGHT_TZ") or "UTC"
-PRECIP_THRESHOLD = float(os.getenv("RAIN_PRECIP_THRESHOLD", "0.1"))
-CLEAR_DELAY = int(os.getenv("RAIN_CLEAR_DELAY", "1800"))
-POLL_INTERVAL = int(os.getenv("RAIN_POLL_INTERVAL", "900"))
+PRECIP_THRESHOLD = _env_number("RAIN_PRECIP_THRESHOLD", 0.1, float)
+CLEAR_DELAY = _env_number("RAIN_CLEAR_DELAY", 1800, int)
+POLL_INTERVAL = _env_number("RAIN_POLL_INTERVAL", 900, int)
+# After a failed fetch, do not retry for this long (each attempt blocks up to 5 s).
+FAIL_BACKOFF = 120
+# A cached "raining" older than this is not trusted when the API is down.
+STALE_MAX = 6 * 3600
+_fail_until = {}
 STATE_DIR = os.getenv("STATE_DIR", "/tmp")
 CACHE_PATH = os.path.join(STATE_DIR, "tapo_rain_cache")
 LAST_RAIN_PATH = os.path.join(STATE_DIR, "tapo_rain_last_seen")
@@ -82,39 +114,63 @@ def is_cache_fresh(cache_ts, now, poll_interval=POLL_INTERVAL):
 def read_cache(path=CACHE_PATH):
     """Return (timestamp, raining_bool) from the cache, or (None, None)."""
     try:
-        with open(path) as f:
-            ts_str, raining_str = f.read().strip().split(",", 1)
-            return float(ts_str), raining_str == "1"
+        ts_str, raining_str = _read_text(path).strip().split(",", 1)
+        ts = float(ts_str)
+        if not math.isfinite(ts) or raining_str not in ("0", "1"):
+            return None, None
+        return ts, raining_str == "1"
     except (OSError, ValueError):
         return None, None
 
 
-def write_cache(now, raining, path=CACHE_PATH):
+def _read_text(path):
+    """Read a small regular file without following a symlink or blocking on a FIFO."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
-        with open(path, "w") as f:
-            f.write(f"{now},{'1' if raining else '0'}")
-        return True
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("not a regular file")
+        return os.read(fd, 256).decode("ascii")
+    finally:
+        os.close(fd)
+
+
+def _atomic_write(path, text):
+    """Write via a private temp file + rename; a planted symlink at ``path`` is replaced,
+    never followed."""
+    directory = os.path.dirname(path) or "."
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".tapo_rain_", dir=directory)
     except OSError:
         return False
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def write_cache(now, raining, path=CACHE_PATH):
+    return _atomic_write(path, f"{now},{'1' if raining else '0'}")
 
 
 # ── last-rain (hysteresis) ──────────────────────────────────────────────────
 
 def read_last_rain(path=LAST_RAIN_PATH):
     try:
-        with open(path) as f:
-            return float(f.read().strip())
+        val = float(_read_text(path).strip())
+        return val if math.isfinite(val) else None
     except (OSError, ValueError):
         return None
 
 
 def touch_rain(now, path=LAST_RAIN_PATH):
-    try:
-        with open(path, "w") as f:
-            f.write(str(now))
-        return True
-    except OSError:
-        return False
+    return _atomic_write(path, str(now))
 
 
 def is_raining_now(now, threshold=PRECIP_THRESHOLD, poll_interval=POLL_INTERVAL,
@@ -124,12 +180,20 @@ def is_raining_now(now, threshold=PRECIP_THRESHOLD, poll_interval=POLL_INTERVAL,
     cache_ts, cached_raining = read_cache(cache_path)
     if is_cache_fresh(cache_ts, now, poll_interval):
         return cached_raining
+    # Stale cache: only trusted for STALE_MAX seconds, then "dry" (never rain forever).
+    if cached_raining and (cache_ts is None or now - cache_ts >= STALE_MAX):
+        cached_raining = False
+    fallback = cached_raining if cached_raining is not None else False
     if lat is None or lon is None:
         # No coordinates configured -> skip weather gating (safe default).
-        return cached_raining if cached_raining is not None else False
+        return fallback
+    if now < _fail_until.get(cache_path, float("-inf")):
+        return fallback
     try:
         raining = parse_precip(_fetch_weather(lat, lon, tz), threshold)
-        write_cache(now, raining, cache_path)
-        return raining
     except Exception:
-        return cached_raining if cached_raining is not None else False
+        _fail_until[cache_path] = now + FAIL_BACKOFF
+        return fallback
+    _fail_until.pop(cache_path, None)
+    write_cache(now, raining, cache_path)
+    return raining
