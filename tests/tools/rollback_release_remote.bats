@@ -164,6 +164,7 @@ echo "$*" >>"$TEST_TMP/systemctl.log"
 [[ " $* " == *" --user "* ]] || exit 0   # the system manager has no such unit
 case "$*" in
     *EnvironmentFiles*) echo "-$TEST_TMP/monitor.env" ;;
+    *is-active*)        echo active ;;
 esac
 STUB
 
@@ -181,4 +182,145 @@ STUB
         echo "a call above went to the system manager"
         return 1
     fi
+}
+
+@test "a failing restart is reported loudly and fails the rollback" {
+    stub_command systemctl <<'STUB'
+case "$*" in
+    *is-active*) echo failed; exit 3 ;;
+esac
+STUB
+    stub_command sleep <<'STUB'
+exit 0
+STUB
+
+    run "$SCRIPT" "$HOST" "$OLD" --python "$STUB_BIN/venv-python" --restart-cmd "false" </dev/null
+
+    assert_status 1
+    assert_output_contains "RESTART FAILED"
+    assert_output_contains "needs attention NOW"
+    assert_output_contains "NOT confirmed running"
+    # The re-point itself happened and stays.
+    [[ "$(current_release)" == "$OLD" ]]
+}
+
+@test "the rollback waits for the unit to be active" {
+    stub_command systemctl <<'STUB'
+case "$*" in
+    *is-active*) echo active ;;
+esac
+STUB
+
+    run "$SCRIPT" "$HOST" "$OLD" --python "$STUB_BIN/venv-python" --restart-cmd "echo restarting" </dev/null
+
+    assert_status 0
+    assert_output_contains "tapo-monitor.service is active"
+}
+
+@test "an env file that cannot be rewritten warns and the rollback carries on" {
+    printf 'TAPO_EXPECTED_FINGERPRINT=feed0000face\n' >"$TEST_TMP/monitor.env"
+    chmod 444 "$TEST_TMP/monitor.env"
+    stub_command systemctl <<'STUB'
+case "$*" in
+    *EnvironmentFiles*) echo "-$TEST_TMP/monitor.env" ;;
+esac
+STUB
+
+    rollback "$OLD"
+
+    assert_status 0
+    assert_output_contains "is not writable — TAPO_EXPECTED_FINGERPRINT NOT updated"
+    assert_output_contains "verified — current runs package abc123def456"
+}
+
+@test "a rollback is refused while a deploy or another rollback holds the lock" {
+    mkdir -p "$HOME/.local/state/tapo-monitor"
+    exec 9>"$HOME/.local/state/tapo-monitor/release-$HOST.lock"
+    flock -n 9
+
+    rollback "$OLD"
+    exec 9>&-
+
+    assert_status 1
+    assert_output_contains "already running"
+    [[ "$(current_release)" == "$NEW" ]]
+}
+
+@test "the host-side lock refuses the switch while another one is in progress" {
+    exec 8>"$ROOT/.release.lock"
+    flock -n 8
+
+    rollback "$OLD"
+    exec 8>&-
+
+    assert_status 1
+    assert_output_contains "holds $ROOT/.release.lock"
+    [[ "$(current_release)" == "$NEW" ]]
+}
+
+# ── host-side lease held for the whole sequence ───────────────────────────────────────
+
+@test "a rollback is refused while a fresh lease is held and changes nothing" {
+    printf 'other-ws 4242 %s\n' "$(date +%s)" >"$ROOT/releases/.deploy.lock"
+
+    rollback "$OLD"
+
+    assert_status 1
+    assert_output_contains "holds the lease"
+    assert_output_contains "owner other-ws pid 4242"
+    [[ "$(current_release)" == "$NEW" ]]
+    assert_file_contains "$ROOT/releases/.deploy.lock" "other-ws 4242"
+}
+
+@test "a stale lease is taken over by the rollback and released afterwards" {
+    printf 'old-ws 4242 %s\n' "$(( $(date +%s) - 3600 ))" >"$ROOT/releases/.deploy.lock"
+
+    rollback "$OLD"
+
+    assert_status 0
+    assert_output_contains "WARNING: taking over a stale lease"
+    [[ "$(current_release)" == "$OLD" ]]
+    assert_file_absent "$ROOT/releases/.deploy.lock"
+}
+
+@test "the lease is held during the restart and released after a successful rollback" {
+    stub_command systemctl <<'STUB'
+[[ "$*" == *is-active* ]] && echo active
+exit 0
+STUB
+    run "$SCRIPT" "$HOST" "$OLD" --python "$STUB_BIN/venv-python" \
+        --restart-cmd "cp $ROOT/releases/.deploy.lock $TEST_TMP/lease-during-restart" </dev/null
+
+    assert_status 0
+    [[ "$(cat "$TEST_TMP/lease-during-restart")" =~ ^[A-Za-z0-9_.-]+\ [0-9]+\ [0-9]+$ ]]
+    assert_file_absent "$ROOT/releases/.deploy.lock"
+}
+
+@test "the lease is released when the rollback fails" {
+    STUB_HOST_FINGERPRINT=000000000000 rollback "$OLD"
+
+    assert_status 1
+    assert_output_contains "VERIFY FAILED"
+    assert_file_absent "$ROOT/releases/.deploy.lock"
+}
+
+@test "a rollback leaves a lease that changed hands alone" {
+    stub_command systemctl <<'STUB'
+[[ "$*" == *is-active* ]] && echo active
+exit 0
+STUB
+    run "$SCRIPT" "$HOST" "$OLD" --python "$STUB_BIN/venv-python" \
+        --restart-cmd "printf 'foreign-ws 7 %s\n' \$(date +%s) >$ROOT/releases/.deploy.lock" </dev/null
+
+    assert_status 0
+    assert_file_contains "$ROOT/releases/.deploy.lock" "foreign-ws 7"
+}
+
+@test "a rollback to a host without releases does not create the layout" {
+    rm -rf "$ROOT/releases" "$ROOT/current"
+
+    rollback "$OLD"
+
+    assert_status 1
+    assert_file_absent "$ROOT/releases"
 }

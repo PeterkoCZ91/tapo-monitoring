@@ -4,9 +4,11 @@ After=network-online.target
 Wants=network-online.target
 # Restart=always alone retries a crash loop forever in silence, and this is the host every
 # camera depends on: a scorer that never comes back degrades the whole fleet to raw
-# passthrough without anyone being told. Give up after 5 starts in 5 minutes and report.
-StartLimitIntervalSec=300
-StartLimitBurst=5
+# passthrough without anyone being told. With RestartSec=30, 20 starts in 15 minutes
+# tolerates ~10 minutes of boot-time retries (model/GPU/network not ready) before a real
+# crash loop is declared failed and reported.
+StartLimitIntervalSec=900
+StartLimitBurst=20
 OnFailure=pi-failure-notify@%n.service
 
 [Service]
@@ -35,7 +37,7 @@ WorkingDirectory=@SCORER_HOME@
 # observability setting.
 ExecStart=@SCORER_PYTHON@ -m tapo_monitor.scorer_service --model ${TAPO_SCORER_MODEL} --port ${TAPO_SCORER_PORT} --input-size ${TAPO_SCORER_INPUT_SIZE}
 Restart=always
-RestartSec=10
+RestartSec=30
 
 [Install]
 WantedBy=multi-user.target

@@ -4,6 +4,8 @@ name: Docker images
 # 64-bit ARM boards) and pushes them to the GitHub Container Registry of this repository:
 #   ghcr.io/<owner>/<repo>:<version>, :latest               monitor
 #   ghcr.io/<owner>/<repo>:<version>-scorer, :scorer        scorer
+# Only stable X.Y.Z versions are accepted; :latest / :scorer move only for a stable
+# release event or a manual run from the default branch. Pre-releases are refused.
 # Authentication is the workflow's own GITHUB_TOKEN; the repository holds no secrets.
 
 on:
@@ -25,7 +27,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Never push an image for a commit whose CI suite is not green.
+  tests:
+    uses: ./.github/workflows/ci.yml
+
   image:
+    needs: tests
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -47,19 +54,36 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           INPUT_VERSION: ${{ inputs.version }}
           REPOSITORY: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           version="${RELEASE_TAG:-$INPUT_VERSION}"
           if [ -z "$version" ]; then
             version="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -n1)"
           fi
           version="${version#v}"
-          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'; then
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "refusing to publish unexpected version '$version'" >&2
             exit 1
           fi
           # Registry paths must be lowercase; the owner name may not be.
           image="ghcr.io/${REPOSITORY,,}"
+          # Floating tags: stable release events, or a manual run from the default branch.
+          move=false
+          if [ "$EVENT" = release ] && [ "$PRERELEASE" != true ]; then
+            move=true
+          elif [ "$EVENT" = workflow_dispatch ] && [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
+            # Only the version the checked-out code declares: an older version typed into
+            # the input must not drag :latest back to it.
+            current="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -n1)"
+            if [ "$version" = "$current" ]; then
+              move=true
+            fi
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "move_latest=$move" >> "$GITHUB_OUTPUT"
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@v3
@@ -79,7 +103,7 @@ jobs:
           push: true
           tags: |
             ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}${{ matrix.suffix }}
-            ${{ steps.meta.outputs.image }}:${{ matrix.latest }}
+            ${{ steps.meta.outputs.move_latest == 'true' && format('{0}:{1}', steps.meta.outputs.image, matrix.latest) || '' }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}

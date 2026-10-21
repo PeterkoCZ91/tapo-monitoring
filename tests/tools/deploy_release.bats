@@ -108,8 +108,10 @@ STUB
 
     run "$SCRIPT" "$HOST" HEAD
 
-    # It reached the guarded ssh, which is exactly as far as a test may let it go.
-    assert_status 99
+    # It reached the guarded ssh (the host lease call), which is exactly as far as a test
+    # may let it go.
+    assert_status 1
+    assert_output_contains "could not take the host lease"
     assert_output_matches 'releases/[0-9]{8}T[0-9]{6}Z-abc123def456 to deploy-target\.invalid'
 }
 

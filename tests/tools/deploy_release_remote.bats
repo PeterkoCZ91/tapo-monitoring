@@ -51,6 +51,7 @@ if [[ "${1:-}" == -I && "${2:-}" == -c ]]; then
 fi
 if [[ "${1:-}" == -m && "${2:-}" == pip ]]; then
     [[ "${3:-}" == --version ]] && exit 0
+    [[ "${3:-}" == freeze ]] && { echo "pytapo==3.4.18"; exit 0; }
     echo "pip $*" >>"$TEST_TMP/order"
     [[ -f "$TEST_TMP/pip-fails" ]] && exit 1
     exit 0
@@ -134,6 +135,16 @@ current_release() {
     assert_file_contains "$TEST_TMP/selfcheck-cwd" "$ROOT/releases/"
     assert_file_contains "$TEST_TMP/selfcheck-context" "from-env-file"
     assert_file_contains "$TEST_TMP/selfcheck-context" "$ROOT/cameras.yaml"
+}
+
+@test "the selfcheck reads the env file like systemd: no expansion, nothing executed" {
+    printf '%s\n' 'TAPO_TEST_CREDENTIAL=pa$ss(w)`touch '"$TEST_TMP"'/pwned`' >"$TEST_TMP/monitor.env"
+
+    deploy --env-file "$TEST_TMP/monitor.env"
+
+    assert_status 0
+    assert_file_contains "$TEST_TMP/selfcheck-context" 'pa$ss(w)`touch'
+    [[ ! -e "$TEST_TMP/pwned" ]]
 }
 
 @test "a release that fails its selfcheck never becomes current" {
@@ -522,4 +533,203 @@ STUB
     assert_output_contains "rolling back to releases/$PREVIOUS"
     assert_output_contains "the venv still has the versions --sync-deps installed"
     assert_output_contains "'pytapo==3.4.18'"
+}
+
+# ── restart failures, env file trouble, locks, permissions ────────────────────────────
+
+stub_active_host() {
+    stub_command systemctl <<'STUB'
+case "$*" in
+    *is-active*) echo active ;;
+    *NRestarts*) echo 0 ;;
+esac
+STUB
+    stub_command sleep <<'STUB'
+exit 0
+STUB
+}
+
+@test "a failing restart command is a health failure: rolled back, fingerprint restored" {
+    printf 'TAPO_EXPECTED_FINGERPRINT=000000000000\n' >>"$TEST_TMP/monitor.env"
+    seed_previous_release
+    stub_active_host
+
+    run "$SCRIPT" "$HOST" HEAD --python "$STUB_BIN/venv-python" --env-file "$TEST_TMP/monitor.env" \
+        --restart-cmd "false" --health-wait 0 </dev/null
+
+    [[ "$status" -ne 0 ]] || {
+        printf 'expected a non-zero exit\n--- output ---\n%s\n' "$output"
+        return 1
+    }
+    assert_output_contains "RESTART FAILED"
+    assert_output_contains "rolling back to releases/$PREVIOUS"
+    [[ "$(current_release)" == "$PREVIOUS" ]] || {
+        printf 'current points at %s\n' "$(current_release)"
+        return 1
+    }
+    # The deploy rewrote it to the new fingerprint; the rollback puts back what it was.
+    assert_output_contains "TAPO_EXPECTED_FINGERPRINT restored"
+    assert_file_contains "$TEST_TMP/monitor.env" "TAPO_EXPECTED_FINGERPRINT=$FINGERPRINT"
+}
+
+@test "a rollback that does not bring the unit back says so loudly" {
+    seed_previous_release
+    stub_command systemctl <<'STUB'
+case "$*" in
+    *is-active*) echo failed; exit 3 ;;
+    *NRestarts*) echo 0 ;;
+esac
+STUB
+    stub_command sleep <<'STUB'
+exit 0
+STUB
+
+    run "$SCRIPT" "$HOST" HEAD --python "$STUB_BIN/venv-python" --env-file "$TEST_TMP/monitor.env" \
+        --restart-cmd "false" --health-wait 0 </dev/null
+
+    [[ "$status" -ne 0 ]] || return 1
+    assert_output_contains "ROLLBACK RESTART FAILED"
+    assert_output_contains "ROLLBACK DID NOT RECOVER"
+    assert_output_contains "NOT confirmed running"
+}
+
+@test "an env file that cannot be rewritten warns and the deploy carries on" {
+    printf 'TAPO_EXPECTED_FINGERPRINT=000000000000\n' >>"$TEST_TMP/monitor.env"
+    chmod 444 "$TEST_TMP/monitor.env"
+
+    deploy --env-file "$TEST_TMP/monitor.env"
+
+    assert_status 0
+    assert_output_contains "is not writable — TAPO_EXPECTED_FINGERPRINT NOT updated"
+    assert_output_contains "verified — current runs package $FINGERPRINT"
+}
+
+@test "a writable env file in a directory sed cannot write to warns instead of aborting" {
+    mkdir "$TEST_TMP/envdir"
+    printf 'TAPO_EXPECTED_FINGERPRINT=000000000000\n' >"$TEST_TMP/envdir/monitor.env"
+    chmod 664 "$TEST_TMP/envdir/monitor.env"
+    chmod 555 "$TEST_TMP/envdir"
+
+    deploy --env-file "$TEST_TMP/envdir/monitor.env"
+    chmod 755 "$TEST_TMP/envdir"
+
+    assert_status 0
+    assert_output_contains "could not rewrite"
+    assert_output_contains "verified — current runs package $FINGERPRINT"
+}
+
+@test "a second deploy to the same host is refused while one holds the lock" {
+    mkdir -p "$HOME/.local/state/tapo-monitor"
+    exec 9>"$HOME/.local/state/tapo-monitor/release-$HOST.lock"
+    flock -n 9
+
+    deploy --env-file "$TEST_TMP/monitor.env"
+    exec 9>&-
+
+    assert_status 1
+    assert_output_contains "already running"
+    assert_file_absent "$ROOT/current"
+}
+
+@test "the host-side lock refuses a switch while another one is in progress" {
+    exec 8>"$ROOT/.release.lock"
+    flock -n 8
+
+    deploy --env-file "$TEST_TMP/monitor.env"
+    exec 8>&-
+
+    assert_status 1
+    assert_output_contains "holds $ROOT/.release.lock"
+    assert_file_absent "$ROOT/current"
+}
+
+@test "the config snapshot directory is private too" {
+    deploy --env-file "$TEST_TMP/monitor.env"
+
+    assert_status 0
+    [[ "$(stat -c '%a' "$ROOT/current/config-snapshot")" == "700" ]] || {
+        printf 'snapshot dir mode is %s\n' "$(stat -c '%a' "$ROOT/current/config-snapshot")"
+        return 1
+    }
+}
+
+@test "--sync-deps warns about the shared venv and keeps a pip freeze next to the release" {
+    seed_lock_and_venv
+
+    deploy --env-file "$TEST_TMP/monitor.env" --lock "$TEST_TMP/uv.lock" --sync-deps
+
+    assert_status 0
+    assert_output_contains "changes the SHARED venv now, before the selfcheck"
+    assert_file_contains "$ROOT/current/pip-freeze-before.txt" "pytapo==3.4.18"
+}
+
+# ── host-side lease held for the whole sequence ───────────────────────────────────────
+
+@test "a fresh lease from another workstation refuses the deploy and is left untouched" {
+    mkdir -p "$ROOT/releases"
+    printf 'other-ws 4242 %s\n' "$(date +%s)" >"$ROOT/releases/.deploy.lock"
+
+    deploy --env-file "$TEST_TMP/monitor.env"
+
+    assert_status 1
+    assert_output_contains "holds the lease"
+    assert_output_contains "owner other-ws pid 4242"
+    assert_output_matches "[0-9]+s old"
+    assert_file_absent "$ROOT/current"
+    assert_file_contains "$ROOT/releases/.deploy.lock" "other-ws 4242"
+}
+
+@test "a stale lease is taken over with a warning and released afterwards" {
+    mkdir -p "$ROOT/releases"
+    printf 'old-ws 4242 %s\n' "$(( $(date +%s) - 3600 ))" >"$ROOT/releases/.deploy.lock"
+
+    deploy --env-file "$TEST_TMP/monitor.env"
+
+    assert_status 0
+    assert_output_contains "WARNING: taking over a stale lease from old-ws pid 4242"
+    assert_file_absent "$ROOT/releases/.deploy.lock"
+    [[ "$(current_release)" == *"-$FINGERPRINT" ]]
+}
+
+@test "the lease is held while the restart runs and gone after a successful deploy" {
+    deploy --env-file "$TEST_TMP/monitor.env" \
+        --restart-cmd "cp $ROOT/releases/.deploy.lock $TEST_TMP/lease-during-restart"
+
+    assert_status 0
+    # <workstation-id> <pid> <epoch>
+    [[ "$(cat "$TEST_TMP/lease-during-restart")" =~ ^[A-Za-z0-9_.-]+\ [0-9]+\ [0-9]+$ ]] || {
+        cat "$TEST_TMP/lease-during-restart"
+        return 1
+    }
+    assert_file_absent "$ROOT/releases/.deploy.lock"
+}
+
+@test "the lease is released after a failed health check and rollback" {
+    seed_previous_release
+    stub_active_host
+
+    run "$SCRIPT" "$HOST" HEAD --python "$STUB_BIN/venv-python" --env-file "$TEST_TMP/monitor.env" \
+        --restart-cmd "false" --health-wait 0 </dev/null
+
+    assert_status 1
+    assert_output_contains "rolling back to releases/$PREVIOUS"
+    assert_file_absent "$ROOT/releases/.deploy.lock"
+}
+
+@test "the lease is released when the deploy dies before the switch" {
+    touch "$TEST_TMP/selfcheck-fails"
+
+    deploy --env-file "$TEST_TMP/monitor.env"
+
+    assert_status 1
+    assert_file_absent "$ROOT/releases/.deploy.lock"
+}
+
+@test "a lease that now belongs to someone else is not removed" {
+    deploy --env-file "$TEST_TMP/monitor.env" \
+        --restart-cmd "printf 'foreign-ws 7 %s\n' \$(date +%s) >$ROOT/releases/.deploy.lock"
+
+    assert_status 0
+    assert_output_contains "left alone"
+    assert_file_contains "$ROOT/releases/.deploy.lock" "foreign-ws 7"
 }

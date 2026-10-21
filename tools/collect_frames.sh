@@ -30,6 +30,21 @@ shift
 remote_root="${TAPO_REMOTE_ROOT:-tapo-monitor}"
 failed=0
 
+drop_partial_tail() {
+    # An index copied while the monitor was appending can end in a half-written line
+    # (no trailing newline). Merged as-is it would stay in the local index forever next
+    # to its completed form, so cut it back to the last complete line.
+    local f="$1"
+    [[ -s "$f" ]] || return 0
+    [[ "$(tail -c1 "$f" | od -An -c | tr -d ' ')" == '\n' ]] && return 0
+    local keep
+    keep="$(mktemp)"
+    # Lines before the last one are complete; the last has no newline, so drop it.
+    sed '$d' "$f" > "$keep"
+    cat "$keep" > "$f"
+    rm -f "$keep"
+}
+
 merge_index() {
     # Append lines of $2 missing from $1 (exact-line match), keeping $1's order.
     local local_index="$1" fresh="$2" new_lines
@@ -42,6 +57,15 @@ merge_index() {
         "$local_index" "$fresh" > "$new_lines"
     cat "$new_lines" >> "$local_index"
     rm -f "$new_lines"
+}
+
+# rsync exit 24 = some source files vanished mid-transfer (the monitor prunes its logs
+# while we copy): the rest arrived, so that is success. --safe-links drops symlinks that
+# point outside the tree, so a hostile remote cannot make us copy or follow arbitrary paths.
+rsync_ok() {
+    local rc=0
+    rsync "$@" || rc=$?
+    [[ "$rc" -eq 0 || "$rc" -eq 24 ]]
 }
 
 for source in "$@"; do
@@ -58,15 +82,16 @@ for source in "$@"; do
         dest="$dataset/$host/$log"
         mkdir -p "$dest"
         tmp_index="$(mktemp)"
-        if ! rsync -a --timeout=120 --exclude index.jsonl "$src_prefix$src_root/$log/" "$dest/"; then
+        if ! rsync_ok -a --safe-links --timeout=120 --exclude index.jsonl "$src_prefix$src_root/$log/" "$dest/"; then
             echo "collect_frames: $host $log: not collected (host unreachable or no log)" >&2
             failed=1
-        elif ! rsync -a --timeout=60 "$src_prefix$src_root/$log/index.jsonl" "$tmp_index" \
+        elif ! rsync_ok -a --safe-links --timeout=60 "$src_prefix$src_root/$log/index.jsonl" "$tmp_index" \
                 2>/dev/null; then
             # A log that has not archived its first frame has no index yet: not a failure.
             echo "collect_frames: $host $log: no index yet"
         else
             touch "$dest/index.jsonl"
+            drop_partial_tail "$tmp_index"
             before="$(wc -l < "$dest/index.jsonl")"
             merge_index "$dest/index.jsonl" "$tmp_index"
             after="$(wc -l < "$dest/index.jsonl")"

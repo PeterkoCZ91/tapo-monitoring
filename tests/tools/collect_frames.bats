@@ -37,7 +37,11 @@ for arg in "$@"; do
     fi
     args+=("$arg")
 done
-exec /usr/bin/rsync "${args[@]}"
+/usr/bin/rsync "${args[@]}"
+rc=$?
+# TEST_VANISH: the copy worked but rsync reports vanished source files (exit 24).
+[[ "$rc" -eq 0 && -f "$TEST_TMP/vanish" ]] && exit 24
+exit "$rc"
 STUB
 }
 
@@ -116,4 +120,20 @@ add_frame() {
     [ -f "$DATASET/site-l/sent-log/20260901-000009.jpg" ]
     [ "$(wc -l < "$DATASET/site-l/sent-log/index.jsonl")" -eq 1 ]
     [ -f "$DATASET/site-a/sent-log/20260901-000002.jpg" ]
+}
+
+@test "rsync exit 24 (files vanished mid-transfer) is a success" {
+    touch "$TEST_TMP/vanish"
+    run "$SCRIPT" "$DATASET" site-a
+    assert_status 0
+    assert_output_not_contains "not collected"
+    [ "$(wc -l < "$DATASET/site-a/sent-log/index.jsonl")" -eq 2 ]
+}
+
+@test "a truncated trailing index line is dropped before the merge" {
+    printf '{"file": "half' >>"$REMOTE/site-a/tapo-monitor/sent-log/index.jsonl"
+    run "$SCRIPT" "$DATASET" site-a
+    assert_status 0
+    [ "$(wc -l < "$DATASET/site-a/sent-log/index.jsonl")" -eq 2 ]
+    ! grep -q half "$DATASET/site-a/sent-log/index.jsonl"
 }

@@ -80,3 +80,20 @@ teardown() {
     assert_status 0
     assert_output_not_contains "run me as root"
 }
+
+@test "the service user, home and interpreter are validated before they reach sed" {
+    run "$SCRIPT" --user 'a;b'
+    assert_status 1
+    run "$SCRIPT" --user "$(id -un)" --home 'relative/path'
+    assert_status 1
+    run "$SCRIPT" --user "$(id -un)" --home "$TEST_TMP/x|y"
+    assert_status 1
+}
+
+@test "scorer.env is installed 0640 and an existing --home is not chowned" {
+    if grep -q 'm 0644 "\$stage/scorer.env"' "$SCRIPT"; then
+        echo "scorer.env must not be world-readable"; return 1
+    fi
+    grep -q 'm 0640 "\$stage/scorer.env"' "$SCRIPT"
+    grep -q '\[\[ -d "\$home" \]\] || install -d' "$SCRIPT"
+}

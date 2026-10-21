@@ -48,8 +48,13 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  # The full CI suite (tests, lint, types, bats, soak) on the released commit. Publishing
+  # to PyPI is irreversible, so it waits for this as well as for the build.
+  tests:
+    uses: ./.github/workflows/ci.yml
+
   publish:
-    needs: build
+    needs: [build, tests]
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     environment:
@@ -64,4 +69,4 @@ jobs:
           path: dist/
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@v1.14.3

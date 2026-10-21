@@ -100,7 +100,94 @@ fi
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 stage="$(mktemp -d)"
-trap 'rm -rf "$stage"' EXIT
+trap 'rm -rf "$stage"' EXIT   # replaced by cleanup() once the host lease code is defined
+
+# One deploy/rollback per host at a time from this workstation (same lock file as
+# rollback_release.sh). The host side takes its own flock around the switch, see below.
+lock_dir="${XDG_STATE_HOME:-$HOME/.local/state}/tapo-monitor"
+mkdir -p "$lock_dir"
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"$lock_dir/release-${host//[^A-Za-z0-9_.-]/_}.lock"
+    flock -n 9 || die "another deploy or rollback to $host is already running (lock $lock_dir)"
+else
+    echo "deploy_release: WARNING: no flock on the workstation — concurrent runs are not prevented" >&2
+fi
+
+# ── host-side lease: held for the WHOLE sequence ──────────────────────────────────────
+# The flock on the host only covers the switch (restart, health check and rollback are
+# separate ssh calls), so a second workstation could interleave its own health check or
+# rollback with ours. The lease is a file, releases/.deploy.lock, created atomically
+# (hard link of a fully written temp file) and holding "<workstation-id> <pid> <epoch>"
+# (epoch from the HOST clock). A lease younger than the limit refuses us; an older one is
+# taken over with a warning. Every exit path releases it through the EXIT trap below, and
+# only if it still carries our id.
+lease_limit="${TAPO_DEPLOY_LEASE_SECS:-1200}"
+[[ "$lease_limit" =~ ^[0-9]+$ ]] || die "TAPO_DEPLOY_LEASE_SECS needs a whole number of seconds"
+lease_id="${HOSTNAME:-ws}"; lease_id="${lease_id//[^A-Za-z0-9_.-]/_}-$$-$RANDOM"
+lease_held=0
+acquire_lease() {   # $1 = 1 to create ~/tapo-monitor/releases when missing
+    local rc=0
+    # shellcheck disable=SC2029  # %q-quoted arguments composed here on purpose.
+    ssh "$host" "bash -s -- $(printf ' %q' "$lease_id" "$$" "$lease_limit" "$1" "deploy_release")" <<'LEASE' || rc=$?
+set -u
+id="$1" pid="$2" limit="$3" mk="$4" me="$5"
+dir="$HOME/tapo-monitor/releases"
+f="$dir/.deploy.lock"
+if [[ ! -d "$dir" ]]; then
+    if [[ "$mk" == 1 ]]; then mkdir -p "$dir" || exit 1; else exit 0; fi
+fi
+write_lease() {
+    local tmp="$f.$id.tmp"
+    printf '%s %s %s\n' "$id" "$pid" "$(date +%s)" >"$tmp" || return 1
+    ln "$tmp" "$f" 2>/dev/null; local r=$?
+    rm -f "$tmp"
+    return $r
+}
+write_lease && exit 0
+read -r owner opid ots <"$f" 2>/dev/null || true
+if [[ "${ots:-}" =~ ^[0-9]+$ ]]; then
+    age=$(( $(date +%s) - ots )); ((age >= 0)) || age=0
+else
+    age=$((limit + 1))
+fi
+if ((age < limit)); then
+    echo "$me: another deploy or rollback holds the lease $f on this host: owner ${owner:-?} pid ${opid:-?}, ${age}s old (a lease older than ${limit}s counts as stale)" >&2
+    exit 3
+fi
+echo "$me: WARNING: taking over a stale lease from ${owner:-?} pid ${opid:-?}, ${age}s old (limit ${limit}s)" >&2
+stale="$f.stale.$id"
+mv "$f" "$stale" 2>/dev/null || true
+read -r owner2 _ <"$stale" 2>/dev/null || true
+if [[ "${owner2:-}" != "${owner:-}" ]]; then   # we moved someone's fresh lease: put it back
+    ln "$stale" "$f" 2>/dev/null || true
+    rm -f "$stale"
+    echo "$me: the lease changed hands while taking it over — not proceeding" >&2
+    exit 3
+fi
+rm -f "$stale"
+write_lease || { echo "$me: lost the race for the lease $f" >&2; exit 3; }
+LEASE
+    ((rc == 0)) || die "could not take the host lease on $host (exit $rc) — nothing was changed"
+    lease_held=1
+}
+release_lease() {
+    ((lease_held)) || return 0
+    lease_held=0
+    local t=()
+    command -v timeout >/dev/null 2>&1 && t=(timeout 30)
+    # shellcheck disable=SC2029
+    "${t[@]}" ssh "$host" "bash -s -- $(printf ' %q' "$lease_id")" <<'RELEASE' \
+        || echo "deploy_release: WARNING: could not release the lease on $host — it ages out after ${lease_limit}s" >&2
+f="$HOME/tapo-monitor/releases/.deploy.lock"
+[[ -f "$f" ]] || exit 0
+read -r owner _ <"$f" 2>/dev/null || true
+if [[ "${owner:-}" == "$1" ]]; then rm -f "$f"; else echo "lease now belongs to ${owner:-?}, left alone" >&2; fi
+RELEASE
+}
+cleanup() { rm -rf "${stage:-}"; release_lease; }
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
 
 # ── stage: the committed tree, never the working copy ─────────────────────────────────
 git -C "$repo" archive --format=tar "$ref" | tar -C "$stage" -xf - \
@@ -170,6 +257,7 @@ fi
     || die "--sync-deps needs expected versions from a uv.lock (--lock FILE); nothing was shipped"
 
 # ── transfer: full package into its own directory, touching nothing that runs ─────────
+acquire_lease 1   # from here on until exit nothing else may deploy or roll back this host
 # shellcheck disable=SC2029  # the release name is generated locally on purpose; only
 # $HOME stays escaped for the host.
 tar -C "$stage" -cf - . | ssh "$host" "set -e
@@ -193,6 +281,13 @@ config="$root/cameras.yaml"
 
 [[ -x "$python_bin" ]] || { echo "deploy_release: no interpreter at $python_bin on the host" >&2; exit 1; }
 [[ -f "$config" ]] || { echo "deploy_release: no $config on the host — the release layout expects the host-owned config there" >&2; exit 1; }
+# Per-host lock: two deploys/rollbacks must not interleave the switch and .previous_release.
+exec 8>"$root/.release.lock"
+if command -v flock >/dev/null 2>&1; then
+    flock -n 8 || { echo "deploy_release: another deploy or rollback holds $root/.release.lock on the host" >&2; exit 1; }
+else
+    echo "deploy_release: WARNING: no flock on the host — concurrent deploys are not prevented" >&2
+fi
 if [[ -e "$root/current" && ! -L "$root/current" ]]; then
     echo "deploy_release: $root/current exists and is not a symlink — this host still has the rsync layout; migrate first (docs/operations.md, 'Release deploys and rollback')" >&2
     exit 1
@@ -208,8 +303,11 @@ fi
 # Snapshot what this release was validated against: cameras.yaml is shared across
 # releases, so without the copy "what config did the rolled-back release pass with"
 # has no answer. 600 because the env file holds credentials.
+old_umask="$(umask)"
+umask 077   # credentials: never world/group readable, not even between cp and chmod
 snapshot="$release_dir/config-snapshot"
 mkdir -p "$snapshot"
+chmod 700 "$snapshot"
 cp "$config" "$snapshot/cameras.yaml"
 if [[ -n "$env_file" ]]; then
     [[ -r "$env_file" ]] || { echo "deploy_release: env file $env_file is not readable on the host" >&2; exit 1; }
@@ -218,6 +316,7 @@ else
     echo "deploy_release: NOTE: unit $unit names no EnvironmentFile; snapshot holds only cameras.yaml"
 fi
 chmod 600 "$snapshot"/*
+umask "$old_umask"
 
 # Dependency drift: the venv is shared by every release and never moves with a deploy.
 # Report each runtime dependency whose installed version differs from the lock; with
@@ -278,6 +377,13 @@ if [[ -n "$expected_deps" ]]; then
             echo "  ${undo:-(previous versions unknown — the version query failed)}"
             "$python_bin" -m pip --version >/dev/null 2>&1 \
                 || { echo "deploy_release: --sync-deps: the venv at $python_arg has no pip — install the versions by hand; 'current' was not switched" >&2; exit 1; }
+            echo "deploy_release: WARNING: --sync-deps changes the SHARED venv now, before the selfcheck; if the selfcheck or the health check fails, code is rolled back but the venv keeps the new versions"
+            if "$python_bin" -m pip freeze > "$release_dir/pip-freeze-before.txt" 2>/dev/null; then
+                echo "deploy_release: --sync-deps: previous venv state saved in releases/$release/pip-freeze-before.txt (manual restore: $python_arg -m pip install -r ~/tapo-monitor/releases/$release/pip-freeze-before.txt)"
+            else
+                rm -f "$release_dir/pip-freeze-before.txt"
+                echo "deploy_release: WARNING: pip freeze failed — no full snapshot of the previous venv was kept" >&2
+            fi
             "$python_bin" -m pip install --disable-pip-version-check --quiet "${pins[@]}" \
                 || { echo "deploy_release: --sync-deps: pip install FAILED — 'current' was not switched; the venv may be partly changed (restore command above)" >&2; exit 1; }
             echo "deploy_release: --sync-deps: installed$(printf ' %s' "${pins[@]}")"
@@ -292,10 +398,24 @@ fi
 # never become `current`.
 (
     if [[ -n "$env_file" ]]; then
-        set -a
-        # shellcheck source=/dev/null
-        . "$env_file"
-        set +a
+        # systemd EnvironmentFile= semantics, NOT shell: `a$b`, `p(ss` and backticks are
+        # literal characters there, and sourcing the file would expand or run them.
+        # Same rules as tools/lib/envfile.sh (this runs on the host, where it is absent).
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            line="${line%$'\r'}"
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
+            [[ -z "$line" || "$line" == \#* || "$line" == \;* || "$line" != *=* ]] && continue
+            key="${line%%=*}" val="${line#*=}"
+            key="${key%"${key##*[![:space:]]}"}"
+            [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+            val="${val#"${val%%[![:space:]]*}"}"
+            if [[ ${#val} -ge 2 && ( "${val:0:1}" == '"' || "${val:0:1}" == "'" ) \
+                  && "${val: -1}" == "${val:0:1}" ]]; then
+                val="${val:1:${#val}-2}"
+            fi
+            export "$key=$val"
+        done <"$env_file"
     fi
     cd "$release_dir"
     "$python_bin" -m tapo_monitor.cli selfcheck "$config"
@@ -316,10 +436,19 @@ echo "deploy_release: current -> releases/$release"
 # is the release name's own suffix. Update-only: a host that never opted into
 # TAPO_EXPECTED_FINGERPRINT stays unenrolled, and the daemon reads the new value on the
 # restart that follows.
-if [[ -n "$env_file" && -w "$env_file" ]] \
-        && grep -q '^TAPO_EXPECTED_FINGERPRINT=' "$env_file"; then
-    sed -i "s/^TAPO_EXPECTED_FINGERPRINT=.*/TAPO_EXPECTED_FINGERPRINT=${release##*-}/" "$env_file"
-    echo "deploy_release: TAPO_EXPECTED_FINGERPRINT -> ${release##*-}"
+# A failure here must not abort: `current` is already switched and the restart has to
+# follow, so it is only a warning (the digest may report drift until fixed by hand).
+if [[ -n "$env_file" ]] && grep -q '^TAPO_EXPECTED_FINGERPRINT=' "$env_file"; then
+    # Remembered so an automatic rollback can put the exact previous value back.
+    grep -m1 '^TAPO_EXPECTED_FINGERPRINT=' "$env_file" | cut -d= -f2- \
+        > "$release_dir/fingerprint-before.txt" || true
+    if [[ ! -w "$env_file" ]]; then
+        echo "deploy_release: WARNING: $env_file is not writable — TAPO_EXPECTED_FINGERPRINT NOT updated; set it to ${release##*-} by hand" >&2
+    elif sed -i "s/^TAPO_EXPECTED_FINGERPRINT=.*/TAPO_EXPECTED_FINGERPRINT=${release##*-}/" "$env_file"; then
+        echo "deploy_release: TAPO_EXPECTED_FINGERPRINT -> ${release##*-}"
+    else
+        echo "deploy_release: WARNING: could not rewrite $env_file (sed failed, directory not writable?) — TAPO_EXPECTED_FINGERPRINT NOT updated; set it to ${release##*-} by hand" >&2
+    fi
 fi
 REMOTE
 
@@ -333,13 +462,19 @@ prev_release="$(ssh "$host" 'cat "$HOME/tapo-monitor/.previous_release" 2>/dev/n
 restarts_before="$(ssh "$host" "$systemctl_cmd show -p NRestarts --value $unit 2>/dev/null" || true)"
 # shellcheck disable=SC2029  # client-side expansion is the point: the arguments are
 # %q-quoted (or a literal command) composed here and executed on the host.
-ssh "$host" "$restart_cmd"
+restart_failed=0
+ssh "$host" "$restart_cmd" || restart_failed=1
 
 # Believe the unit, not the exit code of the restart command: a release that passed its
 # selfcheck can still crash-loop once it runs for real. NRestarts counts only automatic
 # restarts (Restart=always), so a manual `systemctl restart` does not move it and two or
-# more new ones inside the window mean the unit is flapping.
-if ((health_wait > 0)) && [[ "$restart_cmd" != "true" ]]; then
+# more new ones inside the window mean the unit is flapping. A restart command that
+# itself fails is a health failure too: `current` is already switched at this point.
+unhealthy=0
+if ((restart_failed)); then
+    echo "deploy_release: RESTART FAILED — '$restart_cmd' exited non-zero on $host; treating it as a health failure" >&2
+    unhealthy=1
+elif ((health_wait > 0)) && [[ "$restart_cmd" != "true" ]]; then
     if [[ ! "$restarts_before" =~ ^[0-9]+$ ]]; then
         echo "deploy_release: health check skipped — cannot read NRestarts of $unit on $host" >&2
     else
@@ -352,25 +487,74 @@ if ((health_wait > 0)) && [[ "$restart_cmd" != "true" ]]; then
         [[ "$restarts_after" =~ ^[0-9]+$ ]] || restarts_after="$restarts_before"
         if [[ "$state" != "active" ]] || ((restarts_after - restarts_before >= 2)); then
             echo "deploy_release: HEALTH CHECK FAILED — $unit is '$state', $((restarts_after - restarts_before)) automatic restarts in ${health_wait}s" >&2
-            if [[ -n "$prev_release" && "$prev_release" != "$release" && "$prev_release" != "current" ]]; then
-                echo "deploy_release: rolling back to releases/$prev_release" >&2
-                # shellcheck disable=SC2029
-                ssh "$host" "set -e; cd \"\$HOME/tapo-monitor\"
-                    test -d \"releases/$prev_release\"
-                    ln -s \"releases/$prev_release\" .current.rollback.\$\$
-                    mv -T .current.rollback.\$\$ current"
-                # shellcheck disable=SC2029
-                ssh "$host" "$restart_cmd"
-                # The venv is not part of a release: what --sync-deps installed stays.
-                # shellcheck disable=SC2029
-                undo="$(ssh "$host" "cat \"\$HOME/tapo-monitor/releases/$release/deps-before.txt\" 2>/dev/null" || true)"
-                [[ -z "$undo" ]] || echo "deploy_release: the venv still has the versions --sync-deps installed; to restore the previous ones run on the host: $undo" >&2
-                die "rolled back to releases/$prev_release; the failed release is kept in releases/$release"
-            fi
-            die "no previous release to roll back to; $unit needs attention on $host"
+            unhealthy=1
+        else
+            echo "deploy_release: $unit stayed active, $((restarts_after - restarts_before)) automatic restarts"
         fi
-        echo "deploy_release: $unit stayed active, $((restarts_after - restarts_before)) automatic restarts"
     fi
+fi
+
+if ((unhealthy)); then
+    if [[ -n "$prev_release" && "$prev_release" != "$release" && "$prev_release" != "current" ]]; then
+        echo "deploy_release: rolling back to releases/$prev_release" >&2
+        # shellcheck disable=SC2029
+        ssh "$host" "set -e; cd \"\$HOME/tapo-monitor\"
+            test -d \"releases/$prev_release\"
+            ln -s \"releases/$prev_release\" .current.rollback.\$\$
+            mv -T .current.rollback.\$\$ current" \
+            || die "rollback FAILED: could not re-point current at releases/$prev_release; $unit on $host still points at the failed release — fix by hand"
+        # Put TAPO_EXPECTED_FINGERPRINT back to what it was before this deploy rewrote it.
+        remote_args="$(printf ' %q' "$release" "$prev_release" "$env_file" "$unit" "$sd_scope")"
+        # shellcheck disable=SC2029
+        ssh "$host" "bash -s --$remote_args" <<'REMOTE' || echo "deploy_release: WARNING: could not restore TAPO_EXPECTED_FINGERPRINT after the rollback — check the env file by hand" >&2
+release="$1" prev="$2" env_file="$3" unit="$4" sd_scope="$5"
+root="$HOME/tapo-monitor"
+if [[ -z "$env_file" ]]; then
+    # shellcheck disable=SC2086
+    env_file="$(systemctl $sd_scope show -p EnvironmentFiles --value "$unit" 2>/dev/null \
+        | tr ' ' '\n' | sed 's/^-//' | grep -m1 '^/' || true)"
+fi
+want="$(cat "$root/releases/$release/fingerprint-before.txt" 2>/dev/null || true)"
+[[ "$want" =~ ^[A-Za-z0-9._-]+$ ]] || want="${prev##*-}"
+if [[ -n "$env_file" ]] && grep -q '^TAPO_EXPECTED_FINGERPRINT=' "$env_file"; then
+    if [[ ! -w "$env_file" ]]; then
+        echo "deploy_release: WARNING: $env_file is not writable — TAPO_EXPECTED_FINGERPRINT left as is; set it to $want by hand" >&2
+    elif sed -i "s/^TAPO_EXPECTED_FINGERPRINT=.*/TAPO_EXPECTED_FINGERPRINT=$want/" "$env_file"; then
+        echo "deploy_release: TAPO_EXPECTED_FINGERPRINT restored -> $want"
+    else
+        echo "deploy_release: WARNING: sed failed on $env_file — set TAPO_EXPECTED_FINGERPRINT to $want by hand" >&2
+    fi
+fi
+REMOTE
+        rb_ok=1
+        # shellcheck disable=SC2029
+        ssh "$host" "$restart_cmd" || {
+            echo "deploy_release: ROLLBACK RESTART FAILED — '$restart_cmd' exited non-zero after re-pointing to releases/$prev_release" >&2
+            rb_ok=0
+        }
+        if [[ "$restart_cmd" != "true" ]]; then
+            rb_state=""
+            for _ in 1 2 3 4 5; do
+                # shellcheck disable=SC2029
+                rb_state="$(ssh "$host" "$systemctl_cmd is-active $unit" || true)"
+                [[ "$rb_state" == "active" ]] && break
+                sleep 1
+            done
+            if [[ "$rb_state" != "active" ]]; then
+                echo "deploy_release: !!! ROLLBACK DID NOT RECOVER — $unit on $host is '$rb_state' on releases/$prev_release; needs attention NOW !!!" >&2
+                rb_ok=0
+            else
+                echo "deploy_release: $unit is active again on releases/$prev_release"
+            fi
+        fi
+        # The venv is not part of a release: what --sync-deps installed stays.
+        # shellcheck disable=SC2029
+        undo="$(ssh "$host" "cat \"\$HOME/tapo-monitor/releases/$release/deps-before.txt\" 2>/dev/null" || true)"
+        [[ -z "$undo" ]] || echo "deploy_release: the venv still has the versions --sync-deps installed; to restore the previous ones run on the host: $undo" >&2
+        ((rb_ok)) || die "rolled back to releases/$prev_release but $unit is NOT confirmed running; the failed release is kept in releases/$release"
+        die "rolled back to releases/$prev_release; the failed release is kept in releases/$release"
+    fi
+    die "no previous release to roll back to; $unit needs attention on $host"
 fi
 
 remote_args="$(printf ' %q' "$fingerprint" "$python_bin" "$KEEP_RELEASES")"

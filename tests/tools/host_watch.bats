@@ -37,7 +37,9 @@ fi
 exit 0
 STUB
     stub_command curl <<'STUB'
-case "$*" in
+cfg=""; prev=""
+for a in "$@"; do [[ "$prev" == --config ]] && cfg="$(cat "$a")"; prev="$a"; done
+case "$* $cfg" in
     *api.telegram.org*)
         for arg in "$@"; do
             case "$arg" in
@@ -333,4 +335,14 @@ assert_no_telegram() {
         return 1
     fi
     assert_file_absent "$STATE_DIR/host1.ping.miss"
+}
+
+@test "an env file with shell metacharacters is read as data, never executed" {
+    printf 'TELEGRAM_TOKEN="dummy$b(p`touch %s/pwned`"\nTELEGRAM_CHAT_ID=1\n' "$TEST_TMP" >"$TEST_TMP/secrets.env"
+    printf 'TAPO_ENV_FILE=%s/secrets.env\nWATCH_TARGETS=\n' "$TEST_TMP" >"$TEST_TMP/host-watch.env"
+
+    run "$SCRIPT"
+
+    [[ ! -e "$TEST_TMP/pwned" ]]
+    assert_output_contains "WATCH_TARGETS missing"
 }

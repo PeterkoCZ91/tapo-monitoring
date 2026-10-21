@@ -60,6 +60,7 @@ make_release_layout() {
     RELEASE="20260101T000000Z-abc123def456"
     mkdir -p "$ROOT/releases/$RELEASE/tools"
     cp "$REPO_ROOT/tools/check_monitor_rollout.sh" "$ROOT/releases/$RELEASE/tools/"
+    cp -r "$REPO_ROOT/tools/lib" "$ROOT/releases/$RELEASE/tools/"
     ln -s "releases/$RELEASE" "$ROOT/current"
     touch "$ROOT/cameras.yaml"
 }
@@ -70,6 +71,7 @@ make_flat_layout() {
     ROOT="$TEST_TMP/tapo-monitor"
     mkdir -p "$ROOT/tools"
     cp "$REPO_ROOT/tools/check_monitor_rollout.sh" "$ROOT/tools/"
+    cp -r "$REPO_ROOT/tools/lib" "$ROOT/tools/"
     touch "$ROOT/cameras.yaml"
 }
 

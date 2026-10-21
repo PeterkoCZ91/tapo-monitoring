@@ -171,10 +171,18 @@ esac
 # The unit names its own env file; guessing a path per host is how the checks drifted
 # apart in the first place. Only the three variables below are ever read out of it — the
 # same file holds the camera and Telegram credentials, which must not travel back here.
-env_file=$(prop "$unit_props" EnvironmentFiles | tr ' ' '\n' | sed 's/^-//' | grep -m1 '^/')
+# A unit can list several EnvironmentFile= entries; the last file defining a key wins.
+env_files=$(prop "$unit_props" EnvironmentFiles | tr ' ' '\n' | sed 's/^-//' | grep '^/')
 envget() {
-    [ -n "$env_file" ] && [ -r "$env_file" ] || return 0
-    sed -n "s/^[[:space:]]*$1=//p" "$env_file" | tail -1 | tr -d '"\047\r' | awk '{$1=$1; print}'
+    local f v out=""
+    while IFS= read -r f; do
+        [ -n "$f" ] && [ -r "$f" ] || continue
+        v=$(sed -n "s/^[[:space:]]*$1=//p" "$f" | tail -1 | tr -d '"\047\r' | awk '{$1=$1; print}')
+        [ -n "$v" ] && out=$v
+    done <<ENVLIST
+$env_files
+ENVLIST
+    printf '%s' "$out"
 }
 
 link=$(readlink "$root/current" 2>/dev/null)

@@ -7,3 +7,9 @@ Type=oneshot
 # default; a host that keeps them elsewhere points TAPO_ENV_FILE at that file here.
 EnvironmentFile=-/etc/tapo-monitor/notify.env
 ExecStart=/usr/local/bin/pi_notify.sh "🔴 <b>Service failed:</b> %i&#10;%H" "%i"
+# Hardening (root oneshot). PrivateTmp is deliberately NOT set: pi_notify.sh keeps its
+# per-service cooldown lock in /tmp, and a private /tmp per run would defeat the
+# cooldown and let a flapping unit spam Telegram.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only

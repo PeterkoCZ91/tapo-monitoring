@@ -7,6 +7,9 @@ on:
   # A push event dropped during an Actions outage leaves that commit unverified with
   # nothing to re-run, since a run is only ever created in response to an event.
   workflow_dispatch:
+  # Called by release.yml and docker.yml so nothing is published for a commit whose
+  # suite is not green. No inputs or secrets; the caller's ref is what gets tested.
+  workflow_call:
 
 jobs:
   test:

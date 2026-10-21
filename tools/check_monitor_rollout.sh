@@ -58,15 +58,22 @@ failures=()
 
 # Assert the credentials the service actually gets: read the env file from the unit
 # itself rather than guessing a host-specific path.
-env_file="${TAPO_MONITOR_ENV:-$("${systemctl_cmd[@]}" show -p EnvironmentFiles --value "$unit" 2>/dev/null \
-    | tr ' ' '\n' | sed 's/^-//' | grep -m1 '^/' || true)}"
-if [[ -n "$env_file" && -r "$env_file" ]]; then
-    set -a
-    # Host-specific path, so shellcheck cannot follow it.
-    # shellcheck source=/dev/null
-    . "$env_file"
-    set +a
+# The unit may list several EnvironmentFile= entries (a leading `-` marks one optional):
+# load all of them in order, as systemd does, and never source them as shell.
+# shellcheck source=lib/envfile.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/envfile.sh"
+env_files=()
+if [[ -n "${TAPO_MONITOR_ENV:-}" ]]; then
+    env_files=("$TAPO_MONITOR_ENV")
+else
+    while IFS= read -r candidate; do
+        [[ -n "$candidate" ]] && env_files+=("$candidate")
+    done < <("${systemctl_cmd[@]}" show -p EnvironmentFiles --value "$unit" 2>/dev/null \
+        | tr ' ' '\n' | sed 's/^-//' | grep '^/' || true)
 fi
+for env_file in "${env_files[@]}"; do
+    envfile_load "$env_file"
+done
 
 run_cli() { (cd "$root" && PYTHONPATH="$root" "$python_bin" -m tapo_monitor.cli "$@"); }
 
@@ -104,13 +111,15 @@ if [[ -n "$fingerprint" ]]; then
     fi
 fi
 
-if run_cli selfcheck "$config" > /tmp/monitor-selfcheck.$$ 2>&1; then
+selfcheck_out="$(mktemp "${TMPDIR:-/tmp}/monitor-selfcheck.XXXXXX")"
+trap 'rm -f "$selfcheck_out"' EXIT
+if run_cli selfcheck "$config" > "$selfcheck_out" 2>&1; then
     pass selfcheck
 else
     fail selfcheck "see output below"
 fi
-sed 's/^/    /' /tmp/monitor-selfcheck.$$
-rm -f /tmp/monitor-selfcheck.$$
+sed 's/^/    /' "$selfcheck_out"
+rm -f "$selfcheck_out"
 
 since="$("${systemctl_cmd[@]}" show -p ActiveEnterTimestamp --value "$unit" 2>/dev/null || true)"
 journal="$("${journalctl_cmd[@]}" -u "$unit" ${since:+--since "$since"} --no-pager 2>/dev/null || true)"

@@ -3,9 +3,17 @@ Description=tapo-monitor — config-driven Tapo camera monitoring
 After=network-online.target
 Wants=network-online.target
 # Restart=always alone retries a crash loop forever in silence — an ImportError from
-# a half-copied package never self-heals. Stop after 5 starts in 5 minutes and report.
-StartLimitIntervalSec=300
-StartLimitBurst=5
+# a half-copied package never self-heals. With RestartSec=30, 20 starts in 15 minutes
+# tolerates ~10 minutes of boot-time retries (network, DNS, camera not yet up) before a
+# real crash loop is declared failed and reported.
+#
+# User-unit variant (tools/deploy_release.sh --user, `systemctl --user`): After=/Wants=
+# network-online.target do nothing there (the user manager cannot order against system
+# targets) and WantedBy=multi-user.target does not exist; install it with
+# WantedBy=default.target instead, and enable linger (`loginctl enable-linger <user>`)
+# so it starts at boot. OnFailure=pi-failure-notify@%n.service must then be a user unit too.
+StartLimitIntervalSec=900
+StartLimitBurst=20
 OnFailure=pi-failure-notify@%n.service
 
 [Service]
@@ -25,7 +33,8 @@ WorkingDirectory=%h/tapo-monitor/current
 # working directory, i.e. in whichever release `current` points at right now.
 ExecStart=%h/tapo-env/bin/python -m tapo_monitor run %h/tapo-monitor/cameras.yaml
 Restart=always
-RestartSec=10
+RestartSec=30
 
 [Install]
+# System unit. For a user unit use: WantedBy=default.target
 WantedBy=multi-user.target

@@ -16,13 +16,16 @@ setup() {
     export TAPO_ENV_FILE="$TEST_TMP/secrets.env"
     printf 'TELEGRAM_TOKEN=test-token\nTELEGRAM_CHAT_ID=1234567\n' >"$TAPO_ENV_FILE"
 
-    # The lock path is hardcoded to /tmp inside the script, so the test names its service
-    # after its own PID and removes the file again; nothing else here touches /tmp.
+    # The cooldown stamp lives under TAPO_NOTIFY_LOCK_DIR (/run in production).
+    export TAPO_NOTIFY_LOCK_DIR="$TEST_TMP/run"
+    mkdir -p "$TAPO_NOTIFY_LOCK_DIR"
     SERVICE="batstest-$$"
-    LOCK="/tmp/notify_cooldown_batstest_$$"
+    LOCK="$TAPO_NOTIFY_LOCK_DIR/notify_cooldown_batstest_$$"
 
     stub_command curl <<'STUB'
-printf '%s\n' "$*" >>"$TEST_TMP/curl.log"
+cfg=""; prev=""
+for a in "$@"; do [[ "$prev" == --config ]] && cfg="$(cat "$a")"; prev="$a"; done
+printf '%s\n' "$* $cfg" >>"$TEST_TMP/curl.log"
 if [[ -f "$TEST_TMP/telegram-refuses" ]]; then
     echo '{"ok":false,"description":"Bad Request: chat not found"}'
 else
@@ -164,7 +167,9 @@ assert_curl_not_called() {
 exit 0
 STUB
     stub_command curl <<'STUB'
-printf '%s\n' "$*" >>"$TEST_TMP/curl.log"
+cfg=""; prev=""
+for a in "$@"; do [[ "$prev" == --config ]] && cfg="$(cat "$a")"; prev="$a"; done
+printf '%s\n' "$* $cfg" >>"$TEST_TMP/curl.log"
 if [[ ! -f "$TEST_TMP/network-ready" ]]; then
     touch "$TEST_TMP/network-ready"
     exit 6
@@ -184,7 +189,9 @@ STUB
 exit 0
 STUB
     stub_command curl <<'STUB'
-printf '%s\n' "$*" >>"$TEST_TMP/curl.log"
+cfg=""; prev=""
+for a in "$@"; do [[ "$prev" == --config ]] && cfg="$(cat "$a")"; prev="$a"; done
+printf '%s\n' "$* $cfg" >>"$TEST_TMP/curl.log"
 exit 7
 STUB
 
@@ -194,4 +201,38 @@ STUB
     assert_output_contains "Telegram send failed"
     [[ "$(wc -l <"$CURL_LOG")" -eq 3 ]]
     assert_file_absent "$LOCK"
+}
+
+@test "a malformed cooldown stamp is ignored, never evaluated" {
+    printf 'x[$(touch %s/pwned)]\n' "$TEST_TMP" >"$LOCK"
+
+    run "$SCRIPT" "unit failed" "$SERVICE"
+
+    assert_status 0
+    assert_file_absent "$TEST_TMP/pwned"
+    assert_file_contains "$CURL_LOG" "text=unit failed"
+}
+
+@test "the env file is data: no expansion, no execution" {
+    printf 'TELEGRAM_TOKEN="dummy$b(p`touch %s/pwned`"\nTELEGRAM_CHAT_ID=1234567\n' "$TEST_TMP" >"$TAPO_ENV_FILE"
+
+    run "$SCRIPT" "camera unreachable"
+
+    assert_status 0
+    assert_file_absent "$TEST_TMP/pwned"
+    assert_file_contains "$CURL_LOG" 'botdummy$b(p`touch '
+}
+
+@test "the token is not in curl's argv" {
+    stub_command curl <<'STUB'
+printf '%s\n' "$*" >"$TEST_TMP/argv.log"
+echo '{"ok":true}'
+STUB
+
+    run "$SCRIPT" "camera unreachable"
+
+    assert_status 0
+    if grep -q 'test-token' "$TEST_TMP/argv.log"; then
+        echo "token leaked into argv"; return 1
+    fi
 }

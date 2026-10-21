@@ -66,6 +66,20 @@ python_bin="${python_bin:-$home/env/bin/python}"
 model="${model:-$home/yolox_m.onnx}"
 metrics_file="${metrics_file:-$home/metrics/scorer.jsonl}"
 
+# These values are rendered with sed into a root-owned unit: refuse anything that could
+# break the substitution or inject a directive (same character set as
+# provision_shadow_scorer.sh).
+safe_path() {  # <flag> <value>
+    [[ "$2" == /* ]] || die "$1 must be an absolute path"
+    [[ "$2" =~ ^[A-Za-z0-9._/+@:,=-]+$ ]] \
+        || die "$1 contains characters that are unsafe in a systemd unit (use [A-Za-z0-9._/+@:,=-])"
+}
+[[ "$user" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "--user $user is not a valid user name"
+safe_path --home "$home"
+safe_path --python "$python_bin"
+safe_path --model "$model"
+safe_path --metrics-file "$metrics_file"
+
 run_as() { runuser -u "$user" -- "$@"; }
 
 changed=0 restart_needed=0
@@ -100,7 +114,9 @@ else
     install -d -o root -g root -m 0755 /etc/tapo-monitor
     # The metrics journal is written by the service user, so its directory must belong to
     # them — a root-owned directory here is a crash the first time metrics persist.
-    install -d -o "$user" -g "$user" -m 0755 "$home" "$(dirname "$metrics_file")"
+    # An existing --home belongs to someone already (possibly a real user home or /): leave it alone.
+    [[ -d "$home" ]] || install -d -o "$user" -g "$user" -m 0755 "$home"
+    install -d -o "$user" -g "$user" -m 0755 "$(dirname "$metrics_file")"
 fi
 
 # ── the venv, optionally built here ───────────────────────────────────────────────────
@@ -156,7 +172,7 @@ TAPO_SCORER_METRICS_RETENTION_DAYS=7
 TAPO_SCORER_METRICS_RETENTION_FILES=8
 TAPO_SCORER_METRICS_MAX_JOURNAL_BYTES=33554432
 ENV
-    install -o root -g root -m 0644 "$stage/scorer.env" "$env_path"
+    install -o root -g root -m 0640 "$stage/scorer.env" "$env_path"
     note "created: $env_path"
     changed=1 restart_needed=1
 fi

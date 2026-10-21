@@ -14,3 +14,9 @@ Type=oneshot
 # in this file on each host, never in the repository — see docs/operations.md.
 EnvironmentFile=/etc/tapo-monitor/host-watch.env
 ExecStart=/usr/local/bin/host_watch.sh
+# Hardening (root oneshot). PrivateTmp is deliberately NOT set: host_watch.sh keeps its
+# miss counters in /var/tmp/host-watch so they survive a reboot, and PrivateTmp would
+# hide that directory (and reset every counter) on each run.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only

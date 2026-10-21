@@ -75,6 +75,92 @@ REMOTE
 fi
 
 # ── re-point, restart, verify ──────────────────────────────────────────────────────────
+# One deploy/rollback per host at a time (same lock file as deploy_release.sh).
+lock_dir="${XDG_STATE_HOME:-$HOME/.local/state}/tapo-monitor"
+mkdir -p "$lock_dir"
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"$lock_dir/release-${host//[^A-Za-z0-9_.-]/_}.lock"
+    flock -n 9 || die "another deploy or rollback to $host is already running (lock $lock_dir)"
+else
+    echo "rollback_release: WARNING: no flock on the workstation — concurrent runs are not prevented" >&2
+fi
+# ── host-side lease: held for the WHOLE sequence ──────────────────────────────────────
+# The flock on the host only covers the switch (restart, health check and rollback are
+# separate ssh calls), so a second workstation could interleave its own health check or
+# rollback with ours. The lease is a file, releases/.deploy.lock, created atomically
+# (hard link of a fully written temp file) and holding "<workstation-id> <pid> <epoch>"
+# (epoch from the HOST clock). A lease younger than the limit refuses us; an older one is
+# taken over with a warning. Every exit path releases it through the EXIT trap below, and
+# only if it still carries our id.
+lease_limit="${TAPO_DEPLOY_LEASE_SECS:-1200}"
+[[ "$lease_limit" =~ ^[0-9]+$ ]] || die "TAPO_DEPLOY_LEASE_SECS needs a whole number of seconds"
+lease_id="${HOSTNAME:-ws}"; lease_id="${lease_id//[^A-Za-z0-9_.-]/_}-$$-$RANDOM"
+lease_held=0
+acquire_lease() {   # $1 = 1 to create ~/tapo-monitor/releases when missing
+    local rc=0
+    # shellcheck disable=SC2029  # %q-quoted arguments composed here on purpose.
+    ssh "$host" "bash -s -- $(printf ' %q' "$lease_id" "$$" "$lease_limit" "$1" "rollback_release")" <<'LEASE' || rc=$?
+set -u
+id="$1" pid="$2" limit="$3" mk="$4" me="$5"
+dir="$HOME/tapo-monitor/releases"
+f="$dir/.deploy.lock"
+if [[ ! -d "$dir" ]]; then
+    if [[ "$mk" == 1 ]]; then mkdir -p "$dir" || exit 1; else exit 0; fi
+fi
+write_lease() {
+    local tmp="$f.$id.tmp"
+    printf '%s %s %s\n' "$id" "$pid" "$(date +%s)" >"$tmp" || return 1
+    ln "$tmp" "$f" 2>/dev/null; local r=$?
+    rm -f "$tmp"
+    return $r
+}
+write_lease && exit 0
+read -r owner opid ots <"$f" 2>/dev/null || true
+if [[ "${ots:-}" =~ ^[0-9]+$ ]]; then
+    age=$(( $(date +%s) - ots )); ((age >= 0)) || age=0
+else
+    age=$((limit + 1))
+fi
+if ((age < limit)); then
+    echo "$me: another deploy or rollback holds the lease $f on this host: owner ${owner:-?} pid ${opid:-?}, ${age}s old (a lease older than ${limit}s counts as stale)" >&2
+    exit 3
+fi
+echo "$me: WARNING: taking over a stale lease from ${owner:-?} pid ${opid:-?}, ${age}s old (limit ${limit}s)" >&2
+stale="$f.stale.$id"
+mv "$f" "$stale" 2>/dev/null || true
+read -r owner2 _ <"$stale" 2>/dev/null || true
+if [[ "${owner2:-}" != "${owner:-}" ]]; then   # we moved someone's fresh lease: put it back
+    ln "$stale" "$f" 2>/dev/null || true
+    rm -f "$stale"
+    echo "$me: the lease changed hands while taking it over — not proceeding" >&2
+    exit 3
+fi
+rm -f "$stale"
+write_lease || { echo "$me: lost the race for the lease $f" >&2; exit 3; }
+LEASE
+    ((rc == 0)) || die "could not take the host lease on $host (exit $rc) — nothing was changed"
+    lease_held=1
+}
+release_lease() {
+    ((lease_held)) || return 0
+    lease_held=0
+    local t=()
+    command -v timeout >/dev/null 2>&1 && t=(timeout 30)
+    # shellcheck disable=SC2029
+    "${t[@]}" ssh "$host" "bash -s -- $(printf ' %q' "$lease_id")" <<'RELEASE' \
+        || echo "rollback_release: WARNING: could not release the lease on $host — it ages out after ${lease_limit}s" >&2
+f="$HOME/tapo-monitor/releases/.deploy.lock"
+[[ -f "$f" ]] || exit 0
+read -r owner _ <"$f" 2>/dev/null || true
+if [[ "${owner:-}" == "$1" ]]; then rm -f "$f"; else echo "lease now belongs to ${owner:-?}, left alone" >&2; fi
+RELEASE
+}
+cleanup() { rm -rf "${stage:-}"; release_lease; }
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+stage=""
+acquire_lease 0
 remote_args="$(printf ' %q' "$release" "$unit" "$sd_scope")"
 # shellcheck disable=SC2029  # client-side expansion is the point: the arguments are
 # %q-quoted (or a literal command) composed here and executed on the host.
@@ -82,6 +168,15 @@ ssh "$host" "bash -s --$remote_args" <<'REMOTE'
 set -euo pipefail
 release="$1" unit="$2" sd_scope="$3"
 root="$HOME/tapo-monitor"
+# Per-host lock around the switch: no interleaving with a deploy or another rollback.
+if [[ -d "$root" ]]; then
+    exec 8>"$root/.release.lock"
+    if command -v flock >/dev/null 2>&1; then
+        flock -n 8 || { echo "rollback_release: another deploy or rollback holds $root/.release.lock on the host" >&2; exit 1; }
+    else
+        echo "rollback_release: WARNING: no flock on the host — concurrent runs are not prevented" >&2
+    fi
+fi
 [[ -d "$root/releases/$release" ]] || { echo "rollback_release: no $root/releases/$release on this host — run without a release name to list them" >&2; exit 1; }
 if [[ -e "$root/current" && ! -L "$root/current" ]]; then
     echo "rollback_release: $root/current is not a symlink — this host still has the rsync layout" >&2
@@ -100,17 +195,44 @@ echo "rollback_release: current -> releases/$release"
 # shellcheck disable=SC2086
 env_file="$(systemctl $sd_scope show -p EnvironmentFiles --value "$unit" 2>/dev/null \
     | tr ' ' '\n' | sed 's/^-//' | grep -m1 '^/' || true)"
-if [[ -n "$env_file" && -w "$env_file" ]] \
-        && grep -q '^TAPO_EXPECTED_FINGERPRINT=' "$env_file"; then
-    sed -i "s/^TAPO_EXPECTED_FINGERPRINT=.*/TAPO_EXPECTED_FINGERPRINT=${release##*-}/" "$env_file"
-    echo "rollback_release: TAPO_EXPECTED_FINGERPRINT -> ${release##*-}"
+# A failure must not abort: `current` is already switched and the restart has to follow.
+if [[ -n "$env_file" ]] && grep -q '^TAPO_EXPECTED_FINGERPRINT=' "$env_file"; then
+    if [[ ! -w "$env_file" ]]; then
+        echo "rollback_release: WARNING: $env_file is not writable — TAPO_EXPECTED_FINGERPRINT NOT updated; set it to ${release##*-} by hand" >&2
+    elif sed -i "s/^TAPO_EXPECTED_FINGERPRINT=.*/TAPO_EXPECTED_FINGERPRINT=${release##*-}/" "$env_file"; then
+        echo "rollback_release: TAPO_EXPECTED_FINGERPRINT -> ${release##*-}"
+    else
+        echo "rollback_release: WARNING: could not rewrite $env_file (sed failed, directory not writable?) — TAPO_EXPECTED_FINGERPRINT NOT updated; set it to ${release##*-} by hand" >&2
+    fi
 fi
 REMOTE
 
 echo "rollback_release: restarting via: $restart_cmd"
 # shellcheck disable=SC2029  # client-side expansion is the point: the arguments are
 # %q-quoted (or a literal command) composed here and executed on the host.
-ssh "$host" "$restart_cmd"
+restart_ok=1
+ssh "$host" "$restart_cmd" || {
+    echo "rollback_release: RESTART FAILED — '$restart_cmd' exited non-zero on $host; current already points at releases/$release" >&2
+    restart_ok=0
+}
+# Wait for the unit to come up on the release we just pointed at (skipped for a no-op
+# restart command, as in deploy_release.sh).
+if [[ "$restart_cmd" != "true" ]]; then
+    systemctl_cmd="systemctl${sd_scope:+ $sd_scope}"
+    state=""
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        # shellcheck disable=SC2029
+        state="$(ssh "$host" "$systemctl_cmd is-active $unit" || true)"
+        [[ "$state" == "active" ]] && break
+        sleep 1
+    done
+    if [[ "$state" == "active" ]]; then
+        echo "rollback_release: $unit is active"
+    else
+        echo "rollback_release: !!! $unit on $host is '$state' after the rollback — needs attention NOW !!!" >&2
+        restart_ok=0
+    fi
+fi
 
 remote_args="$(printf ' %q' "$release" "$python_bin")"
 # shellcheck disable=SC2029  # client-side expansion is the point: the arguments are
@@ -136,5 +258,6 @@ else
 fi
 REMOTE
 
+((restart_ok)) || die "rollback re-pointed current to releases/$release but $unit is NOT confirmed running"
 echo "rollback_release: done — follow up on the host with:"
 echo "  ~/tapo-monitor/current/tools/check_monitor_rollout.sh${sd_scope:+ $sd_scope} ${release#*-}"

@@ -82,6 +82,7 @@ STUB
     stub_command ssh <<'STUB'
 cat >/dev/null
 echo "ssh called: $*" >>"$TEST_TMP/ssh.log"
+case "$*" in *is-active*) echo active ;; esac
 STUB
 
     run "$SCRIPT" "$HOST" "$RELEASE" --unit tapo-monitor-two.service </dev/null

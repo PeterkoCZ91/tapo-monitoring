@@ -31,21 +31,51 @@ set -uo pipefail
 # WATCH_STATE_DIR and HOST_WATCH_ENV_FILE exist so a dry run can redirect everything;
 # production hosts have no reason to set either.
 ENV_FILE="${HOST_WATCH_ENV_FILE:-/etc/tapo-monitor/host-watch.env}"
-if [ -r "$ENV_FILE" ]; then
-  set -a
-  # Host-specific path, so shellcheck cannot follow it.
-  # shellcheck source=/dev/null
-  . "$ENV_FILE"
-  set +a
-fi
+# Read as systemd reads it (no expansion, nothing executed), never sourced as shell.
+# Safe EnvironmentFile reader, inlined: this script is installed standalone. Keep in
+# sync with tools/lib/envfile.sh (no expansion, nothing executed, KEY=[A-Za-z_][A-Za-z0-9_]*).
+# Echo "KEY<TAB>VALUE" pairs, one per valid line.
+_envfile_parse() {
+    local file="$1" line key val
+    [[ -r "$file" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" || "$line" == \#* || "$line" == \;* ]] && continue
+        [[ "$line" == *=* ]] || continue
+        key="${line%%=*}"
+        val="${line#*=}"
+        key="${key%"${key##*[![:space:]]}"}"
+        [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+        val="${val#"${val%%[![:space:]]*}"}"
+        if [[ ${#val} -ge 2 && ( "${val:0:1}" == '"' || "${val:0:1}" == "'" ) \
+              && "${val: -1}" == "${val:0:1}" ]]; then
+            val="${val:1:${#val}-2}"
+        fi
+        printf '%s\t%s\n' "$key" "$val"
+    done <"$file"
+}
+
+envfile_load() {
+    local key val
+    while IFS=$'\t' read -r key val; do
+        export "$key=$val"
+    done < <(_envfile_parse "$1")
+}
+
+envfile_get() {
+    local want="$2" key val out=""
+    while IFS=$'\t' read -r key val; do
+        [[ "$key" == "$want" ]] && out="$val"
+    done < <(_envfile_parse "$1")
+    printf '%s' "$out"
+}
+
+envfile_load "$ENV_FILE"
 
 SECRETS_FILE="${TAPO_ENV_FILE:-/etc/tapo-monitor/secrets.env}"
-if [ -r "$SECRETS_FILE" ]; then
-  set -a
-  # shellcheck source=/dev/null
-  . "$SECRETS_FILE"
-  set +a
-fi
+envfile_load "$SECRETS_FILE"
 
 TARGETS="${WATCH_TARGETS:?WATCH_TARGETS missing (name=ping_addr[,health=url] ...)}"
 FAILS="${WATCH_FAILS:-3}"
@@ -65,7 +95,10 @@ failures=0
 # cooldown, and an unconfirmed recovery must not close an episode.
 send_telegram() {
   local response
-  response=$(curl -fsS --connect-timeout 5 --max-time 10 -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+  # The URL carries the bot credential, so it goes in through a curl config on a pipe and
+  # never appears in argv (visible to every local user in /proc and ps).
+  response=$(curl -fsS --connect-timeout 5 --max-time 10 -X POST \
+    --config <(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TELEGRAM_TOKEN") \
     --data-urlencode "chat_id=${CHAT}" \
     --data-urlencode "text=$1" 2>&1) || true
   case "$response" in
