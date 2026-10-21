@@ -49,7 +49,8 @@ def _camera(path, root):
 def _post(url, path, timeout, token=None):
     with open(path, "rb") as f:
         headers = {"Content-Type": "image/jpeg", **scorer.auth_headers(token)}
-        req = urllib.request.Request(url, data=f.read(), headers=headers)
+        req = scorer.keep_auth_off_redirects(
+            urllib.request.Request(url, data=f.read(), headers=headers))
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.load(resp)
 

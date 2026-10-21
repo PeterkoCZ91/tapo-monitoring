@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import html
+import ipaddress
 import json
 import logging
 import math
@@ -443,14 +444,22 @@ class LabelSession:
         with self._lock:
             if not self._history:
                 return None
-            kind, frame, previous, position = self._history.pop()
+            entry = self._history.pop()
+            kind, frame, previous, position = entry
             if kind == "skip":
-                self._queue.remove(frame)
-                self._queue.insert(position, frame)
+                # The frame may have been labeled from another tab meanwhile: nothing to move.
+                if frame in self._queue:
+                    self._queue.remove(frame)
+                    self._queue.insert(position, frame)
                 return frame
             restored = previous.get("label") if previous else UNLABELED
-            record = self._append(frame, restored, now, undo=True,
-                                  boxes=previous.get("boxes") if previous else None)
+            try:
+                record = self._append(frame, restored, now, undo=True,
+                                      boxes=previous.get("boxes") if previous else None)
+            except OSError:
+                # Nothing was written: keep the entry so memory and file stay in step.
+                self._history.append(entry)
+                raise
             if previous:
                 self._labeled[frame.sha256] = record
             else:
@@ -1753,17 +1762,82 @@ a{{color:inherit}}
 """
 
 
+MAX_BODY = 1024 * 1024
+REQUEST_TIMEOUT = 10.0
+# The page is one document with inline script and style and loads only same-origin data.
+_CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; "
+        "frame-ancestors 'none'")
+_LOOPBACK_NAMES = ("localhost", "127.0.0.1", "::1")
+
+
+def _split_host(value):
+    """``host[:port]`` / ``[v6]:port`` -> (lowercase host, port string or None)."""
+    value = (value or "").strip().lower()
+    if value.startswith("["):
+        host, _, rest = value[1:].partition("]")
+        return host, rest[1:] if rest.startswith(":") else None
+    host, sep, port = value.partition(":")
+    return host, (port if sep else None)
+
+
+def _is_ip(host):
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
 def make_server(session, port=0, bind=DEFAULT_BIND):
     """HTTP server for one :class:`LabelSession`. Stdlib only, threaded."""
     lang = session.lang
+    bound = bind.lower().strip("[]")
+    wildcard = _is_ip(bound) and ipaddress.ip_address(bound).is_unspecified
 
     class Handler(BaseHTTPRequestHandler):
+        timeout = REQUEST_TIMEOUT
+
+        def _host_ok(self, value):
+            """Host (or Origin authority) must name this server: blocks DNS rebinding.
+
+            Only the hostname counts, not the port, so ssh -L and port mappings work.
+            Extra names come from ``TAPO_LABEL_ALLOWED_HOSTS`` (comma separated).
+            """
+            host, _port = _split_host(value)
+            if not host:
+                return False
+            allowed = {h.strip().lower() for h in
+                       os.environ.get("TAPO_LABEL_ALLOWED_HOSTS", "").split(",")}
+            # A wildcard bind is reached by IP literal; a hostname there is a rebinding.
+            return (host in _LOOPBACK_NAMES or host == bound or host in allowed
+                    or (wildcard and _is_ip(host)))
+
+        def _guard(self, post):
+            if not self._host_ok(self.headers.get("Host")):
+                self._json(403, {"error": "bad host"})
+                return False
+            if post:
+                origin = self.headers.get("Origin")
+                if origin is not None and not self._host_ok(
+                        urllib.parse.urlsplit(origin).netloc):
+                    self._json(403, {"error": "bad origin"})
+                    return False
+                ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                if ctype != "application/json":
+                    self._json(415, {"error": "application/json required"})
+                    return False
+            return True
+
         def _send(self, code, body, content_type):
             try:
                 self.send_response(code)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Frame-Options", "DENY")
+                self.send_header("Content-Security-Policy", _CSP)
+                self.send_header("X-Content-Type-Options", "nosniff")
                 self.end_headers()
                 self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError):
@@ -1776,6 +1850,8 @@ def make_server(session, port=0, bind=DEFAULT_BIND):
             self._send(200, text.encode(), "text/html; charset=utf-8")
 
         def do_GET(self):
+            if not self._guard(post=False):
+                return
             path = urllib.parse.urlsplit(self.path).path
             if path == "/":
                 self._html(page(lang))
@@ -1814,9 +1890,20 @@ def make_server(session, port=0, bind=DEFAULT_BIND):
             self._send(200, body, "image/jpeg")
 
         def do_POST(self):
+            if not self._guard(post=True):
+                return
             path = urllib.parse.urlsplit(self.path).path
             try:
-                length = int(self.headers.get("Content-Length") or 0)
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    length = -1
+                if length < 0:
+                    self._json(400, {"error": "bad Content-Length"})
+                    return
+                if length > MAX_BODY:
+                    self._json(413, {"error": "body too large"})
+                    return
                 payload = json.loads(self.rfile.read(length) or b"{}") if length else {}
                 if not isinstance(payload, dict):
                     raise ValueError("payload must be an object")
@@ -1832,6 +1919,9 @@ def make_server(session, port=0, bind=DEFAULT_BIND):
                     return
             except (KeyError, ValueError, TypeError) as exc:
                 self._json(400, {"error": type(exc).__name__})
+                return
+            except TimeoutError:
+                self._json(408, {"error": "request timeout"})
                 return
             except OSError as exc:
                 log.warning("label write failed: %s", exc)

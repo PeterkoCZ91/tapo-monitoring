@@ -32,6 +32,8 @@ from collections import deque
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import scorer
+
 log = logging.getLogger(__name__)
 
 SOURCE_ID_LENGTHS = range(16, 65)
@@ -652,12 +654,10 @@ def is_decode_artifact(jpeg_bytes):
     frames are textured or off 128 and never match. Anything undecodable is not an artifact.
     """
     try:
-        import io
 
         import numpy as np
-        from PIL import Image
 
-        img = Image.open(io.BytesIO(jpeg_bytes))
+        img = open_image(jpeg_bytes)
         img.draft("L", (320, 320))
         luma = np.asarray(img.convert("L").resize(ARTIFACT_SIZE), dtype=np.float32)
     except Exception:  # noqa: BLE001 - the scorer itself reports undecodable input
@@ -689,11 +689,9 @@ def preprocess_image(img, input_size):
 
 def preprocess(jpeg_bytes, input_size):
     """JPEG bytes -> (1,3,S,S) float32 letterboxed BGR array + used ratio."""
-    import io
 
-    from PIL import Image
 
-    img = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
+    img = open_image(jpeg_bytes).convert("RGB")
     return preprocess_image(img, input_size)
 
 
@@ -811,10 +809,8 @@ def build_score_fn(model_path, input_size=416, decoder=None):
     xyxy in original pixels) for the winning person detection, so a caller can
     crop/zoom to it; ``box`` is ``None`` when no person.
     """
-    import io
 
     import onnxruntime as ort
-    from PIL import Image
 
     from . import detectors
 
@@ -831,7 +827,7 @@ def build_score_fn(model_path, input_size=416, decoder=None):
         return [box[0] + x0, box[1] + y0, box[2] + x0, box[3] + y0]
 
     def score_fn(jpeg_bytes, tiles=1):
-        img = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
+        img = open_image(jpeg_bytes).convert("RGB")
         rects = tile_rects(img.width, img.height, tiles)
         results = []
         for (x0, y0, x1, y1) in rects:
@@ -907,6 +903,32 @@ SHADOW_MISSED_PRIMARY = 0.10   # primary this blind + shadow >= SHADOW_LOW -> ke
 SHADOW_MISSED_MAX = 1500
 SHADOW_MISSED_GAP = 30.0       # at most one missed/ image per source per this many seconds
 SHADOW_WARN_SECONDS = 60.0
+MISSED_SOURCES_MAX = 256       # per-source rate-limit entries kept; the oldest go first
+MAX_TILES = 4                  # ceiling for the ``tiles`` query parameter (grid is tiles x tiles)
+MAX_BODY_BYTES = 32 * 1024 * 1024
+MAX_IMAGE_PIXELS = 64_000_000   # decoded size cap: a small body can still expand to gigabytes
+try:    # Pillow's own bomb guard (warns at this size, errors at twice it)
+    from PIL import Image as _PILImage
+    _PILImage.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+except ImportError:     # pragma: no cover - the service needs Pillow to score anyway
+    pass
+
+
+class ImageTooLarge(ValueError):
+    """The JPEG header declares more than ``MAX_IMAGE_PIXELS`` pixels."""
+
+
+def open_image(jpeg_bytes):
+    """``Image.open`` on JPEG bytes, refusing oversized images before any pixel decode."""
+    import io
+
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(jpeg_bytes))
+    if img.width * img.height > MAX_IMAGE_PIXELS:
+        raise ImageTooLarge(f"{img.width}x{img.height} exceeds {MAX_IMAGE_PIXELS} pixels")
+    return img
+REQUEST_TIMEOUT = 30.0         # socket timeout per request: stalled uploads are dropped
 ENSEMBLE_LOW = 0.12
 ENSEMBLE_HIGH = 0.45
 ENSEMBLE_BAND = 0.10
@@ -964,10 +986,8 @@ def load_face_fn(env=None):
                                   threads=load_threads(env))
 
     def face_fn(jpeg_bytes):
-        import io
 
-        from PIL import Image
-        return detector.detect(Image.open(io.BytesIO(jpeg_bytes)))
+        return detector.detect(open_image(jpeg_bytes))
 
     return face_fn
 
@@ -1059,7 +1079,8 @@ def _shadow_call(url, token, body, tiles, timeout):
     headers = {"Content-Type": "image/jpeg"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    req = scorer.keep_auth_off_redirects(
+        urllib.request.Request(url, data=body, headers=headers, method="POST"))
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read())
@@ -1160,6 +1181,16 @@ def combine_ensemble(config, primary, shadow):
     p = float(primary["person"])
     s = float(shadow["person"])
     reply = dict(primary)
+    shadow_scores = shadow.get("person_scores")
+    if isinstance(shadow_scores, list):
+        try:
+            for x in shadow_scores:
+                float(x)
+        except (TypeError, ValueError):
+            # A malformed shadow list must not kill the reply: degrade to the primary.
+            reply["ensemble"] = {"mode": config.mode, "primary": round(p, 4),
+                                 "shadow": round(s, 4), "used": "primary"}
+            return reply, "primary"
     marginal = config.trust <= s < config.host
     if s >= config.host or marginal:
         used = "shadow_marginal" if marginal else "shadow"
@@ -1407,6 +1438,8 @@ class ShadowRunner:
                 if self._save_disagreement(body, primary_person, shadow_person,
                                            "missed", self.config.missed_max):
                     self._missed_last[source_id] = now
+                    while len(self._missed_last) > MISSED_SOURCES_MAX:
+                        self._missed_last.pop(next(iter(self._missed_last)))
                     self._count("missed")
 
     def _warn(self, error):
@@ -1562,6 +1595,8 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
     gate = EnsembleGate(ensemble, shadow) if ensemble is not None else None
 
     class Handler(BaseHTTPRequestHandler):
+        timeout = REQUEST_TIMEOUT   # a stalled upload must not pin a handler thread forever
+
         def _reply(self, code, payload):
             body = json.dumps(payload).encode()
             try:
@@ -1615,7 +1650,7 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
                 return
             query = parse_qs(parsed.query)
             try:
-                tiles = max(1, int(query.get("tiles", ["1"])[0]))
+                tiles = min(MAX_TILES, max(1, int(query.get("tiles", ["1"])[0])))
             except (TypeError, ValueError):
                 tiles = 1
             want_faces = face_fn is not None and query.get("faces", ["0"])[0] == "1"
@@ -1624,14 +1659,27 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
             # or stalled upload shows up in the latency metrics.
             metrics.begin(tiles, source_id)
             request_started = time.monotonic()
+            # metrics.finish() must run exactly once whatever happens while the body is read.
             try:
-                length = max(0, int(self.headers.get("Content-Length", 0)))
+                length = int(self.headers.get("Content-Length", 0))
             except (TypeError, ValueError):
-                length = 0
+                length = -1
+            if length < 0 or length > MAX_BODY_BYTES:
+                code, reason = (413, "body_too_large") if length > 0 else (400, "bad_length")
+                try:
+                    self._reply(code, {"error": reason.replace("_", " ")})
+                finally:
+                    metrics.finish(time.monotonic() - request_started, 0.0, False,
+                                   failure_reason=reason, source_id=source_id)
+                return
             try:
                 body = self.rfile.read(length)
             except OSError:         # reset or timed-out upload: same as a short one
                 body = b""
+            except BaseException:
+                metrics.finish(time.monotonic() - request_started, 0.0, False,
+                               failure_reason="body_read_error", source_id=source_id)
+                raise
             if len(body) != length:
                 log.warning("scoring failed: short_body (got=%d, content_length=%d, source=%s)",
                             len(body), length, source_id or "-")
@@ -1642,6 +1690,17 @@ def make_server(score_fn, port=8765, metrics_file=None, metrics_persist_seconds=
                     metrics.finish(now - request_started, 0.0, False,
                                    failure_reason="short_body", source_id=source_id)
                 return
+            try:
+                open_image(body)
+            except ImageTooLarge:
+                try:
+                    self._reply(413, {"error": "image too large"})
+                finally:
+                    metrics.finish(time.monotonic() - request_started, 0.0, False,
+                                   failure_reason="image_too_large", source_id=source_id)
+                return
+            except Exception:  # noqa: BLE001 - undecodable bodies keep their usual path
+                pass
             score_started = time.monotonic()
             ok = False
             result = None

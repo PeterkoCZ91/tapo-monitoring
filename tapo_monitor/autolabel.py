@@ -19,11 +19,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
 
 from . import labeling
+
+log = logging.getLogger(__name__)
 
 AGREE_HIGH = 0.65       # both at or above: a person
 AGREE_LOW = 0.20        # both below: nobody (production side capped at the gray zone)
@@ -46,6 +49,15 @@ def decide(production, teacher):
     return None
 
 
+def _stamp(path):
+    """``(mtime_ns, size)`` of a file, None when it does not exist."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
 def _append(path, record):
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -60,9 +72,23 @@ def run(dataset_dir, score_fn, *, model, now=None, progress=None):
     now = time.time() if now is None else now
     frames = labeling.load_frames(dataset_dir)
     labeled = labeling.latest_labels(dataset_dir)
-    cache = labeling.teacher_scores(dataset_dir)
+    # Only scores of THIS teacher count: a cache from another model must not label frames.
+    cache, seen, legacy = {}, set(), 0
+    for rec in labeling._read_jsonl(os.path.join(dataset_dir, labeling.TEACHER_NAME)):
+        sha, person = rec.get("sha256"), labeling._number(rec.get("person"))
+        if not isinstance(sha, str) or person is None:
+            continue
+        seen.add((sha, rec.get("model")))
+        if rec.get("model") == model:
+            cache[sha] = person
+        elif rec.get("model") is None:
+            legacy += 1
+    if legacy:
+        log.warning("teacher cache: %d rows without a model field ignored (rescoring with %s)",
+                    legacy, model)
     teacher_path = os.path.join(dataset_dir, labeling.TEACHER_NAME)
     labels_path = os.path.join(dataset_dir, labeling.LABELS_NAME)
+    fresh, last_stamp = labeled, None
     summary = {"scored": 0, "cached": 0, "auto_person": 0, "auto_no_person": 0,
                "for_human": 0}
     for index, frame in enumerate(frames, 1):
@@ -77,12 +103,22 @@ def run(dataset_dir, score_fn, *, model, now=None, progress=None):
                 continue
             summary["scored"] += 1
             cache[frame.sha256] = teacher
-            _append(teacher_path, {"sha256": frame.sha256, "path": frame.path,
-                                   "model": model, "person": round(teacher, 4),
-                                   "scored_at": now})
+            if (frame.sha256, model) not in seen:
+                seen.add((frame.sha256, model))
+                _append(teacher_path, {"sha256": frame.sha256, "path": frame.path,
+                                       "model": model, "person": round(teacher, 4),
+                                       "scored_at": now})
         if progress is not None and index % 50 == 0:
             progress(index, len(frames))
         if frame.sha256 in labeled:
+            continue
+        # A person may have labeled this frame since the run began: look again just
+        # before appending, so their label is never shadowed by an automatic one.
+        # (re-read only when the file changed, not once per frame)
+        stamp = _stamp(labels_path)
+        if stamp != last_stamp:
+            fresh, last_stamp = labeling.latest_labels(dataset_dir), stamp
+        if frame.sha256 in fresh:
             continue
         label = decide(frame.score, teacher)
         if label is None:

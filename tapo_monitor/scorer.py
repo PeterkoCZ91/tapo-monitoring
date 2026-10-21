@@ -48,6 +48,20 @@ def resolve_token(token_env, env=None):
     return (env.get(token_env) or "").strip() or None
 
 
+def keep_auth_off_redirects(req):
+    """Make ``req``'s ``Authorization`` header private to the original URL. Mutates ``req``.
+
+    urllib's redirect handler copies ``req.headers`` to the redirect target, so a bearer
+    token set the normal way would be replayed to whatever host a (compromised or
+    misconfigured) scorer redirects to. Headers added with ``add_unredirected_header`` are
+    sent on the first request only and never copied by the handler.
+    """
+    for name in list(req.headers):
+        if name.lower() == "authorization":
+            req.add_unredirected_header("Authorization", req.headers.pop(name))
+    return req
+
+
 def auth_headers(token):
     """``{"Authorization": "Bearer <token>"}`` for a token, else ``{}``."""
     return {"Authorization": f"Bearer {token}"} if token else {}
@@ -184,6 +198,7 @@ def _score_attempt(url, image_path, timeout, tiles, *, source_id=None, ignore_zo
             headers["X-Tapo-Source-ID"] = normalized_source_id
     headers.update(auth_headers(token))
     req = urllib.request.Request(url, data=body, headers=headers)
+    keep_auth_off_redirects(req)
     try:
         resp = urllib.request.urlopen(req, timeout=timeout)
         try:
@@ -289,11 +304,17 @@ class ScorerPool:
             if self.fails < FAIL_THRESHOLD:
                 return
             self.fails = 0        # a dead fleet is re-probed after N more failures, not per call
-            for step in range(1, len(self.urls)):
-                candidate = (self.index + step) % len(self.urls)
-                if _health_ok(self.urls[candidate]):
-                    self._switch(candidate, "unreachable")
-                    return
+            index = self.index
+            others = [(step, self.urls[(index + step) % len(self.urls)])
+                      for step in range(1, len(self.urls))]
+        # Health probes block on the network: never hold the lock (and every other
+        # request's record()) while they run.
+        for step, candidate_url in others:
+            if _health_ok(candidate_url):
+                with self.lock:
+                    if self.index == index:      # nobody switched while we probed
+                        self._switch((index + step) % len(self.urls), "unreachable")
+                return
 
     def maybe_return_to_primary(self):
         """Back to the first candidate once its /health answers; checked every 5 minutes."""

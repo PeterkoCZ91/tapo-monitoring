@@ -106,8 +106,11 @@ def select_frames(paths, keep=None, limit=MAX_IMAGES):
     if keep in paths:
         ki = paths.index(keep)
         if ki not in idx:
-            nearest = min(range(len(idx)), key=lambda j: abs(idx[j] - ki))
-            idx[nearest] = ki
+            # Never displace the first or last frame: swap the nearest inner one.
+            inner = [j for j in range(len(idx)) if 0 < idx[j] < len(paths) - 1]
+            if inner:
+                nearest = min(inner, key=lambda j: abs(idx[j] - ki))
+                idx[nearest] = ki
             idx = sorted(set(idx))
     return [paths[i] for i in idx]
 
@@ -118,7 +121,10 @@ def _content_to_description(content):
     desc = (data.get("description") or "").strip()
     animal = data.get("animal")
     animal = animal.strip() if isinstance(animal, str) else ""
-    if data.get("person"):
+    person = data.get("person")
+    if isinstance(person, str):
+        person = person.strip().lower() in ("true", "yes", "1")
+    if person:
         return desc or "person"          # blank desc must not read as "empty scene"
     if animal:
         return desc or animal

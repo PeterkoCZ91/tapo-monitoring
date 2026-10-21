@@ -162,12 +162,33 @@ def send_token(url):
     return urlparse(url).hostname not in ("127.0.0.1", "localhost", "::1")
 
 
-def score_jpeg(url, path, token=None, force_token=False, timeout=60):
+class _NoAuthRedirect(urllib.request.HTTPRedirectHandler):
+    """Never re-send the bearer token to a redirect target: drop the header on redirect."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            for h in list(new.headers):
+                if h.lower() == "authorization":
+                    del new.headers[h]
+            for h in list(new.unredirected_hdrs):
+                if h.lower() == "authorization":
+                    del new.unredirected_hdrs[h]
+        return new
+
+
+_OPENER = urllib.request.build_opener(_NoAuthRedirect)
+
+
+def score_jpeg(url, path, token=None, force_token=False, timeout=60, allow_insecure=False):
     headers = {"Content-Type": "image/jpeg"}
     if token and (force_token or send_token(url)):
+        if urlparse(url).scheme != "https" and send_token(url) and not allow_insecure:
+            raise ValueError(f"refusing to send the token over plain http to {url} "
+                             "(use https or --allow-insecure)")
         headers["Authorization"] = "Bearer " + token
     req = urllib.request.Request(url, data=Path(path).read_bytes(), headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _OPENER.open(req, timeout=timeout) as resp:
         return float(json.load(resp)["person"])
 
 
@@ -285,7 +306,7 @@ def _cmd_score(a):
     token = Path(a.token_file).read_text().strip() if a.token_file else None
     scorers = {}
     for name, url in parse_scorers(a.scorer):
-        scorers[name] = (lambda u: lambda p: score_jpeg(u, p, token))(url)
+        scorers[name] = (lambda u: lambda p: score_jpeg(u, p, token, allow_insecure=a.allow_insecure))(url)
     frames_dir = Path(a.frames_dir)
     meta = []
     for w in plan:
@@ -335,6 +356,8 @@ def main(argv=None):
     p.add_argument("--scorer", action="append", required=True, metavar="[NAME=]URL",
                    help="scorer /score URL; repeat for a second model (named yolox, rfdetr in order)")
     p.add_argument("--token-file", help="bearer token, sent to non-loopback scorers only")
+    p.add_argument("--allow-insecure", action="store_true",
+                   help="send the token to a non-loopback http:// scorer anyway")
     p.add_argument("--every", type=int, default=5, help="seconds between frames")
     p.add_argument("--width", type=int, default=0, help="scale frames to this width (0 = native)")
     p.add_argument("--max-rate", type=float, default=2.0, help="frames per second sent to a scorer")
