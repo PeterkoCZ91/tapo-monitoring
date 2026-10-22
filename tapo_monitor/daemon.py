@@ -1024,6 +1024,16 @@ def resolve_secrets(app: AppConfig) -> dict:
         "telegram_token": env(app.telegram, "token_env"),
         "telegram_chat": env(app.telegram, "chat_id_env"),
         "groq_key": env(app.groq, "api_key_env"),
+        # The vision endpoint's settings, so any OpenAI-compatible server can
+        # answer: a local llama.cpp/vLLM/Ollama keeps the frames on the LAN.
+        "vision": {
+            "base_url": (app.groq or {}).get("base_url") or enrich.DEFAULT_BASE_URL,
+            "model": (app.groq or {}).get("model") or enrich.DEFAULT_MODEL,
+            "prompt": (app.groq or {}).get("prompt") or enrich.VISION_PROMPT,
+            "max_tokens": int((app.groq or {}).get("max_tokens") or 160),
+            "timeout": int((app.groq or {}).get("timeout") or 20),
+            "json_mode": bool((app.groq or {}).get("json_mode", True)),
+        },
         "face_names": enrich.parse_face_names(env(app.faces, "names_env")),
     }
 
@@ -2165,7 +2175,7 @@ def _crop_too_small(cfg, crop, floor=None):
     return bool(width) and width < floor
 
 
-def _caption_describe(cfg, groq_key, images):
+def _caption_describe(cfg, groq_key, images, vision=None):
     """Caption-only Groq for already-approved frame(s); never blocks a send.
 
     ``images`` may be a single path or a chronological sequence — a sequence lets the
@@ -2173,7 +2183,7 @@ def _caption_describe(cfg, groq_key, images):
     """
     if not cfg.enrich.groq:
         return ""
-    desc = enrich.groq_describe(groq_key, images)
+    desc = enrich.groq_describe(groq_key, images, **(vision or {}))
     return "" if notify.is_empty_scene(desc) else desc
 
 
@@ -2493,6 +2503,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             cam, cfg, last_seen,
             now=now,
             groq_key=secrets["groq_key"],
+            vision=secrets.get("vision"),
             telegram_token=secrets["telegram_token"],
             telegram_chat=secrets["telegram_chat"],
             snapshot=live_snapshot,
@@ -3043,7 +3054,7 @@ def _deliver_hub_frames(cfg, state, clip, event, etype, image, clip_extra, *, sc
                                 threshold=cfg.scorer.threshold if s is not None else None,
                                 extra=clip_extra)
             return
-        description = _caption_describe(cfg, secrets["groq_key"], image)
+        description = _caption_describe(cfg, secrets["groq_key"], image, secrets.get("vision"))
         caption = notify.build_caption(
             monitor.TYPE_EMOJI.get(etype, "👁"), time_str(clip),
             description=description or None, score=s, camera=notify.caption_camera(cfg),
@@ -3407,7 +3418,7 @@ class _SdPick:
 
 
 def _sd_followup_job(cfg, event, etype, fetch, start, span, out_dir, score, *,
-                     prescore, dense_kw, panlimit_windows, groq_key):
+                     prescore, dense_kw, panlimit_windows, groq_key, vision=None):
     """Read one follow-up window and pick its frame. Runs on the SD worker's thread.
 
     Everything it needs arrives as a value (the pan-limit windows as a copy): it must not
@@ -3452,7 +3463,8 @@ def _sd_followup_job(cfg, event, etype, fetch, start, span, out_dir, score, *,
             return pick
         # Without a local scorer, retain the caption-based/raw selection.
         for frame in eligible_frames:
-            desc = enrich.groq_describe(groq_key, frame) if cfg.enrich.groq else ""
+            desc = (enrich.groq_describe(groq_key, frame, **(vision or {}))
+                    if cfg.enrich.groq else "")
             # Raw mode (groq off): no subject arbiter -> first frame wins as-is.
             if not cfg.enrich.groq or not notify.is_empty_scene(desc):
                 pick.image, pick.description = frame, desc   # subject found in this frame
@@ -3601,7 +3613,8 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
             prescore=score is not None and fetch is recclip.fetch_recording_frames,
             dense_kw=dense_kw,
             panlimit_windows=list(state.pan_limit_out_of_bounds.get(cfg.name, ())),
-            groq_key=secrets.get("groq_key"))
+            groq_key=secrets.get("groq_key"),
+            vision=secrets.get("vision"))
         remaining.append(entry)
         worker.submit(entry["camera"], id(entry), run, context=job)
         collect()                     # an inline worker has the answer already
@@ -3899,7 +3912,7 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
             # came from SD; the RTSP fallback has no sequence to offer.
             images = (enrich.select_frames(frames, keep=image)
                       if image in frames else image)
-            description = _caption_describe(cfg, secrets["groq_key"], images)
+            description = _caption_describe(cfg, secrets["groq_key"], images, secrets.get("vision"))
         label = enrich.face_label(monitor.face_ids(event), secrets.get("face_names"))
         if (app.faces or {}).get("ignore_known") and etype != "motion" and monitor.has_known_face(event, secrets.get("face_names")):
             log.info("skip %s: known face present [sd] (ignored: %s)", etype, label)
@@ -4012,7 +4025,7 @@ def _send_held_frame(app, cfg, state, group, *, now, secrets, time_str, reason, 
     path = group["hold_path"]
     s = sampler.held_score(group)
     _, on_alert = alert_gate(state, cfg.name, app.alerts.cooldown, now)
-    description = _caption_describe(cfg, secrets["groq_key"], path)
+    description = _caption_describe(cfg, secrets["groq_key"], path, secrets.get("vision"))
     caption = notify.build_caption(
         monitor.TYPE_EMOJI.get("motion", "👁"), time_str(group["event"]),
         description=description or None, score=s, lens=group.get("hold_lens"),
