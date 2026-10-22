@@ -629,7 +629,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                                     threshold=cfg.scorer.threshold, reason="below_threshold")
                         sample_drop(cfg, image, etype, s, "live", event)
                     else:
-                        log.info("drop %s: Groq reports empty scene", etype)
+                        log.info("drop %s: the vision model reports an empty scene", etype)
                         audit_event(cfg, event, etype, "live", "drop", reason="empty")
                     _observe(observe, event, etype, False)
                     return
