@@ -330,6 +330,7 @@ TYPE_EMOJI = {"person": "👤", "vehicle": "🚗", "pet": "🐾", "tamper": "⚠
 
 
 def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_chat,
+                vision=None,
                 snapshot, time_str, can_alert=None, on_alert=None, face_names=None,
                 ignore_known=False,
                 defer=None, score=None, observe=None, poll_observe=None,
@@ -522,7 +523,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 else:
                     empty = s < cfg.scorer.threshold
             elif cfg.enrich.groq:
-                description = enrich.groq_describe(groq_key, image)
+                description = enrich.groq_describe(groq_key, image, **(vision or {}))
                 empty = notify.is_empty_scene(description)
             else:
                 # Groq disabled = raw mode: there is no arbiter to declare a scene
@@ -690,7 +691,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             if score is not None and cfg.enrich.groq and not description:
                 # Caption-only Groq for an already-approved frame; the empty marker
                 # would be a misleading caption, not a veto.
-                description = enrich.groq_describe(groq_key, image)
+                description = enrich.groq_describe(groq_key, image, **(vision or {}))
                 if notify.is_empty_scene(description):
                     description = ""
             label = enrich.face_label(face_ids(event), face_names)

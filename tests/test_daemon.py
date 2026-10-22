@@ -10,6 +10,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tapo_monitor import enrich
 from tapo_monitor import config as cfg
 from tapo_monitor import daemon, notify, runtime_state, snapshot
 from tests.conftest import FakeResponse as _Resp
@@ -1618,7 +1619,11 @@ def test_resolve_secrets_reads_env(monkeypatch):
     })
     secrets = daemon.resolve_secrets(app)
     assert secrets == {"telegram_token": "tok123", "telegram_chat": "555",
-                       "groq_key": "gk789", "face_names": {12: "alice"}}
+                       "groq_key": "gk789", "face_names": {12: "alice"},
+                       "vision": {"base_url": enrich.DEFAULT_BASE_URL,
+                                  "model": enrich.DEFAULT_MODEL,
+                                  "prompt": enrich.VISION_PROMPT,
+                                  "max_tokens": 160, "timeout": 20, "json_mode": True}}
 
 
 def test_resolve_secrets_missing_env_is_empty(monkeypatch):
@@ -1630,7 +1635,11 @@ def test_resolve_secrets_missing_env_is_empty(monkeypatch):
     })
     secrets = daemon.resolve_secrets(app)
     assert secrets == {"telegram_token": "", "telegram_chat": "", "groq_key": "",
-                       "face_names": {}}
+                       "face_names": {},
+                       "vision": {"base_url": enrich.DEFAULT_BASE_URL,
+                                  "model": enrich.DEFAULT_MODEL,
+                                  "prompt": enrich.VISION_PROMPT,
+                                  "max_tokens": 160, "timeout": 20, "json_mode": True}}
 
 
 # ── run_monitor_pass (injected deps, fake camera) ────────────────────────────

@@ -22,6 +22,10 @@ VISION_PROMPT = (
 
 DEFAULT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
+# The OpenAI-compatible base URL. The default is Groq's; point it at a local
+# llama.cpp / vLLM / Ollama server to keep the frames on the LAN.
+DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
+
 # The marker callers (notify.is_empty_scene, the SD arbiter loop) test for; predates
 # JSON mode and stays the return contract for "nothing of interest".
 EMPTY_SCENE = "empty scene"
@@ -132,7 +136,8 @@ def _content_to_description(content):
 
 
 def groq_describe(api_key, images, prompt=VISION_PROMPT, model=DEFAULT_MODEL,
-                  max_tokens=160, timeout=20):
+                  max_tokens=160, timeout=20, base_url=DEFAULT_BASE_URL,
+                  json_mode=True, user_agent=USER_AGENT):
     """Describe one frame or a chronological frame sequence via Groq vision.
 
     ``images`` is a path or a list of paths (thinned to ``MAX_IMAGES``). The request
@@ -156,23 +161,34 @@ def groq_describe(api_key, images, prompt=VISION_PROMPT, model=DEFAULT_MODEL,
                 b64 = base64.b64encode(f.read()).decode()
             content.append({"type": "image_url",
                             "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-        payload = json.dumps({
+        payload = {
             "model": model,
             "messages": [{"role": "user", "content": content}],
             "max_tokens": max_tokens,
-            "response_format": {"type": "json_object"},
-        }).encode()
+        }
+        if json_mode:
+            # The contract is a JSON object; an endpoint that does not support
+            # response_format runs in text mode instead.
+            payload["response_format"] = {"type": "json_object"}
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": user_agent,
+        }
+        if api_key:
+            # A local server needs no key, and some reject an empty bearer.
+            headers["Authorization"] = f"Bearer {api_key}"
         req = urllib.request.Request(
-            "https://api.groq.com/openai/v1/chat/completions",
-            data=payload,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "User-Agent": USER_AGENT,
-            },
+            base_url.rstrip("/") + "/chat/completions",
+            data=json.dumps(payload).encode(),
+            headers=headers,
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             reply = json.load(resp)["choices"][0]["message"]["content"]
+        if not json_mode:
+            # Text mode: the prompt carries the marker, so the answer is the
+            # description. "empty scene" (or a blank) still reads as empty.
+            text = str(reply or "").strip()
+            return text
         return _content_to_description(reply)
     except Exception:
         return ""
