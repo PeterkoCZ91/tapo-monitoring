@@ -9,9 +9,12 @@ into the daemon pass as the opt-in ``lastalarm`` detection source.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import OrderedDict
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 ALARM_PARAMS = {"system": {"name": ["last_alarm_info"]}}
 # An alarm older than this is "the last one that ever happened", not news.
@@ -110,11 +113,12 @@ def dedupe(events: list[dict], seen: SeenAlarms) -> list[dict]:
 
 def events_without_sd(client: Any, last_seen: float, now: float | None = None,
                       max_age_s: float = DEFAULT_MAX_AGE_S,
-                      reraise: Any = None) -> list[dict]:
+                      reraise: Any = None, on_error: Any = None) -> list[dict]:
     """Poll ``client.getLastAlarmInfo`` and return events newer than ``last_seen``.
 
     Never raises: any camera/client error yields ``[]``, except one for which the optional
-    ``reraise(exc)`` predicate is true (the daemon passes the auth-failure test).
+    ``reraise(exc)`` predicate is true (the daemon passes the auth-failure test). A
+    swallowed error is handed to the optional ``on_error(exc)`` so it can be logged.
     """
     try:
         call = getattr(client, "executeFunction", None)
@@ -125,6 +129,8 @@ def events_without_sd(client: Any, last_seen: float, now: float | None = None,
     except Exception as exc:  # noqa: BLE001 - a flaky camera must not break the poll loop
         if reraise is not None and reraise(exc):
             raise
+        if on_error is not None:
+            on_error(exc)
         return []
     events = parse_last_alarm(response, now=now, max_age_s=max_age_s)
     return [e for e in events if e["start_time"] > last_seen]
@@ -144,13 +150,16 @@ class LastAlarmClient:
     One instance lives per camera (with one :class:`SeenAlarms`); the daemon rebinds
     ``cam`` / ``last_seen`` each pass. Calls closer than ``min_interval`` return ``[]``
     without touching the camera (nothing is lost: the alarm stays "last" on the camera).
-    Authentication errors propagate so the daemon's observer path sees them.
+    Authentication errors propagate so the daemon's observer path sees them; any other
+    error is logged once per streak (with the count when the camera answers again).
     """
 
     def __init__(self, cam: Any, seen: SeenAlarms, last_seen: float = 0,
                  min_interval: float = MIN_CALL_INTERVAL_S,
-                 clock: Any = time.monotonic) -> None:
+                 clock: Any = time.monotonic, name: str = "") -> None:
         self.cam = cam
+        self.name = name
+        self.failures = 0
         self.seen = seen
         self.last_seen = last_seen
         self.min_interval = min_interval
@@ -162,7 +171,19 @@ class LastAlarmClient:
         if self._last_call is not None and t - self._last_call < self.min_interval:
             return []
         self._last_call = t
-        events = events_without_sd(self.cam, self.last_seen, reraise=_is_auth_error)
+        failed: list[BaseException] = []
+        events = events_without_sd(self.cam, self.last_seen, reraise=_is_auth_error,
+                                   on_error=failed.append)
+        if failed:
+            self.failures += 1
+            if self.failures == 1:
+                log.warning("getLastAlarmInfo %s failed: %s: %s", self.name or "?",
+                            type(failed[0]).__name__, failed[0])
+            return []
+        if self.failures:
+            log.info("getLastAlarmInfo %s recovered after %d failure(s)",
+                     self.name or "?", self.failures)
+            self.failures = 0
         return dedupe(events, self.seen)
 
     def __getattr__(self, name: str) -> Any:

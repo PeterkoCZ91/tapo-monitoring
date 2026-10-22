@@ -139,3 +139,15 @@ def test_motion_event_type_is_kept_for_the_classifier():
     wrap = alarminfo.LastAlarmClient(cam, alarminfo.SeenAlarms())
     (event,) = wrap.getEvents()
     assert event["event_type"] == "motion"
+
+
+def test_ordinary_error_is_logged_once_per_streak_with_recovery(caplog):
+    cam = _AlarmCam([RuntimeError("-40109"), RuntimeError("-40109"), _resp(int(time.time()))])
+    wrap = alarminfo.LastAlarmClient(cam, alarminfo.SeenAlarms(), min_interval=0, name="c545d")
+    with caplog.at_level("INFO", logger="tapo_monitor.alarminfo"):
+        assert wrap.getEvents() == []
+        assert wrap.getEvents() == []
+        assert len(wrap.getEvents()) == 1
+    lines = [r.getMessage() for r in caplog.records]
+    assert lines == ["getLastAlarmInfo c545d failed: RuntimeError: -40109",
+                     "getLastAlarmInfo c545d recovered after 2 failure(s)"]

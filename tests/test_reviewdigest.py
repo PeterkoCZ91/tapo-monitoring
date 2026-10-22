@@ -1063,3 +1063,11 @@ def test_normal_boundary_safety_hold_is_information_and_other_drift_remains_degr
     assert 'endstop safety hold (boundary)' in '\n'.join(lines)
     control['drift'] = 1
     assert 'control drift' in reviewdigest.fleet_lines(_control_snapshot(control))[0]
+
+
+def test_degraded_layer_without_drift_names_its_cause_not_control_drift():
+    control = {'status': 'degraded', 'drift': 0, 'causes': ['storage'],
+               'age_s': 20, 'max_age_s': 600}
+    lines = reviewdigest.fleet_lines(_control_snapshot(control))
+    assert 'Fleet degraded' in lines[0] and 'front degraded (storage)' in lines[0]
+    assert 'control drift' not in '\n'.join(lines)

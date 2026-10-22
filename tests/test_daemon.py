@@ -5882,6 +5882,25 @@ def test_digital_twin_reuses_client_and_respects_probe_interval():
     assert state.twin_fleet["a"]["drift"]["counts"]["drift"] == 0
 
 
+@pytest.mark.parametrize("sources, expected", [(["lastalarm"], "ok"), (["getevents"], "degraded")])
+def test_digital_twin_empty_card_slot_is_ok_only_for_a_card_less_camera(sources, expected):
+    # 2026-10-21: a C545D without a card, on the lastalarm source by design, kept every
+    # digest orange as "control drift / degraded" because its slot reported offline.
+    app = cfg.load_config_from_dict({
+        "observability": {"digital_twin": True, "probe_interval": 60},
+        "cameras": [{"name": "a", "host": "203.0.113.10", "detection": {"sources": sources}}],
+    })
+    state = _twin_state()
+    snapshot = _twin_snapshot()
+    snapshot["groups"]["storage"]["sd_card"]["value"] = [
+        {"hd_info_1": {"detect_status": "offline", "status": "offline", "free_space": "0B"}}]
+
+    daemon.process_digital_twin(app, {"a": object()}, state, now=100, secrets={},
+                                probe=lambda client: snapshot)
+
+    assert state.twin_fleet["a"]["health"]["layers"]["storage"] == expected
+
+
 def test_digital_twin_deduplicates_drift_and_reports_recovery(monkeypatch):
     app = _twin_app(drift_alerts=True)
     state = _twin_state()

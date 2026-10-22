@@ -2165,7 +2165,8 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             # one SeenAlarms per camera, so pacing and dedupe survive across passes).
             wrapper = state.lastalarm_clients.get(cfg.name)
             if wrapper is None:
-                wrapper = alarminfo.LastAlarmClient(cam, alarminfo.SeenAlarms())
+                wrapper = alarminfo.LastAlarmClient(cam, alarminfo.SeenAlarms(),
+                                                    name=cfg.name)
                 state.lastalarm_clients[cfg.name] = wrapper
             wrapper.cam = cam
             wrapper.last_seen = last_seen
@@ -4608,6 +4609,11 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
                 events=state.events_reachable.get(cfg.name),
                 rtsp=state.rtsp_reachable.get(cfg.name),
             )
+            if (layers.get("storage") == "degraded" and "lastalarm" in cfg.detection.sources
+                    and capabilities.sd_card_absent(snapshot_data)):
+                # A card-less camera runs on getLastAlarmInfo by design; its empty slot
+                # is configuration, not a fault (the recorder check below still applies).
+                layers["storage"] = "ok"
             recorder = state.recorder_health.get(
                 cfg.name, {"status": "unknown", "reason": "disabled"}
             )
@@ -4940,6 +4946,10 @@ def fleet_health_snapshot(app: AppConfig, state: MonitorState, *, now,
                     "max_age_s": max(2 * app.observability.probe_interval,
                                      app.alerts.outage_threshold),
                 }
+                causes = (observed_health.get("causes")
+                          if isinstance(observed_health, Mapping) else None)
+                if causes:
+                    control_view["causes"] = list(causes)
                 inhibition = observed.get("tracking_inhibition")
                 if isinstance(inhibition, Mapping) and inhibition.get("active") is True:
                     control_view["tracking_inhibition"] = dict(inhibition)

@@ -279,8 +279,12 @@ def fleet_lines(health):
                     detail.append(f"{name} endstop safety hold ({reason})")
         if not fresh:
             unknown.append(name)
-        elif control.get("status") not in (None, "unknown", "ok") or control.get("drift", 0):
+        elif control.get("drift", 0):
             problems.append(f"{name} control drift / {control.get('status', 'unknown')}")
+        elif control.get("status") not in (None, "unknown", "ok"):
+            causes = control.get("causes") or ()
+            suffix = f" ({', '.join(str(c) for c in causes)})" if causes else ""
+            problems.append(f"{name} {control.get('status')}{suffix}")
         elif control.get("status") != "ok" or control.get("drift") != 0:
             unknown.append(name)
     if unknown:

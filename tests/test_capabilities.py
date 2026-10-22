@@ -182,3 +182,18 @@ def test_derive_health_marks_storage_error_without_poisoning_api():
     assert health["api"] == "ok"
     assert health["storage"] == "degraded"
     assert health["network"] == health["events"] == health["rtsp"] == "unknown"
+
+
+def _sd(value, state="available"):
+    return {"groups": {"storage": {"sd_card": {"state": state, "value": value}}}}
+
+
+def test_sd_card_absent_only_when_every_slot_reports_offline():
+    empty = [{"hd_info_1": {"detect_status": "offline", "status": "offline", "free_space": "0B"}}]
+    assert capabilities.sd_card_absent(_sd(empty)) is True
+    assert capabilities.derive_health(_sd(empty))["storage"] == "degraded"
+    assert capabilities.sd_card_absent(_sd([{"hd_info_1": {"detect_status": "normal"}}])) is False
+    assert capabilities.sd_card_absent(_sd([{"hd_info_1": {"detect_status": "offline"}},
+                                            {"hd_info_2": {"detect_status": "abnormal"}}])) is False
+    assert capabilities.sd_card_absent(_sd(empty, state="error")) is False
+    assert capabilities.sd_card_absent({}) is False

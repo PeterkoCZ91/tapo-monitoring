@@ -404,6 +404,17 @@ def _api_health(groups):
     return "unknown"
 
 
+def sd_card_absent(snapshot):
+    """True when ``getSDCard`` answered and every slot reports no card (``offline``)."""
+    groups = snapshot.get("groups", {}) if isinstance(snapshot, Mapping) else {}
+    storage = groups.get("storage", {}) if isinstance(groups, Mapping) else {}
+    result = storage.get("sd_card", {}) if isinstance(storage, Mapping) else {}
+    if not isinstance(result, Mapping) or result.get("state") != "available":
+        return False
+    statuses = set(_detect_statuses(result.get("value")))
+    return statuses == {"offline"}
+
+
 def _storage_health(groups):
     storage = groups.get("storage", {}) if isinstance(groups, Mapping) else {}
     result = storage.get("sd_card", {}) if isinstance(storage, Mapping) else {}
