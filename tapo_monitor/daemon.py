@@ -3465,7 +3465,7 @@ def _sd_followup_job(cfg, event, etype, fetch, start, span, out_dir, score, *,
         for frame in eligible_frames:
             desc = (enrich.groq_describe(groq_key, frame, **(vision or {}))
                     if cfg.enrich.groq else "")
-            # Raw mode (groq off): no subject arbiter -> first frame wins as-is.
+            # Raw mode (the vision endpoint off): no subject arbiter -> first frame wins as-is.
             if not cfg.enrich.groq or not notify.is_empty_scene(desc):
                 pick.image, pick.description = frame, desc   # subject found in this frame
                 break
