@@ -273,6 +273,25 @@ without an SD card: each pass polls `getLastAlarmInfo` (at most one call per 1.5
 turns a fresh, not yet seen alarm into an event. Alerts use the live frame only (no SD
 follow-up). The camera reports a person as coarse `motion`, which follows `strict_people`.
 
+`reolink` (opt-in, needs the `reolink` extra and Python 3.11+, never combined with Tapo
+sources or any SD option) is for a Reolink camera: the daemon keeps one push subscription
+over the camera's native TCP 9000 channel and starts an event when one of
+`reolink_triggers` turns on for any lens (`motion`, `people`, `vehicle`, `dog_cat`; empty =
+all). The alert frame comes from RTSP (`rtsp_stream`, default `h264Preview_01_main`), so
+RTSP must be enabled on the camera. The Tapo control, twin and watchdog paths skip it.
+
+```yaml
+  - name: parking
+    host: "<REOLINK_LAN_IP>"
+    user_env: PARKING_USER            # one account for TCP 9000 and RTSP
+    password_env: PARKING_PASSWORD
+    rtsp_user_env: PARKING_USER
+    rtsp_password_env: PARKING_PASSWORD
+    reolink_triggers: [people, dog_cat]
+    detection:
+      sources: [reolink]
+```
+
 ### Data collection, privacy and detection notices
 
 Per-camera switches:

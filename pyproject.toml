@@ -53,6 +53,9 @@ onvif = ["onvif-zeep"]
 # Opt-in MQTT bridge with Home Assistant discovery (mqtt: block). Imported only when the
 # block is set; without the library the daemon logs the install hint and runs without it.
 mqtt = ["paho-mqtt>=1.6"]
+# Reolink cameras (detection source "reolink"): push events over the camera's native
+# TCP 9000 channel. Imported only when such a camera connects.
+reolink = ["reolink-aio>=0.21; python_version >= '3.11'"]
 
 [project.scripts]
 tapo-monitor = "tapo_monitor.cli:main"

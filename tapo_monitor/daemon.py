@@ -58,6 +58,7 @@ from . import (
     panlimit,
     recclip,
     reliability,
+    reolink,
     reviewdigest,
     runtime_state,
     sampler,
@@ -929,7 +930,9 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
             app_push_seen.pop(cfg.name, None)
         if connect is not None:
             cam, _err = connect(cfg)
-            if cam is not None:
+            # A Reolink camera has none of the Tapo control API: connect only keeps its
+            # event subscription alive.
+            if cam is not None and not reolink.is_reolink(cfg):
                 profile = detection.event_profile(getattr(cfg, "event_profile", None))
                 # A dual-lens camera has its detection read per lens once, before the
                 # self-heal: the repairs write only to the lenses that drifted, and the
@@ -2154,7 +2157,8 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
     for cfg in app.cameras:
         lastalarm = ("lastalarm" in cfg.detection.sources
                      and "getevents" not in cfg.detection.sources)
-        if "getevents" not in cfg.detection.sources and not lastalarm:
+        pushed = reolink.is_reolink(cfg)     # the client queues the camera's pushes
+        if "getevents" not in cfg.detection.sources and not (lastalarm or pushed):
             continue
         cam = cam_clients.get(cfg.name)
         if cam is None:
@@ -2261,7 +2265,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             state.pending_sd.append(entry)
             return True
         # A lastalarm camera has no SD card: live frame only, never an SD follow-up.
-        defer_fn = defer if (cfg.sd_snapshot and not lastalarm) else None
+        defer_fn = defer if (cfg.sd_snapshot and not (lastalarm or pushed)) else None
         raw_snapshot = snapshot_for(cfg)
         raw_score = score_for(cfg)
 
@@ -4581,7 +4585,7 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
     changed = False
     for cfg in app.cameras:
         cam = cam_clients.get(cfg.name)
-        if cam is None:
+        if cam is None or reolink.is_reolink(cfg):     # the probes are Tapo API calls
             continue
         last_probe = state.twin_last_probe.get(cfg.name)
         if last_probe is not None and now - last_probe < app.observability.probe_interval:
@@ -5142,7 +5146,9 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     if control_due(last_control, now, control_interval):
         # A healthy stop-mode session is also the guard's emergency OFF path.
         # Retiring it every minute created a blind window and needless camera logins.
-        retained = {c.name for c in app.cameras if stopcontrol.enabled(c)
+        # A Reolink client is its push subscription: closing it would drop events.
+        retained = {c.name for c in app.cameras
+                    if (stopcontrol.enabled(c) or reolink.is_reolink(c))
                     and state.events_reachable.get(c.name) is not False}
         for name, client in list(cam_clients.items()):
             if name not in retained:
@@ -5490,7 +5496,7 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
                     and age >= app.alerts.event_restart_threshold
                     and not state.event_restart_attempted.get(name)):
                 client = cam_clients.get(name)
-                if client is not None:
+                if client is not None and not reolink.is_reolink(cfg):
                     state.event_restart_attempted[name] = True
                     if camera_api.reboot(client):
                         log.warning("event API restart requested for %s", name)
@@ -5688,6 +5694,37 @@ def _confirm_switch(cfg, state, client, old, now):
     return True
 
 
+def _connect_reolink(cfg: CameraConfig, cam_clients, state, now):
+    """Keep one live push subscription per Reolink camera; (client, err) like connect."""
+    name = cfg.name
+    previous = cam_clients.get(name)
+    if previous is not None and getattr(previous, "alive", False):
+        return previous, None
+    if previous is not None:
+        camera.close_client(previous)
+        cam_clients.pop(name, None)
+    user, password, _cloud = resolve_camera_credentials(cfg)
+    try:
+        client = reolink.connect(camera.active_host(cfg), user, password,
+                                 triggers=cfg.reolink_triggers or reolink.TRIGGERS)
+    except Exception as exc:  # noqa: BLE001 - a failed login backs off like any camera
+        if state is not None:
+            fails = state.connect_fails.get(name, 0) + 1
+            state.connect_fails[name] = fails
+            wait = backoff_seconds(fails)
+            if now is not None:
+                state.connect_backoff_until[name] = now + wait
+            log.warning("connect %s failed (#%d): %s: %s; backing off %ds",
+                        name, fails, type(exc).__name__, exc, wait)
+        return None, exc
+    if state is not None:
+        if state.connect_fails.pop(name, 0):
+            log.info("camera %s reconnected", name)
+        state.connect_backoff_until.pop(name, None)
+    cam_clients[name] = client
+    return client, None
+
+
 def _connect_camera(cam_clients, state=None, now=None):
     """Return a connect(cfg) that builds a pytapo client and caches it for the monitor pass.
 
@@ -5768,6 +5805,9 @@ def _connect_camera(cam_clients, state=None, now=None):
                     _revert_return(cfg, state, switched_from, camera.active_host(cfg),
                                    now, FAILOVER_REJECT_SECONDS)
                 return None, "backoff"
+
+        if reolink.is_reolink(cfg):
+            return _connect_reolink(cfg, cam_clients, state, now)
 
         def login():
             previous = cam_clients.get(name)

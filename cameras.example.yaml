@@ -177,7 +177,7 @@ cameras:
     #   types: [person, motion]
 
     detection:
-      sources: [getevents]   # subset of: getevents, hubpoll, onvif, motion
+      sources: [getevents]   # subset of: getevents, hubpoll, onvif, motion; lastalarm and reolink stand alone
       strict_people: true    # only alert on confirmed people (ignore generic motion)
 
     tracking:

@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 ROLES = {"tracking", "static"}
 SCHEDULES = {"astral", "always_night", "always_day"}
 WEATHER_STRATEGIES = {"none", "disable_tracking", "lower_sensitivity"}
-DETECTION_SOURCES = {"onvif", "getevents", "motion", "hubpoll", "lastalarm"}
+DETECTION_SOURCES = {"onvif", "getevents", "motion", "hubpoll", "lastalarm", "reolink"}
 SMARTTRACK_KINDS = {"people", "vehicle", "pet", "baby"}
 SNAPSHOT_SOURCES = {"rtsp", "sd"}
 LIGHT_TRIGGER_TYPES = {"person", "motion", "pet", "tamper", "vehicle"}
@@ -259,6 +259,9 @@ class CameraConfig:
     rtsp_password_env: str | None = None
     rtsp_port: int = 554
     rtsp_stream: str = "stream1"
+    # detection source "reolink": the camera states that start an event (motion, people,
+    # vehicle, dog_cat). Empty = all of them.
+    reolink_triggers: tuple[str, ...] = ()
     rtsp_timeout: int = 15  # seconds; slow cameras/Pis need >8s for the first keyframe
     # Clockwise rotation (0/90/180/270) applied at frame capture across all sources when the
     # camera is physically mounted rotated. 0 = off. Fixes the frame for the scorer, crop and
@@ -752,6 +755,9 @@ def _detection(data, where):
     if "lastalarm" in sources and "getevents" in sources:
         raise ConfigError(f"{where}: detection.sources: pick one of 'getevents' (SD card) "
                           "or 'lastalarm' (no card), not both")
+    if "reolink" in sources and len(sources) > 1:
+        raise ConfigError(f"{where}: detection source 'reolink' (a Reolink camera's push "
+                          "events) cannot be combined with Tapo sources")
     # Do not coerce strings: bool("false") is True and would invert the policy.
     strict_people = d.get("strict_people", True)
     if not isinstance(strict_people, bool):
@@ -1384,6 +1390,14 @@ def _camera(data, index):
             or data.get("snapshot_source") == "recording"):
         raise ConfigError(f"{where}: detection source 'lastalarm' is for cameras without an "
                           "SD card; sd_snapshot / sd_motion / recording are not allowed")
+    if "reolink" in detection.sources and (
+            data.get("sd_snapshot") or data.get("sd_motion")
+            or data.get("snapshot_source") == "recording"):
+        raise ConfigError(f"{where}: detection source 'reolink' has no SD-card path; "
+                          "sd_snapshot / sd_motion / recording are not allowed")
+    reolink_triggers = tuple(data.get("reolink_triggers") or ())
+    _check_subset(list(reolink_triggers), {"motion", "people", "vehicle", "dog_cat"},
+                  "reolink_triggers", where)
     try:
         hub_poll_interval = int(data.get("hub_poll_interval", 20))
     except (TypeError, ValueError):
@@ -1510,8 +1524,10 @@ def _camera(data, index):
         rtsp_password_env=data.get("rtsp_password_env"),
         rtsp_port=rtsp_port,
         sd_motion_span_cap=int(data["sd_motion_span_cap"]) if data.get("sd_motion_span_cap") is not None else None,
-        rtsp_stream=data.get("rtsp_stream", "stream1"),
+        rtsp_stream=data.get("rtsp_stream", "h264Preview_01_main"
+                             if "reolink" in detection.sources else "stream1"),
         rtsp_timeout=rtsp_timeout,
+        reolink_triggers=reolink_triggers,
         rotate=rotate,
         sd_snapshot=bool(data.get("sd_snapshot", False)),
         sd_span_cap=int(data["sd_span_cap"]) if data.get("sd_span_cap") is not None else None,
