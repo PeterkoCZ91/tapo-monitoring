@@ -15,6 +15,13 @@ All notable changes to this project are documented here.
   instead of only on the wide lens.
 
 ### Changed
+- `tracking.day_preset` no longer defaults to `"2"`: unset, no preset is recalled.
+  A camera without a `tracking` section and without a preset 2 on the device logged
+  `failed to recall preset 2` every control tick. **Cameras that relied on the
+  implicit preset "2" must now set `tracking.day_preset: "2"` explicitly**, or they
+  stop returning to that view by day, in `storm_park` rain and (for `role: static`)
+  around the clock. `weather.storm_park` or `weather.strategy: disable_tracking`
+  without a `day_preset` logs a warning at load.
 - A quoted or otherwise non-boolean value for `night_only`, `telegram_alerts`,
   `pan_limit.enabled`/`tilt`, `light_trigger.enabled`, the `reliability` and
   `observability` switches and `alerts.event_restart_enabled` is a `ConfigError`

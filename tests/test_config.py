@@ -1550,3 +1550,67 @@ def test_crop_min_px_defaults_overrides_and_rejects_negatives():
     data["cameras"][0]["crop_min_px"] = -1
     with pytest.raises(cfg.ConfigError, match="crop_min_px"):
         cfg.load_config_from_dict(data)
+
+
+# ── tracking.day_preset has no implicit default ──────────────────────────────
+
+def test_camera_without_tracking_section_has_no_day_preset_and_recalls_nothing():
+    # A camera with no tracking block and no preset "2" on the device logged
+    # "failed to recall preset 2" every minute (seen on a fixed camera since 2026-10-14).
+    from tapo_monitor import daemon
+
+    cam = cfg.load_config_from_dict(_minimal()).cameras[0]
+
+    assert cam.tracking.day_preset is None
+    assert cam.tracking.night_preset is None
+    for night in (False, True):
+        for rain in (False, True):
+            assert daemon.plan_camera(cam, night=night, rain_active=rain).preset is None
+
+
+def test_static_camera_without_day_preset_recalls_nothing():
+    from tapo_monitor import daemon
+
+    data = _minimal()
+    data["cameras"][0]["role"] = "static"
+    cam = cfg.load_config_from_dict(data).cameras[0]
+
+    assert daemon.plan_camera(cam, night=False, rain_active=False).preset is None
+    assert daemon.plan_camera(cam, night=True, rain_active=False).preset is None
+
+
+def test_explicit_day_preset_is_still_recalled_when_parked():
+    from tapo_monitor import daemon
+
+    data = _minimal()
+    data["cameras"][0]["tracking"] = {"day_preset": "2"}
+    cam = cfg.load_config_from_dict(data).cameras[0]
+
+    assert cam.tracking.day_preset == "2"
+    assert daemon.plan_camera(cam, night=False, rain_active=False).preset == "2"
+
+
+def test_storm_park_without_day_preset_warns(caplog):
+    data = _minimal()
+    data["cameras"][0]["weather"] = {"strategy": "lower_sensitivity", "storm_park": True}
+    app = _load_capturing(caplog, data)
+
+    assert app.cameras[0].tracking.day_preset is None
+    assert "storm_park" in caplog.text and "day_preset" in caplog.text
+
+
+def test_storm_park_with_day_preset_does_not_warn(caplog):
+    data = _minimal()
+    data["cameras"][0]["weather"] = {"strategy": "lower_sensitivity", "storm_park": True}
+    data["cameras"][0]["tracking"] = {"day_preset": "1"}
+    _load_capturing(caplog, data)
+
+    assert "storm_park" not in caplog.text
+
+
+def test_disable_tracking_without_day_preset_warns(caplog):
+    data = _minimal()
+    data["cameras"][0]["weather"] = {"strategy": "disable_tracking"}
+    _load_capturing(caplog, data)
+
+    assert "disable_tracking" in caplog.text and "day_preset" in caplog.text

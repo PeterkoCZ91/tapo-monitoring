@@ -41,7 +41,7 @@ def test_plan_tracking_night_dry():
     assert plan.preset is None  # no night_preset by default
 
 def test_plan_tracking_day_parks_at_day_preset():
-    plan = daemon.plan_camera(_cam(), night=False, rain_active=False)
+    plan = daemon.plan_camera(_cam(tracking={"day_preset": "2"}), night=False, rain_active=False)
     assert plan.autotrack_on is False
     assert plan.preset == "2"
 
@@ -52,11 +52,19 @@ def test_plan_rain_lower_sensitivity_keeps_tracking():
     assert plan.motion_sensitivity == 20
 
 def test_plan_rain_disable_tracking_parks():
-    cam = _cam(weather={"strategy": "disable_tracking"})
+    cam = _cam(weather={"strategy": "disable_tracking"}, tracking={"day_preset": "2"})
     plan = daemon.plan_camera(cam, night=True, rain_active=True)
     assert plan.autotrack_on is False
     assert plan.rain_parked is True
     assert plan.preset == "2"
+
+
+def test_plan_without_day_preset_parks_without_recalling():
+    cam = _cam(weather={"strategy": "disable_tracking"})
+    plan = daemon.plan_camera(cam, night=True, rain_active=True)
+    assert plan.autotrack_on is False
+    assert plan.preset is None
+    assert daemon.plan_camera(cam, night=False, rain_active=False).preset is None
 
 def test_plan_static_never_tracks():
     plan = daemon.plan_camera(_cam(role="static"), night=True, rain_active=False)

@@ -219,7 +219,7 @@ ONVIF, ping, the SD download and the scene probe.
 | --- | --- | --- |
 | `name` | short unique string | Used in logs, state and notifications. Required. |
 | `host` | LAN address/DNS name, or a list of them | Required; keep real values private. A list turns on [host failover](#host-failover-optional). |
-| `role` | `tracking`, `static` | Tracking cameras follow policy; static cameras stay parked at `day_preset`, re-asserted every control tick. |
+| `role` | `tracking`, `static` | Tracking cameras follow policy; static cameras stay parked at `day_preset` (when set), re-asserted every control tick. |
 | `schedule` | `astral`, `always_night`, `always_day` | Controls day/night plan selection. |
 | `night_only` | boolean | Drains events but suppresses all Telegram traffic during daytime. |
 | `quiet_hours` | `"HH:MM-HH:MM"`, unset | Mutes INSIDE a fixed local clock window (the camera alerts outside it): detections are drained silently and all Telegram, including camera-down notices, is suppressed. The inverse gate of `night_only`, which reports only during the astral night. Wraps past midnight if end ≤ start. Mutually exclusive with `night_only`. To keep reporting all day and only switch the white lamp on in a night window, use `light_trigger` instead. |
@@ -497,6 +497,14 @@ tracking:
   track_hold: 180
 ```
 
+`day_preset` is the view a parked camera returns to: a `tracking` camera by day or while
+`storm_park` holds it in rain, and a `static` camera around the clock. It has no default —
+unset, nothing is recalled and the lens stays where it is (right for a fixed lens or a
+camera without saved presets). Set it explicitly, e.g. `day_preset: "2"`, on every
+pan/tilt camera that should be brought back to a view; up to 0.11 an unset value meant
+`"2"`. `storm_park` or `strategy: disable_tracking` without a `day_preset` logs a
+warning at load: rain then only stops tracking. `night_preset` is optional and recalled only while a tracking camera tracks.
+
 `smarttrack` accepts `people`, `vehicle`, `pet` and `baby` where firmware supports them.
 The current control policy re-asserts person detection, disables vehicle detection and
 applies auto-track last. `person_sensitivity` is an optional integer from 0 to 100; unset
@@ -590,8 +598,9 @@ Strategies:
 - `lower_sensitivity` — use `motion_rain` while rain is active;
 - `disable_tracking` — stop tracking while rain is active.
 
-`storm_park` composes with the selected strategy and recalls the configured day preset
-during rain. Weather needs top-level location coordinates.
+`storm_park` composes with the selected strategy and recalls the configured
+`tracking.day_preset` during rain, as does `disable_tracking` (with no `day_preset`
+either one only stops tracking and warns at load). Weather needs top-level location coordinates.
 
 ### Live, SD and local-recorder media
 

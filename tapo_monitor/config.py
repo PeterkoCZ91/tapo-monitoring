@@ -67,7 +67,9 @@ class DetectionConfig:
 @dataclass
 class TrackingConfig:
     smarttrack: list[str] = field(default_factory=lambda: ["people"])
-    day_preset: str | None = "2"
+    # No implicit default: a camera without the preset (or a fixed lens) would be asked
+    # to recall it every control tick and log the refusal each time.
+    day_preset: str | None = None
     night_preset: str | None = None
     # How long the camera keeps looking where auto-track took it, in seconds. Two halves
     # of one dwell, both needed: back_time is the firmware's own return timer (30 s on the
@@ -793,7 +795,7 @@ def _tracking(data, where):
         raise ConfigError(f"{where}: tracking.track_hold must not be negative")
     return TrackingConfig(
         smarttrack=list(smarttrack),
-        day_preset=d.get("day_preset", "2"),
+        day_preset=d.get("day_preset"),
         night_preset=d.get("night_preset"),
         back_time=back_time,
         track_hold=track_hold,
@@ -1509,6 +1511,16 @@ def _camera(data, index):
                 raise ConfigError(f"{where}: scorer lens_ignore_zones has unknown lens "
                                   f"{lens!r} (known: {', '.join(sorted(lens_names))})")
     pan_limit = _pan_limit(data.get("pan_limit"), where)
+    tracking_cfg = _tracking(data.get("tracking"), where)
+    weather_cfg = _weather(data.get("weather"), where)
+    rain_parks = weather_cfg.storm_park or weather_cfg.strategy == "disable_tracking"
+    if rain_parks and tracking_cfg.day_preset is None:
+        # Not an error: rain still switches auto-track off, the lens just stays wherever
+        # the last track left it instead of returning to a known view.
+        log.warning("%s: weather parks this camera in rain (storm_park or disable_tracking) but "
+                    "tracking.day_preset is unset, so rain "
+                    "stops tracking without parking the lens; set tracking.day_preset "
+                    "(e.g. \"2\") to park it", where)
     if scorer.alert_zones and (role != "static" or pan_limit.enabled):
         # Not an error: the zones still work while the lens is parked, but auto-track or
         # a pan-limit recall changes the framing they were drawn on.
@@ -1604,8 +1616,8 @@ def _camera(data, index):
         hub_user_env=data.get("hub_user_env"),
         hub_password_env=data.get("hub_password_env"),
         detection=detection,
-        tracking=_tracking(data.get("tracking"), where),
-        weather=_weather(data.get("weather"), where),
+        tracking=tracking_cfg,
+        weather=weather_cfg,
         enrich=_enrich(data.get("enrich"), where),
         sampler=sampler,
         scorer=scorer,
