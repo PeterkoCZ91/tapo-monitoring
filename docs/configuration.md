@@ -609,6 +609,8 @@ clip_video: false
 clip_seconds: 30
 clip_pre_roll: 2
 clip_height: 720
+clip_url: null
+clip_token_env: null
 ```
 
 - `sd_snapshot` gives confirmed events an event-time follow-up when the live frame fails or
@@ -673,6 +675,15 @@ clip_height: 720
   minutes after the event. The queue is kept in memory: a restart drops the clips not
   yet sent, never an alert. Cameras that only collect data (`telegram_alerts: false`)
   send no clips.
+- `clip_url` gives `clip_video` a recorder instead of the card, for a camera whose card
+  cannot be read over the network (source `reolink`, `lastalarm`). The daemon asks
+  `GET <clip_url>?start=<epoch>&pre=<clip_pre_roll>&seconds=<clip_seconds>` once the
+  window has passed (10 s after its end), expects an mp4 (at most 200 MB, transcoded
+  like a card clip) and reads the epoch of its first frame from an optional
+  `X-Clip-Start` header. `clip_token_env` names an environment variable whose value is
+  sent as `Authorization: Bearer`. The event start is the daemon host's clock for a
+  push source, so keep the recorder host on NTP and leave a few seconds of
+  `clip_pre_roll`.
 - `sd_span_cap` bounds the event window downloaded/scanned.
 - `sd_motion_span_cap` bounds the first window for unconfirmed motion/PIR; one empty
   result retries with `sd_span_cap`. Confirmed person events use the full window directly.

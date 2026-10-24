@@ -25,6 +25,8 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import urllib.parse
+import urllib.request
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -35,6 +37,10 @@ log = logging.getLogger(__name__)
 
 # Seconds past the window's end on top of the freshness guard, as the card follow-up uses.
 DUE_MARGIN = 9
+# A clip_url recorder has the window once its last short segment is closed.
+URL_MARGIN = 10
+# Largest clip accepted from a clip_url recorder (a 4K source before the transcode).
+MAX_DOWNLOAD = 200 * 1024 * 1024
 # An entry older than this (from the event start) is dropped: the card has long moved on
 # and a clip that late answers nobody's question.
 MAX_AGE = 900
@@ -57,7 +63,10 @@ def start_from_incident(incident):
 
 
 def due_at(cfg, start):
-    """When the clip window has cleared the card's freshness guard. Pure."""
+    """When the clip window can be read: past the card's freshness guard, or just past
+    its end for a ``clip_url`` recorder. Pure."""
+    if cfg.clip_url:
+        return start + cfg.clip_seconds + URL_MARGIN
     return start + cfg.clip_seconds + cfg.sd_fresh_guard + DUE_MARGIN
 
 
@@ -92,6 +101,60 @@ def _fetch_card(cfg, start, out_dir, pre_roll, seconds, guard):  # pragma: no co
                                            seconds=seconds, guard=guard)
 
 
+def fetch_url(cfg, start, out_dir, pre_roll, seconds, guard=None, *,
+              urlopen=urllib.request.urlopen):
+    """Download the clip from the ``clip_url`` recorder: ``(path, window_start)``.
+
+    ``window_start`` comes from the recorder's ``X-Clip-Start`` header (None when absent);
+    ``(None, None)`` on any failure. The recorder may hold the answer until the window
+    is on disk, so the timeout covers the clip length on top of the transfer.
+    """
+    query = urllib.parse.urlencode({"start": int(start), "pre": int(pre_roll),
+                                    "seconds": int(seconds)})
+    req = urllib.request.Request(f"{cfg.clip_url}?{query}")
+    token = os.environ.get(cfg.clip_token_env, "") if cfg.clip_token_env else ""
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    path = os.path.join(out_dir, "recorder.mp4")
+    try:
+        with urlopen(req, timeout=int(seconds) + 60) as resp:
+            size = 0
+            with open(path, "wb") as f:
+                while chunk := resp.read(1 << 20):
+                    size += len(chunk)
+                    if size > MAX_DOWNLOAD:
+                        raise ValueError(f"clip larger than {MAX_DOWNLOAD} bytes")
+                    f.write(chunk)
+            header = resp.headers.get("X-Clip-Start")
+    except Exception as exc:  # noqa: BLE001 - the recorder's failure is just no clip
+        log.warning("clip %s: recorder answered no clip: %s", cfg.name, exc)
+        _unlink(path)
+        return None, None
+    if size == 0:
+        log.warning("clip %s: recorder sent an empty clip", cfg.name)
+        _unlink(path)
+        return None, None
+    try:
+        window_start = int(header) if header is not None else None
+    except ValueError:
+        window_start = None
+    return path, window_start
+
+
+def _unlink(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def _fetch(cfg, start, out_dir, pre_roll, seconds, guard):
+    """The clip source the camera has: its ``clip_url`` recorder or its card."""
+    if cfg.clip_url:
+        return fetch_url(cfg, start, out_dir, pre_roll, seconds, guard)
+    return _fetch_card(cfg, start, out_dir, pre_roll, seconds, guard)
+
+
 @dataclass
 class ClipEntry:
     camera: str
@@ -120,8 +183,9 @@ class ClipJob:
     secrets: dict | None = None
 
 
-def read_clip(cfg, entry, *, work_dir=None, fetch=_fetch_card):
-    """Read the clip window from the card. A :class:`ClipRead` or None. Card thread."""
+def read_clip(cfg, entry, *, work_dir=None, fetch=None):
+    """Read the clip window (card or recorder). A :class:`ClipRead` or None. Card thread."""
+    fetch = fetch or _fetch
     job_dir = tempfile.mkdtemp(prefix=sdworker.JOB_DIR_PREFIX + f"{os.getpid()}_clip_",
                                dir=work_dir)
     try:
@@ -166,7 +230,7 @@ def deliver_clip(cfg, entry, read, secrets, *, transcode=_run_ffmpeg, send=None)
         shutil.rmtree(read.job_dir, ignore_errors=True)
 
 
-def run_job(cfg, entry, secrets, *, work_dir=None, fetch=_fetch_card,
+def run_job(cfg, entry, secrets, *, work_dir=None, fetch=None,
             transcode=_run_ffmpeg, send=None):
     """Read, transcode and send one clip on the calling thread. True when sent."""
     read = read_clip(cfg, entry, work_dir=work_dir, fetch=fetch)

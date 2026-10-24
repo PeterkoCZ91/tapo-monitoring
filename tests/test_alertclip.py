@@ -443,3 +443,107 @@ def test_finished_clip_job_goes_back_to_the_clip_queue(fake_telegram, monkeypatc
                               worker=worker)
     daemon._clips.drain(app, worker, now=entry.due_at + 2, secrets=SECRETS)
     assert daemon._clips.entries == []
+
+
+# ---- clip_url: a recorder serves the clip (cameras without a readable card) -------------
+
+def _url_camera(**extra):
+    data = {"name": "yard", "host": HOST, "clip_video": True,
+            "clip_url": "http://10.0.0.9:8095/clip", "detection": {"sources": ["reolink"]},
+            **extra}
+    return cfg.load_config_from_dict({"cameras": [data]}).cameras[0]
+
+
+def test_clip_url_lets_a_card_less_camera_send_clips():
+    cam = _url_camera(clip_token_env="CLIPD_TOKEN")
+    assert cam.clip_url == "http://10.0.0.9:8095/clip" and cam.clip_token_env == "CLIPD_TOKEN"
+
+
+@pytest.mark.parametrize("bad", ["ftp://x/clip", "10.0.0.9/clip", "", 5])
+def test_clip_url_must_be_http(bad):
+    with pytest.raises(cfg.ConfigError, match="clip_url"):
+        _url_camera(clip_url=bad)
+
+
+def test_clip_url_due_time_skips_the_card_guard():
+    cam = _url_camera(clip_seconds=30)
+    assert alertclip.due_at(cam, 1000) == 1000 + 30 + alertclip.URL_MARGIN
+
+
+class FakeHTTP:
+    def __init__(self, body=b"mp4", status=200, headers=None):
+        self.body, self.status = body, status
+        self.headers = headers or {"X-Clip-Start": "998"}
+        self.requests = []
+
+    def __call__(self, req, timeout):
+        self.requests.append((req, timeout))
+        if self.status != 200:
+            import urllib.error
+            raise urllib.error.HTTPError(req.full_url, self.status, "no", {}, None)
+        outer = self
+
+        class Resp:
+            status = 200
+            headers = outer.headers
+
+            def read(self, n=-1):
+                data, outer.body = outer.body, b""
+                return data
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        return Resp()
+
+
+def test_fetch_url_downloads_the_clip_with_the_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLIPD_TOKEN", "s3cret")
+    cam = _url_camera(clip_token_env="CLIPD_TOKEN", clip_pre_roll=2, clip_seconds=30)
+    http = FakeHTTP(body=b"x" * 100)
+    path, window_start = alertclip.fetch_url(cam, 1000, str(tmp_path), 2, 30,
+                                             urlopen=http)
+    assert window_start == 998 and open(path, "rb").read() == b"x" * 100
+    [(req, timeout)] = http.requests
+    assert req.full_url == "http://10.0.0.9:8095/clip?start=1000&pre=2&seconds=30"
+    assert req.get_header("Authorization") == "Bearer s3cret"
+    assert timeout >= 30 + 40
+
+
+def test_fetch_url_without_token_env_sends_no_header(tmp_path):
+    http = FakeHTTP()
+    alertclip.fetch_url(_url_camera(), 1000, str(tmp_path), 2, 30, urlopen=http)
+    assert http.requests[0][0].get_header("Authorization") is None
+
+
+def test_fetch_url_failures_give_nothing(tmp_path):
+    cam = _url_camera()
+    assert alertclip.fetch_url(cam, 1000, str(tmp_path), 2, 30,
+                               urlopen=FakeHTTP(status=404)) == (None, None)
+    assert alertclip.fetch_url(cam, 1000, str(tmp_path), 2, 30,
+                               urlopen=FakeHTTP(body=b"")) == (None, None)
+    assert os.listdir(tmp_path) == []
+    path, start = alertclip.fetch_url(cam, 1000, str(tmp_path), 2, 30,
+                                      urlopen=FakeHTTP(headers={"X-Clip-Start": "x"}))
+    assert path and start is None
+
+
+def test_fetch_url_refuses_an_oversized_clip(tmp_path, monkeypatch):
+    monkeypatch.setattr(alertclip, "MAX_DOWNLOAD", 10)
+    assert alertclip.fetch_url(_url_camera(), 1000, str(tmp_path), 2, 30,
+                               urlopen=FakeHTTP(body=b"x" * 11)) == (None, None)
+    assert os.listdir(tmp_path) == []
+
+
+def test_default_fetch_picks_the_url_for_clip_url_cameras(monkeypatch, tmp_path):
+    used = []
+    monkeypatch.setattr(alertclip, "fetch_url", lambda *a, **k: used.append("url") or (None, None))
+    monkeypatch.setattr(alertclip.sdclip, "fetch_sd_clip_subprocess",
+                        lambda *a, **k: used.append("card") or (None, None))
+    entry = alertclip.ClipEntry("yard", "yard-1000", 1000, 7, "c", 0)
+    alertclip.read_clip(_url_camera(), entry, work_dir=str(tmp_path))
+    alertclip.read_clip(_camera(clip_video=True), entry, work_dir=str(tmp_path))
+    assert used == ["url", "card"]

@@ -316,6 +316,11 @@ class CameraConfig:
     clip_seconds: int = 30
     clip_pre_roll: int = 2
     clip_height: int = 720
+    # A recorder that serves the clip over HTTP instead of the card (a camera without a
+    # readable card, e.g. source reolink): GET clip_url?start=&pre=&seconds= -> mp4, with
+    # an optional bearer token from the env var clip_token_env.
+    clip_url: str | None = None
+    clip_token_env: str | None = None
     # False records every alert decision exactly as if it went out (sent log, cooldowns,
     # audit) but sends no photo to Telegram: a camera that is only collecting data. System
     # notices (privacy, outage, drift) still go out.
@@ -1352,6 +1357,13 @@ def _camera(data, index):
     clip_seconds = _clip_int(data, "clip_seconds", 30, 5, 60, where)
     clip_pre_roll = _clip_int(data, "clip_pre_roll", 2, 0, 10, where)
     clip_height = _clip_int(data, "clip_height", 720, 240, 1080, where)
+    clip_url = data.get("clip_url")
+    if clip_url is not None and not (isinstance(clip_url, str)
+                                     and clip_url.startswith(("http://", "https://"))):
+        raise ConfigError(f"{where}: 'clip_url' must be an http:// or https:// URL")
+    clip_token_env = data.get("clip_token_env")
+    if clip_token_env is not None and not isinstance(clip_token_env, str):
+        raise ConfigError(f"{where}: 'clip_token_env' must be an environment variable name")
     night_vision = data.get("night_vision")
     if night_vision is not None and night_vision not in ("ir", "auto"):
         raise ConfigError(f"{where}: 'night_vision' must be 'ir' or 'auto'")
@@ -1406,9 +1418,9 @@ def _camera(data, index):
             or data.get("snapshot_source") == "recording"):
         raise ConfigError(f"{where}: detection source 'reolink' has no SD-card path; "
                           "sd_snapshot / sd_motion / recording are not allowed")
-    if clip_video and "getevents" not in detection.sources:
+    if clip_video and not clip_url and "getevents" not in detection.sources:
         raise ConfigError(f"{where}: clip_video reads the camera's SD card and needs "
-                          "detection source 'getevents'")
+                          "detection source 'getevents', or a recorder in 'clip_url'")
     reolink_triggers = tuple(data.get("reolink_triggers") or ())
     _check_subset(list(reolink_triggers), {"motion", "people", "vehicle", "dog_cat"},
                   "reolink_triggers", where)
@@ -1568,6 +1580,8 @@ def _camera(data, index):
         clip_seconds=clip_seconds,
         clip_pre_roll=clip_pre_roll,
         clip_height=clip_height,
+        clip_url=clip_url,
+        clip_token_env=clip_token_env,
         person_sensitivity=int(data["person_sensitivity"]) if data.get("person_sensitivity") is not None else None,
         night_only=_check_bool(data.get("night_only", False), "night_only", where),
         quiet_hours=quiet_hours,
