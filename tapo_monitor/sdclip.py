@@ -631,9 +631,167 @@ def download_main(argv):  # pragma: no cover - subprocess entry, real camera I/O
     return 0
 
 
+# ── alert clip: a short video around the event, sent after the alert ────────────────
+
+# Shortest clip worth sending; anything below is a sliver of the segment edge.
+CLIP_MIN_SECONDS = 3
+
+# Stdout marker the clip subprocess prints for the downloaded mp4.
+_CLIP_MARKER = "CLIP:"
+
+
+def clip_window(event_start, seg, pre_roll, seconds):
+    """Card window ``(start, end)`` for an alert clip, or None when it is too short.
+
+    The wanted window is ``[event_start - pre_roll, event_start + seconds]``; a known
+    segment ``seg = (start, end)`` clips it, since the camera serves nothing outside its
+    recording (an event at the segment start loses its pre-roll).
+    """
+    start, end = event_start - pre_roll, event_start + seconds
+    if seg:
+        start, end = max(seg[0], start), min(seg[1], end)
+    if end - start < CLIP_MIN_SECONDS:
+        return None
+    return start, end
+
+
+def fetch_sd_clip(client, start_time, out_dir, pre_roll=2, seconds=30,
+                  download=_download_segment, segment_bounds=_segment_bounds,
+                  stats=None, guard=None, lookup_retry=True):
+    """Download the card's video around the event; return the mp4 path or None.
+
+    The same read as :func:`fetch_sd_frames` (segment lookup, freshness ``guard``,
+    ``stats``), but the window is :func:`clip_window` and the mp4 is neither turned
+    into frames nor deleted: the caller owns it.
+    """
+    try:
+        time_correction = client.getTimeCorrection() or 0
+    except Exception:
+        time_correction = 0
+    seg = (segment_bounds(client, start_time, retry_pause=SD_LOOKUP_RETRY_PAUSE)
+           if lookup_retry else segment_bounds(client, start_time))
+    info = stats if stats is not None else {}
+    window = clip_window(start_time, seg, pre_roll, seconds)
+    info.update(aligned=bool(seg))
+    if window is None:
+        info.update(window=[int(start_time), int(start_time)], lead=None)
+        print(f"SD clip: no window of {CLIP_MIN_SECONDS}+ s around {int(start_time)} "
+              f"(segment={seg})", file=sys.stderr)
+        return None
+    dl_start, dl_end = window
+    info.update(window=[int(dl_start), int(dl_end)], lead=int(start_time - dl_start))
+    started = _time.monotonic()
+    mp4 = download(client, dl_start, dl_end, time_correction, out_dir,
+                   **({"guard": guard} if guard is not None else {}))
+    info["download_s"] = round(_time.monotonic() - started, 1)
+    if not mp4:
+        print(f"SD clip: download returned no segment "
+              f"(start={int(dl_start)}, end={int(dl_end)}, aligned={bool(seg)}, "
+              f"tc={time_correction})", file=sys.stderr)
+        return None
+    try:
+        info["bytes"] = os.path.getsize(mp4)
+    except OSError:
+        info["bytes"] = None
+    return mp4
+
+
+def fetch_sd_clip_subprocess(cfg, start_time, out_dir, pre_roll=2, seconds=30,
+                             run=None, python=None, timeout=None, guard=None):
+    """Download the alert clip in a FRESH subprocess; return ``(path, window_start)``.
+
+    ``window_start`` is the epoch the mp4 begins at (the STATS window start), so the
+    caller can seek to ``event_start - pre_roll`` inside it; None when the child sent no
+    usable STATS line. ``(None, None)`` on any failure. Same reasons and conventions as
+    :func:`fetch_sd_frames_subprocess`: only the credential env-var *names* travel in
+    argv, a freshness ``guard`` as ``guard=N``.
+    """
+    import json
+    import subprocess as _sp
+    import sys as _sys
+
+    run = run or _sp.run
+    python = python or _sys.executable
+    if timeout is None:
+        timeout = download_timeout(pre_roll + seconds)
+    argv = [python, "-m", "tapo_monitor.sdclip", "clip",
+            camera.active_host(cfg), cfg.user_env or "", cfg.password_env or "",
+            cfg.cloud_password_env or "", str(int(start_time)), out_dir,
+            str(int(pre_roll)), str(int(seconds))]
+    if guard is not None:
+        argv.append(f"guard={int(guard)}")
+    started = _time.monotonic()
+    started_wall = _time.time()
+    camera_name = getattr(cfg, "name", "camera")
+    log.info("SD clip start %s: at=%.3f timeout=%ss", camera_name, _time.time(), timeout)
+    try:
+        proc = run(argv, capture_output=True, text=True, timeout=timeout)
+    except Exception as exc:
+        _remove_abandoned_downloads(out_dir, started_wall)
+        log.warning("SD clip subprocess failed to run: %r", exc)
+        return None, None
+    stderr_tail = (proc.stderr or "").strip()[-800:]
+    if proc.returncode != 0:
+        log.warning("SD clip subprocess exit=%s; stderr: %s", proc.returncode, stderr_tail)
+        return None, None
+    lines = (proc.stdout or "").splitlines()
+    clips = [ln[len(_CLIP_MARKER):].strip() for ln in lines if ln.startswith(_CLIP_MARKER)]
+    window_start = None
+    for ln in lines:
+        if ln.startswith(_STATS_MARKER):
+            stats_json = ln[len(_STATS_MARKER):]
+            log_card_read(getattr(cfg, "name", cfg.host), stats_json,
+                          0, _time.monotonic() - started)
+            try:
+                window_start = int(json.loads(stats_json)["window"][0])
+            except (ValueError, TypeError, KeyError, IndexError):
+                window_start = None
+    path = clips[-1] if clips else None
+    if not path or not os.path.exists(path) or os.path.getsize(path) <= 0:
+        log.warning("SD clip subprocess returned no clip; stderr: %s", stderr_tail)
+        return None, None
+    return path, window_start
+
+
+def clip_main(argv):
+    """Entry for the clip subprocess: build a fresh client, download, print the path.
+
+    argv: host user_env password_env cloud_env start out_dir pre_roll seconds [guard=N]
+    [lookup_retry=0|1 (default 1)]
+    """
+    import json
+
+    from . import camera
+
+    options = dict(a.split("=", 1) for a in argv if "=" in a)
+    argv = [a for a in argv if "=" not in a]
+    host, user_env, pass_env, cloud_env, start, out_dir, pre_roll, seconds = argv[:8]
+    guard = int(options["guard"]) if "guard" in options else None
+    user = os.environ.get(user_env, "") if user_env else ""
+    password = os.environ.get(pass_env, "") if pass_env else ""
+    cloud = (os.environ.get(cloud_env, "") if cloud_env else "") or password
+    factory = camera.tapo_factory(host, user, password, cloud)
+    started = _time.monotonic()
+    client, _err = camera.connect(factory)
+    stats = {"connect_s": round(_time.monotonic() - started, 1)}
+    if client is None:
+        print(f"SD connect failed: {_err}", file=sys.stderr)
+        print(_STATS_MARKER + json.dumps(stats))
+        return 4
+    path = fetch_sd_clip(client, int(start), out_dir, pre_roll=int(pre_roll),
+                         seconds=int(seconds), stats=stats, guard=guard,
+                         lookup_retry=options.get("lookup_retry", "1") != "0")
+    if path:
+        print(f"{_CLIP_MARKER}{path}")
+    print(_STATS_MARKER + json.dumps(stats))
+    return 0
+
+
 if __name__ == "__main__":  # pragma: no cover - CLI dispatch
     import sys
 
     if len(sys.argv) > 1 and sys.argv[1] == "download":
         raise SystemExit(download_main(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "clip":
+        raise SystemExit(clip_main(sys.argv[2:]))
     raise SystemExit(2)

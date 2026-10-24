@@ -286,3 +286,194 @@ def test_caption_names_frame_time_and_unverified_marker():
     text = notify.build_caption("👁", "T", frame_time="10:11:12", unverified=True)
     assert text.splitlines()[0] == "👁 T · frame 10:11:12 (unverified)"
     assert notify.build_caption("👁", "T") == "👁 T"
+
+
+# ── delivered message id (thread-local) ──────────────────────────────────────
+
+def _ok_with_id(message_id):
+    return _FakeResp(notify.json.dumps(
+        {"ok": True, "result": {"message_id": message_id, "chat": {"id": 1}}},
+        separators=(",", ":")).encode())
+
+
+def test_last_message_id_captured_from_send_photo(monkeypatch, tmp_path):
+    monkeypatch.delenv("TAPO_SENT_LOG_DIR", raising=False)
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: _ok_with_id(4242))
+    img = tmp_path / "snap.jpg"
+    img.write_bytes(b"\xff\xd8IMG")
+    notify.clear_last_message_id()
+
+    assert notify.send_photo("tok", "chat", str(img), "c") is True
+    assert notify.last_message_id() == 4242
+
+    notify.clear_last_message_id()
+    assert notify.last_message_id() is None
+
+
+def test_last_message_id_captured_from_album_first_element(monkeypatch, tmp_path):
+    monkeypatch.delenv("TAPO_SENT_LOG_DIR", raising=False)
+    body = b'{"ok":true,"result":[{"message_id":71},{"message_id":72}]}'
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: _FakeResp(body))
+    paths = []
+    for i in range(2):
+        p = tmp_path / f"s{i}.jpg"
+        p.write_bytes(b"\xff\xd8" + bytes([i]))
+        paths.append(str(p))
+    notify.clear_last_message_id()
+
+    assert notify.send_album("tok", "chat", paths, "c") is True
+    assert notify.last_message_id() == 71
+
+
+def test_last_message_id_is_per_thread(monkeypatch, tmp_path):
+    # Each camera runs on its own thread; one camera's send must never hand its id to
+    # another camera's clip.
+    import threading
+    monkeypatch.delenv("TAPO_SENT_LOG_DIR", raising=False)
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: _ok_with_id(9))
+    img = tmp_path / "snap.jpg"
+    img.write_bytes(b"\xff\xd8IMG")
+    notify.clear_last_message_id()
+    seen = []
+
+    def other():
+        notify.send_photo("tok", "chat", str(img), "c")
+        seen.append(notify.last_message_id())
+
+    t = threading.Thread(target=other)
+    t.start()
+    t.join()
+
+    assert seen == [9]
+    assert notify.last_message_id() is None
+
+
+def test_send_photo_record_id_false_keeps_previous_id(monkeypatch, tmp_path):
+    # The zoom photo follows the main alert; the clip must reply to the main one.
+    monkeypatch.delenv("TAPO_SENT_LOG_DIR", raising=False)
+    ids = iter([100, 101])
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: _ok_with_id(next(ids)))
+    img = tmp_path / "snap.jpg"
+    img.write_bytes(b"\xff\xd8IMG")
+    notify.clear_last_message_id()
+
+    assert notify.send_photo("tok", "chat", str(img), "main") is True
+    assert notify.send_photo("tok", "chat", str(img), "zoom", archive=False,
+                             record_id=False) is True
+    assert notify.last_message_id() == 100
+
+
+def test_unparseable_ok_body_still_succeeds_without_id(monkeypatch, tmp_path):
+    monkeypatch.delenv("TAPO_SENT_LOG_DIR", raising=False)
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: _FakeResp(b'{"ok":true, garbage'))
+    img = tmp_path / "snap.jpg"
+    img.write_bytes(b"\xff\xd8IMG")
+    notify.clear_last_message_id()
+
+    assert notify.send_photo("tok", "chat", str(img), "c") is True
+    assert notify.last_message_id() is None
+
+
+# ── send_video (alert clip) ──────────────────────────────────────────────────
+
+def _video(tmp_path):
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"\x00\x00\x00\x18ftypmp42" + bytes(range(256)))
+    return clip
+
+
+def test_send_video_posts_reply_with_streaming_and_bytes(monkeypatch, tmp_path):
+    posted = []
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: (posted.append(req), _FakeResp())[1])
+    clip = _video(tmp_path)
+
+    assert notify.send_video("tok", "chat", str(clip), "🎬 clip", reply_to=4242,
+                             width=1280, height=720, duration=30) is True
+
+    req = posted[0]
+    assert req.full_url.endswith("/bottok/sendVideo")
+    body = req.data
+    assert clip.read_bytes() in body
+    assert b'name="video"; filename="clip.mp4"' in body
+    assert b"Content-Type: video/mp4" in body
+    assert b'name="supports_streaming"\r\n\r\ntrue\r\n' in body
+    assert b'name="width"\r\n\r\n1280\r\n' in body
+    assert b'name="height"\r\n\r\n720\r\n' in body
+    assert b'name="duration"\r\n\r\n30\r\n' in body
+    assert "🎬 clip".encode() in body
+    marker = b'name="reply_parameters"\r\n\r\n'
+    start = body.index(marker) + len(marker)
+    params = notify.json.loads(body[start:body.index(b"\r\n", start)])
+    assert params == {"message_id": 4242, "allow_sending_without_reply": True}
+    boundary = req.get_header("Content-type").split("boundary=")[1]
+    assert boundary.encode() not in clip.read_bytes()
+
+
+def test_send_video_without_reply_omits_reply_parameters(monkeypatch, tmp_path):
+    posted = []
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: (posted.append(req), _FakeResp())[1])
+    clip = _video(tmp_path)
+
+    assert notify.send_video("tok", "chat", str(clip), "c") is True
+    assert b"reply_parameters" not in posted[0].data
+    assert b'name="width"' not in posted[0].data
+
+
+def test_send_video_retries_once_on_failure(monkeypatch, tmp_path):
+    calls = []
+
+    def flaky(req, timeout=None):
+        calls.append(timeout)
+        if len(calls) == 1:
+            raise OSError("boom")
+        return _FakeResp()
+
+    monkeypatch.setattr(notify.urllib.request, "urlopen", flaky)
+    monkeypatch.setattr(notify.time, "sleep", lambda *_: None)
+    assert notify.send_video("tok", "chat", str(_video(tmp_path)), "c") is True
+    assert calls == [120, 120]
+
+
+def test_send_video_gives_up_after_second_failure(monkeypatch, tmp_path):
+    calls = []
+
+    def dead(req, timeout=None):
+        calls.append(1)
+        raise OSError("boom")
+
+    monkeypatch.setattr(notify.urllib.request, "urlopen", dead)
+    monkeypatch.setattr(notify.time, "sleep", lambda *_: None)
+    assert notify.send_video("tok", "chat", str(_video(tmp_path)), "c") is False
+    assert len(calls) == 2
+
+
+def test_send_video_missing_file_returns_false(monkeypatch, tmp_path):
+    def boom(req, timeout=None):
+        raise AssertionError("must not post")
+
+    monkeypatch.setattr(notify.urllib.request, "urlopen", boom)
+    assert notify.send_video("tok", "chat", str(tmp_path / "gone.mp4"), "c") is False
+
+
+def test_send_video_does_not_touch_the_sent_log(monkeypatch, tmp_path):
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: _FakeResp())
+    archive = tmp_path / "sent"
+    monkeypatch.setenv("TAPO_SENT_LOG_DIR", str(archive))
+    assert notify.send_video("tok", "chat", str(_video(tmp_path)), "c") is True
+    assert not archive.exists()
+
+
+def test_send_video_does_not_change_last_message_id(monkeypatch, tmp_path):
+    monkeypatch.setattr(notify.urllib.request, "urlopen",
+                        lambda req, timeout=None: _ok_with_id(555))
+    notify.clear_last_message_id()
+    assert notify.send_video("tok", "chat", str(_video(tmp_path)), "c") is True
+    assert notify.last_message_id() is None

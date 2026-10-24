@@ -34,6 +34,9 @@ All notable changes to this project are documented here.
   nothing is expanded or executed.
 
 ### Added
+- `clip_video` (opt-in, card cameras): after an alert photo is delivered, a 30 s H.264
+  clip of the event read from the camera card (`clip_seconds`, `clip_pre_roll`,
+  `clip_height`) is sent to Telegram as a reply to the photo.
 - `TAPO_LABEL_ALLOWED_HOSTS` adds extra hostnames the label server accepts in
   `Host`/`Origin`.
 - `tools/suggest_ignore_zones.py` suggests `scorer.ignore_boxes` rects from person

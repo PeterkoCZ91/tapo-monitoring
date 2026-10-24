@@ -773,3 +773,203 @@ def test_download_segment_pins_playback_downloader(monkeypatch, tmp_path):
         "overwriteFiles": True, "window_size": 50, "fileName": "sd_100.mp4",
         "method": "playback", "output": "mp4", "progressInterval": 0,
     }
+
+
+# ── alert clip: a video window around the event, kept for the caller ──────────────
+
+def test_clip_window_without_a_segment_is_the_wanted_window():
+    assert sdclip.clip_window(1000, None, 2, 30) == (998, 1030)
+
+
+def test_clip_window_clips_to_the_segment_at_both_ends():
+    assert sdclip.clip_window(1000, (999, 1020), 2, 30) == (999, 1020)
+    assert sdclip.clip_window(1000, (900, 1100), 2, 30) == (998, 1030)
+
+
+def test_clip_window_event_at_segment_start_loses_the_pre_roll():
+    assert sdclip.clip_window(1000, (1000, 1060), 5, 30) == (1000, 1030)
+
+
+def test_clip_window_none_when_too_short_or_empty():
+    assert sdclip.clip_window(1000, (1000, 1002), 2, 30) is None      # 2 s < 3 s
+    assert sdclip.clip_window(1000, (1100, 1160), 2, 30) is None      # segment after
+    assert sdclip.clip_window(1000, (900, 950), 2, 30) is None        # segment before
+    assert sdclip.clip_window(1000, None, 0, 2) is None
+    assert sdclip.clip_window(1000, (1000, 1003), 2, 30) == (1000, 1003)
+
+
+def test_fetch_sd_clip_keeps_the_file_and_fills_stats(tmp_path):
+    mp4 = tmp_path / "sd_998.mp4"
+    calls = []
+
+    def download(client, start, end, tc, out_dir, **kw):
+        calls.append((start, end, out_dir, kw))
+        mp4.write_bytes(b"x" * 1234)
+        return str(mp4)
+
+    stats = {}
+    out = sdclip.fetch_sd_clip(_Cam(), 1000, str(tmp_path), pre_roll=2, seconds=30,
+                               download=download, segment_bounds=lambda *a, **k: None,
+                               stats=stats, guard=40)
+    assert out == str(mp4) and mp4.exists()          # the caller owns the mp4
+    assert calls == [(998, 1030, str(tmp_path), {"guard": 40})]
+    assert stats["window"] == [998, 1030] and stats["aligned"] is False
+    assert stats["lead"] == 2 and stats["bytes"] == 1234 and "download_s" in stats
+
+
+def test_fetch_sd_clip_aligns_to_the_segment():
+    calls = []
+
+    def download(client, start, end, tc, out_dir, **kw):
+        calls.append((start, end, kw))
+        return "/nonexistent/sd.mp4"
+
+    stats = {}
+    out = sdclip.fetch_sd_clip(_Cam(), 1000, "/tmp", pre_roll=5, seconds=30,
+                               download=download,
+                               segment_bounds=lambda *a, **k: (999, 1020), stats=stats)
+    assert out == "/nonexistent/sd.mp4"
+    assert calls == [(999, 1020, {})]                 # no guard kwarg when unset
+    assert stats["aligned"] is True and stats["lead"] == 1 and stats["bytes"] is None
+
+
+def test_fetch_sd_clip_asks_for_the_lookup_retry_only_when_on():
+    seen = []
+
+    def bounds(client, start, **kw):
+        seen.append(kw)
+        return None
+
+    for retry in (True, False):
+        sdclip.fetch_sd_clip(_Cam(), 1000, "/tmp", download=lambda *a, **k: None,
+                             segment_bounds=bounds, lookup_retry=retry)
+    assert seen == [{"retry_pause": sdclip.SD_LOOKUP_RETRY_PAUSE}, {}]
+
+
+def test_fetch_sd_clip_none_when_download_fails(capsys):
+    assert sdclip.fetch_sd_clip(_Cam(), 1000, "/tmp", download=lambda *a, **k: None,
+                                segment_bounds=lambda *a, **k: None) is None
+    assert "download returned no segment" in capsys.readouterr().err
+
+
+def test_fetch_sd_clip_none_without_downloading_an_empty_window():
+    called = []
+    out = sdclip.fetch_sd_clip(_Cam(), 1000, "/tmp",
+                               download=lambda *a, **k: called.append(a) or "/x.mp4",
+                               segment_bounds=lambda *a, **k: (1100, 1160))
+    assert out is None and called == []
+
+
+def test_fetch_sd_clip_subprocess_returns_the_clip(tmp_path, caplog):
+    clip = tmp_path / "sd_998.mp4"
+    clip.write_bytes(b"x" * 10)
+    captured = {}
+
+    def run(argv, **kw):
+        captured["argv"], captured["kw"] = argv, kw
+        return types.SimpleNamespace(
+            returncode=0, stderr="",
+            stdout=f'noise\nCLIP:{clip}\nSTATS:{{"window": [998, 1030], "lead": 2, '
+                   f'"aligned": false, "bytes": 10}}\n')
+
+    with caplog.at_level("INFO", logger="tapo_monitor.sdclip"):
+        out = sdclip.fetch_sd_clip_subprocess(
+            _cfg(name="cam", password_env="TAPO_PW"), 1000, str(tmp_path), pre_roll=2,
+            seconds=30, run=run, python="PY", guard=40)
+    assert out == (str(clip), 998)               # path + the epoch the mp4 begins at
+    argv = captured["argv"]
+    assert argv[:4] == ["PY", "-m", "tapo_monitor.sdclip", "clip"]
+    assert argv[4:12] == ["203.0.113.12", "U", "TAPO_PW", "C", "1000", str(tmp_path),
+                          "2", "30"]
+    assert argv[-1] == "guard=40"
+    assert captured["kw"]["timeout"] == sdclip.download_timeout(32)
+    assert any("SD read cam: window=32s" in r.getMessage() and "frames=0" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_fetch_sd_clip_subprocess_never_puts_secrets_in_argv(monkeypatch):
+    monkeypatch.setenv("TAPO_PW", "s3cret-value")
+    captured = {}
+
+    def run(argv, **kw):
+        captured["argv"] = argv
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    assert sdclip.fetch_sd_clip_subprocess(_cfg(password_env="TAPO_PW"), 1000, "/tmp",
+                                           run=run, python="PY") == (None, None)
+    assert "s3cret-value" not in " ".join(captured["argv"])
+    assert not any(a.startswith("guard=") for a in captured["argv"])
+
+
+def test_fetch_sd_clip_subprocess_none_when_the_file_is_missing_or_empty(tmp_path):
+    empty = tmp_path / "sd_1.mp4"
+    empty.write_bytes(b"")
+    for path in (tmp_path / "missing.mp4", empty):
+        run = lambda argv, p=path, **kw: types.SimpleNamespace(  # noqa: E731
+            returncode=0, stdout=f"CLIP:{p}\n", stderr="")
+        assert sdclip.fetch_sd_clip_subprocess(_cfg(), 1000, str(tmp_path), run=run,
+                                               python="PY") == (None, None)
+
+
+def test_fetch_sd_clip_subprocess_none_on_nonzero_exit(tmp_path, caplog):
+    clip = tmp_path / "sd_998.mp4"
+    clip.write_bytes(b"x")
+    run = lambda argv, **kw: types.SimpleNamespace(  # noqa: E731
+        returncode=4, stdout=f"CLIP:{clip}\n", stderr="SD connect failed: boom")
+    with caplog.at_level("WARNING", logger="tapo_monitor.sdclip"):
+        assert sdclip.fetch_sd_clip_subprocess(_cfg(), 1000, str(tmp_path), run=run,
+                                               python="PY") == (None, None)
+    assert "exit=4" in caplog.text and "SD connect failed: boom" in caplog.text
+
+
+def test_fetch_sd_clip_subprocess_removes_the_abandoned_mp4_on_timeout(tmp_path):
+    import subprocess
+
+    def run(argv, **kw):
+        (tmp_path / "sd_998.mp4").write_bytes(b"partial")
+        raise subprocess.TimeoutExpired(argv, kw.get("timeout"))
+
+    assert sdclip.fetch_sd_clip_subprocess(_cfg(), 1000, str(tmp_path), run=run,
+                                           python="PY") == (None, None)
+    assert not (tmp_path / "sd_998.mp4").exists()
+
+
+def test_clip_main_prints_the_clip_and_stats(monkeypatch, capsys):
+    from tapo_monitor import camera
+    seen = []
+    monkeypatch.setattr(camera, "tapo_factory", lambda *a: None)
+    monkeypatch.setattr(camera, "connect", lambda factory: (object(), None))
+
+    def fake(client, start, out_dir, **kw):
+        seen.append((start, out_dir, kw))
+        kw["stats"]["bytes"] = 5
+        return "/tmp/sd_998.mp4"
+
+    monkeypatch.setattr(sdclip, "fetch_sd_clip", fake)
+    base = ["203.0.113.12", "", "", "", "1000", "/tmp", "2", "30"]
+    assert sdclip.clip_main(base + ["guard=40", "lookup_retry=0"]) == 0
+    assert sdclip.clip_main(base) == 0
+    out = capsys.readouterr().out
+    assert out.count("CLIP:/tmp/sd_998.mp4") == 2 and out.count("STATS:") == 2
+    assert seen[0][:2] == (1000, "/tmp")
+    assert (seen[0][2]["pre_roll"], seen[0][2]["seconds"]) == (2, 30)
+    assert (seen[0][2]["guard"], seen[0][2]["lookup_retry"]) == (40, False)
+    assert (seen[1][2]["guard"], seen[1][2]["lookup_retry"]) == (None, True)
+
+
+def test_clip_main_exits_4_when_connect_fails(monkeypatch, capsys):
+    from tapo_monitor import camera
+    monkeypatch.setattr(camera, "tapo_factory", lambda *a: None)
+    monkeypatch.setattr(camera, "connect", lambda factory: (None, "boom"))
+    assert sdclip.clip_main(["h", "", "", "", "1000", "/tmp", "2", "30"]) == 4
+    assert "CLIP:" not in capsys.readouterr().out
+
+
+def test_fetch_sd_clip_subprocess_window_start_none_without_stats(tmp_path):
+    clip = tmp_path / "sd_998.mp4"
+    clip.write_bytes(b"x")
+    for stdout in (f"CLIP:{clip}\n", f"CLIP:{clip}\nSTATS:garbled\n"):
+        run = lambda argv, o=stdout, **kw: types.SimpleNamespace(  # noqa: E731
+            returncode=0, stdout=o, stderr="")
+        assert sdclip.fetch_sd_clip_subprocess(_cfg(), 1000, str(tmp_path), run=run,
+                                               python="PY") == (str(clip), None)

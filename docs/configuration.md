@@ -605,6 +605,10 @@ sd_jobs_per_tick: 1
 sd_early_look: false
 sd_early_span: 18
 sd_fresh_guard: 60
+clip_video: false
+clip_seconds: 30
+clip_pre_roll: 2
+clip_height: 720
 ```
 
 - `sd_snapshot` gives confirmed events an event-time follow-up when the live frame fails or
@@ -654,6 +658,21 @@ sd_fresh_guard: 60
   recording, but about 10–20 s behind, and the read is clipped to what is listed. So a
   guard that is too low gives a shorter clip with fewer frames, not an error. Keep the
   default unless a trial on your camera shows complete clips.
+- `clip_video: true` (camera card, `detection.sources` with `getevents`, off by default)
+  sends a short video of every alerted incident as a reply to its photo, so the photo
+  says who was there and the clip what they did. After the photo reached Telegram, the
+  card window from `clip_pre_roll` s (default 2, 0–10) before the event start to
+  `clip_seconds` s (default 30, 5–60) after it is read once the window clears
+  `sd_fresh_guard`, transcoded to H.264 at `clip_height` lines (default 720, 240–1080;
+  the first lens of a two-lens camera, audio when the card has it) and sent with
+  `sendVideo`. With the defaults the clip arrives about 3 minutes after the event: the
+  read is due after about 100 s, and on a Raspberry Pi 4 with a 2K camera the 30 s card
+  read took 44 s, the encode 27 s (x264 at low priority, 3–4 cores) and the 1 MB
+  upload 2 s (measured 2026-10-24). The read runs on the camera's card thread
+  after its SD follow-ups, one clip per incident, tried twice at most, and given up 15
+  minutes after the event. The queue is kept in memory: a restart drops the clips not
+  yet sent, never an alert. Cameras that only collect data (`telegram_alerts: false`)
+  send no clips.
 - `sd_span_cap` bounds the event window downloaded/scanned.
 - `sd_motion_span_cap` bounds the first window for unconfirmed motion/PIR; one empty
   result retries with `sd_span_cap`. Confirmed person events use the full window directly.

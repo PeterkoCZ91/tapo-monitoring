@@ -7,6 +7,8 @@ pure and tested.
 
 import html
 import json
+import secrets
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -27,6 +29,41 @@ EMPTY_MARKER = "empty"
 # dog scores next to its owner (0.80-0.86 measured), so a person walking a dog reads as
 # one. Captions only — the send decision never looks at this.
 ANIMAL_CAPTION_MIN = 0.6
+
+# Message id of the last photo/album this thread delivered, so a later alert clip can
+# reply to it. Thread-local: each camera runs on its own thread and must never pick up
+# another camera's alert. The send functions keep returning plain bools.
+_delivered = threading.local()
+
+
+def last_message_id():
+    """``message_id`` of the last successful sendPhoto/sendMediaGroup on this thread."""
+    return getattr(_delivered, "message_id", None)
+
+
+def clear_last_message_id():
+    """Forget the recorded id, so a failed send that follows cannot reuse a stale one."""
+    _delivered.message_id = None
+
+
+def _read_ok(resp, record_id):
+    """Telegram's ``"ok":true`` check; when ``record_id``, remember ``result.message_id``.
+
+    An album answers with a list of messages; the first one carries the caption. A body
+    that passes the ok check but is not valid JSON still counts as delivered, with no id.
+    """
+    text = resp.read().decode(errors="replace")
+    ok = resp.status < 300 and '"ok":true' in text
+    if ok and record_id:
+        try:
+            result = json.loads(text).get("result")
+            if isinstance(result, list):
+                result = result[0] if result else None
+            message_id = result.get("message_id") if isinstance(result, dict) else None
+            _delivered.message_id = message_id if isinstance(message_id, int) else None
+        except (ValueError, AttributeError):
+            _delivered.message_id = None
+    return ok
 
 
 def is_empty_scene(description, marker=EMPTY_MARKER):
@@ -206,7 +243,7 @@ def telegram_reachable(token, timeout=5):
         return False
 
 
-def _post_photo(token, chat_id, image, caption):
+def _post_photo(token, chat_id, image, caption, record_id=True):
     """POST one photo to Telegram. Returns True on success, False on any failure."""
     try:
         boundary = "tapoMonitorBoundary"
@@ -222,7 +259,7 @@ def _post_photo(token, chat_id, image, caption):
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return resp.status < 300 and '"ok":true' in resp.read().decode(errors="replace")
+            return _read_ok(resp, record_id)
     except Exception:
         return False
 
@@ -250,7 +287,7 @@ def _post_album(token, chat_id, images, caption):
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.status < 300 and '"ok":true' in resp.read().decode(errors="replace")
+            return _read_ok(resp, True)
     except Exception:
         return False
 
@@ -267,7 +304,8 @@ def _archive_bytes(archive_path, sent_image):
 
 
 def send_photo(token, chat_id, image_path, caption, archive_path=None,
-               camera=None, score=None, archive=True, incident=None, send_path=None):
+               camera=None, score=None, archive=True, incident=None, send_path=None,
+               record_id=True):
     """Send a photo with a caption via multipart/form-data. Returns True on success.
 
     ``archive_path`` names a different frame to keep in the sent log: ``crop_to_subject``
@@ -276,17 +314,19 @@ def send_photo(token, chat_id, image_path, caption, archive_path=None,
     ``archive=False`` keeps non-alert traffic (the review digest) out of the sent log,
     which is read as the record of delivered alerts. ``incident`` and ``send_path`` (the
     delivery path, :data:`sentlog.SEND_PATHS`) only go to the sent-log index.
+    ``record_id=False`` leaves :func:`last_message_id` alone: the zoom photo that follows
+    an alert must not take over the id the alert clip replies to.
     """
     try:
         with open(image_path, "rb") as f:
             image = f.read()
     except OSError:
         return False
-    ok = _post_photo(token, chat_id, image, caption)
+    ok = _post_photo(token, chat_id, image, caption, record_id)
     if not ok:
         # A transient Telegram/network failure would otherwise lose a real alert.
         time.sleep(TELEGRAM_RETRY_DELAY)
-        ok = _post_photo(token, chat_id, image, caption)
+        ok = _post_photo(token, chat_id, image, caption, record_id)
     if archive:
         # Best-effort diagnostic copy of the frame (opt-in via env).
         sentlog.archive_if_configured(_archive_bytes(archive_path, image), caption,
@@ -324,6 +364,60 @@ def send_album(token, chat_id, image_paths, caption, camera=None, scores=None,
                 image, caption, delivered=True, now=now + i * 1e-6, camera=camera,
                 score=(scores[i] if scores and i < len(scores) else None),
                 incident=incident, send_path=send_path)
+    return ok
+
+
+def _post_video(token, chat_id, video, caption, reply_to, timeout, width, height,
+                duration):
+    """POST one MP4 to Telegram (sendVideo). Returns True on success, False otherwise."""
+    try:
+        # Random boundary: unlike a JPEG, a 30 s clip is large enough that a fixed string
+        # could plausibly occur in it.
+        boundary = f"tapoMonitor{secrets.token_hex(16)}"
+        fields = [("chat_id", chat_id), ("caption", caption), ("supports_streaming", "true")]
+        for name, value in (("width", width), ("height", height), ("duration", duration)):
+            if value is not None:
+                fields.append((name, int(value)))
+        if reply_to is not None:
+            # Still delivered if the photo was deleted meanwhile, just not as a reply.
+            fields.append(("reply_parameters", json.dumps(
+                {"message_id": reply_to, "allow_sending_without_reply": True})))
+        body = "".join(
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+            for name, value in fields
+        ).encode() + (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"video\"; filename=\"clip.mp4\"\r\n"
+            f"Content-Type: video/mp4\r\n\r\n"
+        ).encode() + video + f"\r\n--{boundary}--\r\n".encode()
+        req = urllib.request.Request(
+            f"{_API}/bot{token}/sendVideo",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return _read_ok(resp, False)
+    except Exception:
+        return False
+
+
+def send_video(token, chat_id, video_path, caption, reply_to=None, timeout=120,
+               width=None, height=None, duration=None):
+    """Send an MP4 clip, as a reply to message ``reply_to`` when given. True on success.
+
+    The alert clip follows its photo, so it is never archived to the sent log (the photo
+    already is) and never changes :func:`last_message_id`. ``width``/``height``/
+    ``duration`` are hints that let Telegram show the player at the right size at once.
+    """
+    try:
+        with open(video_path, "rb") as f:
+            video = f.read()
+    except OSError:
+        return False
+    args = (token, chat_id, video, caption, reply_to, timeout, width, height, duration)
+    ok = _post_video(*args)
+    if not ok:
+        time.sleep(TELEGRAM_RETRY_DELAY)
+        ok = _post_video(*args)
     return ok
 
 

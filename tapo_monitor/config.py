@@ -309,6 +309,13 @@ class CameraConfig:
     # Camera card only: seconds a window's end must be in the past before pytapo downloads
     # it (its FRESH_RECORDING_TIME_SECONDS). The due time of every card read follows it.
     sd_fresh_guard: int = 60
+    # Opt-in: after a delivered alert photo, read clip_pre_roll s before to clip_seconds s
+    # after the event start from the card and send it as an H.264 clip_height-p video
+    # replying to the photo (tapo_monitor.alertclip). Needs a card camera (getevents).
+    clip_video: bool = False
+    clip_seconds: int = 30
+    clip_pre_roll: int = 2
+    clip_height: int = 720
     # False records every alert decision exactly as if it went out (sent log, cooldowns,
     # audit) but sends no photo to Telegram: a camera that is only collecting data. System
     # notices (privacy, outage, drift) still go out.
@@ -1341,6 +1348,10 @@ def _camera(data, index):
         raise ConfigError(f"{where}: 'recording_ready_margin' must be an integer")
     if not 5 <= recording_ready_margin <= 60:
         raise ConfigError(f"{where}: 'recording_ready_margin' must be between 5 and 60")
+    clip_video = _check_bool(data.get("clip_video", False), "clip_video", where)
+    clip_seconds = _clip_int(data, "clip_seconds", 30, 5, 60, where)
+    clip_pre_roll = _clip_int(data, "clip_pre_roll", 2, 0, 10, where)
+    clip_height = _clip_int(data, "clip_height", 720, 240, 1080, where)
     night_vision = data.get("night_vision")
     if night_vision is not None and night_vision not in ("ir", "auto"):
         raise ConfigError(f"{where}: 'night_vision' must be 'ir' or 'auto'")
@@ -1395,6 +1406,9 @@ def _camera(data, index):
             or data.get("snapshot_source") == "recording"):
         raise ConfigError(f"{where}: detection source 'reolink' has no SD-card path; "
                           "sd_snapshot / sd_motion / recording are not allowed")
+    if clip_video and "getevents" not in detection.sources:
+        raise ConfigError(f"{where}: clip_video reads the camera's SD card and needs "
+                          "detection source 'getevents'")
     reolink_triggers = tuple(data.get("reolink_triggers") or ())
     _check_subset(list(reolink_triggers), {"motion", "people", "vehicle", "dog_cat"},
                   "reolink_triggers", where)
@@ -1550,6 +1564,10 @@ def _camera(data, index):
         recording_early_span=recording_early_span,
         recording_ready_margin=recording_ready_margin,
         sd_fresh_guard=sd_fresh_guard,
+        clip_video=clip_video,
+        clip_seconds=clip_seconds,
+        clip_pre_roll=clip_pre_roll,
+        clip_height=clip_height,
         person_sensitivity=int(data["person_sensitivity"]) if data.get("person_sensitivity") is not None else None,
         night_only=_check_bool(data.get("night_only", False), "night_only", where),
         quiet_hours=quiet_hours,
@@ -1650,6 +1668,16 @@ def _outbox(data):
     return OutboxConfig(enabled=enabled,
                         dir=os.path.expanduser(directory.strip()) if directory else None,
                         summary=summary, lang=lang, **ints)
+
+
+def _clip_int(data, key, default, low, high, where):
+    """A whole number from ``low`` to ``high`` for one of the ``clip_*`` options."""
+    value = data.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"{where}: '{key}' must be an integer")
+    if not low <= value <= high:
+        raise ConfigError(f"{where}: '{key}' must be between {low} and {high}")
+    return value
 
 
 def load_config_from_dict(data) -> AppConfig:

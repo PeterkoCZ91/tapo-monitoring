@@ -37,6 +37,7 @@ from typing import Any
 
 from . import (
     alarminfo,
+    alertclip,
     camera,
     capabilities,
     cli,
@@ -1851,13 +1852,22 @@ def send_alert_photo(cfg, secrets, image, caption, downscale=None, score=None,
     failure left there. ``etype`` (the camera's event type) is only read by the outbox,
     which falls back to it when the frame could not be scored.
     """
+    notify.clear_last_message_id()
     ok = _deliver_alert_photo(cfg, secrets, image, caption, downscale=downscale, score=score,
                               incident=incident, send_path=send_path)
     if ok:
         mqtt.note_alert(cfg.name, image=image, score=score)
+        # Only a photo Telegram really took has an id: collect-only sends none.
+        _clips.note_alert(cfg, incident, message_id=notify.last_message_id(),
+                          caption=caption, now=_time.time())
     _note_outbox(cfg, ok, image=image, caption=caption, score=score, incident=incident,
                  send_path=send_path, etype=etype)
     return ok
+
+
+# Clips waiting for their card window (``clip_video``); inert while no camera opts in.
+# Module-level like the outbox: send_alert_photo sees the camera, not the daemon state.
+_clips = alertclip.ClipQueue()
 
 
 # The opt-in outbox (``outbox:`` block), or None when off — the default. Module-level for
@@ -2077,7 +2087,8 @@ def _deliver_alert_photo(cfg, secrets, image, caption, downscale=None, score=Non
             ok = notify.send_photo(token, chat, image, caption, camera=cfg.name, score=score,
                                    incident=incident, send_path=send_path)
             if ok:
-                notify.send_photo(token, chat, crop_temp, "🔍 zoom", archive=False)
+                notify.send_photo(token, chat, crop_temp, "🔍 zoom", archive=False,
+                                  record_id=False)
             return ok
         finally:
             _safe_unlink(crop_temp)
@@ -3434,6 +3445,9 @@ def process_pending_sd(app, cam_clients, state, *, now, secrets, snapshot_for=No
 
     def collect():
         for done in worker.poll():
+            if isinstance(done.context, alertclip.ClipJob):
+                _clips.finish(done.context, value=done.value, error=done.error, now=now)
+                continue
             keep[id(done.context.entry)] = _finish_sd_followup(
                 app, cam_clients, state, done.context, done.value, done.error, now=now,
                 secrets=secrets, snapshot_for=snapshot_for, time_str=time_str, night=night)
@@ -5195,6 +5209,9 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     sample(scoring, cam_clients, state, now=now, secrets=secrets, night=night)
     drain_kw = {"worker": sd_worker} if sd_worker is not None else {}
     drain(scoring, cam_clients, state, now=now, secrets=secrets, night=night, **drain_kw)
+    if sd_worker is not None:
+        # After the follow-ups: a clip only takes a camera's card thread they left idle.
+        _clips.drain(app, sd_worker, now=now, secrets=secrets)
     # After the in-memory retries, so they win whatever they can still deliver themselves.
     late(app, state, now=now, secrets=secrets)
     guard(app, cam_clients, state, now=now, secrets=secrets, night=night)
