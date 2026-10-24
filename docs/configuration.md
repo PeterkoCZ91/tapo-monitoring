@@ -1150,6 +1150,15 @@ events with `tapo-monitor replay --compare` first (see [observability](observabi
   earlier frames of the same group already scored below threshold is, with `hold`, skipped
   (audit `action=scorer_unavailable reason=skipped_prior_low_scores`) and retried at the
   next interval; the last frame of the window still passes through. `open` always passes it.
+- `unscored_at_night` (`send`, default, or `hold`): what a frame the scorer could not
+  score does during the camera's night (its `schedule`). `send` passes it through as
+  above. `hold` sends no unverified photo at night on any path: a live frame of a camera
+  with a card follow-up is handed to it (that read is scored again about two minutes
+  later, by when the scorer is often back), any other live, sampler, card or hub frame
+  goes to the review log with no score (audit `action=scorer_unavailable
+  reason=held_at_night`) and the sampler keeps sampling. A card follow-up that is still
+  unscored is dropped. Daytime frames still pass through. In one review, unscored night
+  photos sent during a scorer outage were 4 of the 6 false alarms.
 - The [artifact filter](operations.md#partially-decoded-frames-artifact-filter) is enabled
   by default on the scorer service. A recognised partially decoded grey frame returns
   zero scores with `artifact: true`; this is a successful filtered result, not a scorer

@@ -222,6 +222,13 @@ def effective_night(cfg: CameraConfig, astronomical_night: bool) -> bool:
     return astronomical_night
 
 
+def holds_unscored(cfg: CameraConfig, astronomical_night: bool) -> bool:
+    """Whether an unscored frame of this camera is held now (``unscored_at_night: hold``
+    during the camera's :func:`effective_night`) instead of passed through."""
+    return (cfg.scorer.unscored_at_night == "hold"
+            and effective_night(cfg, astronomical_night))
+
+
 def scorer_threshold(cfg: CameraConfig, astronomical_night: bool) -> float:
     """The scorer threshold this camera applies now: ``night_threshold`` during its night.
 
@@ -2469,6 +2476,7 @@ def run_monitor_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             scene_alert=scene_alert,
             hold_archive=hold_archive,
             mute=camera_muted(cfg, night, now),
+            hold_unscored=holds_unscored(cfg, night),
             trigger_whitelamp=camera.trigger_whitelamp,
             **seen_kw,
         )
@@ -2769,7 +2777,7 @@ def run_hubpoll_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, s
             process_hub_clip_queue(app, state, hub_worker, now=now, secrets=secrets,
                                    frame_for=frame_for, score_for=score_for,
                                    time_str=time_str, clip_frame_for=clip_frame_for,
-                                   cooldown=cooldown)
+                                   cooldown=cooldown, night=night)
         check_hub_inactivity(app, state, now=now, secrets=secrets, night=night,
                              hub_for=hub_for)
     finally:
@@ -2951,11 +2959,12 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
                 continue
             _deliver_hub_frames(cfg, state, clip, event, etype, image, clip_extra,
                                 score=score, can_alert=can_alert, on_alert=on_alert,
-                                secrets=secrets, time_str=time_str, now=now)
+                                secrets=secrets, time_str=time_str, now=now,
+                                hold_unscored=holds_unscored(cfg, night))
 
 
 def _deliver_hub_frames(cfg, state, clip, event, etype, image, clip_extra, *, score,
-                       can_alert, on_alert, secrets, time_str, now):
+                       can_alert, on_alert, secrets, time_str, now, hold_unscored=False):
     """Score, gate and send the frame(s) a hub clip produced; queue a failed send for retry.
 
     Shared by the inline path and the clip worker, so a clip decided on either is judged
@@ -2968,6 +2977,15 @@ def _deliver_hub_frames(cfg, state, clip, event, etype, image, clip_extra, *, sc
         image, s = (frames[0], None) if score is None else _select_recording_frame(
             cfg, event, etype, frames, score, path="hubpoll", keep_below=True,
             audit_extra=clip_extra)
+        if score is not None and s is None and hold_unscored:
+            # scorer.unscored_at_night: hold - no unverified hub photo at night.
+            log.warning("scorer unavailable at night; hubpoll %s clip held", cfg.name)
+            monitor.audit_event(cfg, event, etype, "hubpoll", "scorer_unavailable",
+                                reason="held_at_night", extra=clip_extra)
+            sentlog.archive_review_if_configured(
+                image, {**sentlog.review_meta(cfg.name, "hold", etype, None, event),
+                        **{k: v for k, v in clip_extra.items() if v is not None}})
+            return
         if score is not None and s is None:
             log.warning("scorer unavailable; hubpoll passes %s frame through", cfg.name)
         elif s is not None and s < cfg.scorer.threshold:
@@ -3048,7 +3066,7 @@ def _hub_clip_job(fetch, clip, name):
 
 
 def _finish_hub_clip(state, cfg, entry, frames, *, now, secrets, frame_for, score_for,
-                     time_str, cooldown):
+                     time_str, cooldown, night=True):
     """Decide and send one queued clip, given the frames its job returned (maybe none)."""
     clip = {k: entry.get(k) for k in ("start_time", "end_time", "video_type")}
     event = detection.normalize_event({"start_time": clip["start_time"]},
@@ -3068,11 +3086,12 @@ def _finish_hub_clip(state, cfg, entry, frames, *, now, secrets, frame_for, scor
     can_alert, on_alert = alert_gate(state, cfg.name, cooldown, now)
     _deliver_hub_frames(cfg, state, clip, event, "motion", image, clip_extra,
                         score=score_for(cfg), can_alert=can_alert, on_alert=on_alert,
-                        secrets=secrets, time_str=time_str, now=now)
+                        secrets=secrets, time_str=time_str, now=now,
+                        hold_unscored=holds_unscored(cfg, night))
 
 
 def process_hub_clip_queue(app, state, worker, *, now, secrets, frame_for, score_for,
-                           time_str, clip_frame_for, cooldown):
+                           time_str, clip_frame_for, cooldown, night=True):
     """Hand queued hub clips to ``worker`` and decide the ones that came back.
 
     One download per hub at a time (the worker is keyed by hub host, and a hub tolerates a
@@ -3096,7 +3115,7 @@ def process_hub_clip_queue(app, state, worker, *, now, secrets, frame_for, score
         try:
             _finish_hub_clip(state, cfg, entry, frames, now=now, secrets=secrets,
                              frame_for=frame_for, score_for=score_for, time_str=time_str,
-                             cooldown=cooldown)
+                             cooldown=cooldown, night=night)
         except Exception:  # noqa: BLE001 - one bad clip must not end the pass
             entry["finish_attempts"] = entry.get("finish_attempts", 0) + 1
             log.exception("hubpoll %s: deciding the clip at %s failed (attempt %d)",
@@ -3850,6 +3869,16 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
         # The scorer is configured but answered for no frame (an outage): the photo still
         # goes out, marked like an unscored sampler send so it does not read as confirmed.
         unscored = job.scored and selected_score is None
+        if unscored and holds_unscored(cfg, night):
+            # scorer.unscored_at_night: hold - the card read was the second chance for a
+            # frame the scorer could not read live; still unscored, it is not sent.
+            log.warning("scorer unavailable at night; %s card follow-up held, not sent",
+                        etype)
+            sentlog.archive_review_if_configured(
+                image, sentlog.review_meta(cfg.name, "hold", etype, None, event))
+            monitor.audit_event(cfg, event, etype, "sd", "scorer_unavailable",
+                                reason="held_at_night")
+            return False
         caption = notify.build_caption(
             monitor.TYPE_EMOJI.get(etype, "👤"), time_str(event),
             description=description or None, detail=label or None,
@@ -4192,6 +4221,17 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                             group["scored"])
                 monitor.audit_event(cfg, group["event"], etype, "sampler",
                                     "scorer_unavailable", reason="skipped_prior_low_scores")
+                continue
+            if score is not None and s is None and holds_unscored(cfg, night):
+                # scorer.unscored_at_night: hold - no unverified photo at night. The frame
+                # stays in the review log; the group keeps sampling, so a later frame the
+                # scorer can read may still send.
+                log.warning("scorer unavailable at night; sampler %s holds frame %d/%d",
+                            cfg.name, group["frames"], scfg.max_frames)
+                monitor.audit_event(cfg, group["event"], etype, "sampler",
+                                    "scorer_unavailable", reason="held_at_night")
+                sentlog.archive_review_if_configured(
+                    image, sentlog.review_meta(cfg.name, "hold", etype, None, group["event"]))
                 continue
             motion_corr = (cfg.scorer.motion_send_threshold is not None
                            and etype == "motion" and not group.get("pir_backed"))

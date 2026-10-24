@@ -46,6 +46,9 @@ All notable changes to this project are documented here.
   `clip_height`) is sent to Telegram as a reply to the photo.
   `clip_url` takes the clip from a recorder over HTTP instead, for cameras without a
   readable card (`reolink`, `lastalarm`).
+- `scorer.unscored_at_night: hold` (opt-in): during a scorer outage no unverified photo
+  is sent at night; card cameras hand the event to their follow-up, everything else is
+  kept in the review log. Daytime frames and the default `send` pass through as before.
 - `TAPO_LABEL_ALLOWED_HOSTS` adds extra hostnames the label server accepts in
   `Host`/`Origin`.
 - `tools/suggest_ignore_zones.py` suggests `scorer.ignore_boxes` rects from person

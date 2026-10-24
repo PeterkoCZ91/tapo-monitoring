@@ -151,6 +151,10 @@ class ScorerConfig:
     # camera's person class; the default profile still calls it PIR) skip that hold, as
     # the sampler already does for such a burst: at or above ``threshold`` it sends.
     person_bit_skips_hold: bool = False
+    # What a frame the scorer could not score does at the camera's night: "send" passes it
+    # through unverified (as always); "hold" sends nothing unverified at night - a camera
+    # with a card hands the event to its follow-up, which scores it again later.
+    unscored_at_night: str = "send"
     # Rects ``[x1, y1, x2, y2]`` as fractions of the frame whose people are ignored: a
     # static person-shaped object there stops counting (see scorer.apply_ignore_zones).
     ignore_zones: tuple = ()
@@ -962,6 +966,9 @@ def _scorer(data, where):
                 f"{where}: scorer motion_send_threshold must be > night_threshold")
     person_bit_skips_hold = _check_bool(d.get("person_bit_skips_hold", False),
                                         "person_bit_skips_hold", f"{where}: scorer")
+    unscored_at_night = d.get("unscored_at_night", "send")
+    if unscored_at_night not in ("send", "hold"):
+        raise ConfigError(f"{where}: scorer unscored_at_night must be 'send' or 'hold'")
     ignore_zones = _ignore_zones(d.get("ignore_zones"), where)
     lens_ignore_zones = _lens_ignore_zones(d.get("lens_ignore_zones"), where)
     max_person_box = d.get("max_person_box")
@@ -1002,6 +1009,7 @@ def _scorer(data, where):
                         token_env=token_env,
                         motion_send_threshold=motion_send_threshold,
                         person_bit_skips_hold=person_bit_skips_hold,
+                        unscored_at_night=unscored_at_night,
                         ignore_zones=ignore_zones, lens_ignore_zones=lens_ignore_zones,
                         max_person_box=max_person_box,
                         ignore_boxes=ignore_boxes, ignore_boxes_mode=ignore_boxes_mode,

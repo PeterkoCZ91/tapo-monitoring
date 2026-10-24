@@ -361,13 +361,14 @@ def review_meta(camera, verdict, etype, score, event=None):
     """Index metadata for one suppressed frame (camera, verdict, event type, scores). Pure.
 
     Shared by the live pass and the sampler so both write the same review-log shape.
-    ``score`` may be a plain float or a scorer result exposing ``person``/``animal``.
+    ``score`` may be a plain float, a scorer result exposing ``person``/``animal``, or
+    None for a frame the scorer could not score (no invented score in the index).
     ``event`` is the camera event behind the frame: it adds ``incident`` and
     ``event_start``, the same fields the sent log carries. Without one they are omitted.
     """
     return {"camera": camera, "verdict": verdict, "etype": etype,
-            "person": float(getattr(score, "person", score)),
-            "animal": float(getattr(score, "animal", 0.0)),
+            "person": None if score is None else float(getattr(score, "person", score)),
+            "animal": None if score is None else float(getattr(score, "animal", 0.0)),
             **incident_mod.index_fields(incident_mod.incident_id(camera, event))}
 
 

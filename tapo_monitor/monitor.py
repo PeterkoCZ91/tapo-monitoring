@@ -302,6 +302,29 @@ def collect_detections(events, last_seen, strict_people=True, profile=None, even
     return alertable, (camera.newest_start(fresh) or last_seen)
 
 
+def _hold_unscored(cfg, event, etype, image, *, defer, can_defer, on_alert, observe):
+    """An unscored live frame at night under ``unscored_at_night: hold``: no photo.
+
+    A camera with a card follow-up gets the event deferred to it (the read is scored a
+    couple of minutes later, by when the scorer is often back); otherwise the frame goes
+    to the review log, so the person can still be found afterwards. Not through the
+    sampler's hold archive: a frame remembered there may be sent when the hold expires,
+    which is exactly the unverified send this avoids.
+    """
+    if defer is not None and can_defer:
+        log.warning("scorer unavailable at night; %s held for the card follow-up", etype)
+        _on_alert(on_alert, etype, event)
+        defer(event, etype, False)
+        audit_event(cfg, event, etype, "live", "defer", reason="scorer_unavailable")
+        _observe(observe, event, etype, True)
+        return
+    log.warning("scorer unavailable at night; %s frame held, not sent", etype)
+    audit_event(cfg, event, etype, "live", "scorer_unavailable", reason="held_at_night")
+    sentlog.archive_review_if_configured(
+        image, sentlog.review_meta(cfg.name, "hold", etype, None, event))
+    _observe(observe, event, etype, False)
+
+
 TYPE_EMOJI = {"person": "👤", "vehicle": "🚗", "pet": "🐾", "tamper": "⚠️", "motion": "👁"}
 
 
@@ -312,7 +335,8 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 media_observe=None, latency_observe=None, mute=False, corroborate=None,
                 burst_sent=None, open_burst=None,
                 send_alert=None, scene_alert=None, hold_archive=None,
-                trigger_whitelamp=camera.trigger_whitelamp, event_seen=None):
+                trigger_whitelamp=camera.trigger_whitelamp, event_seen=None,
+                hold_unscored=False):
     """Poll one camera once and alert on new detections. Returns the new watermark.
 
     ``mute`` polls and advances the watermark but skips all grabbing/scoring/alerting.
@@ -334,7 +358,10 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         same passage is already pending).
       score(image_path) -> float|None — local scorer subject confidence; when passed it
         replaces Groq as the send/drop arbiter (Groq only captions what already passed)
-        and None (scorer unreachable) degrades to raw passthrough, never a drop.
+        and None (scorer unreachable) degrades to raw passthrough, never a drop -
+        unless ``hold_unscored`` (``scorer.unscored_at_night: hold`` at night): then a
+        frame that could follow up on the card is deferred, any other is kept in the
+        review log and not sent.
       observe(event, etype, sent, delivered) -> feeds the sampler's event grouping;
         ``sent`` is True when this event produced an alert or was handed to the SD
         follow-up, ``delivered`` only when a photo actually reached Telegram.
@@ -489,6 +516,11 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             if score is not None:
                 # Local scorer is the arbiter; Groq no longer decides anything.
                 s = score(image)
+                if s is None and hold_unscored:
+                    _hold_unscored(cfg, event, etype, image, defer=defer,
+                                   can_defer=etype != "motion" or defer_motion,
+                                   on_alert=on_alert, observe=observe)
+                    return
                 if s is None:
                     # Scorer unreachable: raw passthrough — degraded means spam,
                     # never a silent miss.
