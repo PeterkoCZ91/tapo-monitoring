@@ -365,12 +365,20 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
     try:
         events = cam.getEvents() or []
     except Exception as exc:
-        # A camera can answer configuration calls while its event endpoint is broken.
-        # The message stays here, in the local journal: it is the only place that says
-        # *why* (timeout vs auth vs refused), and audit_error deliberately drops it.
-        text = str(exc).replace("\n", " ").strip()
-        log.warning("getEvents failed: %s%s", type(exc).__name__,
-                    f": {text[:200]}" if text else "")
+        # Camera exception text can contain a session URL (/stok=...), credentials
+        # and addresses. Log only a fixed diagnosis, never a slice of that text.
+        text = str(exc).lower()
+        if "connecttimeout" in text or "connect timeout" in text:
+            reason = "connect timeout"
+        elif "readtimeout" in text or "read timed out" in text:
+            reason = "read timeout"
+        elif "invalid stok" in text or "unauthorized" in text or "authentication" in text:
+            reason = "authentication failure"
+        elif "connection refused" in text:
+            reason = "connection refused"
+        else:
+            reason = "other"
+        log.warning("getEvents failed: %s: %s", type(exc).__name__, reason)
         audit_error(cfg, exc, now=now)
         _health_observe(poll_observe, False, exc)
         return last_seen

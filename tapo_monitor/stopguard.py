@@ -126,6 +126,7 @@ class StopGuard:
         self._closed = False
         self._disable_warned = self._stop_warned = False
         self._position = self._observed_at = None
+        self._last_motion_delta = None
         self._safe_samples = 0
         self._healthy = self._latched = self._disable_ok = self._armed = False
         self._reason = "starting"
@@ -216,6 +217,7 @@ class StopGuard:
     def _note_suspended(self):
         with self._lock:
             self._healthy = self._armed = False
+            self._last_motion_delta = None
             self._safe_samples = 0
             self._observed_at = None
             self._reason = "suspended"
@@ -483,6 +485,7 @@ class StopGuard:
             cause = f"{type(exc).__name__}{_diag_text(getattr(exc, 'rpc_diag', None))}"
             with self._lock:
                 self._healthy = False
+                self._last_motion_delta = None
                 self._safe_samples = 0
                 self._recovery_until = -math.inf
                 self._last_cause = cause
@@ -506,7 +509,9 @@ class StopGuard:
             self._read_failures = 0
             if self._reason == "suspended" and not self._latched:
                 self._reason = "starting"
-            previous = self._position if self._observed_at is not None and now - self._observed_at <= self.stale_after else None
+            previous = (self._position if self._healthy and self._observed_at is not None
+                        and now - self._observed_at <= self.stale_after else None)
+            self._last_motion_delta = position - previous if previous is not None else None
             self._position, self._observed_at, self._healthy = position, now, True
             self._observe_episode()
             safe = self._safe(position)
@@ -568,6 +573,14 @@ class StopGuard:
             state = self.snapshot()
             if (not state.latched or not state.healthy or state.disable_pending
                     or not self._disable_ok or not self._safe(target)):
+                return False
+            # A verified Stop/OFF does not prove the motor has ceased moving.
+            # Do not issue a home preset while fresh observations show motion
+            # away from that target; keep the latch and normal Stop retries.
+            delta = self._last_motion_delta
+            if (delta is not None and abs(delta) > 1e-6
+                    and delta * (target - self._position) < 0):
+                self._trace("recall_refused", "outward_motion")
                 return False
             self._recovery_direction = 1 if target > self._position else -1
             self._recovery_target = target

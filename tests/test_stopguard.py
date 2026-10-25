@@ -349,6 +349,30 @@ def test_recovery_permit_allows_acceleration_then_inward_motion():
     guard.close()
 
 
+def test_recall_refused_while_fresh_samples_move_away_from_the_target():
+    guard, clock, trace = guard_for([0.75, 0.75, 0.78])
+    guard.poll_once()
+    await_off(guard)
+    clock.advance()
+    guard.poll_once()
+    clock.advance()
+    guard.poll_once()  # 0.75 -> 0.78: still drifting outward after the verified OFF
+    assert not guard.prepare_recovery(0.5)
+    guard.close()
+
+
+def test_recall_allowed_once_the_motion_stops():
+    guard, clock, trace = guard_for([0.75, 0.75, 0.75])
+    guard.poll_once()
+    await_off(guard)
+    clock.advance()
+    guard.poll_once()
+    clock.advance()
+    guard.poll_once()
+    assert guard.prepare_recovery(0.5)
+    guard.close()
+
+
 def test_recovery_permit_outward_motion_forces_stop_and_cancels_permit():
     guard, clock, trace = guard_for([0.75, 0.76, 0.76])
     guard.poll_once()

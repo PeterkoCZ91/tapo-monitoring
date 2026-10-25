@@ -1243,13 +1243,13 @@ def test_audit_error_keeps_the_exception_message_out_of_the_audit_line(caplog):
     assert "stok" not in audit_lines[0]
 
 
-def test_get_events_failure_logs_the_detail_in_the_journal(monkeypatch, caplog):
-    # The detail must still be diagnosable — it belongs in the local journal, once.
+def test_get_events_failure_logs_a_fixed_diagnosis_not_the_exception_text(monkeypatch, caplog):
+    # The journal names the failure class only: exception text can carry a session URL.
     cfg = _cfg_with_scorer()
 
     class Cam:
         def getEvents(self):
-            raise Exception("Invalid stok value from 203.0.113.10")
+            raise Exception("Invalid stok value from 203.0.113.10")  # must not reach the log
 
     with caplog.at_level("WARNING", logger="tapo_monitor.monitor"):
         watermark = monitor.run_monitor(
@@ -1258,7 +1258,7 @@ def test_get_events_failure_logs_the_detail_in_the_journal(monkeypatch, caplog):
 
     assert watermark == 5
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
-    assert warnings == ["getEvents failed: Exception: Invalid stok value from 203.0.113.10"]
+    assert warnings == ["getEvents failed: Exception: authentication failure"]
 
 
 def test_run_monitor_triggers_whitelamp_in_window():
