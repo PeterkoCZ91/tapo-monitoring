@@ -97,7 +97,8 @@ class StopGuard:
                  stop_interval=0.15, cooldown=2.0, stable_samples=2,
                  retry_interval=1.0, stable_tolerance=0.002, suspended=None,
                  clock=time.monotonic, wait=None, name="", recover=None,
-                 recover_interval=5.0, recover_attempts=6, reverify_interval=_REVERIFY_EVERY):
+                 recover_interval=5.0, recover_attempts=6, reverify_interval=_REVERIFY_EVERY,
+                 stop_escalated=None):
         values = (right_limit, margin, poll_interval, stale_after, stop_interval,
                   cooldown, retry_interval, stable_tolerance)
         if not all(math.isfinite(v) for v in values):
@@ -115,6 +116,8 @@ class StopGuard:
                 not math.isfinite(self.left_inner) or self.left_inner >= self.right_inner):
             raise ValueError("guard margins leave no safe range")
         self.read_position, self.stop, self.disable_tracking = read_position, stop, disable_tracking
+        # True while Stop runs with a stretched budget (it then blocks this thread longer).
+        self.stop_escalated = stop_escalated or (lambda: False)
         self.poll_interval, self.stale_after = poll_interval, stale_after
         self.stop_interval, self.cooldown = stop_interval, cooldown
         self.stable_samples, self.retry_interval = stable_samples, retry_interval
@@ -548,7 +551,11 @@ class StopGuard:
         if recovery_outward:
             self._stop_if_due(force=True)
         if not safe:
-            # Stop before dispatching the slower native API work.
+            # Stop before dispatching the slower native API work, unless Stop may now
+            # block this thread for up to the stretched budget: OFF runs in its own
+            # thread, so dispatching it first keeps it from waiting behind Stop.
+            if self.stop_escalated():
+                self._request_disable()
             if not latched or not inward:
                 self._stop_if_due()
             self._request_disable()

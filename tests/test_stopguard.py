@@ -780,3 +780,15 @@ def test_recall_attempts_are_bounded_per_episode():
         await_home(guard)
     assert len(homes) == 2
     guard.close()
+
+
+@pytest.mark.parametrize("escalated", [False, True])
+def test_tracking_off_is_dispatched_before_a_stretched_stop(escalated):
+    seen = []
+    guard = StopGuard(lambda: 0.75, lambda: seen.append(guard._disable_thread is not None),
+                      lambda: True, right_limit=0.8, margin=0.1, clock=Clock(),
+                      stop_escalated=lambda: escalated)
+    guard.poll_once()
+    await_off(guard)
+    assert seen == [escalated]
+    guard.close()

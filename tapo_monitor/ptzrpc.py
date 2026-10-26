@@ -48,7 +48,50 @@ def diagnose(exc):
     return "other"
 
 
-def call(ptz, operation, *, budget=0.8, clock=time.monotonic):
+class AdaptiveBudget:
+    """Time budget for an idempotent Stop that stretches after a failed Stop.
+
+    Base budget until a Stop fails; then ``escalated`` (never above ``CAP``) until
+    ``restore_after`` consecutive successes or ``quiet_s`` seconds without a failure.
+    The failure itself was made with the base budget. Only Stop may use this: a
+    position read must stay within the guard's stale_after, a late Stop ACK is valid.
+    """
+
+    CAP = 2.0
+
+    def __init__(self, base=0.8, escalated=1.6, restore_after=3, quiet_s=30.0,
+                 clock=time.monotonic):
+        self.base = min(float(base), self.CAP)
+        self.escalated = min(max(float(escalated), self.base), self.CAP)
+        self.restore_after, self.quiet_s, self.clock = restore_after, quiet_s, clock
+        self._active = False
+        self._successes = 0
+        self._last_failure = None
+
+    def _expire(self):
+        if self._active and self.clock() - self._last_failure >= self.quiet_s:
+            self._active, self._successes = False, 0
+
+    @property
+    def is_escalated(self):
+        self._expire()
+        return self._active
+
+    def budget(self):
+        return self.escalated if self.is_escalated else self.base
+
+    def record(self, ok):
+        self._expire()
+        if not ok:
+            self._active, self._successes = True, 0
+            self._last_failure = self.clock()
+        elif self._active:
+            self._successes += 1
+            if self._successes >= self.restore_after:
+                self._active, self._successes = False, 0
+
+
+def call(ptz, operation, *, budget=0.8, clock=time.monotonic, adaptive=None):
     """Call a position read or Stop, retrying transient connection/read failures.
 
     These operations are idempotent. Do not wrap relative movement or a toggle.
@@ -57,7 +100,27 @@ def call(ptz, operation, *, budget=0.8, clock=time.monotonic):
     All attempts share a deadline shorter than the old 0.5s connect + 0.5s read
     timeouts combined; failure is still propagated to the guard's latch.
     Only the observer thread owns this transport. Restore its timeout afterwards.
+
+    With ``adaptive`` (Stop only) the budget comes from it and the outcome is fed back.
+    An extended budget uses two attempts, a short one and a final one that owns all
+    remaining time, so the extra time is usable by a late ACK instead of idling.
     """
+    attempts = 4
+    if adaptive is not None:
+        budget = adaptive.budget()
+        if adaptive.is_escalated:
+            attempts = 2
+        try:
+            result = _call(ptz, operation, budget, clock, attempts)
+        except Exception:
+            adaptive.record(False)
+            raise
+        adaptive.record(True)
+        return result
+    return _call(ptz, operation, budget, clock, 4)
+
+
+def _call(ptz, operation, budget, clock, attempts):
     started = clock()
     deadline = started + budget
     transport = ptz.zeep_client.transport
@@ -65,14 +128,14 @@ def call(ptz, operation, *, budget=0.8, clock=time.monotonic):
     phase = None
     diag = {"attempts": 0, "errors": []}
     try:
-        for attempt in range(4):
+        for attempt in range(attempts):
             remaining = deadline - clock()
             if remaining <= 0:
                 raise TimeoutError("PTZ RPC deadline exceeded")
             connect = min(0.1, remaining / 3)
-            if attempt == 3 and phase == "connect":
+            if attempt == attempts - 1 and phase == "connect":
                 connect = remaining - min(0.05, remaining / 4)
-            read = min(0.25, remaining - connect) if attempt < 3 else remaining - connect
+            read = min(0.25, remaining - connect) if attempt < attempts - 1 else remaining - connect
             transport.operation_timeout = (connect, read)
             diag["attempts"] = attempt + 1
             try:
@@ -80,7 +143,7 @@ def call(ptz, operation, *, budget=0.8, clock=time.monotonic):
             except Exception as exc:
                 phase = _transport_phase(exc)
                 diag["errors"].append(diagnose(exc))
-                if attempt == 3 or phase is None:
+                if attempt == attempts - 1 or phase is None:
                     raise
             else:
                 if clock() > deadline:

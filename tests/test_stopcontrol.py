@@ -475,3 +475,18 @@ def test_recover_home_recalls_only_a_safe_known_view_through_the_daemon_recall()
     assert calls[-1] == (client, "home")
     controller.recall = None
     assert controller.recover_home() is False
+
+
+def test_only_stop_gets_the_adaptive_budget(monkeypatch):
+    calls = []
+    real = stopcontrol.ptzrpc.call
+    monkeypatch.setattr(stopcontrol.ptzrpc, "call",
+                        lambda ptz, op, **kw: calls.append(kw) or real(ptz, op, **kw))
+    controller, client, ptz = harness()
+    controller.start()
+    guard = controller.guard
+    guard.read()
+    guard.stop()
+    assert "adaptive" not in calls[0] and "budget" not in calls[0]
+    assert isinstance(calls[1]["adaptive"], stopcontrol.ptzrpc.AdaptiveBudget)
+    assert guard.options["stop_escalated"]() is False

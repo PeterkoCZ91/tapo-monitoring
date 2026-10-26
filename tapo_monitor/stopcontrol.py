@@ -112,14 +112,19 @@ class StopControl:
         for preset in (self.cfg.tracking.day_preset, self.cfg.tracking.night_preset):
             if preset is not None and not self.safe_preset(preset):
                 raise ValueError("scheduled preset is not inside the stop guard range")
+        # Stop is idempotent and a late ACK is valid, so only it gets an adaptive budget;
+        # position reads keep 0.8 s because the guard rejects a pose older than stale_after.
+        stop_budget = ptzrpc.AdaptiveBudget()
         guard = self.guard_factory(
             lambda: ptzrpc.call(ptz, lambda: panlimit.read_pan_x(ptz, token)),
             lambda: ptzrpc.call(ptz, lambda: ptz.Stop(
-                {"ProfileToken": token, "PanTilt": True, "Zoom": True})),
+                {"ProfileToken": token, "PanTilt": True, "Zoom": True}),
+                adaptive=stop_budget),
             self.disable_tracking, right_limit=right, left_limit=left, recover=self.recover_home,
             margin=pl.stop_margin, poll_interval=pl.stop_poll_interval,
             stop_interval=pl.stop_poll_interval, cooldown=pl.stop_cooldown,
-            suspended=self.suspended, name=self.cfg.name)
+            suspended=self.suspended, name=self.cfg.name,
+            stop_escalated=lambda: stop_budget.is_escalated)
         self.host = host
         self.guard = guard
         guard.start()

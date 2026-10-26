@@ -182,3 +182,100 @@ def test_stop_failure_log_carries_category_not_exception_text(caplog):
     text = caplog.text
     assert "cause=connect timeout" in text
     assert "RuntimeError" not in text and "leaked-text" not in text and "192.0.2.1" not in text
+
+
+def timing_op(ptz, transport, clock, latency):
+    """Operation answering after `latency` s, or timing out at the transport read limit."""
+    seen = []
+
+    def operation():
+        connect, read = transport.operation_timeout
+        seen.append(connect + read)
+        if latency <= connect + read:
+            clock.now += latency
+            return "ok"
+        clock.now += connect + read
+        try:
+            raise ReadTimeout("slow")
+        except ReadTimeout as exc:
+            raise RuntimeError("ONVIF wrapper") from exc
+    return operation, seen
+
+
+def failing(ptz, transport, clock):
+    return timing_op(ptz, transport, clock, 99)[0]
+
+
+def test_budget_escalates_after_failure_and_restores_after_three_successes():
+    clock = Clock()
+    b = ptzrpc.AdaptiveBudget(clock=clock)
+    assert b.budget() == 0.8
+    b.record(True)
+    assert b.budget() == 0.8
+    b.record(False)
+    assert b.budget() == 1.6
+    b.record(True)
+    b.record(True)
+    assert b.budget() == 1.6
+    b.record(False)          # a failure resets the success streak
+    for _ in range(2):
+        b.record(True)
+    assert b.budget() == 1.6
+    b.record(True)
+    assert b.budget() == 0.8
+
+
+def test_budget_restores_after_quiet_period():
+    clock = Clock()
+    b = ptzrpc.AdaptiveBudget(clock=clock)
+    b.record(False)
+    clock.now = 29.9
+    assert b.budget() == 1.6
+    clock.now = 30.0
+    assert b.budget() == 0.8
+
+
+def test_budget_is_capped_at_two_seconds():
+    b = ptzrpc.AdaptiveBudget(escalated=10.0, clock=Clock())
+    b.record(False)
+    assert b.budget() == 2.0 == ptzrpc.AdaptiveBudget.CAP
+
+
+def test_first_failure_uses_base_budget_then_late_stop_ack_succeeds():
+    ptz, transport, clock = harness()
+    b = ptzrpc.AdaptiveBudget(clock=clock)
+    op, seen = timing_op(ptz, transport, clock, 1.2)
+    with pytest.raises((RuntimeError, TimeoutError)):
+        ptzrpc.call(ptz, op, adaptive=b, clock=clock)
+    assert clock.now <= 0.8 + 1e-9          # first failure still used the base budget
+    assert b.budget() == 1.6
+    start = clock.now
+    op, seen = timing_op(ptz, transport, clock, 1.2)
+    assert ptzrpc.call(ptz, op, adaptive=b, clock=clock) == "ok"
+    assert clock.now - start <= 1.6
+    assert transport.operation_timeout == .5
+
+
+def test_stop_at_1_2_s_fails_with_plain_0_8_budget():
+    ptz, transport, clock = harness()
+    op, _ = timing_op(ptz, transport, clock, 1.2)
+    with pytest.raises((RuntimeError, TimeoutError)):
+        ptzrpc.call(ptz, op, budget=0.8, clock=clock)
+
+
+def test_escalated_failure_stays_within_the_stretched_budget():
+    ptz, transport, clock = harness()
+    b = ptzrpc.AdaptiveBudget(clock=clock)
+    b.record(False)
+    with pytest.raises((RuntimeError, TimeoutError)):
+        ptzrpc.call(ptz, failing(ptz, transport, clock), adaptive=b, clock=clock)
+    assert 1.5 <= clock.now <= 1.6 + 1e-9   # extra time is used, not idle
+    assert b.budget() == 1.6
+
+
+def test_reads_without_adaptive_keep_the_base_budget():
+    ptz, transport, clock = harness()
+    op, _ = timing_op(ptz, transport, clock, 1.2)
+    with pytest.raises((RuntimeError, TimeoutError)):
+        ptzrpc.call(ptz, op, clock=clock)
+    assert clock.now <= 0.8 + 1e-9
