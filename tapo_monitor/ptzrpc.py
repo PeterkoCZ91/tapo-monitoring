@@ -19,6 +19,35 @@ def _transport_phase(exc):
     return None
 
 
+def diagnose(exc):
+    """Fixed category for a failed RPC: never the exception text, which can carry
+    the camera's address or a session token.
+
+    One of 'connect timeout', 'read timeout', 'authentication failure',
+    'connection refused' or 'other'.
+    """
+    from requests.exceptions import ConnectTimeout, Timeout
+
+    from .camera import is_authentication_error
+
+    chain, seen, cur = [], set(), exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        chain.append(cur)
+        cur = cur.__cause__ or cur.__context__
+    if any(isinstance(e, ConnectTimeout) for e in chain):
+        return "connect timeout"
+    if any(isinstance(e, (Timeout, TimeoutError)) for e in chain):
+        return "read timeout"
+    if any(isinstance(e, ConnectionRefusedError) for e in chain):
+        return "connection refused"
+    if is_authentication_error(exc) or any(
+            "not authorized" in str(e).lower() or "unauthorized" in str(e).lower()
+            for e in chain):
+        return "authentication failure"
+    return "other"
+
+
 def call(ptz, operation, *, budget=0.8, clock=time.monotonic):
     """Call a position read or Stop, retrying transient connection/read failures.
 
@@ -50,7 +79,7 @@ def call(ptz, operation, *, budget=0.8, clock=time.monotonic):
                 result = operation()
             except Exception as exc:
                 phase = _transport_phase(exc)
-                diag["errors"].append(f"{type(exc).__name__}/{phase or 'other'}")
+                diag["errors"].append(diagnose(exc))
                 if attempt == 3 or phase is None:
                     raise
             else:

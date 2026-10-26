@@ -450,7 +450,7 @@ def test_episode_summary_counts_every_stop_failure_despite_deduplicated_warning(
         clock.advance()
     warnings = [r.getMessage() for r in caplog.records if "Stop failed" in r.getMessage()]
     assert len(warnings) == 1
-    assert "error=OSError" in warnings[0] and "lost" not in warnings[0]
+    assert "cause=other" in warnings[0] and "lost" not in warnings[0]
     assert guard.rearm()
     [line] = episode_lines(caplog)
     message = line.getMessage()
@@ -656,7 +656,7 @@ def test_pose_loss_trace_names_cause_and_pre_trip_reads(caplog):
         clock.advance(0.2)
         if value is None:
             error = TimeoutError("slow")
-            error.rpc_diag = {"attempts": 3, "errors": ["ReadTimeout/read"] * 3, "elapsed_s": 0.8}
+            error.rpc_diag = {"attempts": 3, "errors": ["read timeout"] * 3, "elapsed_s": 0.8}
             raise error
         return value
 
@@ -676,9 +676,9 @@ def test_pose_loss_trace_names_cause_and_pre_trip_reads(caplog):
     await_off(guard)
     assert guard.rearm()
     text = "\n".join(r.getMessage() for r in caplog.records)
-    assert "reason=pose_unavailable" in text and "cause=TimeoutError (attempts=3" in text
+    assert "reason=pose_unavailable" in text and "cause=read timeout (attempts=3" in text
     trace = next(r.getMessage() for r in caplog.records if "stop guard trace" in r.getMessage())
-    assert "cause=TimeoutError" in trace and "readfail=TimeoutError" in trace
+    assert "cause=read timeout" in trace and "readfail=read timeout" in trace
     assert "pre=[" in trace and "0.5000/0.20s" in trace and "stop=ok" in trace
     assert "off=ok" in trace and "rearm" in trace
     guard.close()

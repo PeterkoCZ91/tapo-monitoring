@@ -138,5 +138,47 @@ def test_failure_carries_attempt_diagnostics_for_the_guard_trace():
         ptzrpc.call(ptz, operation, budget=.5, clock=clock)
     diag = caught.value.rpc_diag
     assert diag["attempts"] == 4
-    assert diag["errors"] == ["ReadTimeout/read"] * 4
+    assert diag["errors"] == ["read timeout"] * 4
     assert 0 < diag["elapsed_s"] <= .5
+
+
+def _chained(outer, inner):
+    try:
+        try:
+            raise inner
+        except Exception as cause:
+            raise outer from cause
+    except Exception as exc:
+        return exc
+
+
+@pytest.mark.parametrize("exc, category", [
+    (_chained(RuntimeError("onvif"), ConnectTimeout("192.0.2.1")), "connect timeout"),
+    (_chained(RuntimeError("onvif"), ReadTimeout("192.0.2.1")), "read timeout"),
+    (_chained(RuntimeError("onvif"), ConnectionRefusedError("192.0.2.1")), "connection refused"),
+    (RuntimeError("Sender not authorized for 192.0.2.1"), "authentication failure"),
+    (RuntimeError("weird 192.0.2.1"), "other"),
+])
+def test_diagnose_returns_fixed_category(exc, category):
+    assert ptzrpc.diagnose(exc) == category
+
+
+def test_stop_failure_log_carries_category_not_exception_text(caplog):
+    from tapo_monitor.stopguard import StopGuard
+
+    def stop():
+        raise _chained(RuntimeError("leaked-text 192.0.2.1"), ConnectTimeout("192.0.2.1"))
+
+    clock = Clock()
+    poses = iter([0.5, 0.5, 0.86])
+    guard = StopGuard(lambda: next(poses), stop, lambda: True, name="cam",
+                      right_limit=0.8, margin=0.1, clock=clock)
+    for _ in range(3):
+        guard.poll_once()
+        clock.now += 0.2
+    thread = guard._disable_thread
+    if thread is not None:
+        thread.join(1)
+    text = caplog.text
+    assert "cause=connect timeout" in text
+    assert "RuntimeError" not in text and "leaked-text" not in text and "192.0.2.1" not in text

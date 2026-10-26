@@ -13,6 +13,8 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 
+from . import ptzrpc
+
 log = logging.getLogger(__name__)
 
 _TRACE_LIMIT = 80        # events kept per episode
@@ -457,10 +459,11 @@ class StopGuard:
                 self._stats["stops_failed"] += 1
                 if episode is not None and episode is self._episode:
                     episode.stops_failed += 1
-                    self._trace("stop", f"FAIL {type(exc).__name__} {self.clock() - began:.2f}s"
+                    self._trace("stop", f"FAIL {ptzrpc.diagnose(exc)} {self.clock() - began:.2f}s"
                                 f"{_diag_text(diag)}")
             if not self._stop_warned:
-                log.warning("PTZ stop guard Stop failed name=%s error=%s", self.name, type(exc).__name__)
+                log.warning("PTZ stop guard Stop failed name=%s cause=%s", self.name,
+                            ptzrpc.diagnose(exc))
             self._stop_warned = True
 
     def poll_once(self):
@@ -482,7 +485,7 @@ class StopGuard:
                 raise ValueError("unusable pose")
         except Exception as exc:  # noqa: BLE001 - fail closed on unavailable or stale position
             read_s = self.clock() - started
-            cause = f"{type(exc).__name__}{_diag_text(getattr(exc, 'rpc_diag', None))}"
+            cause = f"{ptzrpc.diagnose(exc)}{_diag_text(getattr(exc, 'rpc_diag', None))}"
             with self._lock:
                 self._healthy = False
                 self._last_motion_delta = None
