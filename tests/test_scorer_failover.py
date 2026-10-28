@@ -355,3 +355,37 @@ def test_start_probes_runs_in_the_background_and_stops_on_reset(monkeypatch):
     scorer.reset_pools()
     pool.probe_thread.join(2)
     assert not pool.probe_thread.is_alive()
+
+
+def _watch_health(monkeypatch, notice_after):
+    from types import SimpleNamespace
+
+    from tapo_monitor import daemon, notify
+
+    sent = []
+    monkeypatch.setattr(notify, "send_operational", lambda tok, chat, text: sent.append(text))
+    monkeypatch.setattr(scorer, "start_probes", lambda cfgs, interval=None: None)
+    app = SimpleNamespace(cameras=[])
+    daemon.watch_scorer_health(app, {"telegram_token": "t", "telegram_chat": "c"},
+                               notice_after=notice_after)
+    return sent, scorer._health_listeners[-1]
+
+
+def test_scorer_blip_shorter_than_the_notice_delay_sends_nothing(monkeypatch):
+    sent, listener = _watch_health(monkeypatch, notice_after=60)
+    listener(P, False)
+    listener(P, True)
+    assert sent == []
+
+
+def test_scorer_outage_is_announced_after_the_delay_and_recovery_follows(monkeypatch):
+    import time
+
+    sent, listener = _watch_health(monkeypatch, notice_after=0.05)
+    listener(P, False)
+    deadline = time.time() + 2
+    while not sent and time.time() < deadline:
+        time.sleep(0.01)
+    assert len(sent) == 1 and "not answering" in sent[0]
+    listener(P, True)
+    assert len(sent) == 2 and "answers again" in sent[1]

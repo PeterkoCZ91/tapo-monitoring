@@ -26,6 +26,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time as _time
 import urllib.parse
 from collections.abc import Callable, Mapping
@@ -5615,13 +5616,49 @@ def watch_scorer_switches(state):
     scorer.add_switch_listener(on_switch)
 
 
-def watch_scorer_health(app, secrets):
-    """Probe the scorers outside of scoring and tell the operator when one goes down or returns."""
+# A scorer that is down this long is worth a notice; a shorter blip is only logged.
+SCORER_DOWN_NOTICE_AFTER = 600
+
+
+def watch_scorer_health(app, secrets, notice_after=None):
+    """Probe the scorers outside of scoring and tell the operator when one stays down.
+
+    A candidate must be down for ``notice_after`` seconds before the operator hears of it,
+    and the "answers again" notice follows only an announced outage, so a flapping link
+    produces nothing instead of a down/up pair per blip. Every transition is still logged.
+    """
+    delay = SCORER_DOWN_NOTICE_AFTER if notice_after is None else notice_after
+    lock = threading.Lock()
+    pending = {}      # url -> timer of a down notice not yet sent
+    announced = set()  # urls whose down notice went out
+
+    def send(text):
+        notify.send_operational(secrets["telegram_token"], secrets["telegram_chat"], text)
+
+    def announce_down(url):
+        host = urllib.parse.urlsplit(url).netloc
+        with lock:
+            if pending.pop(url, None) is None:
+                return
+            announced.add(url)
+        send(f"🟠 Scorer {host} is not answering /health; scoring uses another candidate")
+
     def on_health(url, healthy):
         host = urllib.parse.urlsplit(url).netloc
-        text = (f"🟢 Scorer {host} answers again" if healthy
-                else f"🟠 Scorer {host} is not answering /health; scoring uses another candidate")
-        notify.send_operational(secrets["telegram_token"], secrets["telegram_chat"], text)
+        with lock:
+            timer = pending.pop(url, None)
+            if timer is not None:
+                timer.cancel()
+            was_announced = url in announced
+            if healthy:
+                announced.discard(url)
+            elif not was_announced:
+                timer = threading.Timer(delay, announce_down, args=(url,))
+                timer.daemon = True
+                pending[url] = timer
+                timer.start()
+        if healthy and was_announced:
+            send(f"🟢 Scorer {host} answers again")
     scorer.add_health_listener(on_health)
     scorer.start_probes([cfg.scorer for cfg in app.cameras])
 
