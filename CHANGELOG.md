@@ -41,6 +41,9 @@ All notable changes to this project are documented here.
   nothing is expanded or executed.
 
 ### Added
+- `tools/soak_report.py` reports the endstop episodes separately from failed Stop calls:
+  observed configured-limit crossings, peaks measured after verified tracking OFF and
+  crossings whose peak was after OFF. Missing peak or OFF timing is counted as unknown.
 - `outbox.max_bytes` (default 64 MiB) limits the stored alert bytes besides `max_entries`;
   both limits evict the oldest non-person entries first and log each eviction. A
   replacement is written as a new JPEG version and its sidecar switches only after the

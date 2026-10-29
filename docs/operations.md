@@ -1291,7 +1291,11 @@ Per host it prints the service state and package fingerprint (`tapo-monitor vers
 journal text, not `journalctl -p`), alerts sent per camera and path, the median and p90 of
 the first delivered alert per event (`event_age_s` of the audit `send` rows), `drop`, `hold`
 and `cooldown` counts, `would_*` observe rows per camera, `host_switch`, outbox and hub
-lines, and service memory and CPU from `systemctl show`.
+lines, and service memory and CPU from `systemctl show`. The endstop line separately
+counts observed configured-limit crossings, peaks measured after verified tracking OFF,
+and crossings whose peak was after OFF. These are episode-level observations, not counts
+of failed Stop RPCs; missing peak/OFF timing is reported as unknown, and sparse position
+samples cannot prove the lens stayed within the limit between readings.
 
 A check never reads a missing thing as a clean one: a unit that is not loaded is judged by
 `LoadState` (`systemctl show` on a nonexistent unit still says `Result=success`), a probe

@@ -200,3 +200,33 @@ def test_stopguard_episode_counts_all_retries_when_warning_is_deduplicated():
                for d in soak.compare(probe("host-a"), rec))
     rec["deviations"] = []
     assert "8/13 Stop failures/attempts" in soak.render_host("host-a", rec)
+
+def test_stopguard_report_distinguishes_observed_crossing_after_off_from_rpc_failures():
+    journal = (
+        "WARNING PTZ stop guard episode cam: reason=boundary duration=63s "
+        "beyond_limit=True reads_failed=5 stops=7 stops_failed=4 "
+        "first_stop_ok=+1.92s off=verified+1.46s off_failed=0 peak_at=+59.56s\n"
+        "INFO PTZ stop guard episode cam: reason=boundary duration=32s "
+        "beyond_limit=False reads_failed=0 stops=3 stops_failed=0 "
+        "first_stop_ok=+0.12s off=verified+0.80s off_failed=0 peak_at=+0.18s"
+    )
+    text = (FIXTURES / "host-a.raw").read_text().replace("@@journal", "@@journal\n" + journal)
+    rec = soak.analyze(text, 24)
+    assert rec["stopguard_limit_crossings"] == 1
+    assert rec["stopguard_crossings_after_off"] == 1
+    assert rec["stopguard_peak_after_off"] == 1
+    assert rec["stopguard_peak_timing_unknown"] == 0
+    rec["deviations"] = []
+    assert "1 observed limit crossing" in soak.render_host("host-a", rec)
+    assert "1 crossing with peak after OFF" in soak.render_host("host-a", rec)
+    assert "1 peak after verified OFF" in soak.render_host("host-a", rec)
+    assert rec["stopguard_stop_failures"] == 4  # distinct from physical crossings
+
+def test_stopguard_missing_timing_is_unknown_not_zero():
+    text = (FIXTURES / "host-a.raw").read_text().replace(
+        "@@journal", "@@journal\nINFO PTZ stop guard episode cam: "
+        "beyond_limit=False reads_failed=0 stops=3 stops_failed=0 off_failed=0")
+    rec = soak.analyze(text, 24)
+    assert rec["stopguard_peak_after_off"] == 0
+    assert rec["stopguard_peak_timing_unknown"] == 1
+    assert probe("host-denied")["stopguard_limit_crossings"] is None

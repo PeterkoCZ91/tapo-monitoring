@@ -48,6 +48,9 @@ STOPGUARD_EPISODE_FIELDS = {
     "stops_failed": re.compile(r"\bstops_failed=(\d+)"),
     "off_failed": re.compile(r"\boff_failed=(\d+)"),
 }
+STOPGUARD_CROSSING_RE = re.compile(r"\bbeyond_limit=(True|False)\b")
+STOPGUARD_PEAK_RE = re.compile(r"\bpeak_at=\+([0-9.]+)s\b")
+STOPGUARD_OFF_RE = re.compile(r"\boff=verified\+([0-9.]+)s\b")
 START_RE = re.compile(r"systemd\[\d+\]: Started ")
 FAILED_RE = re.compile(r"systemd\[\d+\]: (Failed with result|.*Main process exited)")
 HUB_ERR_RE = re.compile(r"\bhub\b.*(failed|refused|error_code)", re.IGNORECASE)
@@ -193,7 +196,9 @@ def analyze(text, since_hours):
                     "outbox_problems", "host_switch", "audit_errors", "stopguard_problems",
                     "stopguard_episodes", "stopguard_reads_failed", "stopguard_stop_attempts",
                     "stopguard_stop_failures", "stopguard_off_failures",
-                    "stopguard_unparsed"):
+                    "stopguard_unparsed", "stopguard_limit_crossings",
+                    "stopguard_peak_after_off", "stopguard_crossings_after_off",
+                    "stopguard_peak_timing_unknown"):
             stats[key] = None
         stats["error_signatures"] = []
     else:
@@ -232,6 +237,8 @@ def _journal_stats(lines):
     audit_errors = host_switch = stopguard_problems = 0
     stopguard_episodes = stopguard_reads_failed = stopguard_stop_attempts = 0
     stopguard_stop_failures = stopguard_off_failures = stopguard_unparsed = 0
+    stopguard_limit_crossings = stopguard_peak_after_off = stopguard_peak_timing_unknown = 0
+    stopguard_crossings_after_off = 0
     sent: dict = {}
     first_age: dict = {}
     gates: dict = {}
@@ -284,6 +291,17 @@ def _journal_stats(lines):
             stopguard_stop_attempts += stops
             stopguard_stop_failures += failed_stops
             stopguard_off_failures += failed_off
+            crossing = STOPGUARD_CROSSING_RE.search(line)
+            if crossing and crossing.group(1) == "True":
+                stopguard_limit_crossings += 1
+            peak, off = STOPGUARD_PEAK_RE.search(line), STOPGUARD_OFF_RE.search(line)
+            if peak and off:
+                if float(peak.group(1)) > float(off.group(1)):
+                    stopguard_peak_after_off += 1
+                    if crossing and crossing.group(1) == "True":
+                        stopguard_crossings_after_off += 1
+            else:
+                stopguard_peak_timing_unknown += 1
         if START_RE.search(line):
             starts += 1
         if FAILED_RE.search(line):
@@ -322,6 +340,10 @@ def _journal_stats(lines):
         "stopguard_stop_failures": stopguard_stop_failures,
         "stopguard_off_failures": stopguard_off_failures,
         "stopguard_unparsed": stopguard_unparsed,
+        "stopguard_limit_crossings": stopguard_limit_crossings,
+        "stopguard_peak_after_off": stopguard_peak_after_off,
+        "stopguard_crossings_after_off": stopguard_crossings_after_off,
+        "stopguard_peak_timing_unknown": stopguard_peak_timing_unknown,
         "alerts": {"sent_ok": sent_ok, "sent_failed": sent_failed, "by_camera": sent},
         "first_alert": first_alert,
         "gates": {c: dict(v) for c, v in sorted(gates.items())},
@@ -475,6 +497,10 @@ def render_host(name, entry):
                  f"{_count(entry.get('stopguard_stop_attempts'))} Stop failures/attempts, "
                  f"{_count(entry.get('stopguard_episodes'))} episodes; "
                  f"pose reads failed {_count(entry.get('stopguard_reads_failed'))}")
+    lines.append(f"   endstops   {_count(entry.get('stopguard_limit_crossings'))} observed limit crossing(s), "
+                 f"{_count(entry.get('stopguard_peak_after_off'))} peak after verified OFF, "
+                 f"timing unknown {_count(entry.get('stopguard_peak_timing_unknown'))}")
+    lines.append(f"              {_count(entry.get('stopguard_crossings_after_off'))} crossing with peak after OFF")
     for sig in entry["error_signatures"]:
         lines.append(f"              {sig['count']:>4}x {sig['text']}")
     if not entry["journal"]["usable"]:
