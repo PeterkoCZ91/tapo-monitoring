@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 
 import pytest
 
@@ -79,13 +80,15 @@ def test_outbox_is_off_by_default():
 
 def test_outbox_block_parses_and_validates():
     app = _app({"enabled": True, "max_age": 3600, "max_entries": 50, "max_photos": 3,
-                "summary": False, "dir": "~/ob"})
+                "max_bytes": 4096, "summary": False, "dir": "~/ob"})
     ob = app.outbox
     assert (ob.enabled, ob.max_age, ob.max_entries, ob.max_photos, ob.summary) == (
         True, 3600, 50, 3, False)
     assert ob.dir == os.path.expanduser("~/ob")
+    assert ob.max_bytes == 4096
     assert ob.lang == "en" and _app({"lang": "cs"}).outbox.lang == "cs"
     for bad in ({"enabled": "yes"}, {"max_age": 10}, {"max_entries": 0},
+                {"max_bytes": 0}, {"max_bytes": True},
                 {"max_photos": True}, {"dir": ""}, {"surprise": 1}, {"lang": "de"}):
         with pytest.raises(cfg.ConfigError):
             _app(bad)
@@ -98,6 +101,7 @@ def test_default_dir_sits_beside_the_state_files(tmp_path):
     box = daemon.configure_outbox(app, env=env)
     try:
         assert box.dir == str(tmp_path / "tapo-monitor" / "outbox")
+        assert box.max_bytes == 64 * 1024 * 1024
     finally:
         daemon._outbox = None
 
@@ -169,6 +173,15 @@ def test_a_repeated_failure_updates_the_frame_but_keeps_the_first_failure_time(b
     assert (entry.failed_at, entry.caption, entry.score["person"]) == (100.0, "sd", 0.9)
     with open(entry.image, "rb") as fh:
         assert fh.read() == b"B"
+    assert entry.image.endswith(".jpg")
+    assert not os.path.exists(os.path.join(box.dir, "yard-90.jpg"))
+    restarted = outbox.Outbox(box.dir)
+    old_time = T0 - 2 * outbox.STALE_AFTER
+    os.utime(entry.image, (old_time, old_time))
+    restarted.sweep(T0)
+    assert restarted.entries()[0].image == entry.image
+    restarted.remove(entry.key)
+    assert os.listdir(box.dir) == []
 
 
 def test_max_entries_drops_the_oldest(tmp_path):
@@ -176,6 +189,13 @@ def test_max_entries_drops_the_oldest(tmp_path):
     for start in (1000, 2000, 3000):
         _capture(box, tmp_path, start)
     assert [e.incident for e in box.entries()] == ["yard-2000", "yard-3000"]
+
+def test_full_outbox_preserves_person_when_new_motion_is_lower_priority(tmp_path):
+    box = _box(tmp_path, max_entries=1)
+    _capture(box, tmp_path, 1000, etype="person")
+    assert _capture(box, tmp_path, 2000, etype="motion",
+                    score=scorer.SubjectScore(0.1, 0)) is None
+    assert [e.incident for e in box.entries()] == ["yard-1000"]
 
 
 def test_entries_survive_a_restart(tmp_path):
@@ -189,6 +209,11 @@ def test_a_sidecar_without_its_frame_is_dropped(tmp_path):
     os.remove(os.path.join(box.dir, "yard-1000.jpg"))
     assert box.entries() == []
     assert os.listdir(box.dir) == []
+
+
+def test_image_path_rejects_empty_explicit_sidecar_name(tmp_path):
+    box = _box(tmp_path)
+    assert box._image_path("yard-1000", {"image_file": ""}) is None
 
 
 # ── drain ────────────────────────────────────────────────────────────────────
@@ -700,12 +725,252 @@ def test_sweep_removes_stale_temp_files_and_orphan_frames(tmp_path):
     assert [e.incident for e in box.entries()] == ["yard-1000"]
 
 
+@pytest.mark.parametrize("replaced", [False, True])
+def test_sweep_keeps_the_frame_of_an_unreadable_sidecar(tmp_path, replaced):
+    box = _box(tmp_path)
+    key = _capture(box, tmp_path, 1000)
+    if replaced:                                   # versioned frame name
+        _capture(box, tmp_path, 1000)
+    [entry] = box.entries()
+    os.utime(entry.image, (T0 - 2 * outbox.STALE_AFTER,) * 2)
+    sidecar = box._path(key, outbox._META)
+    os.chmod(sidecar, 0)
+    try:
+        if os.access(sidecar, os.R_OK):
+            pytest.skip("running as root: chmod does not stop reads")
+        box.sweep(T0)
+    finally:
+        os.chmod(sidecar, 0o600)
+    assert os.path.exists(entry.image)
+    assert [e.incident for e in box.entries()] == ["yard-1000"]
+
+
 def test_writes_are_fsynced(tmp_path, monkeypatch):
     synced = []
     real = os.fsync
     monkeypatch.setattr(outbox.os, "fsync", lambda fd: synced.append(fd) or real(fd))
     _capture(_box(tmp_path), tmp_path, 1000)
     assert len(synced) == 2                        # frame and sidecar
+
+def test_outbox_byte_budget_evicts_oldest_nonperson_before_person(tmp_path, caplog):
+    box = _box(tmp_path, max_bytes=100_000)
+    _capture(box, tmp_path, 1000, etype="person")
+    _capture(box, tmp_path, 2000, etype="motion", score=scorer.SubjectScore(0.1, 0))
+    used = sum(os.path.getsize(box._path(e.key, suffix))
+               for e in box.entries() for suffix in (outbox._IMAGE, outbox._META))
+    box.max_bytes = used + 20
+    with caplog.at_level("WARNING"):
+        _capture(box, tmp_path, 3000, etype="person", score=scorer.SubjectScore(0.9, 0))
+    assert [e.incident for e in box.entries()] == ["yard-1000", "yard-3000"]
+    assert any("byte budget" in r.message and "yard-2000" in r.message
+               for r in caplog.records)
+
+def test_outbox_oversize_capture_keeps_prior_incident(tmp_path, caplog):
+    box = _box(tmp_path, max_bytes=10_000)
+    _capture(box, tmp_path, 1000)
+    before = box.entries()[0]
+    box.max_bytes = 100
+    with caplog.at_level("WARNING"):
+        assert box.capture(camera="yard", image=_frame(tmp_path, "large.jpg", b"x" * 101),
+                           caption="replacement", failed_at=2000, incident="yard-1000") is None
+    assert box.entries()[0].caption == before.caption
+    assert any("byte budget" in r.message for r in caplog.records)
+
+def test_outbox_enforces_new_byte_limit_on_startup(tmp_path):
+    env = {"XDG_STATE_HOME": str(tmp_path)}
+    old = outbox.Outbox(str(tmp_path / "tapo-monitor" / "outbox"))
+    _capture(old, tmp_path, 1000, etype="motion", score=scorer.SubjectScore(0.1, 0))
+    _capture(old, tmp_path, 2000, etype="person")
+    keep = old.entries()[1]
+    limit = sum(os.path.getsize(old._path(keep.key, suffix))
+                for suffix in (outbox._IMAGE, outbox._META))
+    try:
+        box = daemon.configure_outbox(_app({"enabled": True, "max_bytes": limit}), env=env)
+        assert [entry.incident for entry in box.entries()] == [keep.incident]
+    finally:
+        daemon._outbox = None
+
+def test_outbox_full_disk_does_not_break_capture(tmp_path, monkeypatch, caplog):
+    box = _box(tmp_path, max_bytes=10_000)
+    def no_space(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(box, "_write_atomic", no_space)
+    with caplog.at_level("WARNING"):
+        assert _capture(box, tmp_path, 1000) is None
+    assert any("could not store" in r.message for r in caplog.records)
+
+def test_outbox_disk_full_keeps_prior_entry_instead_of_eviction(tmp_path, monkeypatch):
+    box = _box(tmp_path, max_bytes=100_000)
+    old_key = _capture(box, tmp_path, 1000, etype="motion", score=scorer.SubjectScore(0.1, 0))
+    old_size = sum(os.path.getsize(box._path(old_key, suffix))
+                   for suffix in (outbox._IMAGE, outbox._META))
+    box.max_bytes = old_size + 1
+    real_write = box._write_atomic
+    def require_room(path, data):
+        if path.endswith("yard-2000.jpg") and os.path.exists(box._path(old_key, outbox._META)):
+            raise OSError(28, "No space left on device")
+        return real_write(path, data)
+    monkeypatch.setattr(box, "_write_atomic", require_room)
+    assert _capture(box, tmp_path, 2000, etype="person") is None
+    assert [e.incident for e in box.entries()] == ["yard-1000"]
+
+def test_failed_new_capture_never_evicts_an_existing_alert(tmp_path, monkeypatch):
+    box = _box(tmp_path, max_entries=1)
+    old = _capture(box, tmp_path, 1000, etype="motion", score=scorer.SubjectScore(0.1, 0))
+    original = box._write_atomic
+    def fail_new(path, data):
+        if "yard-2000" in path:
+            raise OSError(28, "No space left on device")
+        return original(path, data)
+    monkeypatch.setattr(box, "_write_atomic", fail_new)
+    assert _capture(box, tmp_path, 2000, etype="person") is None
+    assert [e.key for e in box.entries()] == [old]
+
+def test_failed_replacement_keeps_original_frame_and_caption(tmp_path, monkeypatch):
+    box = _box(tmp_path)
+    old = _capture(box, tmp_path, 1000)
+    original_frame = (tmp_path / "outbox" / f"{old}.jpg").read_bytes()
+    original = box._write_meta
+    def fail_new_meta(key, meta):
+        if meta["caption"] == "replacement":
+            raise OSError(28, "No space left on device")
+        return original(key, meta)
+    monkeypatch.setattr(box, "_write_meta", fail_new_meta)
+    assert box.capture(camera="yard", image=_frame(tmp_path, "new.jpg", b"new-frame"),
+                       caption="replacement", failed_at=2000, incident="yard-1000") is None
+    [entry] = box.entries()
+    assert entry.caption == "👤 1000"
+    with open(entry.image, "rb") as fh:
+        assert fh.read() == original_frame
+
+def test_drain_keeps_an_in_flight_frame_during_same_incident_replacement(tmp_path):
+    box = _box(tmp_path, min_age=0)
+    start = int(T0 - 3600)
+    _capture(box, tmp_path, start, etype="person")
+    seen = []
+    def send_text(text):
+        assert box.capture(camera="yard", image=_frame(tmp_path, "replacement.jpg", b"new"),
+                           caption="later", failed_at=T0, incident=f"yard-{start}",
+                           etype="person")
+        return True
+    def send_photo(entry, caption):
+        with open(entry.image, "rb") as fh:
+            seen.append(fh.read())
+        return True
+    outbox.drain(box, now=T0, known_cameras={"yard"}, send_text=send_text,
+                 send_photo=send_photo, archive_review=lambda *a: None,
+                 score_for=lambda camera: None, threshold_for=lambda *a: 0.5,
+                 probe=lambda: True)
+    assert seen == [b"\xff\xd8JPEG"]
+    assert box.entries() == []
+
+
+def test_new_capture_never_reuses_a_borrowed_removed_frame_path(tmp_path):
+    box = _box(tmp_path)
+    key = _capture(box, tmp_path, 1000)
+    with box.borrow_entries() as [old]:
+        box.remove(key)
+        assert os.path.exists(old.image)
+        assert box.capture(camera="yard", image=_frame(tmp_path, "again.jpg", b"again"),
+                           caption="again", failed_at=2000, incident="yard-1000") == key
+        [new] = box.entries()
+        assert new.image != old.image
+    assert not os.path.exists(old.image)
+    [new] = box.entries()
+    with open(new.image, "rb") as fh:
+        assert fh.read() == b"again"
+
+def test_replacement_byte_budget_includes_versioned_image_name(tmp_path):
+    box = _box(tmp_path)
+    key = _capture(box, tmp_path, 1000)
+    frame = b"new"
+    old = box._read_meta(key)
+    assert old is not None
+    candidate = {**old, "caption": "new", "score": None, "send_path": None}
+    # Fits without `image_file`, but not with its versioned name in the sidecar.
+    box.max_bytes = len(frame) + len(json.dumps(candidate, ensure_ascii=False).encode())
+    assert box.capture(camera="yard", image=_frame(tmp_path, "new.jpg", frame),
+                       caption="new", failed_at=2000, incident="yard-1000") is None
+    assert box.entries()[0].caption == "👤 1000"
+
+def test_outbox_sidecar_update_stays_within_byte_budget(tmp_path):
+    box = _box(tmp_path, max_bytes=100_000)
+    _capture(box, tmp_path, 1000, etype="motion", score=scorer.SubjectScore(0.1, 0))
+    _capture(box, tmp_path, 2000, etype="person")
+    used = sum(os.path.getsize(box._path(e.key, suffix))
+               for e in box.entries() for suffix in (outbox._IMAGE, outbox._META))
+    box.max_bytes = used
+    box.update(box.entries()[1], score={"person": 0.99, "animal": 0.01, "persons": 2})
+    assert sum(os.path.getsize(box._path(e.key, suffix))
+               for e in box.entries() for suffix in (outbox._IMAGE, outbox._META)) <= box.max_bytes
+
+def test_a_non_person_update_never_evicts_a_person(tmp_path):
+    box = _box(tmp_path, max_bytes=100_000)
+    _capture(box, tmp_path, 1000, etype="person")
+    _capture(box, tmp_path, 2000, etype="motion")
+    used = sum(os.path.getsize(box._path(e.key, suffix))
+               for e in box.entries() for suffix in (outbox._IMAGE, outbox._META))
+    box.max_bytes = used
+    box.update(box.entries()[1], score={"person": 0.01, "animal": 0.0, "persons": 0})
+    assert "yard-1000" in [e.incident for e in box.entries()]
+
+def test_drain_does_not_send_summary_when_announcement_cannot_be_persisted(tmp_path):
+    box = _box(tmp_path, min_age=0)
+    _capture(box, tmp_path, int(T0 - 3600), etype="person")
+    [entry] = box.entries()
+    box.max_bytes = sum(os.path.getsize(box._path(entry.key, suffix))
+                        for suffix in (outbox._IMAGE, outbox._META))
+    rec = _Recorder()
+    report = rec.drain(box)
+    assert rec.calls == []
+    assert report["stopped"] is True
+    assert [e.incident for e in box.entries()] == [entry.incident]
+
+def test_update_sizes_current_replacement_not_borrowed_old_frame(tmp_path):
+    box = _box(tmp_path)
+    key = _capture(box, tmp_path, 1000)
+    with box.borrow_entries() as [old]:
+        box.capture(camera="yard", image=_frame(tmp_path, "large.jpg", b"x" * 1000),
+                    caption="replacement", failed_at=2000, incident="yard-1000")
+        [current] = box.entries()
+        current_size = os.path.getsize(current.image) + os.path.getsize(box._path(key, outbox._META))
+        box.max_bytes = current_size
+        assert box.update(old, announced=True, announce_started_at=T0) is False
+        assert box.entries()[0].announced is False
+
+def test_outbox_concurrent_cap_checks_do_not_over_evict(tmp_path, monkeypatch):
+    box = _box(tmp_path, max_bytes=100_000)
+    _capture(box, tmp_path, 1000, etype="person")
+    _capture(box, tmp_path, 2000, etype="motion", score=scorer.SubjectScore(0.9, 0))
+    _capture(box, tmp_path, 3000, etype="person")
+    middle = box.entries()[1]
+    box.max_entries = 2
+    original = box.entries
+    first_inside = threading.Event()
+    release_first = threading.Event()
+    second_finished = threading.Event()
+    def paused_entries():
+        result = original()
+        if threading.current_thread().name == "first":
+            first_inside.set()
+            assert release_first.wait(2)
+        return result
+    monkeypatch.setattr(box, "entries", paused_entries)
+    def reprioritize_and_cap():
+        box.update(middle, score={"person": 0.1, "animal": 0.0})
+        box._enforce_cap()
+        second_finished.set()
+    a = threading.Thread(target=box._enforce_cap, name="first")
+    b = threading.Thread(target=reprioritize_and_cap, name="second")
+    a.start()
+    assert first_inside.wait(2)
+    b.start()
+    second_finished.wait(0.1)  # old unlocked path can finish before the stale snapshot resumes
+    release_first.set()
+    a.join(2)
+    b.join(2)
+    assert not a.is_alive() and not b.is_alive()
+    assert len(box.entries()) == 2
 
 
 def test_outage_texts_default_to_english(tmp_path):

@@ -1489,6 +1489,7 @@ outbox:
   # dir: /private/path/outbox   # default: outbox/ beside health.json
   max_age: 86400                # seconds; older entries are dropped unsent
   max_entries: 300              # oldest dropped beyond this
+  max_bytes: 67108864           # 64 MiB for stored JPEGs and JSON sidecars
   max_photos: 10                # late photos per camera per drain
   summary: true                 # one outage text before the late photos
   lang: en                      # en or cs: language of the outage text and late captions
@@ -1525,7 +1526,14 @@ outbox:
 - An entry is removed only after its send succeeded. A failed photo stops that camera
   until the next attempt (other cameras continue); after three failed attempts the entry
   goes to the review log. A failed summary means the link is still down and stops the
-  whole drain. When the outbox is full, the oldest non-person entries are dropped first. Late photos are recorded in the sent log with `path: outbox` and never
+  whole drain. Count and byte limits both evict the oldest non-person entries first,
+  with each eviction logged. A single alert larger than `max_bytes` is refused without
+  replacing an older copy of its incident. Failed writes do not evict existing alerts;
+  a replacement writes a versioned JPEG and switches its JSON sidecar only after the
+  frame is safely stored. Disk errors log a warning and never interrupt live delivery;
+  a full filesystem can still lose the newly failed alert. The byte limit covers
+  completed JPEG/JSON pairs, not temporary or orphan files (the latter are swept
+  after an hour). Late photos are recorded in the sent log with `path: outbox` and never
   arm a cooldown, so they cannot silence a fresh live alert.
 - Collect-only cameras (`telegram_alerts: false`, silenced app notifications) are never
   captured, and an event in a mute window never reaches the send path, so nothing muted

@@ -515,6 +515,7 @@ class OutboxConfig:
     dir: str | None = None
     max_age: int = 24 * 3600            # seconds; older entries are dropped, not sent
     max_entries: int = 300              # oldest dropped beyond this
+    max_bytes: int = 64 * 1024 * 1024    # total stored JPEG and sidecar bytes
     max_photos: int = 10                # late photos per camera per drain
     summary: bool = True                # one "outage" text before the late photos
     lang: str = "en"                    # language of the outage text and late captions
@@ -1694,6 +1695,7 @@ def _outbox(data):
         raise ConfigError("outbox.dir must be a non-empty path (or omitted for the default)")
     ints = {}
     for key, default, low in (("max_age", 24 * 3600, 600), ("max_entries", 300, 1),
+                              ("max_bytes", 64 * 1024 * 1024, 1),
                               ("max_photos", 10, 1)):
         value = data.get(key, default)
         if isinstance(value, bool) or not isinstance(value, int) or value < low:

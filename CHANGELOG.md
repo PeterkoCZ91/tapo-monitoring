@@ -41,6 +41,11 @@ All notable changes to this project are documented here.
   nothing is expanded or executed.
 
 ### Added
+- `outbox.max_bytes` (default 64 MiB) limits the stored alert bytes besides `max_entries`;
+  both limits evict the oldest non-person entries first and log each eviction. A
+  replacement is written as a new JPEG version and its sidecar switches only after the
+  frame is stored, a failed write evicts nothing and a disk error never interrupts live
+  delivery.
 - `clip_video` (opt-in, card cameras): after an alert photo is delivered, a 30 s H.264
   clip of the event read from the camera card (`clip_seconds`, `clip_pre_roll`,
   `clip_height`) is sent to Telegram as a reply to the photo.

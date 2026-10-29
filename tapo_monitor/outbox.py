@@ -33,7 +33,8 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 
 from . import incident as incident_mod
 
@@ -248,17 +249,22 @@ def review_meta(entry: Entry, now, reason=None) -> dict:
 class Outbox:
     """The outbox directory plus the in-memory Telegram reachability probe state."""
 
-    def __init__(self, directory, *, max_age=24 * 3600, max_entries=300, max_photos=10,
+    def __init__(self, directory, *, max_age=24 * 3600, max_entries=300,
+                 max_bytes=64 * 1024 * 1024, max_photos=10,
                  summary=True, min_age=MIN_AGE, lang="en"):
         self.dir = directory
         self.max_age = max_age
         self.max_entries = max_entries
+        self.max_bytes = max_bytes
         self.max_photos = max_photos
         self.summary = summary
         self.lang = lang
         self.min_age = min_age
         self.last_ok_at: float | None = None
         self.next_probe_at = 0.0
+        self._budget_lock = threading.RLock()
+        self._borrowed: dict[str, int] = {}
+        self._retired: set[str] = set()
         self._locks_guard = threading.Lock()
         self._key_locks: dict[str, threading.RLock] = {}
 
@@ -270,6 +276,45 @@ class Outbox:
     # ── storage ──────────────────────────────────────────────────────────────
     def _path(self, key, suffix):
         return os.path.join(self.dir, key + suffix)
+
+    def _image_path(self, key, meta):
+        """Only this entry's canonical or versioned JPEG, never an arbitrary sidecar path."""
+        name = meta.get("image_file", key + _IMAGE)
+        if not isinstance(name, str) or not re.fullmatch(
+                re.escape(key) + r"(?:\.[0-9a-f]{8})?\.jpg", name):
+            return None
+        return os.path.join(self.dir, name)
+
+    def _retire_image(self, path):
+        """Do not unlink a JPEG while a drain still holds its Entry snapshot."""
+        if self._borrowed.get(path, 0):
+            self._retired.add(path)
+            return
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            log.warning("outbox: could not remove old frame %s", os.path.basename(path))
+
+    @contextmanager
+    def borrow_entries(self):
+        with self._budget_lock:
+            entries = self.entries()
+            for entry in entries:
+                self._borrowed[entry.image] = self._borrowed.get(entry.image, 0) + 1
+        try:
+            yield entries
+        finally:
+            with self._budget_lock:
+                for entry in entries:
+                    path = entry.image
+                    self._borrowed[path] -= 1
+                    if not self._borrowed[path]:
+                        del self._borrowed[path]
+                        if path in self._retired:
+                            self._retired.remove(path)
+                            self._retire_image(path)
 
     def _write_atomic(self, path, data: bytes):
         # fsync before the rename: after a power cut the name must not point at an empty
@@ -314,6 +359,13 @@ class Outbox:
 
     def capture(self, *, camera, image, caption, failed_at, incident=None, etype=None,
                 score=None, send_path=None):
+        with self._budget_lock:
+            return self._capture_locked(camera=camera, image=image, caption=caption,
+                                        failed_at=failed_at, incident=incident, etype=etype,
+                                        score=score, send_path=send_path)
+
+    def _capture_locked(self, *, camera, image, caption, failed_at, incident=None, etype=None,
+                        score=None, send_path=None):
         """Store one undelivered alert; returns the key, or None when it failed.
 
         A second failure of the same incident (the SD follow-up retrying every minute)
@@ -351,8 +403,29 @@ class Outbox:
                     "announce_started_at": previous.get("announce_started_at"),
                     "announce_sent": bool(previous.get("announce_sent", False)),
                     "attempts": int(previous.get("attempts", 0) or 0)}
-            self._write_atomic(self._path(key, _IMAGE), frame)
-            self._write_meta(key, meta)
+            old_image = self._image_path(key, previous) if previous else None
+            image = self._path(key, _IMAGE)
+            if previous or self._borrowed.get(image, 0) or image in self._retired:
+                # A borrowed canonical path may survive removal of its sidecar;
+                # never overwrite it before the in-flight drain releases it.
+                image = self._path(key, "." + uuid.uuid4().hex[:8] + _IMAGE)
+                meta["image_file"] = os.path.basename(image)
+            if len(frame) + len(json.dumps(meta, ensure_ascii=False).encode()) > self.max_bytes:
+                log.warning("outbox: byte budget (%d) cannot hold %s, alert not kept",
+                            self.max_bytes, key)
+                return None
+            try:
+                self._write_atomic(image, frame)
+                self._write_meta(key, meta)
+            except OSError:
+                if image != old_image:
+                    try:
+                        os.unlink(image)
+                    except OSError:
+                        pass
+                raise
+            if old_image and old_image != image:
+                self._retire_image(old_image)
         except OSError:
             log.warning("outbox: could not store the alert for %s", camera, exc_info=True)
             return None
@@ -363,17 +436,28 @@ class Outbox:
             log.info("outbox: kept undelivered %s alert for %s (%s)",
                      etype or "?", camera, incident or key)
         self._enforce_cap()
-        return key
+        return key if os.path.exists(self._path(key, _META)) else None
 
     def remove(self, key):
+        with self._budget_lock:
+            self._remove_locked(key)
+
+    def _remove_locked(self, key):
         with self._lock(key):
-            for suffix in (_META, _IMAGE):
+            meta = self._read_meta(key) or {}
+            image = self._image_path(key, meta)
+            for path in (self._path(key, _META), self._path(key, _IMAGE), image):
+                if path is None:
+                    continue
                 try:
-                    os.remove(self._path(key, suffix))
+                    if path == self._path(key, _META):
+                        os.remove(path)
+                    else:
+                        self._retire_image(path)
                 except FileNotFoundError:
                     pass
                 except OSError:
-                    log.debug("outbox: could not remove %s%s", key, suffix, exc_info=True)
+                    log.debug("outbox: could not remove %s", key, exc_info=True)
         with self._locks_guard:       # the entry is gone: do not keep its lock forever
             self._key_locks.pop(key, None)
 
@@ -411,7 +495,11 @@ class Outbox:
                     log.warning("outbox: dropping corrupt entry %s", key)
                     self.remove(key)
                 continue
-            image = self._path(key, _IMAGE)
+            image = self._image_path(key, meta)
+            if image is None:
+                log.warning("outbox: dropping entry %s, invalid image path", key)
+                self.remove(key)
+                continue
             if not os.path.exists(image):
                 log.warning("outbox: dropping entry %s, its frame is gone", key)
                 self.remove(key)
@@ -440,43 +528,113 @@ class Outbox:
 
     def sweep(self, now):
         """Remove stale leftovers: temp files and frames without a sidecar (> 1 h old)."""
+        with self._budget_lock:
+            self._sweep_locked(now)
+
+    def _sweep_locked(self, now):
         names = set(self._names())
+        referenced = set()
+        unread = []                   # sidecars that exist but did not read this time
+        for key in self._keys():
+            meta = self._read_meta(key)
+            if meta is None:
+                unread.append(key + ".")
+                continue
+            image = self._image_path(key, meta)
+            if image is not None:
+                referenced.add(os.path.basename(image))
         for name in names:
-            orphan = (name.endswith(_IMAGE)
-                      and name[:-len(_IMAGE)] + _META not in names)
+            orphan = (name.endswith(_IMAGE) and name not in referenced
+                      and not name.startswith(tuple(unread)))
             if not (name.endswith(_TMP) or orphan):
                 continue
             path = os.path.join(self.dir, name)
             try:
                 if now - os.path.getmtime(path) > STALE_AFTER:
+                    if self._borrowed.get(path, 0):
+                        continue
                     os.remove(path)
                     log.info("outbox: swept stale %s", name)
             except OSError:
                 pass
 
     def update(self, entry: Entry, **changes):
-        """Rewrite an entry's sidecar with ``changes`` (score, announced, attempts)."""
+        """Rewrite an entry's sidecar; return whether the change was durable."""
+        with self._budget_lock:
+            return self._update_locked(entry, **changes)
+
+    def _update_locked(self, entry: Entry, **changes):
         with self._lock(entry.key):
             meta = self._read_meta(entry.key)
             if meta is None:
-                return
+                return False
             meta.update(changes)
             try:
+                current_image = self._image_path(entry.key, meta)
+                if current_image is None:
+                    return False
+                size = os.path.getsize(current_image) + len(json.dumps(meta, ensure_ascii=False).encode())
+                if size > self.max_bytes:
+                    log.warning("outbox: byte budget cannot hold update of %s", entry.key)
+                    return False
                 self._write_meta(entry.key, meta)
+                person = _likely_person(replace(entry, etype=meta.get("etype"),
+                                                score=meta.get("score")))
+                self._reserve(size, entry.key, person)
+                return True
             except OSError:
                 log.debug("outbox: could not update %s", entry.key, exc_info=True)
+                return False
+
+    def _usage(self):
+        entries = self.entries()
+        sizes = {}
+        for entry in entries:
+            try:
+                sizes[entry.key] = (os.path.getsize(entry.image)
+                                    + os.path.getsize(self._path(entry.key, _META)))
+            except OSError:
+                sizes[entry.key] = 0
+        return entries, sizes
+
+    def _reserve(self, new_size, key, incoming_person):
+        """Trim after an atomic metadata update, protecting the updated entry."""
+        entries, sizes = self._usage()
+        used = sum(sizes.values()) - sizes.get(key, 0) + new_size
+        count = len(entries) + (key not in sizes)
+        victims = ([e for e in entries if e.key != key and not _likely_person(e)]
+                   + ([e for e in entries if e.key != key and _likely_person(e)]
+                      if incoming_person else []))
+        for entry in victims:
+            if used <= self.max_bytes and count <= self.max_entries:
+                break
+            reason = "byte budget" if used > self.max_bytes else "entry limit"
+            log.warning("outbox: %s exceeded (%d bytes, %d entries), dropping %s",
+                        reason, used, count, entry.key)
+            self.remove(entry.key)
+            used -= sizes[entry.key]
+            count -= 1
+        return used <= self.max_bytes and count <= self.max_entries
 
     def _enforce_cap(self):
-        """Drop beyond ``max_entries``: the oldest non-person entries first, then persons."""
-        entries = self.entries()
-        excess = len(entries) - self.max_entries
-        if excess <= 0:
-            return
-        victims = ([e for e in entries if not _likely_person(e)]
-                   + [e for e in entries if _likely_person(e)])[:excess]
-        for entry in victims:
-            log.warning("outbox: full (%d), dropping %s", self.max_entries, entry.key)
+        """Bound complete entries by count and bytes; discard oldest non-person first."""
+        with self._budget_lock:
+            self._enforce_cap_locked()
+
+    def _enforce_cap_locked(self):
+        entries, sizes = self._usage()
+        used = sum(sizes.values())
+        count = len(entries)
+        for entry in ([e for e in entries if not _likely_person(e)]
+                      + [e for e in entries if _likely_person(e)]):
+            if count <= self.max_entries and used <= self.max_bytes:
+                break
+            reason = "byte budget" if used > self.max_bytes else "entry limit"
+            log.warning("outbox: %s exceeded (%d bytes, %d entries), dropping %s",
+                        reason, used, count, entry.key)
             self.remove(entry.key)
+            used -= sizes[entry.key]
+            count -= 1
 
     def has_entries(self) -> bool:
         return bool(self._keys())
@@ -517,6 +675,18 @@ def drain(box: Outbox, *, now, known_cameras, send_text, send_photo, archive_rev
           score_for, threshold_for, probe, busy=frozenset(), review_enabled=True,
           max_rescores=MAX_RESCORES_PER_TICK, max_sends=MAX_SENDS_PER_TICK,
           budget_s=TICK_BUDGET_S, clock=time.monotonic):
+    """Hold each frame until this drain finishes, without blocking concurrent captures."""
+    with box.borrow_entries() as entries:
+        return _drain(box, entries, now=now, known_cameras=known_cameras,
+                      send_text=send_text, send_photo=send_photo,
+                      archive_review=archive_review, score_for=score_for,
+                      threshold_for=threshold_for, probe=probe, busy=busy,
+                      review_enabled=review_enabled, max_rescores=max_rescores,
+                      max_sends=max_sends, budget_s=budget_s, clock=clock)
+
+def _drain(box: Outbox, entries, *, now, known_cameras, send_text, send_photo, archive_review,
+           score_for, threshold_for, probe, busy, review_enabled,
+           max_rescores, max_sends, budget_s, clock):
     """Deliver what the outbox holds, if Telegram is back. Returns a small report dict.
 
     Collaborators, all injectable:
@@ -544,7 +714,6 @@ def drain(box: Outbox, *, now, known_cameras, send_text, send_photo, archive_rev
     """
     report = {"sent": 0, "reviewed": 0, "dropped": 0, "failed": 0, "summaries": 0,
               "stopped": False, "budget": False}
-    entries = box.entries()
     if not entries:
         return report
     box.sweep(now)
@@ -595,7 +764,9 @@ def drain(box: Outbox, *, now, known_cameras, send_text, send_photo, archive_rev
                 scorer_down = True
                 continue
             entry.score = score_fields(result)
-            box.update(entry, score=entry.score)
+            if not box.update(entry, score=entry.score):
+                report["stopped"] = True
+                return report
         if unfinished:
             report["budget"] = True          # score the rest first: one summary per batch
             continue
@@ -619,8 +790,14 @@ def drain(box: Outbox, *, now, known_cameras, send_text, send_photo, archive_rev
             # otherwise announce the same batch again (an unconfirmed flag expires after
             # ANNOUNCE_CONFIRM_WAIT). A failed or raising send takes it back.
             for entry in new:
-                box.update(entry, announced=True, announce_started_at=now,
-                           announce_sent=False)
+                if not box.update(entry, announced=True, announce_started_at=now,
+                                  announce_sent=False):
+                    for prior in new:
+                        if prior is entry:
+                            break
+                        box.update(prior, announced=False, announce_started_at=None)
+                    report["stopped"] = True
+                    return report
             try:
                 sent = send_text(summary_text(camera, new, new_persons, to_phone, now,
                                               review_enabled, lang=box.lang))
@@ -638,7 +815,9 @@ def drain(box: Outbox, *, now, known_cameras, send_text, send_photo, archive_rev
             for entry in new:
                 entry.announced = True
                 entry.announce_sent = True
-                box.update(entry, announce_sent=True)
+                if not box.update(entry, announce_sent=True):
+                    log.warning("outbox: summary was sent but confirmation for %s was not saved",
+                                entry.key)
         for entry in review:
             archive_review(entry, review_meta(entry, now))
             box.remove(entry.key)
@@ -663,7 +842,8 @@ def drain(box: Outbox, *, now, known_cameras, send_text, send_photo, archive_rev
                 continue
             log.warning("outbox: late send of %s failed; %s retried later",
                         entry.key, camera)
-            box.update(entry, attempts=entry.attempts)
+            if not box.update(entry, attempts=entry.attempts):
+                log.warning("outbox: late send attempt for %s was not saved", entry.key)
             report["stopped"] = True
             break
     return report

@@ -1897,9 +1897,11 @@ def configure_outbox(app, env=None, home=None):
         return None
     _outbox = outbox.Outbox(cfg.dir or outbox_default_dir(env, home),
                             max_age=cfg.max_age, max_entries=cfg.max_entries,
+                            max_bytes=cfg.max_bytes,
                             max_photos=cfg.max_photos, summary=cfg.summary,
                             lang=cfg.lang)
     _outbox.sweep(_time.time())
+    _outbox._enforce_cap()  # apply a newly lowered limit to entries from an older run
     waiting = len(_outbox.entries())
     log.info("outbox enabled: %s (%d undelivered alert(s) waiting)", _outbox.dir, waiting)
     if not _review_log_configured(env):
