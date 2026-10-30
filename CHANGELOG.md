@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.12.0] - 2026-10-30
 
 ### Fixed
 - Stop repeatedly requesting vehicle detection OFF on the verified C216 hardware
@@ -20,6 +20,18 @@ All notable changes to this project are documented here.
   health degraded, which kept every review digest orange. A degraded recorder still
   does. A degraded camera without configuration drift is reported with its cause
   (`front degraded (storage)`) instead of as "control drift".
+
+- A wrong camera password no longer costs about six logins per cycle: an
+  authentication error stops the connect retries and the backoff honours the camera's
+  "try again in N seconds". `-40211` is the TPAP probe answer, not a bad password.
+- The stop guard latches in the same step as the pose decision, backs off failing
+  Stop/OFF calls without slowing pose reads, survives an unexpected error in its loop
+  and refuses a home recall while fresh samples still move away from the target.
+- A getEvents failure logs a fixed diagnosis (timeout, authentication, refused, other)
+  instead of a slice of the exception text, which could carry a session URL.
+- `deploy_release.sh` and `rollback_release.sh` treat a failed restart as a failed
+  deploy (health check and rollback run), hold a host-side lease for the whole
+  sequence, and keep the Telegram token out of `curl` argv.
 
 ### Changed
 - `tracking.day_preset` no longer defaults to `"2"`: unset, no preset is recalled.
@@ -47,6 +59,12 @@ All notable changes to this project are documented here.
   `deploy_release.sh` read unit env files like systemd does (`tools/lib/envfile.sh`):
   nothing is expanded or executed.
 
+- A scorer outage is announced only after it has lasted ten minutes, and the
+  recovery notice is sent only for an announced outage, so a flaky link no longer
+  produces a pair of messages for every short blip.
+- ONVIF position reads and Stop calls log a fixed failure category (`cause=`), and
+  after a failed Stop the next Stop gets a longer time budget (reads keep 0.8 s).
+
 ### Added
 - `tools/soak_report.py` reports the endstop episodes separately from failed Stop calls:
   observed configured-limit crossings, peaks measured after verified tracking OFF and
@@ -71,6 +89,14 @@ All notable changes to this project are documented here.
   `Host`/`Origin`.
 - `tools/suggest_ignore_zones.py` suggests `scorer.ignore_boxes` rects from person
   boxes that repeat at the same place in the scorer logs (read-only).
+- `detection.sources: [lastalarm]` (opt-in) for cameras without a readable card,
+  where getEvents fails with `-71114`: events come from `getLastAlarmInfo` and the
+  alert uses the live frame only. `tools/probe_last_alarm.py` records a real answer.
+- `detection.sources: [reolink]` (opt-in, the `reolink` extra) for Reolink cameras:
+  one push subscription over the camera's TCP 9000 channel, an event when a configured
+  trigger (`motion`, `people`, `vehicle`, `dog_cat`) turns on, the alert frame from RTSP.
+- `tapo_monitor.macresolve` and `tools/build_verifier_dataset.py` helpers (not wired into
+  the daemon).
 
 ## [0.11.0] - 2026-10-20
 

@@ -1,4 +1,4 @@
-# Upgrading to the next release (unreleased)
+# Upgrading to 0.12.0
 
 Install the new package on the monitor hosts as usual. Most changes need no action, but
 the first one can change what an existing camera does, so check it before deploying.
