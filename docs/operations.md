@@ -895,6 +895,18 @@ This covers the scorer dying loudly. A host that dies quietly — power, kernel,
 is caught from outside by the mutual host watch, which polls this service's `/health` from
 another machine; see "Watching the hosts themselves" below.
 
+While the scorer is down, a camera does by default what it always did: a frame the scorer
+could not score is sent as an `(unverified)` photo, at night too. `scorer.unscored_at_night:
+hold` changes only the night (the camera's `schedule`): no unverified photo is sent, a
+live frame of a card camera is handed to its card follow-up (scored again about two
+minutes later), and any other frame goes to the review log with no score. Look for
+`scorer unavailable at night; ... held` warnings in the journal and for audit entries with
+`action=scorer_unavailable reason=held_at_night`; held frames can still be found and
+labelled from the review log afterwards. A person whose card follow-up is also unscored is
+therefore not alerted about during a long night outage, so pair `hold` with a
+[scorer failover](configuration.md#scorer-failover-optional) target. See
+[configuration](configuration.md#local-scorer-and-crop) for the option.
+
 When `TAPO_SCORER_METRICS_FILE` is set, the scorer also writes one aggregate JSON line
 after the configured persistence interval. The small `.state` sidecar restores cumulative
 counters after a restart. The current JSONL file rotates once its **oldest record** is
@@ -1718,6 +1730,13 @@ than none, because it converts silence into false reassurance.
 4. Check the audit summary before changing `scorer.threshold`.
 5. If an alert is missing, check whether it was dropped below threshold, deferred to SD,
    blocked by cooldown or failed at Telegram.
+6. A pan/tilt camera that no longer returns to its view by day, or in `storm_park` rain,
+   has no `tracking.day_preset`. The option has no default any more (up to 0.11 an unset
+   value meant preset `"2"`), so a camera that relied on it needs `day_preset: "2"` in its
+   `tracking:` section. Conversely, a fixed camera or one without saved presets should
+   leave it unset: nothing is recalled, and the `failed to recall preset 2` warning every
+   control tick is gone. A rain-parking camera without a `day_preset` logs a warning at
+   load. See [configuration](configuration.md#tracking-and-detection-policy).
 
 ### Make sure the journal survives
 
@@ -1808,6 +1827,10 @@ a site label to operational messages.
 For a lightweight gateway, run external reachability checks on a peer. A systemd
 timer override with `OnUnitActiveSec=30s`, `AccuracySec=1s` and `WATCH_FAILS=3`
 detects a sustained outage in approximately 60–90 seconds plus probe time.
+If the override clears the interval with an empty `OnUnitActiveSec=` first, also
+repeat `OnBootSec=2min` after it: an empty assignment resets every monotonic timer
+of the unit, including `OnBootSec`, and the watch then never starts after a reboot
+(a watcher on a peer host silently stopped starting after a reboot this way).
 Keep local network measurement cadence independent from alert cadence. Configure
 `alerts.outage_threshold`, `alerts.stall_threshold` and
 `alerts.event_failure_threshold` explicitly when a shorter camera alert delay is
@@ -1816,7 +1839,8 @@ needed; this does not change camera polling or reboot thresholds.
 ## Recording a real getLastAlarmInfo answer
 
 Cameras without an SD card cannot use `getEvents`; `alarminfo.parse_last_alarm` reads
-`getLastAlarmInfo` instead, but its shape is not yet validated on real hardware. Stop the
+`getLastAlarmInfo` instead. Its shape was validated on a C545D (2026-10-21); record a new
+answer before trusting another model or firmware. Stop the
 monitor first (a second session risks a lockout), then run
 `python3 tools/probe_last_alarm.py --config cameras.yaml --camera NAME --i-stopped-the-daemon`
 (`--count 3 --interval 5 --out answer.json`). It sends only `getLastAlarmInfo`, prints the

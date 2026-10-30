@@ -272,6 +272,9 @@ funnel where configured.
 without an SD card: each pass polls `getLastAlarmInfo` (at most one call per 1.5 s) and
 turns a fresh, not yet seen alarm into an event. Alerts use the live frame only (no SD
 follow-up). The camera reports a person as coarse `motion`, which follows `strict_people`.
+A failed call is logged once per streak (`getLastAlarmInfo NAME failed: ...`, then
+`recovered after N failure(s)`); authentication errors still reach the daemon's login handling. The
+empty card slot of such a camera does not count as degraded storage health.
 
 `reolink` (opt-in, needs the `reolink` extra and Python 3.11+, never combined with Tapo
 sources or any SD option) is for a Reolink camera: the daemon keeps one push subscription
@@ -279,6 +282,10 @@ over the camera's native TCP 9000 channel and starts an event when one of
 `reolink_triggers` turns on for any lens (`motion`, `people`, `vehicle`, `dog_cat`; empty =
 all). The alert frame comes from RTSP (`rtsp_stream`, default `h264Preview_01_main`), so
 RTSP must be enabled on the camera. The Tapo control, twin and watchdog paths skip it.
+Without an SD follow-up, a `people` trigger is alerted even when the scorer rates the frame
+below `scorer.threshold`, as for any camera-confirmed person without one: from a high,
+top-down view at night the scorer can rate a person the camera saw correctly at 0.1-0.2.
+A bare `motion` trigger still needs the scorer.
 
 ```yaml
   - name: parking
@@ -693,6 +700,8 @@ clip_token_env: null
   sent as `Authorization: Bearer`. The event start is the daemon host's clock for a
   push source, so keep the recorder host on NTP and leave a few seconds of
   `clip_pre_roll`.
+  The full guide, with the recorder contract, log lines and troubleshooting, is
+  [Alert video clips](alert-clips.md).
 - `sd_span_cap` bounds the event window downloaded/scanned.
 - `sd_motion_span_cap` bounds the first window for unconfirmed motion/PIR; one empty
   result retries with `sd_span_cap`. Confirmed person events use the full window directly.

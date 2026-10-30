@@ -5,6 +5,30 @@ reliability and detection-quality control plane. It is intentionally capability-
 camera models and firmware expose different methods, so an empty or unsupported response
 is evidence about that device, not a reason to guess.
 
+## Current priorities — 2026-10-28
+
+The latest released package is **0.11.0**. Release history is in the [changelog](../CHANGELOG.md). Unreleased local candidates on top of it (Reolink detection source, stricter C216 limits, quiet `lastalarm` errors, ONVIF failure categories, Stop-only adaptive budget) are in soak and not published.
+Code implemented in a local candidate, a production trial and a completed acceptance
+review are separate milestones; a checked implementation item does not close its trial.
+
+| Priority | Implemented / deployed | Still open |
+|---|---|---|
+| Virtual PTZ endstops (10.15) | **Deployed candidate, not accepted.** A local read-only soak report separates observed crossings from Stop RPC failures | A later 24-hour review found configured-limit crossings, including peaks after verified OFF. The 2026-10-24 review was not clean either: 129 of 217 Stop failures fell in three hours when a card-reading job ran beside the daemon, and the one "crossing" was the lens standing beyond the limit while its position could not be read. A new untouched 24-hour soak started 2026-10-24. 2026-10-26: still not clean, with about 38 % of Stop calls failing (2621 of 6962 in 24 h), 6 observed limit crossings and 25 peaks after verified OFF. Rebooting the camera did not help, so uptime is not the cause. Failures are now logged with a fixed category (mostly read timeouts). A Stop-only adaptive time budget (0.8 s, stretched to 1.6 s after a failed Stop, hard cap 2 s; position reads stay at 0.8 s because the guard rejects a pose older than 1 s) was soaked from 2026-10-26 and did not help: about 37 % of Stop calls still failed after 18.5 h, and about 98 % of episodes ended at the home pose while the lens stood still (about 50 per hour, also at night), so the camera briefly stops answering rather than the budget being too short. A/B trial since 2026-10-27: `stop_poll_interval` 0.15 -> 0.3 s on that camera (baseline about 110 failures per hour); the first 15 h showed about 31 % failures, a small change that needs the full window. Candidate if it does not help: do not trip the guard on a read outage while the pose is far from the limit. That is a safety change and needs its own candidate. The failure-category logging and adaptive budget are local commits, not released |
+| Detector quality (10.14) | **Production trial reviewed on two cameras.** The 2026-10-23 hand review covered 516 frames and confirmed threshold 0.35 for that sample | Review other cameras, scorer fallback and an unbiased recording sample; a scorer outage can still send unverified frames. 2026-10-27: a labelled week (346 decisive frames, sample biased toward model disagreements, so not a production recall or false-alarm rate) ranked the production model first: recall 73 % with 19 false positives, against 51 % / 8 for the large RF-DETR, 36 % / 95 for YOLOX 960 and 19 % / 56 for YOLOX 640; on the 198 frames all four scored, 68 % / 6. Still missing: a per-camera and day/night breakdown |
+| Alert correctness and photo selection (10.5, 10.6, 10.13) | **Released in 0.10.0–0.10.2:** photo selection, late-event deduplication and partial-scoring fixes | Review delivered passages, photo quality and cross-path duplicates at incident level |
+| Outbox resilience (10.9) | Existing opt-in outbox **released**; `max_bytes`, safe replacement and full-disk handling **locally tested, not deployed** | First real outage review, controlled send-failure/restart trial and release soak remain open |
+| Alert clips (10.17) | **New, in a candidate soak since 2026-10-24** on one camera-card site and one recorder-backed camera; first clips arrived about 3 minutes after the event, about 1 MB each | A clean 24-hour soak: a clip for every alert photo, no slower card follow-ups, playable on a phone at night. 2026-10-25: on the card site with a weak Wi-Fi link (about -72 dBm) many clips failed (`no card read`, 150 s download timeout) and the clip trial was switched off there; a clip path must not add retries or notices on a poor link before wider rollout |
+| Poor-link behaviour (new) | **Not implemented.** On one site with a weak Wi-Fi link and an unstable uplink, a day showed 176 scorer timeouts and 23 Telegram send failures; alerts arrive in bursts after each outage rather than as duplicates. The existing outbox already merges late alerts into one outage summary | A poor-link mode: fewer retries, merged late alerts, no clip or card-read retries on a weak link. It needs a measurable trigger (for example a sustained scorer-timeout rate) and a decision on how stale an alert may be before it is not sent late |
+| Alert latency (10.4) | Card follow-ups attributed: the live frame is taken 17–19 s after the event, when `getEvents` reports it, and is empty for most of them | Trial `sd_early_look` on the second card site after the current soak; consider a lower freshness guard or a local recorder |
+| Quiet digests (10.16) and other opt-ins (10.12–10.13) | Problems-only digest **deployed candidate**; zones, vehicles and loitering **released opt-in** | Verify degraded/unknown digest behavior and complete observe-only site trials before wider promotion |
+
+A candidate release requires a real overnight / at least 24-hour soak of its code and
+configuration, with useful activity, no unexplained scorer failures, tracebacks,
+unscored deliveries or duplicate incidents. Endstop acceptance adds the checks in 10.15.
+Simulated soak and a quiet period with no relevant events cannot replace that evidence.
+Site-specific observations and host identifiers belong in private operator notes, not this
+public roadmap.
+
 ## Product outcome
 
 Two connected systems form the target architecture:
@@ -388,8 +412,9 @@ multi-tick scenarios are written once rather than rebuilt by hand in each test.
 
 ## Phase 8 — Prove phase 7 in production, close what it exposed
 
-Status: **in progress** (8.2–8.4 done; 8.1 trial running on one camera; 8.5 waits for a second camera; 8.6: lens reach measured and per-lens repair shipped; photo comparison, pan/tilt-first live frame and
-the album still open)
+Status: **in progress** (8.1–8.4 reviewed; 8.5 waits for a second overlapping camera;
+8.6 detection repair and opt-in lens album implemented, with per-lens image/light repair
+and broader photo-quality review still open; virtual endstop validation is tracked in 10.15)
 
 Phase 7 was built and tested against fakes; the scenario harness and a replay of a real
 recorded day then surfaced a handful of smaller gaps. This phase ships phase 7 the way
@@ -501,8 +526,10 @@ turns after a person the wide lens saw (dual-cam linkage). See
   idle baseline). Add a deny-list in the client so no probe or future getter can send them.
   Done: `apiguard` refuses both in every client's `performRequest` (batches and hub
   envelopes included, all models, no config opt-in); twin probes skip them as `denied_method`.
-- [ ] An event source for a camera without an SD card: `getLastAlarmInfo` returns the type
-  and time of the last alarm without storage.
+- [x] An event source for a camera without an SD card: `getLastAlarmInfo` returns the type
+  and time of the last alarm without storage. Done: opt-in `detection.sources: [lastalarm]`
+  (live frame only), answer shape validated on a C545D; in production trial on one camera
+  since 2026-10-21.
 - [x] Say which lens took the photo in the alert caption. Shipped: the stream a frame was
   grabbed from names its lens (`· wide lens` / `· pan/tilt lens`) on the live, lens-pick
   and sampler paths; SD and recording frames name none, since their lens is not known.
@@ -518,8 +545,9 @@ turns after a person the wide lens saw (dual-cam linkage). See
 
 ## Phase 9 — Detection quality from our own labelled frames
 
-Status: **in progress** (9.1 and 9.3's CPU teacher shipped; 9.2 tooling shipped — night
-thresholds wait for the drop sample to collect night frames; 9.4 not started)
+Status: **in progress** (collection, labelling, teacher inference and calibration tooling
+implemented; the detector disagreement review is complete, while production quality,
+night-threshold review and the optional verifier remain open)
 
 A month of ledger data from one site (20k camera events, 145k scored frames) shows the
 scorer separates sharply: 77 % of events score below 0.30, 17 % above 0.65, and only
@@ -571,10 +599,12 @@ shadows. The generic detector has never seen this fleet's IR night scenes.
 - [x] `tapo-monitor autolabel`: a larger detector (YOLOX-x) scores every collected frame
   once; frames it and the production scorer agree on are labelled automatically, and the
   labelling page queues the biggest disagreements first — the most likely errors, and
-  the only frames a person has to look at. Runs on the CPU of the operator's machine
-  (about 2 s a frame on two threads); observe-only, nothing on the alert path changes.
-- [x] The teacher also runs as a GPU-only service beside the production scorer (iGPU,
-  OpenVINO), so new frames no longer wait for a CPU run.
+  the only frames a person has to look at. CPU inference and remote teacher-service use are
+  supported; teacher agreement remains a selection aid, not independent ground truth.
+  Observe-only, nothing on the alert path changes.
+- [x] Support a GPU-only teacher service with OpenVINO as well as CPU serving;
+  choose the deployed backend from measured cost and throughput, independently of
+  production alert scoring.
 - [ ] Rules for the shared host: announce every write, work in one own directory, check
   free disk and GPU use first, clean up after each run.
 
@@ -591,14 +621,11 @@ shadows. The generic detector has never seen this fleet's IR night scenes.
 
 ## Phase 10 — Incidents, not frames
 
-Status: **in progress** (10.1, 10.6 and 10.7 done; 10.3 disk telemetry and daily
-archive/ledger retention shipped, operator journal policies open; 10.2 and 10.5 in trials on one
-camera; 10.4: recording follow-ups 119 s -> 56 s and follow-ups off the main loop on the fleet,
-camera-card path and hub clips next; 10.8 done; 10.9 in a trial on one site; 10.10 in a
-trial on one camera since 2026-10-01; opt-in `sd_early_span`, `sd_frame_pick: tallest` and
-`lens_album` shipped, each awaiting its own trial; 10.11 network history and digest
-integration shipped; 0.9.0 (2026-10-12) ships the 10.9 outbox, 10.12, 10.13 and the
-10.14 shadow tooling, all opt-in)
+Status: **in progress** (10.1, 10.6–10.8 and telemetry/retention tooling implemented;
+10.2, 10.9 and 10.10 still require their incident-level trial reviews. Photo selection
+and scoring controls shipped in 0.10.0; late-event deduplication in 0.10.1 and partial
+scoring-failure handling in 0.10.2. RF-DETR Medium 896 is in production evaluation;
+virtual endstop candidates and quieter daily digests remain unreleased.)
 
 Frame statistics hide what matters to the person holding the phone: was each visit
 alerted, and how late. A first join of labels with deliveries showed that of 31 held
@@ -634,7 +661,9 @@ busiest site.
 - [ ] Trial it in `observe` mode on one camera (running since 2026-09-24), label the frames
   it would have sent, and promote to `send` from incident-level numbers (10.1). After a
   week: 16 holds, 7 expired, 5 would have been sent (score 0.45-0.55, 150-270 s after the
-  event, no other alert) against about 516 alerts sent; the 5 frames await labels.
+  event, no other alert) against about 516 alerts sent. The earlier five-frame review
+  recorded four persons and one uncertain frame; confirm the current policy and measure
+  delivered incidents before declaring the trial complete.
 
 ### 10.3 — Telemetry that fills disks
 
@@ -716,6 +745,13 @@ busiest site.
   pytapo's 60 s freshness guard plus a slow download. `sd_early_look` already reads the
   first 18 s at +87 s; `sd_early_span` (6-30, default 18) makes that first window smaller
   still (12 s is due at +81 s). Opt-in and unchanged by default.
+- [x] Attribute the card follow-ups (2026-10-23, two card sites, first alerts since
+  2026-10-20): in 64 of 65 incidents whose first alert came from the card, the live frame
+  had scored 0.0-0.3 and was deferred. The camera's `getEvents` reported each event
+  17-19 s after it started, so the live grab came after the person had left. The card
+  alert then took a median 151 s on the site with `sd_early_look` and 195 s without:
+  the 60 s freshness guard, a card download that runs at about real time (7 MB of a 2K
+  stream in 35-43 s) and frame extraction. A recording-source camera reaches 87 s.
 - [ ] Trial `sd_early_look` on a card site, then `sd_early_span: 12` once its `SD read`
   lines show how often the sent photo lies in the first 12 s.
 
@@ -738,18 +774,23 @@ closest.
   (< 85 px) fell from 30 % to 11 %, at no cost in delay (57 s vs 55 s) or score (0.82 vs
   0.80); at night no measurable change. Live frames of the same days did not move, so it
   is not scene drift. Kept on the recording-source camera.
-- [ ] `largest` ranks by box area, so part of its gain is people side-on or mid-stride
-  rather than closer, and more boxes touch the frame edge (9 % → 15 %, feet cut off).
-  Try ranking by box height before recommending it further. Implemented as the opt-in
-  `sd_frame_pick: tallest` (box height, 1.1x gain over the sharpest, edge-touching boxes
-  set aside when another frame is clear); the trial against `largest` is still open.
+- [x] Rank by box height with `sd_frame_pick: tallest`; box area alone can favour
+  side-on or mid-stride people and cut off feet. Clip replay supported the height-based
+  pick, and it has been deployed beyond the initial trial. This completes implementation
+  and rollout, not a long-term incident-level quality review.
+- [x] 0.10.0 sets aside frames smeared by camera motion and adds opt-in
+  `sd_prefer_face` with scorer face detection. `sd_score_parallel` bounds concurrent
+  scoring uploads on both SD and recording paths; the default remains sequential.
+- [ ] Review delivered photos and first-alert latency after the frame-selection rollout,
+  separately by camera and day/night. Keep face preference opt-in until real clips
+  establish a useful gain; a model cannot recover a face absent from the recording.
 - [x] A crop narrower than `crop_min_px` (default 400) follows the whole frame as a second
   zoom photo instead of arriving as an unreadable thumbnail; the native frame a crop was
   cut from is archived for review, and an alert that went out without a score is captioned
   `(unverified)`. Shipped in 0.9.0.
-- [ ] Camera-card sites stay on `sharpest`: their card path is already the slowest, and
-  their one checked clip gained 1.16× with more motion blur. Revisit with their own
-  week of `box_area` after the card early look (10.4) lands.
+- [ ] Review card-source photo quality with each camera's own clips and current frame
+  selection; the earlier single-clip result is insufficient for a general recommendation.
+  Separate download latency, extraction cost and photo quality in the comparison.
 
 ### 10.6 — One visit, one message
 
@@ -779,6 +820,11 @@ closest.
   (18 sampler photos, 13 motion card photos, one live photo), and every one of those
   motion photos had already reached the threshold (0.47–0.91). None followed a motion
   photo of nobody or an unscored one, so all 32 are duplicates the rule now skips.
+
+- [x] 0.10.1 suppresses a late person event when the same passage was already photographed
+  through motion or the sampler, using camera event time rather than only wall-clock cooldown.
+- [ ] Validate this against real delayed events and check duplicates across delivery paths;
+  a check for repeated identical incident/path pairs alone cannot exclude every duplicate.
 
 ### 10.8 — Tell the owner when a camera stops watching
 
@@ -837,6 +883,15 @@ often what photographs the person seconds later.
   every nearby event on one camera; zones drop people inside them (the scoring service
   returns `person_boxes`). On that camera 15 of 113 sent photos, all without a person,
   would have scored below the threshold.
+- [x] Check whether an empty dropped frame hid a person. In the 2026-10-23 review, 63
+  motion incidents on two card cameras had only an empty dropped frame and no alert; 40 s
+  of each incident's card recording was scored every 2 s. 54 had a recording (9 failed:
+  a busy card or a media timeout). Two held a real person, both on the pan/tilt camera
+  (0.94 at +2 s, 0.86 at +25 s, confirmed by eye); the 0.20-0.35 band showed cars, a
+  driver inside a car and motion blur, no person on foot. So the single empty frame cost
+  2 of 54 recorded passages (about 4 %). The drop log keeps a 5 % sample, so the absolute
+  number of such passages is about twenty times larger, and a 2 s step can miss a short
+  pass.
 
 ### 10.12 — Watch zones, loitering and vehicles
 
@@ -860,6 +915,13 @@ often what photographs the person seconds later.
 - [x] `tools/soak_report.sh` (read-only per-host report with a baseline) and
   `tools/soak_sim.py` (the real loop against fake cameras on a fake clock).
 - [x] `label-stats --camera-alias`, and `label --scorer-url` / `--lang`.
+- [x] 0.10.2 retries a failed clip frame after the others have scored and excludes it if
+  it still fails. A partially scored clip no longer becomes an unscored alert; a complete
+  scorer outage remains explicitly marked and audited as unverified.
+- [x] Candidate soak reports include Stop failures, unverified tracking OFF and unsafe
+  endstop episode summaries, including WARNING lines from remote journals. The local
+  analysis update additionally counts observed configured-limit crossings, peaks after
+  verified OFF and their overlap separately from Stop RPC failures; it changes no daemon.
 - [ ] 0.9.0 shipped these features opt-in. Soak them for at least five days on real hosts
   in observe mode before changing any default; release gates are alert volume within 30 % of the baseline and
   no unexpected restart or traceback.
@@ -899,29 +961,48 @@ often what photographs the person seconds later.
   positives per 1000 frames, 0.45 missed 3) and its marginal scores are remapped into the
   host's hold band; default unchanged (TRUST = HOST). Enabling 0.30 live is still open.
 - [ ] Label the audit dataset and compute precision per model and the persons both missed.
+- [x] Production trial review, 2026-10-23: 516 frames from two cameras since the M896
+  switch (15/16 Oct to 23 Oct), every frame hand-labelled with the model's boxes shown;
+  scorer fallback windows excluded. False alarms 6 of 405 sent frames: 4 were sent unscored
+  during a scorer outage (M896 rescores them 0.04-0.12), 2 were the model (0.39, 0.48, both
+  at night). Missed passages: 2 of 404 person incidents dropped by the model (0.11, 0.13,
+  day); 3 more held or cooled down while a neighbouring alert of the same visit went out.
+  Best threshold 0.35 (4 errors of 510), the deployed value. Not yet reviewed: the other
+  cameras. First alerts arrive 26 s median from the live path but 183 s from the SD path,
+  which delivers 39 % of first alerts.
+- [x] Decide what a scorer outage sends. The unscored passthrough produced 4 of the 6
+  false alarms in that review (one night, both sites). `scorer.unscored_at_night: hold`
+  (opt-in) sends no unverified photo at night: card cameras hand the event to their
+  follow-up, other frames go to the review log; daytime frames still pass through.
+- [ ] Enable `unscored_at_night: hold` on the card sites with the next candidate and read
+  the first scorer outage that falls at night.
+- [ ] Review the remaining cameras the same way, and label high-mounted night views: a
+  camera mounted about 15 m above a car park scored clearly visible people at 0.09-0.17
+  with both detectors; only its own person trigger delivered them.
 - [x] Up to four independent shadow targets (`TAPO_SCORER_SHADOW2..4_*`), tiled candidate
   scoring, an optional CUDA provider, a per-target `_MIN_INTERVAL` for candidates sharing a
   GPU with the primary, and a capped `missed/` archive of low-primary, moderate-shadow
   frames that feeds the labelling selection. Shipped in 0.9.0.
-- [ ] Read the shadow run: since early October four candidates (RF-DETR Large 704,
-  YOLOX-m 960, RF-DETR Medium 896 and RF-DETR Medium 576 tiled 2×2) log next to both the
-  live and the recording-feed scorer, the two Medium models on a separate CUDA GPU
-  machine. Label the disagreement frames and the `missed/` archive by hand.
-  Second hand-labelled set (2026-10-13, 206 frames biased to hard cases, per frame at 0.45,
-  104 frames all five models scored): RF-DETR Medium 896 found 21 of 39 persons with
-  6 false alarms, RF-DETR Large 17/6, YOLOX-m 960 13/11, the tiled Medium 576 16/14 and the
-  current YOLOX-m 640 8/15. Medium 896 beats the current model clearly; its lead over
-  RF-DETR Large is within noise. The tiled candidate was dropped early (a night false-alarm
-  cluster on one camera); three candidates run until the end of the week.
+- [x] Complete the candidate disagreement review. Final selection: 350 reviewed frames,
+  346 decisive labels; the common four-model subset has 198 frames (68 person,
+  130 no-person). At 0.45, RF-DETR Medium 896 found 46 positive frames with 6 false
+  positives, RF-DETR Large 35/6, YOLOX-m 960 20/79 and YOLOX-m 640 25/45.
+  These are selected frame counts, not incident recall or production false-alarm rates.
+  The tiled candidate was dropped earlier; the completed shadow campaign is no longer
+  waiting for another week of labels.
+- [x] Select RF-DETR Medium 896 for a controlled production trial and expand the trial
+  after checking service performance. YOLOX scorers remain configured fallbacks;
+  ensemble selection is no longer a prerequisite to this trial.
+- [x] Measure service performance on the deployment CPU under monitor traffic and verify
+  client failover. CPU thread controls and deployment guidance shipped in 0.10.0;
+  a dedicated candidate GPU host is not required for the selected serving configuration.
+- [ ] Review production detection quality per camera and day/night: missed passages,
+  false alerts, first-alert latency and fallback use. Split comparisons when illumination
+  or framing changes; a healthy scorer does not prove recall or precision.
 - [ ] Run a recording audit on a stratified, unbiased sample of recorded windows (day and
   night) to estimate the persons that neither model catches; label the random low-score draw.
-- [ ] Decide between the ensemble, a swap to the second detector and the current model from
-  the shadow week and the audit; enable it first on one camera with the shadow log running.
-- [ ] Re-measure the second detector's latency on the host that will serve it under the real
-  request load of all monitor hosts (the benchmark ran one request at a time).
-- [ ] Move the scorer to the machine that hosts the second detector, with the shared token
-  and a candidate list, and keep the old scorer as the fallback for at least a week.
-  (Only shadow candidates run there so far; the primary has not moved.)
+- [ ] Confirm sustained fallback performance and comparable detection decisions before
+  retiring any previous serving path; a model rollout does not itself close this review.
 - [ ] A cheaper second opinion for static false alarms: let an ignore-zone suggestion come
   from boxes that repeat at the same place across many frames (tool, not automatic).
 - [x] Judge the disagreements between the best candidate and the current model by hand.
@@ -931,6 +1012,79 @@ often what photographs the person seconds later.
 - [x] Publish the comparison and the tool in the docs so others can repeat it on their own data.
 - [x] `tools/recording_audit_estimate.py` estimates misses and false alarms per rule from a
   stratified, partly labeled score table (bootstrap intervals, day/night, completeness check).
+
+### 10.15 — Virtual PTZ endstops and verified recovery
+
+Status: **candidate deployed; production acceptance open**.
+
+- [ ] 2026-10-27: the adaptive Stop budget soak was not clean (about 37 % failures). A/B `stop_poll_interval` 0.3 s is running; decide after the review.
+
+- [x] Observe ONVIF pan position independently of the alert loop and stop before an
+  explicitly configured preset boundary, with a configurable margin and a right-only option.
+  Latch tracking OFF until verified disable, fresh stable interior samples and cooldown
+  permit recovery. Every native tracking write respects the latch.
+- [x] Bound retries for idempotent GetStatus/Stop operations within a shared deadline;
+  preserve failure reporting and privacy/suspension restrictions.
+- [x] Candidate diagnostics record trip position and its age, observed extrema and time
+  of peak, every failed read and Stop callback, first confirmed Stop, verified OFF and
+  episode completion. OFF diagnostics distinguish missing/retired clients and measure
+  session-lock waiting separately from request duration; only exception classes are logged.
+- [x] Keep intentional guard-driven tracking OFF from generating a configuration-drift
+  notification while the latch inhibits tracking; unrelated drift remains reportable.
+- [x] Preserve healthy native sessions across control passes on guarded cameras; replace
+  failed or retired clients without overlapping authenticated sessions.
+- [x] Read managed settings before rewriting matching values on guarded cameras, while
+  retaining repair writes for mismatches and failed or incomplete reads.
+- [x] Retry an unconfirmed Stop after safe pose readings recover and while verified
+  tracking OFF is pending; retain the existing cadence and recovery restrictions.
+- [x] Store guard context with each twin capture so direct drift notices and digests
+  classify intentional OFF consistently; pose-loss holds remain degraded.
+
+The first follow-up deployment had an initial half-hour observation: closed episodes
+confirmed Stop and OFF, but Stop callbacks still failed before retry. This was a smoke
+check, not production acceptance. A subsequent read-only 24-hour review found actual
+configured-limit crossings, some peaking after tracking OFF was verified; a successful
+Stop callback is therefore not evidence that autonomous movement stopped. Per-site
+counts and traces stay in private operator notes. Warning counts and failed Stop RPC
+counts must never be presented as counts of physical overshoots.
+
+- [ ] Resolve observed configured-limit overshoots from natural episode evidence. A Stop
+  acknowledgment alone does not prove that native SmartTrack stopped issuing motion.
+  Transport delay, missing pose and session availability remain distinct hypotheses.
+- [ ] Complete at least 24 hours with several real boundary interventions, no observed
+  configured-limit crossing and confirmed Stop/OFF for every boundary episode. Review
+  time to OFF and explain failures before accepting the candidate. Unknown motion between
+  samples and a quiet run with no interventions cannot establish a physical travel limit.
+
+### 10.16 — Daily digests when attention is needed
+
+- [x] Implement and deploy a candidate `TAPO_REVIEW_DIGEST_PROBLEMS_ONLY=1` mode that
+  skips healthy daily summaries and their photos, while degraded or unknown health retains
+  the daily digest. Outage, recovery and detection notifications keep their existing routing.
+- [ ] Complete the candidate soak and verify degraded/unknown behavior in normal operation
+  before release. This mode does not add an immediate alarm for every possible fault.
+
+### 10.17 — Show what happened: alert clips
+
+The photo says someone was there; it rarely shows what they did. An owner asked for a
+30 s video from the start of the motion, sent with the photo.
+
+- [x] `clip_video` (opt-in, card cameras): once the photo reached Telegram, the card
+  window from `clip_pre_roll` before to `clip_seconds` after the event is read on the
+  camera's card thread after its follow-ups, transcoded to H.264 720p on a separate
+  sender thread and sent with `sendVideo` as a reply to the photo. One clip per incident,
+  two tries, given up 15 minutes after the event; the queue is in memory.
+- [x] `clip_url`: a recorder serves the clip over HTTP, for cameras whose card cannot be
+  read over the network. A night recorder that keeps only a short rolling buffer and
+  cuts event clips from it replaces whole-night recording on such a camera.
+- [x] Measured live (2026-10-24): a 30 s card read of a 2K camera took 44 s, the 720p
+  encode on a Raspberry Pi 4 27 s, the result 1 MB; the first two clips arrived 177 s and
+  201 s after their events. A recorder clip of a 4K camera arrived in 4.5 s (26 MB) and
+  encoded to 1.3 MB.
+- [ ] 24-hour soak on both kinds: a clip for every delivered photo, replies threaded, no
+  "giving up", and card follow-ups no slower than before.
+- [ ] Reuse the card read of an SD follow-up for the clip when it already covers the
+  window, instead of reading the card twice.
 
 ### 10.11 — Network evidence for transient outages
 
@@ -973,45 +1127,58 @@ often what photographs the person seconds later.
 
 ## Planning horizons
 
-These horizons are relative to the next planning cycle, not release promises. Move an
-item forward only when its evidence is available; keep behaviour opt-in until a trial
-has an incident-level review. Updated after the 0.9.0 release (2026-10-12).
+Updated **2026-10-23**. These horizons are review priorities, not release promises.
+Keep implementation, deployment and acceptance separate. Promote a policy only when
+its own evidence is available, and keep unreviewed features opt-in.
 
-### Next weeks — read the evidence that is already being collected
+### Next review — reliability before another release
 
-- Read the shadow run (10.14): label the disagreement frames and the `missed/` archive by
-  hand, then compare the remaining three candidates with the current model on misses, false alarms
-  and day/night, at a matched operating point. Teacher labels do not count as ground truth.
-- Finish the TC46 lab tests at home: pure motion without a person, a monitor smoke test
-  (person, frame, scorer), SD follow-up and frame time, power-loss recovery without a
-  login lockout, night, and preset recall. Only then mark it as fully tested.
-- Close the open trials (10.1, 10.10, 10.5 `tallest` against `largest`) with a labelled,
-  incident-level review; promote each policy separately.
-- Exercise the outbox through a controlled send outage and a daemon restart, and review
-  the first real outage on the trial site (10.9).
+- [ ] Read the `stop_poll_interval` A/B and decide: keep 0.3 s, revert to 0.15 s, or open a separate read-outage tolerance candidate.
+- [ ] Poor-link guard: a clip path adds no retries, notices or card reads on a weak link (see the poor-link row).
 
-### Next month — decide the detector and bound the slow paths
+- [x] Read at least 24 hours of natural endstop episodes (10.15), including boundary
+  interventions. Observed configured-limit crossings and some peaks after verified OFF;
+  the candidate failed this acceptance check.
+- [ ] Explain and resolve those crossings before accepting 10.15; confirm Stop/OFF for
+  every boundary episode and repeat a clean 24-hour trial with useful interventions.
+- [x] Review the RF-DETR Medium 896 production trial (10.14) on two cameras (2026-10-23,
+  see 10.14). Remaining: the other cameras, and first-alert latency (below).
+- Apply the release soak gate to the actual deployed candidate, including unscored sends,
+  delayed-event duplicates and quieter-digest behavior. A green unit check is insufficient.
 
-- Decide between the ensemble, a swap to the best candidate and the current model, from
-  the shadow run and a stratified recording audit; enable the choice on one camera first
-  with the shadow log still running (10.14).
-- Load-test the GPU machine that hosts the candidates under the real request rate of all
-  monitor hosts before it serves anything live.
-- Give the outbox a total on-disk byte budget next to its entry and age limits; evict
-  lower-priority entries first, report every eviction, and test that a full filesystem
-  cannot interrupt live delivery.
-- Soak the 0.9.0 opt-in features (zones, loitering, vehicles, failover lists) in observe
-  mode for at least five days before any default changes (10.12, 10.13).
+### Next weeks — finish existing trials
 
-### Next quarter — validate resilience and broaden device evidence
+- Review photo selection (10.5), hold expiry (10.2) and kept sampling (10.10) at incident
+  level. Confirm current settings instead of treating old unchecked tasks as deployment facts.
+- Review the outbox's first real outage and separately test send failure plus restart
+  recovery (10.9) before wider rollout.
+- Re-check night thresholds only where labels justify a different cut (9.2); complete an
+  unbiased recording audit to measure misses outside the detector disagreement set.
+- Finish TC46 device evidence: native ONVIF movement tests and a daytime lamp/API check
+  do not establish stopping autonomous tracking or automatic night-light quality. SD,
+  power-loss and real night scenarios still need their own acceptance evidence.
 
-- Shadow-run a local fallback scorer during shared-scorer failures; compare its decisions
-  with the shared scorer and labelled frames, and measure CPU, latency and storage cost
-  before considering any failover policy (10.9).
-- Extend host failover to the recorder paths, the CLI, MQTT and hub cameras, with an
+### Next month — bound slow paths and validate opt-in policies
+
+- Measure the remaining card early-look and hub-worker trials (10.4), reporting extraction,
+  download and scoring time separately.
+- [x] Give the outbox a total byte budget for complete entries next to its entry and age
+  limits; report evictions and ensure a full filesystem cannot interrupt live delivery.
+  Local implementation and failure-path tests cover full disk, replacement atomicity and
+  concurrent drains; outage/restart acceptance (10.9) remains open. This is not deployed.
+- Soak zones, loitering, vehicles and failover candidates in observe mode for at least
+  five days before any default changes (10.12, 10.13).
+- Revisit the site-specific verifier (9.4) only if labelled residual errors justify it
+  after the detector change; keep it independent of endstop acceptance.
+
+### Later — broaden resilience and device evidence
+
+- Evaluate a local fallback scorer during shared-scorer failures with measured CPU,
+  latency and decision quality before changing failover policy (10.9).
+- Extend camera-address failover to recorder paths, CLI, MQTT and hub cameras, including
   automatic return to the primary address (10.13).
-- Expand the model/firmware capability fixtures from sanitized camera reports (Research
-  track 5); add an event profile only when a report shows bits the default table lacks.
+- Expand sanitized model/firmware capability fixtures and dual-lens image/light repair
+  evidence (8.6); add event profiles only when observed bits support them.
 - When a second overlapping camera is available, trial the handoff coordinator against
   missed and duplicate incidents (Phase 5).
 
@@ -1033,8 +1200,9 @@ These stay separate from production until repeatable evidence exists:
    `tapo-monitor report` and the *Camera report* issue form collect anonymized reports;
    each accepted one lands in `tests/fixtures/cameras/` as a contract test. The TC46 was
    the first model added this way: its getters, streams and person bits match the
-   C560WS; it is a lab camera, not yet on a site, and pure motion without a person, SD
-   follow-ups, outage recovery, night and PTZ are still to be tested. Next: widen
+   C560WS. Controlled ONVIF movement and a daytime independent-lamp check are complete;
+   autonomous tracking stops, automatic night lighting, SD follow-ups, pure motion and
+   outage recovery still need separate validation. Next: widen
    the redaction allow-list from real reports, and add an `event_profile` row when a
    report's `--watch` shows bits the default table does not know.)
 6. Standalone battery camera onboarding (hubless protocol). (**Paused:** BLE pairing key

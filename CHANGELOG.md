@@ -13,6 +13,13 @@ All notable changes to this project are documented here.
   night-vision mode per lens (read with `chn_id`, written only to a lens that drifted
   or could not be read; an unreadable lens is written at most once per 10 minutes)
   instead of only on the wide lens.
+- A card-less camera on `detection.sources: [lastalarm]` logs a failed
+  `getLastAlarmInfo` call once per streak and its recovery with the failure count;
+  the failures used to be swallowed silently. Alerts are unchanged.
+- An empty card slot (`offline`) on a `lastalarm` camera no longer marks its storage
+  health degraded, which kept every review digest orange. A degraded recorder still
+  does. A degraded camera without configuration drift is reported with its cause
+  (`front degraded (storage)`) instead of as "control drift".
 
 ### Changed
 - `tracking.day_preset` no longer defaults to `"2"`: unset, no preset is recalled.
@@ -52,8 +59,11 @@ All notable changes to this project are documented here.
 - `clip_video` (opt-in, card cameras): after an alert photo is delivered, a 30 s H.264
   clip of the event read from the camera card (`clip_seconds`, `clip_pre_roll`,
   `clip_height`) is sent to Telegram as a reply to the photo.
-  `clip_url` takes the clip from a recorder over HTTP instead, for cameras without a
-  readable card (`reolink`, `lastalarm`).
+  `clip_url` takes the clip from a recorder over HTTP instead (optional bearer token
+  from the environment variable named in `clip_token_env`), for cameras without a
+  readable card (`reolink`, `lastalarm`). A failed read or send is retried once after
+  60 s and then dropped; the queue is in memory. See
+  [Alert video clips](docs/alert-clips.md).
 - `scorer.unscored_at_night: hold` (opt-in): during a scorer outage no unverified photo
   is sent at night; card cameras hand the event to their follow-up, everything else is
   kept in the review log. Daytime frames and the default `send` pass through as before.

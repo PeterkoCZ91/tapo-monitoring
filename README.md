@@ -112,6 +112,9 @@ recorder and scorer can complement the daemon, but neither is required for the b
   a native-resolution grab so a distant figure stays legible. The follow-up photo can be
   the frame where the person is tallest, skips frames smeared by a pan/tilt swing, and can
   prefer one that shows a face ([frame pick](docs/configuration.md#live-sd-and-local-recorder-media)).
+- **Alert video clips (opt-in)** — `clip_video` sends a short H.264 clip of the incident as
+  a reply to its alert photo, read from the camera card or from an HTTP recorder
+  ([guide](docs/alert-clips.md)).
 - **Battery cameras on a hub** — `hubpoll` reads a sleeping camera's detections off the
   hub it records to; with a scorer, the sharpest accepted frame is selected from the
   stored clip. A go2rtc sidecar supplies a live fallback when the clip cannot be decoded.

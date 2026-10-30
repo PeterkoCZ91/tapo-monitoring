@@ -55,10 +55,13 @@ camera names, addresses, credentials, coordinates and observations do not belong
     [Shadow comparison and selection](operations.md#build-a-labeling-set-from-two-to-four-shadow-targets)
     builds a review sample from two to four shadow logs, including missed-person candidates.
     Comparisons do not switch the production model automatically.
-13. [Roadmap](roadmap.md) — remaining product phases and research tracks.
-14. [Releasing](releasing.md) — how a GitHub release reaches PyPI, and the one-time
+13. [Alert video clips](alert-clips.md) — a short video of each alert as a reply to its
+    photo, from the camera card or from an HTTP recorder; options, log lines and
+    troubleshooting.
+14. [Roadmap](roadmap.md) — remaining product phases and research tracks.
+15. [Releasing](releasing.md) — how a GitHub release reaches PyPI, and the one-time
     Trusted Publishing setup.
-15. [Upgrading to 0.9.0](upgrading.md) — changed defaults, optional features and
+16. [Upgrading](upgrading.md) — changed defaults, optional features and
     the scorer-first deployment sequence.
 
 ## Feature maturity

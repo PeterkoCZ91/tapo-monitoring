@@ -1,3 +1,40 @@
+# Upgrading to the next release (unreleased)
+
+Install the new package on the monitor hosts as usual. Most changes need no action, but
+the first one can change what an existing camera does, so check it before deploying.
+
+- **`tracking.day_preset` no longer defaults to `"2"`.** A camera that never named a
+  preset no longer recalls preset 2: unset, nothing is recalled. If a camera relied on
+  the implicit value (to return to a view by day, to park in `storm_park` rain, or, with
+  `role: static`, to stay parked around the clock), set it explicitly:
+
+  ```yaml
+  tracking:
+    day_preset: "2"
+  ```
+
+  `weather.storm_park` or `weather.strategy: disable_tracking` without a `day_preset`
+  is not an error but logs a warning at load, because rain then only stops tracking.
+- **`scorer.unscored_at_night`** (`send` or `hold`, default `send`) is new. The default
+  keeps today's behaviour: a frame the scorer could not score still goes out unverified.
+  With `hold`, nothing unverified is sent during the camera's night: a card camera hands
+  the event to its follow-up, other frames are kept in the review log without a score.
+  Any other value is a `ConfigError`.
+- **`outbox.max_bytes`** (default 64 MiB, integer >= 1) now caps the stored alert bytes
+  next to `max_entries`. Both evict the oldest non-person entries first. At start-up the
+  daemon applies the current limits to entries left by an older run, so lowering a limit
+  trims an existing outbox on the next restart. A non-integer or smaller value is a
+  `ConfigError`.
+- **Alert video clips are opt-in.** `clip_video` and its options change nothing unless
+  enabled; see [Alert video clips](alert-clips.md). Enabling `clip_video` without
+  `clip_url` on a camera that lacks the `getevents` detection source is a `ConfigError`,
+  and `clip_url` must be an `http://` or `https://` URL.
+- **Stricter validation** (from the unreleased changelog): non-boolean values for
+  `night_only`, `telegram_alerts`, `pan_limit.enabled`/`tilt`, `light_trigger.enabled`,
+  the `reliability` and `observability` switches and `alerts.event_restart_enabled` are
+  now a `ConfigError` instead of being read as true. See the [changelog](../CHANGELOG.md)
+  for the integer and mapping checks on `loop`, `alerts` and `observability`.
+
 # Upgrading to 0.11.0
 
 Install the new package on the monitor hosts. **pytapo must be 3.4.28 or newer**: a plain
