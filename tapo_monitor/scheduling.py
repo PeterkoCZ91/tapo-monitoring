@@ -26,7 +26,7 @@ DEFAULT_SUNRISE_OFFSET = 30
 # The daemon asks is_night() every poll (~4 s); an unset NIGHT_TZ would otherwise
 # repeat the same fallback warning ~20 000 times a day and drown the journal.
 _warned_fallback = None
-_warned_env = set()
+_warned_env: set[str] = set()
 
 
 def _parse_hhmm(val, default_hour):

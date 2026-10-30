@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 _safe_unlink = snapshot.safe_unlink
 
 
-_SHAPES = weakref.WeakKeyDictionary()
+_SHAPES: "weakref.WeakKeyDictionary[object, dict]" = weakref.WeakKeyDictionary()
 
 
 def _shape(fn, nargs, min_args, kwnames):
@@ -100,7 +100,7 @@ def _on_alert(on_alert, etype, event, score=None, threshold=None):
     _call_compat(on_alert, etype, event, min_args=1)
 
 
-_EVENT_FAILURES = collections.OrderedDict()
+_EVENT_FAILURES: "collections.OrderedDict[tuple, int]" = collections.OrderedDict()
 _EVENT_FAILURES_MAX = 256
 EVENT_FAILURE_LIMIT = 3
 

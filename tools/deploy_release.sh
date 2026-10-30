@@ -463,6 +463,7 @@ restarts_before="$(ssh "$host" "$systemctl_cmd show -p NRestarts --value $unit 2
 # shellcheck disable=SC2029  # client-side expansion is the point: the arguments are
 # %q-quoted (or a literal command) composed here and executed on the host.
 restart_failed=0
+# shellcheck disable=SC2029  # the restart command is meant to expand here
 ssh "$host" "$restart_cmd" || restart_failed=1
 
 # Believe the unit, not the exit code of the restart command: a release that passed its

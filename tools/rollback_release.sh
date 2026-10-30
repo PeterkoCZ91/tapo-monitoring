@@ -211,6 +211,7 @@ echo "rollback_release: restarting via: $restart_cmd"
 # shellcheck disable=SC2029  # client-side expansion is the point: the arguments are
 # %q-quoted (or a literal command) composed here and executed on the host.
 restart_ok=1
+# shellcheck disable=SC2029  # the restart command is meant to expand here
 ssh "$host" "$restart_cmd" || {
     echo "rollback_release: RESTART FAILED — '$restart_cmd' exited non-zero on $host; current already points at releases/$release" >&2
     restart_ok=0

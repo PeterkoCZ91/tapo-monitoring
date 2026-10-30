@@ -61,6 +61,7 @@ failures=()
 # The unit may list several EnvironmentFile= entries (a leading `-` marks one optional):
 # load all of them in order, as systemd does, and never source them as shell.
 # shellcheck source=lib/envfile.sh
+# shellcheck source=lib/envfile.sh disable=SC1091
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/envfile.sh"
 env_files=()
 if [[ -n "${TAPO_MONITOR_ENV:-}" ]]; then

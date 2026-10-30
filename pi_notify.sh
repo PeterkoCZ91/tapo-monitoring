@@ -34,6 +34,7 @@ envfile_load() {
     done < <(_envfile_parse "$1")
 }
 
+# shellcheck disable=SC2329  # kept identical to tools/lib/envfile.sh
 envfile_get() {
     local want="$2" key val out=""
     while IFS=$'\t' read -r key val; do

@@ -22,7 +22,7 @@ import tempfile
 import urllib.parse
 import urllib.request
 
-_warned_env = set()
+_warned_env: set[str] = set()
 
 
 def _warn_env(name, raw, default):
@@ -61,7 +61,7 @@ POLL_INTERVAL = _env_number("RAIN_POLL_INTERVAL", 900, int)
 FAIL_BACKOFF = 120
 # A cached "raining" older than this is not trusted when the API is down.
 STALE_MAX = 6 * 3600
-_fail_until = {}
+_fail_until: dict[str, float] = {}
 STATE_DIR = os.getenv("STATE_DIR", "/tmp")
 CACHE_PATH = os.path.join(STATE_DIR, "tapo_rain_cache")
 LAST_RAIN_PATH = os.path.join(STATE_DIR, "tapo_rain_last_seen")
