@@ -386,7 +386,7 @@ class Scenario:
         cam._require_online()
         return cam
 
-    def _build_ptz(self, host, port, user, password):
+    def _build_ptz(self, host, port, user, password, timeout=None):
         cam = self._by_host[host]
         cam._require_online()
         return cam, "profile"

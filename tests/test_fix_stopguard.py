@@ -332,3 +332,138 @@ def test_off_retry_backs_off_to_ten_seconds():
     assert len(attempts) < 25            # every second would be ~100
     assert max(gaps) <= 10.5
     assert gaps[-1] >= 8
+
+
+# --- long outages: exponential backoff must not overflow (production, ~35 min offline) ---
+
+
+@pytest.mark.parametrize("failures", [10_000, 10**6])
+def test_backoff_with_huge_failure_counts_returns_the_cap(failures):
+    guard, _, _ = build([])
+    assert guard._backoff(guard.stop_interval, failures) == 2.0
+    assert guard._backoff(guard.poll_interval, failures) == 2.0
+    guard._stop_failures = failures
+    assert guard._stop_gap() == 2.0
+    guard._loop_streak = guard._read_failures = failures
+    assert guard._poll_delay() == 2.0
+    guard._read_failures, guard._loop_streak = failures, 0
+    assert guard._poll_delay() == 1.0
+    guard._off_failures = failures
+    guard._request_disable()          # retry gap 10 s, no OverflowError
+    await_off(guard)
+
+
+def test_capped_exp_clamps_exponent_and_keeps_small_counts():
+    from tapo_monitor.backoff import capped_exp
+
+    assert capped_exp(0.15, 1, 2.0) == pytest.approx(0.3)
+    assert capped_exp(60, 3, 1800) == 480 and isinstance(capped_exp(60, 3, 1800), int)
+    assert capped_exp(60, 0, 1800) == 60
+    assert capped_exp(0.15, 10**6, 2.0) == 2.0
+    assert capped_exp(600, 10**9, 21600) == 21600
+
+
+def test_shared_backoffs_survive_huge_failure_counts():
+    from tapo_monitor import daemon, hubclient
+
+    assert daemon.backoff_seconds(10**6) == 1800
+    assert daemon.backoff_seconds(3) == 240
+    assert hubclient._backoff(10**6, 2.5, 600.0) == 600.0
+    assert hubclient._backoff(2, 2.5, 600.0) == 5.0
+
+
+def _outage_guard(down_polls, stops_ok_after=None):
+    """Camera offline for ``down_polls`` polls (reads, Stop and OFF all fail), then back."""
+    clock = Clock()
+    state = {"polls": 0, "stops": 0, "stop_ok": 0}
+
+    def read():
+        state["polls"] += 1
+        if state["polls"] <= down_polls:
+            raise TimeoutErr("offline")
+        return 0.5
+
+    def stop():
+        state["stops"] += 1
+        if state["polls"] <= down_polls:
+            raise TimeoutErr("offline")
+        state["stop_ok"] += 1
+
+    def off():
+        return state["polls"] > down_polls
+
+    guard = StopGuard(read, stop, off, right_limit=0.8, margin=0.1, clock=clock, name="cam")
+    return guard, clock, state
+
+
+def test_long_outage_keeps_the_guard_thread_alive_and_it_recovers(caplog):
+    caplog.set_level("INFO", logger="tapo_monitor.stopguard")
+    down = 16_000            # > 1024 failed Stops at the 2 s cap (~40 simulated minutes)
+    guard, clock, state = _outage_guard(down)
+    seen = {}
+
+    def wait(delay):
+        clock.advance(delay)
+        if guard._disable_thread is not None:
+            guard._disable_thread.join(1)
+        if state["polls"] == down + 5:
+            seen["alive"] = guard.snapshot().thread_alive
+        return state["polls"] >= down + 100   # > the 10 s OFF retry gap
+
+    guard._wait = wait
+    guard.start()
+    guard._thread.join(60)
+    assert not guard._thread.is_alive()           # left through _wait, not an exception
+    assert seen["alive"]
+    assert state["stops"] > 1024
+    assert state["stop_ok"] >= 1                  # Stop is working again after the outage
+    assert guard._stop_failures == 0
+    assert guard.snapshot().loop_errors == 0
+    assert guard._disable_ok
+    text = [r for r in caplog.records if r.name == "tapo_monitor.stopguard"]
+    assert not any(r.levelname == "ERROR" for r in text)
+    # Low volume: a handful of outage lines, not one per attempt.
+    outage = [r for r in text if "still failing" in r.getMessage()
+              or "pose unavailable" in r.getMessage()]
+    assert 5 <= len(outage) <= 40
+    assert all(r.levelname == "WARNING" for r in outage)
+    assert any("failures=1024" in r.getMessage() and "last_error=TimeoutErr" in r.getMessage()
+               for r in outage)
+    recovered = [r.getMessage() for r in text if "recovered" in r.getMessage()]
+    assert any("pose recovered" in m and f"after {down} failures" in m for m in recovered)
+    assert any("Stop recovered" in m for m in recovered)
+
+
+def test_brief_read_blip_logs_no_outage_warning(caplog):
+    caplog.set_level("INFO", logger="tapo_monitor.stopguard")
+    guard, clock, _ = build([TimeoutErr(), 0.5, 0.5])
+    for _ in range(3):
+        guard.poll_once()
+        await_off(guard)
+        clock.advance()
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "pose unavailable" not in text and "pose recovered" not in text
+
+
+def test_loop_survives_errors_in_its_own_error_handling(caplog):
+    waits = []
+
+    def wait(delay):
+        waits.append(delay)
+        return len(waits) >= 5
+
+    guard, clock, _ = build([0.5] * 10, wait=wait)
+
+    def broken(*_a, **_k):
+        raise OverflowError("int too large to convert to float")
+
+    guard.poll_once = broken
+    guard._trip = broken
+    guard._stop_if_due = broken
+    guard._poll_delay = broken
+    guard._run()                                   # must not raise
+    assert len(waits) == 5
+    assert all(0 < d <= 2.0 for d in waits)        # bounded fallback delay
+    assert guard.snapshot().loop_errors == 10     # each poll and each delay computation
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert errors and errors[0].exc_info is not None

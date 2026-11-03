@@ -18,6 +18,7 @@ per-camera watermark held in :class:`MonitorState` and fires the enrich/notify s
 """
 
 import functools
+import gc
 import json
 import logging
 import math
@@ -55,6 +56,7 @@ from . import (
     monitor,
     motion,
     mqtt,
+    netdiag,
     notify,
     outbox,
     panlimit,
@@ -77,6 +79,7 @@ from . import (
     twin,
     weather,
 )
+from .backoff import capped_exp
 from .config import (
     AppConfig,
     CameraConfig,
@@ -1058,6 +1061,8 @@ class MonitorState:
     total_observed_online: dict = field(default_factory=dict)
     total_observed_offline: dict = field(default_factory=dict)
     network_reachable: dict = field(default_factory=dict)
+    # Outage diagnosis (neighbour state, host Wi-Fi, camera signal); runtime only.
+    net_diag: netdiag.Diagnostics = field(default_factory=netdiag.Diagnostics)
     network_fails: dict = field(default_factory=dict)
     # Opt-in host failover (``host:`` as a list). ``active_hosts`` is the persisted choice
     # per camera, ``host_identity`` the camera's MAC (memory only) and ``failover_rejected``
@@ -1190,7 +1195,7 @@ def backoff_seconds(fails, base=60, cap=1800):
     """
     if fails < 1:
         return 0
-    return min(base * (2 ** (fails - 1)), cap)
+    return capped_exp(base, fails - 1, cap)
 
 
 def update_stall(state: "MonitorState", ok, now, threshold):
@@ -4834,6 +4839,15 @@ def _archive_panlimit_frame(cfg, axis, value, *, now):
         log.debug("pan_limit %s: evidence grab failed", cfg.name, exc_info=True)
 
 
+# A failed ONVIF build is retried after poll_interval * 2**fails, at most this many seconds.
+# Every build parses the WSDL/XSD into ~2.8 MB of cyclic garbage: rebuilt on each 6 s poll
+# while a camera was offline it took a Pi to OOM within the hour.
+PAN_GUARD_REBUILD_CAP = 300
+# Bounded WSDL fetch and ONVIF calls: a dead camera must not hold the loop for zeep's
+# default 300 s. Looser than the stop guard's 1 s, since GotoPreset shares the transport.
+PAN_GUARD_ONVIF_TIMEOUT = 3
+
+
 def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
                     night=True):
     """Soft pan-limit: recall a camera that auto-tracked past its preset span (see
@@ -4865,6 +4879,13 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
             g["refused"] = motion.PRIVACY
             g.pop("out_since", None)
             continue
+        if "ptz" not in g and (now < g.get("retry_at", -math.inf)
+                               or state.network_reachable.get(cfg.name) is False):
+            # Backing off a failed build, or the ping already says the camera is gone:
+            # a build now would only fail again and leave its WSDL garbage behind.
+            g.pop("out_since", None)
+            continue
+        cached = "ptz" in g
         try:
             if g.get("ptz_host") not in (None, camera.active_host(cfg)):
                 # The camera moved to another address: the ONVIF client points at the old one.
@@ -4874,7 +4895,9 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
                 g["ptz_host"] = camera.active_host(cfg)
                 user = os.getenv(pl.onvif_user_env or "", "")
                 password = os.getenv(pl.onvif_password_env or "", "")
-                g["ptz"], g["token"] = panlimit.build_ptz(g["ptz_host"], pl.onvif_port, user, password)
+                g["ptz"], g["token"] = panlimit.build_ptz(
+                    g["ptz_host"], pl.onvif_port, user, password,
+                    timeout=PAN_GUARD_ONVIF_TIMEOUT)
                 g["bounds"] = panlimit.read_preset_bounds(g["ptz"], g["token"])
                 log.info("pan_limit %s: preset bounds %s", cfg.name, g["bounds"])
                 if pl.tilt:
@@ -4882,6 +4905,9 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
                         g["ptz"], g["token"], pl.tilt_min, pl.tilt_max)
                     log.info("pan_limit %s: tilt bounds %s", cfg.name, g["tilt_bounds"])
             x = panlimit.read_pan_x(g["ptz"], g["token"])
+            if g.pop("fails", 0):
+                g.pop("retry_at", None)
+                log.info("pan_limit %s: ONVIF answering again", cfg.name)
             target = panlimit.limit_target(x, g.get("bounds"), pl.margin)
             axis, value = "pan x", x
             # Tilt only when pan is already within bounds: a preset sets both axes, so one
@@ -4948,8 +4974,17 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
             log.info("pan_limit %s: %s=%.4f out of bounds -> recall preset %s",
                      cfg.name, axis, value, target)
         except Exception as e:  # noqa: BLE001 - an ONVIF hiccup must not kill the loop
-            log.warning("pan_limit %s: %s", cfg.name, e)
-            g.pop("ptz", None)          # force a clean rebuild on the next poll
+            fails = g["fails"] = g.get("fails", 0) + 1
+            wait = capped_exp(pl.poll_interval, fails, PAN_GUARD_REBUILD_CAP)
+            g["retry_at"] = now + wait
+            log.warning("pan_limit %s: %s (failure #%d; next ONVIF build in %ds)",
+                        cfg.name, e, fails, wait)
+            g.pop("ptz", None)          # force a clean rebuild once the backoff expires
+            g.pop("token", None)
+            if not cached:
+                # The client built in this pass is garbage now, and its WSDL/XSD cycles
+                # are not reliably collected before the next build adds more.
+                gc.collect()
             # An unread position breaks the "continuously out of bounds" the hold grace
             # measures; a stale start would recall the lens with no grace on return.
             g.pop("out_since", None)
@@ -5734,7 +5769,7 @@ def _reject_seconds(state, name, host):
     streak = state.reject_streak.setdefault(name, {})
     streak[host] = streak.get(host, 0) + 1
     extra = max(0, streak[host] - 2)
-    return min(FAILOVER_REJECT_SECONDS * (2 ** extra), FAILOVER_REJECT_MAX_SECONDS)
+    return capped_exp(FAILOVER_REJECT_SECONDS, extra, FAILOVER_REJECT_MAX_SECONDS)
 
 
 def _revert_return(cfg, state, switched_from, tried_host, now, seconds):
@@ -5889,6 +5924,9 @@ def _connect_camera(cam_clients, state=None, now=None):
                 state.network_fails[name] = fails
                 if was_reachable is not False:
                     log.warning("network %s unreachable", name)
+            state.net_diag.network_event(name, camera.active_host(cfg), reachable=reachable,
+                                        was_reachable=was_reachable,
+                                        now=now if now is not None else _time.time())
         if not reachable:
             previous = cam_clients.pop(name, None)
             if previous is not None:
@@ -5992,6 +6030,8 @@ def _connect_camera(cam_clients, state=None, now=None):
                 log.warning("connect %s failed (#%d): %s; backing off %ds", name, fails, err, wait)
         if client is not None:
             cam_clients[name] = client
+            if state is not None:
+                state.net_diag.poll_signal(name, client, now if now is not None else _time.time())
             try:
                 # Stable identity for per-camera locks (after a failover the same camera
                 # answers on another address).
@@ -6011,8 +6051,11 @@ def _connect_camera(cam_clients, state=None, now=None):
                 try:
                     controller.start()
                 except Exception as exc:  # noqa: BLE001 - inhibit tracking until verified
-                    log.warning("rotation stop %s: initialization failed (%s)",
-                                name, type(exc).__name__)
+                    if isinstance(exc, stopcontrol.StartBackoff):
+                        log.debug("rotation stop %s: initialization deferred (%s)", name, exc)
+                    else:
+                        log.warning("rotation stop %s: initialization failed (%s)",
+                                    name, type(exc).__name__)
                     if not controller.disable_tracking():
                         log.warning("rotation stop %s: tracking OFF unconfirmed", name)
         return client, err

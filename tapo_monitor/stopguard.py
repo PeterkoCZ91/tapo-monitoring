@@ -14,6 +14,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from . import ptzrpc
+from .backoff import capped_exp
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +30,9 @@ _READ_BACKOFF_CAP = 1.0
 _OFF_BACKOFF_CAP = 10.0  # slowest tracking-OFF retry gap
 _OFF_FAILS_TO_UNVERIFY = 2
 _REVERIFY_EVERY = 30.0   # seconds between OFF re-checks while the latch is set
+_OUTAGE_LOG_EVERY = 600.0  # seconds between outage lines once the power-of-two counts thin out
+_READ_OUTAGE_FIRST = 4     # consecutive failed reads before a pose outage is worth a warning
+_LOOP_ERROR_DELAY = _BACKOFF_CAP  # retry gap when even the loop's own delay cannot be computed
 
 
 @dataclass(frozen=True)
@@ -69,6 +73,40 @@ class _Episode:
     last_traced_x: float | None = None
     last_traced_at: float = -math.inf
     cause: str = "none"
+
+
+class _Streak:
+    """Consecutive failures of one kind, reported at thresholds rather than per attempt.
+
+    A line is due at failure ``first``, then at each power-of-two count above it, and at
+    least every ``_OUTAGE_LOG_EVERY`` seconds once reporting started: a 35-minute outage
+    with a 2 s retry gives about a dozen lines, not a thousand. Not thread-safe; the guard
+    updates it under its lock.
+    """
+
+    def __init__(self, first=1):
+        self.first = first
+        self.count = 0
+        self.since = 0.0
+        self.logged_at = -math.inf
+        self.reported = False
+
+    def fail(self, now):
+        self.count += 1
+        if self.count == 1:
+            self.since = now
+        due = (self.count == self.first
+               or (self.count > self.first and self.count & (self.count - 1) == 0)
+               or (self.reported and now - self.logged_at >= _OUTAGE_LOG_EVERY))
+        if due:
+            self.logged_at, self.reported = now, True
+        return due
+
+    def ok(self, now):
+        """Reset; return ``(failures, seconds)`` when the streak had been reported."""
+        result = (self.count, now - self.since) if self.reported else None
+        self.count, self.reported, self.logged_at = 0, False, -math.inf
+        return result
 
 
 def _diag_text(diag):
@@ -144,6 +182,9 @@ class StopGuard:
         self._read_failures = self._stop_failures = self._off_failures = 0
         self._loop_errors = self._loop_streak = 0
         self._loop_warned = False
+        self._read_streak = _Streak(_READ_OUTAGE_FIRST)
+        self._stop_streak = _Streak()
+        self._loop_streak_log = _Streak()
         # Debug-only state: recent reads for the pre-trip context, the cause of the
         # last failed read, the last refused rearm and periodic read statistics.
         self.recover, self.recover_interval = recover, recover_interval
@@ -245,7 +286,7 @@ class StopGuard:
             pending = self._disable_thread is not None and self._disable_thread.is_alive()
             now = self.clock()
             stale = self._latched and now - self._last_verified >= self.reverify_interval
-            gap = min(_OFF_BACKOFF_CAP, self.retry_interval * 2 ** max(0, self._off_failures - 1))
+            gap = capped_exp(self.retry_interval, self._off_failures - 1, _OFF_BACKOFF_CAP)
             if (self._disable_ok and not stale) or pending or now - self._last_disable < gap:
                 return
             self._last_disable = now
@@ -410,7 +451,7 @@ class StopGuard:
     def _backoff(self, base, failures):
         if failures < _BACKOFF_AFTER:
             return base
-        return min(max(base, _BACKOFF_CAP), base * 2 ** (failures - _BACKOFF_AFTER + 1))
+        return capped_exp(base, failures - _BACKOFF_AFTER + 1, max(base, _BACKOFF_CAP))
 
     def _stop_gap(self):
         # Called with the lock held. Repeated Stop failures (auth error, offline camera)
@@ -423,7 +464,8 @@ class StopGuard:
             if self._read_failures >= _BACKOFF_AFTER:
                 # Only repeated non-transport errors (wrong credentials, SOAP faults) slow
                 # the reads; timeouts and connection loss keep the base rate.
-                step = self.poll_interval * 2 ** (self._read_failures - _BACKOFF_AFTER + 1)
+                step = capped_exp(self.poll_interval, self._read_failures - _BACKOFF_AFTER + 1,
+                                  _READ_BACKOFF_CAP)
                 delay = max(delay, min(_READ_BACKOFF_CAP, max(_READ_BACKOFF_FLOOR, step)))
             return delay
 
@@ -454,10 +496,16 @@ class StopGuard:
             self._stop_warned = False
             with self._lock:
                 self._stop_failures = 0
+                recovered = self._stop_streak.ok(self.clock())
+            if recovered:
+                log.info("PTZ stop guard Stop recovered name=%s after %d failures / %.0f s",
+                         self.name, *recovered)
         except Exception as exc:  # noqa: BLE001 - never expose exception text/credentials
             diag = getattr(exc, "rpc_diag", None)
             with self._lock:
                 self._stop_failures += 1
+                due = self._stop_streak.fail(self.clock())
+                streak, since = self._stop_streak.count, self.clock() - self._stop_streak.since
                 self._stats["stops"] += 1
                 self._stats["stops_failed"] += 1
                 if episode is not None and episode is self._episode:
@@ -467,6 +515,10 @@ class StopGuard:
             if not self._stop_warned:
                 log.warning("PTZ stop guard Stop failed name=%s cause=%s", self.name,
                             ptzrpc.diagnose(exc))
+            elif due:
+                log.warning("PTZ stop guard Stop still failing name=%s failures=%d for=%.0fs "
+                            "last_error=%s cause=%s", self.name, streak, since,
+                            type(exc).__name__, ptzrpc.diagnose(exc))
             self._stop_warned = True
 
     def poll_once(self):
@@ -498,6 +550,13 @@ class StopGuard:
                 self._read_failures = (self._read_failures + 1
                                        if self._non_transport(exc) else 0)
                 self._record_read(None, read_s, cause)
+                due = self._read_streak.fail(self.clock())
+                streak = self._read_streak.count
+                since = self.clock() - self._read_streak.since
+            if due:
+                log.warning("PTZ stop guard pose unavailable name=%s failures=%d for=%.0fs "
+                            "last_error=%s cause=%s", self.name, streak, since,
+                            type(exc).__name__, cause)
             self._trip("pose_unavailable")
             with self._lock:
                 if self._episode is not None:
@@ -513,6 +572,11 @@ class StopGuard:
         with self._lock:
             self._record_read(position, now - started)
             self._read_failures = 0
+            recovered = self._read_streak.ok(now)
+        if recovered:
+            log.info("PTZ stop guard pose recovered name=%s after %d failures / %.0f s",
+                     self.name, *recovered)
+        with self._lock:
             if self._reason == "suspended" and not self._latched:
                 self._reason = "starting"
             previous = (self._position if self._healthy and self._observed_at is not None
@@ -621,37 +685,55 @@ class StopGuard:
             return True
 
     def _run(self):
+        # Every step is guarded on its own: an exception in the error handling or in the
+        # delay computation must not end the thread, or the guard stays off until restart.
         try:
             while not self._exit.is_set():
                 try:
                     self.poll_once()
                     with self._lock:
                         self._loop_streak, self._loop_warned = 0, False
+                        recovered = self._loop_streak_log.ok(self.clock())
+                    if recovered:
+                        log.info("PTZ stop guard loop recovered %s after %d errors / %.0f s",
+                                 self.name, *recovered)
                 except Exception as exc:  # noqa: BLE001 - an unexpected error must not end observation
                     self._loop_failed(exc)
-                if self._wait(self._poll_delay()):
+                try:
+                    delay = self._poll_delay()
+                except Exception as exc:  # noqa: BLE001 - fall back to a bounded retry gap
+                    self._loop_failed(exc)
+                    delay = _LOOP_ERROR_DELAY
+                if self._wait(delay):
                     break
         finally:
-            self._stop_if_due()
+            try:
+                self._stop_if_due()
+            except Exception:  # noqa: BLE001 - shutdown Stop is best effort
+                log.exception("PTZ stop guard final Stop failed %s", self.name)
 
     def _loop_failed(self, exc):
         # Fail closed: unknown guard state means no tracking, then keep observing.
-        with self._lock:
-            self._loop_errors += 1
-            self._loop_streak += 1
-            self._healthy = False
-            self._safe_samples = 0
-            self._recovery_until = -math.inf
-            warn = not self._loop_warned
-            self._loop_warned = True
-        if warn:
-            log.error("PTZ stop guard loop error %s: %s", self.name, type(exc).__name__,
-                      exc_info=exc)
+        try:
+            with self._lock:
+                self._loop_errors += 1
+                self._loop_streak += 1
+                self._healthy = False
+                self._safe_samples = 0
+                self._recovery_until = -math.inf
+                due = self._loop_streak_log.fail(self.clock())
+                streak = self._loop_streak_log.count
+                self._loop_warned = True
+            if due:
+                log.error("PTZ stop guard loop error %s: %s errors=%d", self.name,
+                          type(exc).__name__, streak, exc_info=exc)
+        except Exception:  # noqa: BLE001 - the loop itself must survive
+            log.exception("PTZ stop guard loop error handling failed %s", self.name)
         try:
             self._trip("guard_error")
             self._stop_if_due()
         except Exception:  # noqa: BLE001 - the loop itself must survive
-            pass
+            log.debug("PTZ stop guard fail-closed step failed %s", self.name, exc_info=True)
 
     def start(self):
         with self._lock:

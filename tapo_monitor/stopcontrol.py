@@ -1,12 +1,24 @@
 """Connect the virtual endstop to existing camera sessions and scheduled control."""
 
+import gc
 import logging
 import os
+import time
 from dataclasses import replace
 
 from . import camera, panlimit, ptzrpc, sessionguard, stopguard
+from .backoff import capped_exp
 
 log = logging.getLogger(__name__)
+
+# A failed start is retried after REBUILD_BASE * 2**(fails-1) seconds, at most REBUILD_CAP.
+# Each ONVIF build leaves ~2.8 MB of cyclic WSDL garbage; one per control pass adds up.
+REBUILD_BASE = 60.0
+REBUILD_CAP = 300.0
+
+
+class StartBackoff(RuntimeError):
+    """``start`` skipped: the last ONVIF build failed and its retry is not due yet."""
 
 
 def enabled(cfg):
@@ -22,8 +34,11 @@ class StopControl:
     """
 
     def __init__(self, cfg, get_client, *, build_ptz=None, guard_factory=None, suspended=None,
-                 recall=None):
+                 recall=None, clock=time.monotonic):
         self.cfg, self.get_client = cfg, get_client
+        self.clock = clock
+        self._fails = 0
+        self._retry_at = -float("inf")
         self.recall = recall            # recall(client, preset) -> bool; the daemon's safe recall
         self._plan_preset = None
         self.build_ptz = build_ptz or (
@@ -88,6 +103,22 @@ class StopControl:
             return
         if self.guard is not None:
             self.close()
+        now = self.clock()
+        if now < self._retry_at:
+            # Raised, not returned: the caller keeps tracking inhibited until verified.
+            raise StartBackoff(f"retry in {self._retry_at - now:.0f}s")
+        try:
+            self._start(host)
+        except Exception:
+            self._fails += 1
+            self._retry_at = now + capped_exp(REBUILD_BASE, self._fails - 1, REBUILD_CAP)
+            # The ONVIF client built for this attempt is garbage now; collect its WSDL
+            # cycles before the next attempt builds another.
+            gc.collect()
+            raise
+        self._fails, self._retry_at = 0, -float("inf")
+
+    def _start(self, host):
         pl = self.cfg.pan_limit
         ptz, token = self.build_ptz(host, pl.onvif_port,
                                     os.getenv(pl.onvif_user_env or "", ""),

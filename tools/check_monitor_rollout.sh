@@ -122,10 +122,23 @@ fi
 sed 's/^/    /' "$selfcheck_out"
 rm -f "$selfcheck_out"
 
-since="$("${systemctl_cmd[@]}" show -p ActiveEnterTimestamp --value "$unit" 2>/dev/null || true)"
-journal="$("${journalctl_cmd[@]}" -u "$unit" ${since:+--since "$since"} --no-pager 2>/dev/null || true)"
+# The default `ActiveEnterTimestamp` form ("Fri 2026-10-30 21:35:09 CET") carries a zone
+# name that systemd 255's journalctl rejects; with stderr swallowed that read as an empty
+# journal and hid every exception. `@<unix>` parses everywhere. systemd without
+# --timestamp= (< 248) falls back to the local form with the zone name dropped, which
+# journalctl reads as host local time, the zone systemctl printed it in.
+since="$("${systemctl_cmd[@]}" show --timestamp=unix -p ActiveEnterTimestamp --value "$unit" 2>/dev/null || true)"
+if [[ ! "$since" =~ ^@[0-9]+$ ]]; then
+    since="$("${systemctl_cmd[@]}" show -p ActiveEnterTimestamp --value "$unit" 2>/dev/null || true)"
+    [[ "$since" =~ ^(.*[0-9])\ [A-Za-z][A-Za-z0-9/_+-]*$ ]] && since="${BASH_REMATCH[1]}"
+fi
+journal_err="$(mktemp "${TMPDIR:-/tmp}/monitor-journal.XXXXXX")"
+trap 'rm -f "$selfcheck_out" "$journal_err"' EXIT
+journal="$("${journalctl_cmd[@]}" -u "$unit" ${since:+--since "$since"} --no-pager 2>"$journal_err" || true)"
+journal_error="$(head -n 1 "$journal_err")"
+rm -f "$journal_err"
 if [[ -z "$journal" ]]; then
-    warn journal "no readable journal for this unit"
+    warn journal "no readable journal for this unit${journal_error:+: $journal_error}"
 else
     loaded="$(printf '%s\n' "$journal" | grep -o 'loaded [0-9]* camera(s)' | tail -1)"
     if [[ -n "$loaded" ]]; then

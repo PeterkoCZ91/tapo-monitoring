@@ -2,6 +2,39 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Fixed
+- The stop guard thread no longer dies after a long camera outage. About 35 minutes of
+  failed Stops (~1024 retries) overflowed the exponential backoff (`OverflowError: int
+  too large to convert to float`); the error then hit the loop's own error handling and
+  the guard stayed off until a restart. Every exponential backoff (stop guard, connect
+  and hub backoff, failover rejection) now clamps its exponent first, and the guard loop
+  survives a failure in its error handling or delay computation with a bounded 2 s retry.
+- An offline camera with `pan_limit` no longer leaks memory: the pan guard rebuilt its
+  ONVIF client on every 6 s poll, each build leaving ~2.8 MB of WSDL garbage that was
+  not collected (OOM about hourly on a Pi). A failed build now backs off
+  (`poll_interval * 2^n`, at most 300 s, reset on success), is skipped while the ping
+  reports the camera unreachable, is followed by `gc.collect()` and uses a 3 s ONVIF
+  timeout. The rotation stop's ONVIF start backs off the same way (60 s doubling to
+  300 s) while tracking stays inhibited.
+- `check_monitor_rollout.sh` reads the unit start as `@<unix>` (`systemctl show
+  --timestamp=unix`); the zone-suffixed form was rejected by systemd 255's journalctl
+  and, with stderr swallowed, reported `journal: unknown` and hid exceptions. Older
+  systemd falls back to the local time without the zone name, and a journalctl error
+  is now shown.
+
+### Added
+- Low-volume stop guard outage logging: `pose unavailable` and `Stop still failing`
+  warnings with failure count, duration and last error class at power-of-two counts
+  (and at least every 10 minutes), and `recovered after N failures / X s` lines.
+- `network diagnosis <camera> (outage|still down|recovered)` line at the start of a
+  camera outage, every 30 minutes during it and on recovery: the host's neighbour state
+  for the camera (`REACHABLE`/`STALE`/`INCOMPLETE`/`FAILED`/absent, MAC), the host's
+  own Wi-Fi link when the route is wireless (signal, SSID, bitrate) and the camera's
+  last reported Wi-Fi signal with its age. The camera signal (`getConnectionType`) is
+  read at most every 5 minutes and logged hourly or when its level changes.
+
 ## [0.12.0] - 2026-10-30
 
 ### Fixed

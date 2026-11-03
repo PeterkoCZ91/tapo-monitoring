@@ -19,11 +19,20 @@ case "$*" in
     *SubState*)               echo "${STUB_SUB_STATE:-running}" ;;
     *NRestarts*)              echo 0 ;;
     *EnvironmentFiles*)       echo "${STUB_ENV_FILES:-}" ;;
+    # Older systemd has no --timestamp=; it fails and prints nothing on stdout.
+    *--timestamp=unix*)       [[ -n "${STUB_SINCE_UNIX-@1767225600}" ]] || exit 1
+                              echo "${STUB_SINCE_UNIX-@1767225600}" ;;
     *ActiveEnterTimestamp*)   echo "Thu 2026-01-01 00:00:00 UTC" ;;
 esac
 STUB
     # Unset-only default: a test that sets STUB_JOURNAL to the empty string means it.
+    # Like systemd 255, it rejects a --since value that carries a zone name.
     stub_command journalctl <<'STUB'
+printf '%s\n' "$*" >>"$TEST_TMP/journalctl.log"
+if [[ "$*" =~ --since\ [^-]*\ [A-Z]{3,4}( |$) ]]; then
+    echo "Failed to parse timestamp: ${*}" >&2
+    exit 1
+fi
 printf '%s\n' "${STUB_JOURNAL-tapo-monitor: loaded 2 camera(s)}"
 STUB
     # Stands in for the venv interpreter. It records the config path it was handed, so a
@@ -224,6 +233,43 @@ AttributeError: nope"
     assert_output_contains "journal: unknown"
 }
 
+@test "the journal window starts at the unit's start as a unix timestamp" {
+    make_release_layout
+
+    run "$ROOT/current/tools/check_monitor_rollout.sh"
+
+    assert_status 0
+    assert_output_contains "startup: ok"
+    assert_file_contains "$TEST_TMP/journalctl.log" "--since @1767225600"
+}
+
+@test "without --timestamp support the start time is passed without its zone name" {
+    make_release_layout
+    export STUB_SINCE_UNIX=""
+
+    run "$ROOT/current/tools/check_monitor_rollout.sh"
+
+    # systemd 255 rejects "... 00:00:00 UTC"; with the zone it read as journal: unknown
+    # and hid every exception since the start.
+    assert_status 0
+    assert_output_contains "startup: ok"
+    assert_file_contains "$TEST_TMP/journalctl.log" "--since Thu 2026-01-01 00:00:00 --no-pager"
+}
+
+@test "a journalctl error is shown instead of being swallowed" {
+    make_release_layout
+    stub_command journalctl <<'STUB'
+echo "Failed to parse timestamp: nope" >&2
+exit 1
+STUB
+
+    run "$ROOT/current/tools/check_monitor_rollout.sh"
+
+    assert_status 0
+    assert_output_contains "journal: unknown"
+    assert_output_contains "Failed to parse timestamp"
+}
+
 @test "a missing health state is a note, not a failure" {
     make_release_layout
 
@@ -272,6 +318,7 @@ case "$*" in
     *SubState*)               echo running ;;
     *NRestarts*)              echo 0 ;;
     *EnvironmentFiles*)       echo "${STUB_ENV_FILES:-}" ;;
+    *--timestamp=unix*)       echo "@1767225600" ;;
     *ActiveEnterTimestamp*)   echo "Thu 2026-01-01 00:00:00 UTC" ;;
 esac
 STUB

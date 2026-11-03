@@ -30,6 +30,7 @@ import time as _time
 import uuid
 
 from . import apiguard, snapshot
+from .backoff import capped_exp
 
 log = logging.getLogger(__name__)
 
@@ -236,7 +237,7 @@ def _backoff(fails, base, cap):
     """Exponential backoff seconds for ``fails`` consecutive failures. Pure."""
     if fails < 1:
         return 0
-    return min(base * (2 ** (fails - 1)), cap)
+    return capped_exp(base, fails - 1, cap)
 
 
 class HubClient:
