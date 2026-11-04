@@ -213,12 +213,65 @@ ONVIF, ping, the SD download and the scene probe.
   trusted, and the SSH key must already be authorized (no prompts); the result only yields candidate addresses,
   so the MAC identity check above still applies. `ssh_host` must match `[A-Za-z0-9._@-]+`; stale/failed entries are ignored.
 
+### MAC rediscovery (optional)
+
+A router outage can make DHCP hand a camera a new address. Without help the monitor
+keeps pinging the configured one and reports the camera down until someone edits the
+config; worse, if the old address went to another device (or to the monitoring host
+itself) ping answers and the camera looks "back". Give the camera its MAC to let the
+monitor find it again:
+
+```yaml
+cameras:
+  - name: yard
+    host: "192.0.2.10"
+    mac: "02:00:00:aa:bb:cc"     # any case, ':' or '-' separated
+```
+
+Off by default (no `mac:`, no change). Linux with the `ip` command only; elsewhere the
+monitor logs `mac rediscovery off` once and carries on. Not for Reolink or hub-only
+(`hubpoll`) cameras.
+
+- Trigger: three consecutive unreachable control passes. "Unreachable" also covers an
+  address that answers ping but holds another MAC in the host's neighbour table.
+- Search, on a worker thread (the control loop never waits for it, one search per camera
+  at a time): first the neighbour table (`ip -j neigh`, at most once a minute). If the MAC
+  is not there, the camera's directly connected subnet (from `ip -j route get` and the
+  interface's prefix, never more than a /24) is swept once with single pings, 32 in
+  flight and a 2 s reply wait (cameras on weak Wi-Fi answer slowly), and the neighbour
+  table is read again. Sweeps run at most every 10 minutes per camera, doubling after each
+  miss up to an hour; a camera that answers again starts over. A camera behind a router
+  (the route has a gateway) is only looked up in the table, since ARP does not cross it.
+- Switch: the address found becomes an extra `host` candidate and goes through the same
+  path as [host failover](#host-failover-optional): one `camera.active_host` read by
+  pytapo, RTSP/snapshots, ONVIF/`pan_limit`, the rotation stop guard and SD reads; the old
+  session is closed and the login on the new address must succeed and `getBasicInfo` must
+  report the configured MAC. Otherwise the switch is undone and that address is skipped
+  for an hour.
+- Visibility: `camera <name> moved <old> -> <new> (mac ...)` (warning) plus a hint to set
+  the new address in the config or reserve it in the router, and one operational notice
+  (same channel as the camera-down notices). The address is saved in the health state file
+  and restored on restart while the camera keeps the same `mac:`; `cameras.yaml` is never
+  rewritten. When the camera answers at its configured address again (the usual return
+  to the primary), the saved address is dropped.
+
+Independent of `mac:`, two checks stop a false "back online":
+
+- An address that belongs to the monitoring host itself (`ip -j addr`) is never the
+  camera: it counts as unreachable and logs `camera <name> IP <ip> belongs to this host
+  (<iface>)` as an error (at most hourly).
+- After an outage, the camera is back only once a camera login works again: while
+  something answers ping but every login since the outage began has failed, the outage
+  continues and no 🟢 notice is sent. A camera whose login works (or that never failed
+  one) recovers on ping as before.
+
 ### Identity and role
 
 | Field | Values | Notes |
 | --- | --- | --- |
 | `name` | short unique string | Used in logs, state and notifications. Required. |
 | `host` | LAN address/DNS name, or a list of them | Required; keep real values private. A list turns on [host failover](#host-failover-optional). |
+| `mac` | MAC address, unset | Opt-in [MAC rediscovery](#mac-rediscovery-optional): find the camera on the LAN after DHCP moved it. |
 | `role` | `tracking`, `static` | Tracking cameras follow policy; static cameras stay parked at `day_preset` (when set), re-asserted every control tick. |
 | `schedule` | `astral`, `always_night`, `always_day` | Controls day/night plan selection. |
 | `night_only` | boolean | Drains events but suppresses all Telegram traffic during daytime. |

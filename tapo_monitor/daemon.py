@@ -61,6 +61,7 @@ from . import (
     outbox,
     panlimit,
     recclip,
+    rediscover,
     reliability,
     reolink,
     reviewdigest,
@@ -1073,6 +1074,13 @@ class MonitorState:
     active_scorers: dict = field(default_factory=dict)
     host_identity: dict = field(default_factory=dict)
     failover_rejected: dict = field(default_factory=dict)
+    # Opt-in MAC rediscovery (``mac:``): searches on a worker thread, the address found per
+    # camera (``{"host", "mac"}``, persisted in the health file), one pending notice per
+    # move, and when the "address is this host's own" / "other MAC there" lines were logged.
+    rediscovery: rediscover.Rediscovery = field(default_factory=rediscover.Rediscovery)
+    discovered_hosts: dict = field(default_factory=dict)
+    host_moved_notices: dict = field(default_factory=dict)
+    address_conflict_logged: dict = field(default_factory=dict)
     # Return to the primary host: when the active address last changed, and consecutive
     # successful TCP probes of the primary while failed over (memory only).
     host_switched_at: dict = field(default_factory=dict)
@@ -5517,6 +5525,13 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
     for cfg in app.cameras:
         if camera_muted(cfg, night, now):
             continue
+        moved = state.host_moved_notices.get(cfg.name)
+        if moved:
+            if notify.send_operational(token, chat, moved):
+                state.host_moved_notices.pop(cfg.name, None)
+                log.info("host move notice sent for %s", cfg.name)
+            else:
+                log.warning("host move notification delivery failed for %s", cfg.name)
         if "hubpoll" in cfg.detection.sources:
             # A battery camera sleeps through nearly every ping (measured ~6 % answered in
             # deep night), so ICMP says nothing about its health and would alert nightly.
@@ -5526,6 +5541,11 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
         # records a fresh ping result on every control pass; fall back to the historical
         # client-based behaviour only for injected/test connectors that do not.
         ok = state.network_reachable.get(cfg.name, cam_clients.get(cfg.name) is not None)
+        if ok and cfg.name in state.fail_since and state.connect_fails.get(cfg.name):
+            # Something answers ping at the address, but no camera login has worked since
+            # the outage began: after a DHCP shuffle that is often another device (or this
+            # host) holding the camera's old address. Not back until a login succeeds.
+            ok = False
         event, _ = update_outage(state, cfg.name, ok, now, app.alerts.outage_threshold)
         if not ok and now - state.fail_since[cfg.name] >= app.alerts.outage_threshold:
             state.outage_preserver.submit(
@@ -5627,8 +5647,15 @@ PRIMARY_PROBE_INTERVAL = 60    # seconds between TCP probes of a failed-over cam
 
 
 def apply_active_hosts(cameras, state):
-    """Restore each camera's persisted active address, if it is still a candidate."""
+    """Restore each camera's persisted active address, if it is still a candidate.
+
+    An address found by MAC rediscovery comes back first (as the extra candidate) while
+    the camera still has the same ``mac:``; otherwise its record is dropped.
+    """
+    discovered = getattr(state, "discovered_hosts", {})
     for cfg in cameras:
+        if cfg.name in discovered and not rediscover.restore(cfg, discovered[cfg.name]):
+            discovered.pop(cfg.name, None)
         host = state.active_hosts.get(cfg.name)
         if host and host in camera.candidate_hosts(cfg):
             cfg.active_host = host
@@ -5708,6 +5735,9 @@ def _fail_over(cfg, state, cam_clients, now):
     """
     name = cfg.name
     rejected = {h for h, until in state.failover_rejected.get(name, {}).items() if until > now}
+    # An address of this host answers TCP for itself, never for the camera.
+    rejected |= {h for h in camera.candidate_hosts(cfg)
+                 if state.rediscovery.own_interface(h, now)}
     new = camera.find_alternate_host(cfg, skip=rejected)
     if new is None:
         return None
@@ -5732,6 +5762,8 @@ def _maybe_return_to_primary(cfg, state, cam_clients, now):
     if now < state.connect_backoff_until.get(name, 0):
         return None          # a switch would be undone by the backoff; wait it out
     primary = camera.candidate_hosts(cfg)[0]
+    if state.rediscovery.own_interface(primary, now):
+        return None          # the old address is this host's own now, never the camera
     rejected_until = state.failover_rejected.get(name, {}).get(primary, 0)
     if now < rejected_until or now - state.host_switched_at.get(name, 0) < \
             camera.PRIMARY_RETURN_MIN_SECONDS:
@@ -5810,6 +5842,10 @@ def _confirm_switch(cfg, state, client, old, now):
     returned = index == 0
     if returned:
         state.active_hosts.pop(name, None)
+        if getattr(cfg, "discovered_host", None):
+            # Back at the configured address: the rediscovered one is history.
+            cfg.discovered_host = None
+            state.discovered_hosts.pop(name, None)
     else:
         state.active_hosts[name] = new
     state.host_switched_at[name] = now
@@ -5856,6 +5892,103 @@ def _connect_reolink(cfg: CameraConfig, cam_clients, state, now):
     return client, None
 
 
+# The "address is this host's own" / "another MAC answers there" lines, at most this often.
+ADDRESS_CONFLICT_LOG_EVERY = 3600
+
+
+def _log_address_conflict(state, name, now, level, msg, *args):
+    if now - state.address_conflict_logged.get(name, -math.inf) >= ADDRESS_CONFLICT_LOG_EVERY:
+        state.address_conflict_logged[name] = now
+        log.log(level, msg, *args)
+
+
+def _camera_answers(cfg, state, now):
+    """Ping the active address, refusing answers that cannot be the camera.
+
+    An address of this host (DHCP gave the camera's old address to one of its own
+    interfaces) answers ping for itself; with ``mac:`` set, a neighbour entry with another
+    MAC means another device took the address. Both count as unreachable, and both start
+    the MAC search for a camera with ``mac:``.
+    """
+    host = camera.active_host(cfg)
+    if state is not None:
+        iface = state.rediscovery.own_interface(host, now)
+        if iface:
+            _log_address_conflict(state, cfg.name, now, logging.ERROR,
+                                  "camera %s IP %s belongs to this host (%s)",
+                                  cfg.name, host, iface)
+            return False
+    if not camera.ping_reachable(host):
+        return False
+    mac = getattr(cfg, "mac", None)
+    if state is not None and mac and state.rediscovery.available():
+        seen = rediscover.neighbour_mac(host)
+        if seen and seen != mac:
+            _log_address_conflict(state, cfg.name, now, logging.WARNING,
+                                  "camera %s IP %s answers with MAC %s, not the camera's %s",
+                                  cfg.name, host, seen, mac)
+            return False
+    return True
+
+
+def _take_rediscovered(cfg, state, cam_clients, now):
+    """Point a ``mac:`` camera at the address its MAC was found at, if a search found one.
+
+    Returns ``(old, found, previous discovered_host)`` for :func:`_settle_rediscovered`, or
+    None. The login that follows goes through the usual host-switch path, which compares
+    the camera's MAC (``getBasicInfo``) with the configured one before keeping the switch.
+    """
+    mac = getattr(cfg, "mac", None)
+    if state is None or not mac:
+        return None
+    name = cfg.name
+    state.host_identity[name] = rediscover.identity_form(mac)
+    found = state.rediscovery.take(name)
+    old = camera.active_host(cfg)
+    if not found or found == old or state.rediscovery.own_interface(found, now):
+        return None
+    previous = cfg.discovered_host
+    if found not in (cfg.hosts or (cfg.host,)):
+        cfg.discovered_host = found
+    camera.set_active_host(cfg, found)
+    stale = cam_clients.pop(name, None)
+    if stale is not None:
+        camera.close_client(stale)       # one pytapo session: close it before reopening
+    # Logins that failed against whatever answered at the old address say nothing about
+    # the camera at the new one.
+    state.connect_backoff_until.pop(name, None)
+    state.connect_fails.pop(name, None)
+    log.info("camera %s: mac %s seen at %s, trying it", name, mac, found)
+    return old, found, previous
+
+
+def _settle_rediscovered(cfg, state, move, client, now):
+    """Keep a verified move (log, notice, persist) or undo it and skip that address."""
+    old, found, previous = move
+    name = cfg.name
+    if client is not None and camera.active_host(cfg) == found:
+        if found in (cfg.hosts or (cfg.host,)):
+            state.discovered_hosts.pop(name, None)
+        else:
+            state.discovered_hosts[name] = {"host": found, "mac": cfg.mac}
+        log.warning("camera %s moved %s -> %s (mac %s)", name, old, found, cfg.mac)
+        log.warning("camera %s: set its host to %s in the config or reserve the address in "
+                    "the router; until then the address found is kept in the health state",
+                    name, found)
+        state.host_moved_notices[name] = (
+            f"📍 camera '{name}' moved {old} -> {found} (found by its MAC); update the "
+            f"config or reserve the address in the router")
+        if state.health_path:
+            health.save_state(state.health_path, state, logger=log)
+        return
+    state.rediscovery.reject(name, found, now)
+    cfg.discovered_host = previous
+    if camera.active_host(cfg) != old:
+        camera.set_active_host(cfg, old)
+    log.warning("camera %s: mac %s seen at %s, but the login there failed or it is "
+                "another device; staying at %s", name, cfg.mac, found, old)
+
+
 def _connect_camera(cam_clients, state=None, now=None):
     """Return a connect(cfg) that builds a pytapo client and caches it for the monitor pass.
 
@@ -5867,6 +6000,10 @@ def _connect_camera(cam_clients, state=None, now=None):
     ``FAILOVER_AFTER_FAILS`` passes is moved to the first other candidate that answers on
     the API port and proves to be the same device. Every address comes from
     ``camera.active_host``.
+
+    A camera with ``mac:`` that stays unreachable for ``rediscover.SEARCH_AFTER_FAILS``
+    passes is searched for by its MAC on a worker thread; an address found there is tried
+    on a later pass through the same switch-and-verify path (see :func:`_take_rediscovered`).
     """
     from . import camera
 
@@ -5897,15 +6034,36 @@ def _connect_camera(cam_clients, state=None, now=None):
             client, on_auth_failure=auth_failure, on_success=api_success)
 
     def connect(cfg: CameraConfig):
-        name = cfg.name
         if "getevents" not in cfg.detection.sources and "hubpoll" in cfg.detection.sources:
             # A hubpoll-only camera has no stok login to make and sleeps through the ping;
             # spending a control pass on both every minute buys nothing.
             return None, "hubpoll"
-        reachable = camera.ping_reachable(camera.active_host(cfg))
+        at = now if now is not None else _time.time()
+        move = _take_rediscovered(cfg, state, cam_clients, at)
+        result = attempt(cfg, move[0] if move else None)
+        if move:
+            _settle_rediscovered(cfg, state, move, result[0], at)
+        elif state is not None and getattr(cfg, "mac", None):
+            if state.network_reachable.get(cfg.name):
+                state.rediscovery.reset(cfg.name)
+            elif (state.network_fails.get(cfg.name, 0) >= rediscover.SEARCH_AFTER_FAILS
+                  and state.rediscovery.available()):
+                state.rediscovery.request(cfg.name, cfg.mac, camera.active_host(cfg), at)
+        return result
+
+    def attempt(cfg: CameraConfig, moved_from):
+        name = cfg.name
         switched_from = None
         returning = False
-        if (not reachable and state is not None and len(camera.candidate_hosts(cfg)) > 1
+        if moved_from is not None:
+            # Seen in the neighbour table with its MAC just now; the login decides.
+            reachable = True
+            switched_from = moved_from
+        else:
+            reachable = _camera_answers(cfg, state, now if now is not None else _time.time())
+        if moved_from is not None:
+            pass             # just switched by rediscovery: no failover or return now
+        elif (not reachable and state is not None and len(camera.candidate_hosts(cfg)) > 1
                 and state.network_fails.get(name, 0) + 1 >= FAILOVER_AFTER_FAILS):
             switched_from = _fail_over(cfg, state, cam_clients, now if now is not None else 0)
             reachable = switched_from is not None

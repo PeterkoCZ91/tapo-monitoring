@@ -59,8 +59,11 @@ API_PORT = 443
 
 
 def candidate_hosts(cfg):
-    """Every address the camera may live at: the configured list, or just ``cfg.host``."""
-    return tuple(getattr(cfg, "hosts", ()) or (cfg.host,))
+    """Every address the camera may live at: the configured list, or just ``cfg.host``,
+    plus the address MAC rediscovery found it at (opt-in ``mac:``), last."""
+    hosts = tuple(getattr(cfg, "hosts", ()) or (cfg.host,))
+    found = getattr(cfg, "discovered_host", None)
+    return hosts + (found,) if found and found not in hosts else hosts
 
 
 def active_host(cfg):

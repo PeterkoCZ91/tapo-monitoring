@@ -126,7 +126,7 @@ def restore(state, payload):
 def load_state(path, state, logger=None):
     """Load health data into state; missing or invalid files leave it unchanged.
 
-    The failed-over addresses and scorer choices are read on their own: one damaged
+    The failed-over and rediscovered addresses and scorer choices are read on their own: one damaged
     persisted field must not make a camera forget where it is running.
     """
     try:
@@ -151,6 +151,12 @@ def load_state(path, state, logger=None):
     if isinstance(hosts, dict) and hasattr(state, "active_hosts"):
         state.active_hosts.update({k: v for k, v in hosts.items()
                                    if isinstance(k, str) and isinstance(v, str)})
+    found = payload.get("discovered_hosts")
+    if isinstance(found, dict) and hasattr(state, "discovered_hosts"):
+        state.discovered_hosts.update({
+            k: {"host": v["host"], "mac": v["mac"]} for k, v in found.items()
+            if isinstance(k, str) and isinstance(v, dict)
+            and isinstance(v.get("host"), str) and isinstance(v.get("mac"), str)})
     scorers = payload.get("active_scorers")
     if isinstance(scorers, dict) and hasattr(state, "active_scorers"):
         state.active_scorers.update({k: v for k, v in scorers.items()
@@ -171,6 +177,11 @@ def save_state(path, state, logger=None):
             hosts = getattr(state, "active_hosts", None)
             if hosts:     # only a camera that failed over adds this key
                 payload["active_hosts"] = {str(k): str(v) for k, v in hosts.items()}
+            found = getattr(state, "discovered_hosts", None)
+            if found:     # only a camera that MAC rediscovery moved adds this key
+                payload["discovered_hosts"] = {
+                    str(k): {"host": str(v["host"]), "mac": str(v["mac"])}
+                    for k, v in found.items()}
             scorers = getattr(state, "active_scorers", None)
             if scorers:   # only a scorer list that failed over adds this key
                 payload["active_scorers"] = {str(k): int(v) for k, v in scorers.items()}

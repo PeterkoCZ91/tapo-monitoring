@@ -79,6 +79,9 @@ reliability:
 cameras:
   - name: front              # unique label used in logs/alerts
     host: "<LAN_CAMERA_IP>"    # camera IP or DNS name on your LAN
+    # mac: "02:00:00:aa:bb:cc"  # optional; find the camera again by its MAC when DHCP gave
+    #                          # it a new address (Linux, see docs/configuration.md).
+    #                          # Better still: reserve the camera's address in the router.
     role: tracking           # tracking | static
     schedule: astral         # astral | always_night | always_day
     # person_sensitivity: 40   # optional 0-100; lower = fewer false AI-person detections

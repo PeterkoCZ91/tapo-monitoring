@@ -236,17 +236,19 @@ def _check(path):
 
 
 def _use_saved_host(cfg):
-    """Point ``cfg`` at the address the daemon failed over to (saved health state), if any."""
+    """Point ``cfg`` at the address the daemon failed over or moved to (saved health state)."""
     from . import camera as camera_mod
-    from . import health
+    from . import health, rediscover
 
-    if len(camera_mod.candidate_hosts(cfg)) < 2:
+    if len(camera_mod.candidate_hosts(cfg)) < 2 and not getattr(cfg, "mac", None):
         return
-    state = types.SimpleNamespace(active_hosts={}, active_scorers={})
+    state = types.SimpleNamespace(active_hosts={}, active_scorers={}, discovered_hosts={})
     try:
         health.load_state(health.default_state_path(), state)
     except Exception:  # noqa: BLE001 - an unreadable state file means "use the primary"
         return
+    # An address found by MAC rediscovery is an extra candidate (same ``mac:`` only).
+    rediscover.restore(cfg, state.discovered_hosts.get(cfg.name))
     saved = state.active_hosts.get(cfg.name)
     if saved in camera_mod.candidate_hosts(cfg):
         cfg.active_host = saved

@@ -62,3 +62,18 @@ def _fresh_app_silence(monkeypatch):
     from tapo_monitor import daemon
     monkeypatch.setattr(daemon, "_app_silenced", set())
     monkeypatch.setattr(daemon, "_app_push_logged", set())
+
+
+@pytest.fixture(autouse=True)
+def _no_host_address_lookups(request, monkeypatch):
+    """Keep the daemon's own-address and neighbour-MAC checks off the real host network.
+
+    Otherwise a test camera address that happens to be one of the test machine's own (or
+    its loopback) would turn "unreachable". ``tests/test_mac_rediscovery.py`` drives these
+    lookups through its own fake ``ip`` output and opts out with ``REAL_REDISCOVERY``.
+    """
+    if getattr(request.module, "REAL_REDISCOVERY", False):
+        return
+    from tapo_monitor import rediscover
+    monkeypatch.setattr(rediscover, "local_addresses", lambda run=None: {})
+    monkeypatch.setattr(rediscover, "neighbour_mac", lambda ip, run=None: None)

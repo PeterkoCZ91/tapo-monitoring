@@ -20,6 +20,7 @@ from dataclasses import dataclass, field, fields, is_dataclass
 
 from . import detection as event_detection
 from . import reliability, scheduling
+from .macresolve import normalize_mac
 
 log = logging.getLogger(__name__)
 
@@ -253,6 +254,12 @@ class CameraConfig:
     hosts: tuple[str, ...] = ()
     active_host: str | None = field(default=None, repr=False, compare=False,
                                     metadata={"runtime_only": True})
+    # Opt-in MAC rediscovery: the camera's MAC (lowercase, colon-separated). A camera that
+    # stays unreachable is looked up by it on the LAN; the address found there becomes the
+    # runtime-only ``discovered_host`` candidate (see tapo_monitor.rediscover).
+    mac: str | None = None
+    discovered_host: str | None = field(default=None, repr=False, compare=False,
+                                        metadata={"runtime_only": True})
     role: str = "tracking"
     schedule: str = "astral"
     # Names of env vars holding the camera credentials (never the secrets themselves).
@@ -1286,6 +1293,16 @@ def _mqtt(data, cameras):
     )
 
 
+def _mac(value, where):
+    """The optional ``mac:`` in lowercase colon form; ``-``/``:`` and any case accepted."""
+    if value is None:
+        return None
+    mac = normalize_mac(value) if isinstance(value, str) else None
+    if mac is None:
+        raise ConfigError(f"{where}: 'mac' must be a MAC address like 02:00:00:aa:bb:cc")
+    return mac
+
+
 def _camera(data, index):
     if not isinstance(data, dict):
         raise ConfigError(f"cameras[{index}]: must be a mapping")
@@ -1293,6 +1310,7 @@ def _camera(data, index):
     name = _require(data, "name", f"cameras[{index}]")
     where = f"camera {name!r}"
     host, hosts = _hosts(_require(data, "host", where), where)
+    mac = _mac(data.get("mac"), where)
     role = _check_enum(data.get("role", "tracking"), ROLES, "role", where)
     schedule = _check_enum(data.get("schedule", "astral"), SCHEDULES, "schedule", where)
     coord = data.get("coordinator") or {}
@@ -1419,6 +1437,10 @@ def _camera(data, index):
     if crop_min_px < 0:
         raise ConfigError(f"{where}: 'crop_min_px' must be 0 or more")
     detection = _detection(data.get("detection"), where)
+    if mac and ("reolink" in detection.sources or "getevents" not in detection.sources
+                and "hubpoll" in detection.sources):
+        raise ConfigError(f"{where}: 'mac' (rediscovery) needs a Tapo camera polled over "
+                          f"the network, not a Reolink or hub-only camera")
     if "lastalarm" in detection.sources and (
             data.get("sd_snapshot") or data.get("sd_motion")
             or data.get("snapshot_source") == "recording"):
@@ -1562,6 +1584,7 @@ def _camera(data, index):
         name=name,
         host=host,
         hosts=hosts,
+        mac=mac,
         role=role,
         schedule=schedule,
         user_env=data.get("user_env"),

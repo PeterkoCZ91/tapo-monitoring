@@ -24,7 +24,25 @@ All notable changes to this project are documented here.
   systemd falls back to the local time without the zone name, and a journalctl error
   is now shown.
 
+- A camera address taken over by the monitoring host itself (seen after a router outage:
+  DHCP gave a Pi's Wi-Fi the camera's old address) no longer answers for the camera:
+  it counts as unreachable and logs `camera <name> IP <ip> belongs to this host (<iface>)`
+  as an error, at most hourly, and failover never probes it. After an outage, the
+  🟢 notice also waits for a working camera login when every login since the outage
+  began has failed, instead of trusting ping alone (which sent false "back online"
+  notices for two days).
+
 ### Added
+- Opt-in MAC rediscovery: a camera with `mac:` that stays unreachable for three control
+  passes is looked up by its MAC in the neighbour table, then by a gentle sweep of its
+  directly connected subnet (at most a /24, 32 single pings at a time with a 2 s wait,
+  at most every 10 minutes per camera, backing off to an hour), on a worker thread. The
+  address found becomes an extra host candidate and is used by every client (pytapo,
+  RTSP, ONVIF, stop guard, SD) once the login there succeeds with the configured MAC;
+  the move is logged (`camera <name> moved <old> -> <new>`), sent once as an operational
+  notice and kept in the health state across restarts (`cameras.yaml` is not rewritten).
+  With `mac:` set, another MAC at the camera's address also counts as unreachable.
+  Linux with `ip` only; see the configuration reference.
 - Low-volume stop guard outage logging: `pose unavailable` and `Stop still failing`
   warnings with failure count, duration and last error class at power-of-two counts
   (and at least every 10 minutes), and `recovered after N failures / X s` lines.
