@@ -394,6 +394,10 @@ class CameraConfig:
     # A crop narrower than this many source pixels is mush once delivered, so the whole
     # frame is sent as the alert and the crop only follows as a second photo. 0 = off.
     crop_min_px: int = 400
+    # The same floor for a crop cut from the delivery-width frame (SD clip frames, no
+    # native grab), in delivered pixels. Narrower than this, the zoom is dropped and the
+    # whole frame is the only photo. 0 = off (the crop is sent however small).
+    crop_min_px_delivery: int = 0
     # How this model's getEvents fields are read (detection.EVENT_PROFILES). "default" is
     # the C560WS/C260 table every camera had before; "c545d" reads alarm_type 6 / bit 32
     # as a person (no PIR on that model) and knows its pan/tilt lens moves on its own.
@@ -1436,6 +1440,14 @@ def _camera(data, index):
         raise ConfigError(f"{where}: 'crop_min_px' must be a whole number") from None
     if crop_min_px < 0:
         raise ConfigError(f"{where}: 'crop_min_px' must be 0 or more")
+    try:
+        if isinstance(data.get("crop_min_px_delivery"), bool):
+            raise ValueError
+        crop_min_px_delivery = int(data.get("crop_min_px_delivery", 0))
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}: 'crop_min_px_delivery' must be a whole number") from None
+    if crop_min_px_delivery < 0:
+        raise ConfigError(f"{where}: 'crop_min_px_delivery' must be 0 or more")
     detection = _detection(data.get("detection"), where)
     if mac and ("reolink" in detection.sources or "getevents" not in detection.sources
                 and "hubpoll" in detection.sources):
@@ -1635,6 +1647,7 @@ def _camera(data, index):
         crop_from_native=bool(data.get("crop_from_native", False)),
         crop_min_frac=crop_min_frac,
         crop_min_px=crop_min_px,
+        crop_min_px_delivery=crop_min_px_delivery,
         event_profile=event_profile,
         lens_pick_stream=lens_pick_stream,
         lens_album=lens_album,

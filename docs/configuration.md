@@ -1196,8 +1196,12 @@ events with `tapo-monitor replay --compare` first (see [observability](observabi
 - `crop_min_frac` sets the smallest crop the zoom may produce (see below).
 - `crop_min_px` (default 400, 0 = off): with `crop_from_native`, a crop narrower than this
   many source pixels is not sent as the alert; the whole frame is, and the crop follows as a
-  second photo. A crop cut from the delivery-width frame is not measured and is sent alone,
-  as before.
+  second photo. A crop cut from the delivery-width frame is not measured by this key.
+- `crop_min_px_delivery` (default 0 = off): the floor for a crop cut from the
+  delivery-width frame, such as an SD clip frame, which has no native grab. A crop
+  narrower than this many delivered pixels is dropped and the whole frame is the only
+  photo. A distant walker in a 1280 px SD frame leaves a crop of about 150 px, which
+  Telegram enlarges into an unreadable blur; 300 is a reasonable value for such a camera.
 - A frame that reached the alert without a score (scorer unavailable, passed through) is
   never cropped: the whole frame is sent.
 - When no score is available, live frames fail open as raw passthrough.

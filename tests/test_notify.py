@@ -1,5 +1,6 @@
 import os
 import sys
+import urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -209,7 +210,7 @@ def test_send_photo_retries_once_on_failure(monkeypatch, tmp_path):
     def flaky(req, timeout=None):
         calls.append(1)
         if len(calls) == 1:
-            raise OSError("boom")
+            raise urllib.error.URLError(OSError("boom"))   # never reached Telegram
         return _FakeResp(b'{"ok":true}')
 
     monkeypatch.setattr(notify.urllib.request, "urlopen", flaky)
@@ -432,7 +433,7 @@ def test_send_video_retries_once_on_failure(monkeypatch, tmp_path):
     def flaky(req, timeout=None):
         calls.append(timeout)
         if len(calls) == 1:
-            raise OSError("boom")
+            raise urllib.error.URLError(OSError("boom"))
         return _FakeResp()
 
     monkeypatch.setattr(notify.urllib.request, "urlopen", flaky)
@@ -446,7 +447,7 @@ def test_send_video_gives_up_after_second_failure(monkeypatch, tmp_path):
 
     def dead(req, timeout=None):
         calls.append(1)
-        raise OSError("boom")
+        raise urllib.error.URLError(OSError("boom"))
 
     monkeypatch.setattr(notify.urllib.request, "urlopen", dead)
     monkeypatch.setattr(notify.time, "sleep", lambda *_: None)
@@ -477,3 +478,75 @@ def test_send_video_does_not_change_last_message_id(monkeypatch, tmp_path):
     notify.clear_last_message_id()
     assert notify.send_video("tok", "chat", str(_video(tmp_path)), "c") is True
     assert notify.last_message_id() is None
+
+
+# ── no duplicate after an unanswered upload ──────────────────────────────────
+# The photo reached Telegram, the answer did not arrive within the
+# timeout over the slow uplink, and the retry posted the same alert a second time.
+
+def _counting(monkeypatch, exc):
+    calls = []
+
+    def post(req, timeout=None):
+        calls.append(1)
+        if len(calls) == 1:
+            raise exc
+        return _FakeResp(b'{"ok":true}')
+
+    monkeypatch.setattr(notify.urllib.request, "urlopen", post)
+    monkeypatch.setattr(notify.time, "sleep", lambda *_: None)
+    return calls
+
+
+def test_send_photo_does_not_resend_when_the_answer_timed_out(monkeypatch, tmp_path):
+    calls = _counting(monkeypatch, TimeoutError("read timed out"))
+    img = tmp_path / "snap.jpg"
+    img.write_bytes(b"\xff\xd8IMG")
+    assert notify.send_photo("tok", "chat", str(img), "c") is True
+    assert len(calls) == 1
+
+
+def test_send_photo_does_not_resend_when_the_connection_dropped_after_upload(
+        monkeypatch, tmp_path):
+    calls = _counting(monkeypatch, ConnectionResetError("reset"))
+    img = tmp_path / "snap.jpg"
+    img.write_bytes(b"\xff\xd8IMG")
+    assert notify.send_photo("tok", "chat", str(img), "c") is True
+    assert len(calls) == 1
+
+
+def test_send_photo_retries_when_telegram_refused(monkeypatch, tmp_path):
+    err = urllib.error.HTTPError("u", 502, "Bad Gateway", {}, None)
+    calls = _counting(monkeypatch, err)
+    img = tmp_path / "snap.jpg"
+    img.write_bytes(b"\xff\xd8IMG")
+    assert notify.send_photo("tok", "chat", str(img), "c") is True
+    assert len(calls) == 2
+
+
+def test_unconfirmed_photo_is_archived_as_unconfirmed(monkeypatch, tmp_path):
+    _counting(monkeypatch, TimeoutError("read timed out"))
+    seen = {}
+    monkeypatch.setattr(notify.sentlog, "archive_if_configured",
+                        lambda *a, **kw: seen.update(kw))
+    img = tmp_path / "snap.jpg"
+    img.write_bytes(b"\xff\xd8IMG")
+    assert notify.send_photo("tok", "chat", str(img), "c") is True
+    assert seen["delivered"] is True
+
+
+def test_send_album_does_not_resend_when_the_answer_timed_out(monkeypatch, tmp_path):
+    calls = _counting(monkeypatch, TimeoutError("read timed out"))
+    paths = []
+    for name in ("a.jpg", "b.jpg"):
+        p = tmp_path / name
+        p.write_bytes(b"\xff\xd8IMG")
+        paths.append(str(p))
+    assert notify.send_album("tok", "chat", paths, "c") is True
+    assert len(calls) == 1
+
+
+def test_send_video_does_not_resend_when_the_answer_timed_out(monkeypatch, tmp_path):
+    calls = _counting(monkeypatch, TimeoutError("read timed out"))
+    assert notify.send_video("tok", "chat", str(_video(tmp_path)), "c") is True
+    assert len(calls) == 1

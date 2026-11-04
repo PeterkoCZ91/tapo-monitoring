@@ -6,7 +6,9 @@ pure and tested.
 """
 
 import html
+import http.client
 import json
+import logging
 import secrets
 import threading
 import time
@@ -18,8 +20,31 @@ from . import sentlog
 
 _API = "https://api.telegram.org"
 
+log = logging.getLogger(__name__)
+
 # A transient Telegram/network failure would otherwise lose a real alert; retry once.
 TELEGRAM_RETRY_DELAY = 1.0
+
+# A post whose upload finished but whose answer never came (read timeout, connection
+# dropped). Telegram has usually accepted it by then: on a slow uplink the photo arrived
+# and the retry posted it a second time. Truthy, so callers count it
+# as delivered and neither retry nor queue it in the outbox.
+UNCONFIRMED = "unconfirmed"
+
+
+def _failed_post(exc, what):
+    """False when the request certainly did not reach Telegram, else UNCONFIRMED.
+
+    ``urlopen`` wraps every error raised while connecting or uploading in ``URLError``
+    (``HTTPError`` is Telegram's own refusal). Anything else came while waiting for or
+    reading the answer, after the whole request was sent.
+    """
+    if isinstance(exc, urllib.error.URLError) or not isinstance(
+            exc, (OSError, http.client.HTTPException)):
+        return False
+    log.warning("Telegram %s: no answer after upload (%s); not resending, "
+                "it most likely arrived", what, type(exc).__name__)
+    return UNCONFIRMED
 
 # Marker the vision model returns for a frame with nothing of interest.
 EMPTY_MARKER = "empty"
@@ -260,8 +285,8 @@ def _post_photo(token, chat_id, image, caption, record_id=True):
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
             return _read_ok(resp, record_id)
-    except Exception:
-        return False
+    except Exception as exc:
+        return _failed_post(exc, "sendPhoto")
 
 
 def _post_album(token, chat_id, images, caption):
@@ -288,8 +313,8 @@ def _post_album(token, chat_id, images, caption):
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             return _read_ok(resp, True)
-    except Exception:
-        return False
+    except Exception as exc:
+        return _failed_post(exc, "sendMediaGroup")
 
 
 def _archive_bytes(archive_path, sent_image):
@@ -327,6 +352,7 @@ def send_photo(token, chat_id, image_path, caption, archive_path=None,
         # A transient Telegram/network failure would otherwise lose a real alert.
         time.sleep(TELEGRAM_RETRY_DELAY)
         ok = _post_photo(token, chat_id, image, caption, record_id)
+    ok = bool(ok)               # UNCONFIRMED counts as delivered
     if archive:
         # Best-effort diagnostic copy of the frame (opt-in via env).
         sentlog.archive_if_configured(_archive_bytes(archive_path, image), caption,
@@ -357,6 +383,7 @@ def send_album(token, chat_id, image_paths, caption, camera=None, scores=None,
     if not ok:
         time.sleep(TELEGRAM_RETRY_DELAY)
         ok = _post_album(token, chat_id, images, caption)
+    ok = bool(ok)               # UNCONFIRMED counts as delivered
     if ok:
         now = time.time()
         for i, image in enumerate(images):
@@ -396,8 +423,8 @@ def _post_video(token, chat_id, video, caption, reply_to, timeout, width, height
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return _read_ok(resp, False)
-    except Exception:
-        return False
+    except Exception as exc:
+        return _failed_post(exc, "sendVideo")
 
 
 def send_video(token, chat_id, video_path, caption, reply_to=None, timeout=120,
@@ -418,6 +445,7 @@ def send_video(token, chat_id, video_path, caption, reply_to=None, timeout=120,
     if not ok:
         time.sleep(TELEGRAM_RETRY_DELAY)
         ok = _post_video(*args)
+    ok = bool(ok)               # UNCONFIRMED counts as delivered
     return ok
 
 

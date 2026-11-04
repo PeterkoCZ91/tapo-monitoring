@@ -5,6 +5,11 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Fixed
+- A photo, album or clip is no longer posted twice when Telegram received it but its
+  answer did not arrive within the timeout (slow uplink). The retry now runs only when
+  the request certainly did not reach Telegram (connect or upload error, or Telegram's
+  own error answer); a missing answer after the upload counts as delivered and is logged
+  as a warning, so the outbox does not queue it again either.
 - The stop guard thread no longer dies after a long camera outage. About 35 minutes of
   failed Stops (~1024 retries) overflowed the exponential backoff (`OverflowError: int
   too large to convert to float`); the error then hit the loop's own error handling and
@@ -33,6 +38,9 @@ All notable changes to this project are documented here.
   notices for two days).
 
 ### Added
+- `crop_min_px_delivery` (default 0 = off): a crop cut from the delivery-width frame
+  (SD clip frames, no native grab) narrower than this many pixels is dropped and the
+  whole frame is sent instead of a blown-up 150 px patch.
 - Opt-in MAC rediscovery: a camera with `mac:` that stays unreachable for three control
   passes is looked up by its MAC in the neighbour table, then by a gentle sweep of its
   directly connected subnet (at most a /24, 32 single pings at a time with a 2 s wait,

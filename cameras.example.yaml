@@ -299,6 +299,9 @@ cameras:
     # crop_min_px: 400        # with crop_from_native: a crop narrower than this many source
                              # pixels is sent as a second photo after the whole frame
                              # (default 400, 0 = always send the crop alone).
+    # crop_min_px_delivery: 300  # a crop cut from the delivery-width frame (SD clips)
+                             # narrower than this is dropped; the whole frame is sent
+                             # (default 0 = off).
     # crop_from_native: true  # crop before the downscale, so the zoom keeps the camera's
                              # detail. Costs a native grab: free on a Pi 4, about +0.5s
                              # on a Pi Zero 2 W. A stream already at delivery width skips

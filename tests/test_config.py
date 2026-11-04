@@ -1552,6 +1552,19 @@ def test_crop_min_px_defaults_overrides_and_rejects_negatives():
         cfg.load_config_from_dict(data)
 
 
+def test_crop_min_px_delivery_is_off_by_default_and_rejects_negatives():
+    assert cfg.load_config_from_dict(_minimal()).cameras[0].crop_min_px_delivery == 0
+    data = {"cameras": [{"name": "front", "host": "192.0.2.50",
+                         "crop_min_px_delivery": 300}]}
+    assert cfg.load_config_from_dict(data).cameras[0].crop_min_px_delivery == 300
+    data["cameras"][0]["crop_min_px_delivery"] = -1
+    with pytest.raises(cfg.ConfigError, match="crop_min_px_delivery"):
+        cfg.load_config_from_dict(data)
+    data["cameras"][0]["crop_min_px_delivery"] = True
+    with pytest.raises(cfg.ConfigError, match="crop_min_px_delivery"):
+        cfg.load_config_from_dict(data)
+
+
 # ── tracking.day_preset has no implicit default ──────────────────────────────
 
 def test_camera_without_tracking_section_has_no_day_preset_and_recalls_nothing():

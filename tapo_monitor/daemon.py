@@ -2101,6 +2101,15 @@ def _deliver_alert_photo(cfg, secrets, image, caption, downscale=None, score=Non
                                    source_width=getattr(image, "native_width", None),
                                    source_height=getattr(image, "native_height", None))
     crop_temp = cropped if cropped != image else None      # crop_for_subject has no None
+    if crop_temp and not getattr(image, "native", None) and _crop_too_small(
+            cfg, crop_temp, floor=getattr(cfg, "crop_min_px_delivery", 0)):
+        # Cut from the delivery-width frame (an SD clip has no native grab), a distant
+        # subject leaves ~150 px that Telegram blows up into mush and no larger source to
+        # fall back on: the whole frame is the alert and the zoom is dropped.
+        log.info("crop_to_subject %s: crop narrower than crop_min_px_delivery; "
+                 "sending the whole frame", cfg.name)
+        _safe_unlink(crop_temp)
+        cropped, crop_temp = image, None
     if crop_temp and getattr(image, "native", None) and _crop_too_small(cfg, crop_temp):
         # A few hundred source pixels upscaled for delivery is mush the reader cannot
         # judge: the whole frame is the alert, the crop only rides along as a second photo.
@@ -2134,9 +2143,10 @@ def _deliver_alert_photo(cfg, secrets, image, caption, downscale=None, score=Non
             _safe_unlink(temp)
 
 
-def _crop_too_small(cfg, crop):
-    """Whether the crop holds fewer source pixels than ``crop_min_px`` (0 = never)."""
-    floor = getattr(cfg, "crop_min_px", 0)
+def _crop_too_small(cfg, crop, floor=None):
+    """Whether the crop is narrower than ``floor`` px (default ``crop_min_px``; 0 = never)."""
+    if floor is None:
+        floor = getattr(cfg, "crop_min_px", 0)
     if not floor:
         return False
     width = snapshot.image_width(crop)

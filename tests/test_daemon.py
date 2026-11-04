@@ -3193,9 +3193,35 @@ def test_crop_min_px_zero_keeps_small_crops_as_before(monkeypatch, tmp_path):
 
 
 def test_crop_min_px_does_not_apply_without_a_native_source(monkeypatch, tmp_path):
-    # Cut from the delivery-width frame the crop is always a few hundred px wide; the
-    # floor is for native crops, so such a camera keeps its single zoom photo.
+    # crop_min_px counts native pixels, so a crop cut from the delivery-width frame keeps
+    # its single zoom photo; crop_min_px_delivery (off by default) is the floor there.
     cam, full, _crop, _calls, posted, _archive = _crop_send_setup(monkeypatch, tmp_path, 282)
+
+    daemon.send_alert_photo(cam, {"telegram_token": "t", "telegram_chat": "c"},
+                            str(full), "caption", score=0.8)
+
+    assert len(posted) == 1 and b"ZOOM" in posted[0]
+
+
+def test_crop_min_px_delivery_sends_the_whole_frame_instead_of_a_tiny_crop(
+        monkeypatch, tmp_path):
+    # An SD frame (1280 px, no native) gave a 154 px crop of a distant
+    # walker, which Telegram blew up into mush. Opt-in floor: below it, no zoom at all.
+    cam, full, crop, _calls, posted, _archive = _crop_send_setup(monkeypatch, tmp_path, 154)
+    cam.crop_min_px_delivery = 300
+
+    ok = daemon.send_alert_photo(cam, {"telegram_token": "t", "telegram_chat": "c"},
+                                 str(full), "caption", score=0.8)
+
+    assert ok is True
+    assert len(posted) == 1
+    assert b"WHOLE-SCENE" in posted[0] and b"caption" in posted[0]
+    assert not crop.exists()
+
+
+def test_crop_min_px_delivery_keeps_a_crop_wide_enough(monkeypatch, tmp_path):
+    cam, full, _crop, _calls, posted, _archive = _crop_send_setup(monkeypatch, tmp_path, 462)
+    cam.crop_min_px_delivery = 300
 
     daemon.send_alert_photo(cam, {"telegram_token": "t", "telegram_chat": "c"},
                             str(full), "caption", score=0.8)
