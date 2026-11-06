@@ -424,6 +424,9 @@ class CameraConfig:
     hub_poll_interval: int = 20         # seconds between hub polls
     # Download hub clips and cut their frames on a background thread instead of the loop.
     hub_clip_worker: bool = False
+    # Name the camera at the front of its alert captions ("👤 front · 23:14"). Off by
+    # default: the caption stays exactly as it was.
+    caption_camera: bool = False
     # Days without a hub clip after which one Telegram notice is sent; None = off.
     inactivity_alert_days: int | None = None
     # The hub authenticates against the Tapo *account* (e-mail + account password), not a
@@ -1476,6 +1479,7 @@ def _camera(data, index):
     if hub_poll_interval < 1:
         raise ConfigError(f"{where}: 'hub_poll_interval' must be >= 1")
     hub_clip_worker = _check_bool(data.get("hub_clip_worker", False), "hub_clip_worker", where)
+    caption_camera = _check_bool(data.get("caption_camera", False), "caption_camera", where)
     inactivity_alert_days = data.get("inactivity_alert_days")
     if inactivity_alert_days is not None:
         if (isinstance(inactivity_alert_days, bool)
@@ -1657,6 +1661,7 @@ def _camera(data, index):
         go2rtc_src=data.get("go2rtc_src"),
         hub_poll_interval=hub_poll_interval,
         hub_clip_worker=hub_clip_worker,
+        caption_camera=caption_camera,
         inactivity_alert_days=inactivity_alert_days,
         hub_user_env=data.get("hub_user_env"),
         hub_password_env=data.get("hub_password_env"),

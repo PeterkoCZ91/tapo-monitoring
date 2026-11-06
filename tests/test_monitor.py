@@ -1559,6 +1559,22 @@ def test_live_alerts_a_vehicle_in_an_empty_person_frame(monkeypatch):
     assert deferred == ["person"]       # the camera-confirmed person still gets its SD look
 
 
+def test_live_captions_name_the_camera_only_when_asked(monkeypatch):
+    plain = _vehicle_cfg()
+    sent, _armed, _audits = _run_live_vehicle(
+        monkeypatch, plain, {"person": 0.05, "animal": 0.0, "vehicle": 0.8})
+    assert sent[0][0].startswith("🚗 T")
+    named = _vehicle_cfg()
+    named.caption_camera = True
+    sent, _armed, _audits = _run_live_vehicle(
+        monkeypatch, named, {"person": 0.05, "animal": 0.0, "vehicle": 0.8})
+    assert sent[0][0].startswith("🚗 a · T")
+    sent, _armed, _audits = _run_live_vehicle(
+        monkeypatch, named, {"person": 0.9, "animal": 0.0, "vehicle": 0.0})
+    assert [etype for _cap, etype in sent] == ["person"]
+    assert sent[0][0].startswith("👤 a · T")
+
+
 def test_live_vehicle_never_replaces_a_person_alert(monkeypatch):
     sent, armed, audits = _run_live_vehicle(
         monkeypatch, _vehicle_cfg(), {"person": 0.9, "animal": 0.0, "vehicle": 0.9})

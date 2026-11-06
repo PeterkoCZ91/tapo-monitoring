@@ -3034,7 +3034,7 @@ def _deliver_hub_frames(cfg, state, clip, event, etype, image, clip_extra, *, sc
         description = _caption_describe(cfg, secrets["groq_key"], image)
         caption = notify.build_caption(
             monitor.TYPE_EMOJI.get(etype, "👁"), time_str(clip),
-            description=description or None, score=s,
+            description=description or None, score=s, camera=notify.caption_camera(cfg),
         )
         ok = send_alert_photo(cfg, secrets, image, caption, score=s,
                               incident=incident.incident_id(cfg.name, event),
@@ -3745,7 +3745,8 @@ def _sd_vehicle_alert(app, cfg, state, entry, pick, *, now, secrets, time_str):
         entry["vehicle_sent"] = True     # one audit per window, as one alert would be
         return
     caption = notify.build_caption(monitor.TYPE_EMOJI["vehicle"], time_str(event),
-                                   lens=snapshot.frame_lens(pick.vehicle_image))
+                                   lens=snapshot.frame_lens(pick.vehicle_image),
+                                   camera=notify.caption_camera(cfg))
     ok = send_alert_photo(cfg, secrets, pick.vehicle_image, caption, score=None,
                           incident=incident.incident_id(cfg.name, event),
                           send_path="sd", etype="vehicle")
@@ -3911,7 +3912,7 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
             score=selected_score, light=light, lens=snapshot.frame_lens(image),
             # A card frame belongs to the event; the live fallback grab is made now.
             frame_time=_frame_time(event, now) if image == fallback_image else None,
-            unverified=unscored,
+            unverified=unscored, camera=notify.caption_camera(cfg),
         )
         ok = send_alert_photo(cfg, secrets, image, caption, score=selected_score,
                               incident=incident.incident_id(cfg.name, event),
@@ -3998,7 +3999,8 @@ def _send_held_frame(app, cfg, state, group, *, now, secrets, time_str, reason, 
     description = _caption_describe(cfg, secrets["groq_key"], path)
     caption = notify.build_caption(
         monitor.TYPE_EMOJI.get("motion", "👁"), time_str(group["event"]),
-        description=description or None, score=s, lens=group.get("hold_lens"))
+        description=description or None, score=s, lens=group.get("hold_lens"),
+        camera=notify.caption_camera(cfg))
     ok = send_alert_photo(cfg, secrets, path, caption, score=s,
                           incident=incident.incident_id(cfg.name, group["event"]),
                           send_path=send_path, etype="motion")
@@ -4141,7 +4143,7 @@ def _loiter_notice(cfg, group, image, s, minutes, *, secrets, time_str):
     """Send the one "lingering" notice for a sampler group. Returns the delivery result."""
     caption = notify.build_caption(
         "🧍", time_str(group["event"]), description=f"lingering here for ~{minutes} min",
-        score=s, lens=snapshot.frame_lens(image))
+        score=s, lens=snapshot.frame_lens(image), camera=notify.caption_camera(cfg))
     ok = send_alert_photo(cfg, secrets, image, caption, score=s,
                           incident=incident.incident_id(cfg.name, group["event"]),
                           send_path="sampler", etype="person")
@@ -4169,7 +4171,8 @@ def _sampler_vehicle_alert(app, cfg, state, group, image, s, *, now, secrets, ti
                             reason="vehicle_observe")
         return
     caption = notify.build_caption(monitor.TYPE_EMOJI["vehicle"], time_str(group["event"]),
-                                   lens=snapshot.frame_lens(image))
+                                   lens=snapshot.frame_lens(image),
+                                   camera=notify.caption_camera(cfg))
     ok = send_alert_photo(cfg, secrets, image, caption, score=None,
                           incident=incident.incident_id(cfg.name, group["event"]),
                           send_path="sampler", etype="vehicle")
@@ -4330,6 +4333,7 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                 description=description or None, detail=label or None, score=s,
                 light=light, lens=snapshot.frame_lens(image),
                 frame_time=_frame_time(group["event"], now), unverified=unscored,
+                camera=notify.caption_camera(cfg),
             )
             ok = send_alert_photo(cfg, secrets, image, caption, score=s,
                                   incident=incident.incident_id(cfg.name, group["event"]),

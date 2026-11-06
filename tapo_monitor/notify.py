@@ -105,10 +105,20 @@ def is_empty_scene(description, marker=EMPTY_MARKER):
     return marker in text.lower()
 
 
+def caption_camera(cfg):
+    """The name :func:`build_caption` shows for ``cfg``: its name when the camera opts in
+    with ``caption_camera: true``, else None (the caption stays as it always was)."""
+    return cfg.name if getattr(cfg, "caption_camera", False) else None
+
+
 def build_caption(emoji, time_str, description=None, detail=None, count=None,
                   minutes_since_last=None, score=None, light=None, lens=None,
-                  frame_time=None, unverified=False):
+                  frame_time=None, unverified=False, camera=None):
     """Assemble an alert caption. Pure — no I/O.
+
+    ``camera`` names the camera at the front of the headline ("👤 front · 23:14"), for a
+    camera with ``caption_camera: true`` (see :func:`caption_camera`); None or empty adds
+    nothing, so the caption is exactly what it was without the option.
 
     ``score`` may carry the scorer's animal confidence alongside the person one; when the
     scorer is confident an animal is present the caption says so. A dog walker and a lone
@@ -141,6 +151,8 @@ def build_caption(emoji, time_str, description=None, detail=None, count=None,
         emoji = f"{emoji}🐾"
     if light is True:
         emoji = f"{emoji}🔦"
+    if camera:
+        emoji = f"{emoji} {camera} ·"
     headline = f"{emoji} {detail} {time_str}".strip() if detail else f"{emoji} {time_str}"
     if frame_time:
         headline = f"{headline} · frame {frame_time}"

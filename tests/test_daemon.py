@@ -5310,6 +5310,19 @@ def test_expired_hold_rescued_after_pan_limit_recall(monkeypatch, tmp_path, capl
     assert "hold_expired" not in caplog.text
 
 
+def test_rescued_hold_caption_names_the_camera_when_asked(monkeypatch, tmp_path):
+    sent = []
+    app = _sampler_app(threshold=0.3, motion_send=0.6)
+    app.cameras[0].caption_camera = True
+    state = daemon.MonitorState()
+    g, frame = _rescue_group(tmp_path)
+    state.groups["a"] = g
+    state.pan_limit_recall_at["a"] = 1150
+    _run_sampler(app, state, 1271, sent, monkeypatch)
+    assert [img for img, _cap in sent] == [frame]
+    assert sent[0][1].startswith("👁 a · T")
+
+
 def test_expired_hold_without_recall_stays_hold_expired(monkeypatch, tmp_path, caplog):
     sent = []
     app = _sampler_app(threshold=0.3, motion_send=0.6)
@@ -6422,6 +6435,23 @@ def test_hubpoll_captions_the_clip_time_not_the_send_time(monkeypatch, tmp_path)
                             clip_frame_for=_clip_frames(tmp_path))
 
     assert captions and "clip@1100" in captions[0]
+
+
+def test_hubpoll_caption_names_the_camera_only_when_asked(monkeypatch, tmp_path):
+    captions = []
+    monkeypatch.setattr(daemon.notify, "send_photo",
+                        lambda token, chat, path, caption, **k: captions.append(caption) or True)
+    for opt_in in (False, True):
+        app = _hub_app(caption_camera=True) if opt_in else _hub_app()
+        hub = _FakeHub(clips=[[_clip(1100)]])
+        state = daemon.MonitorState()
+        state.hub_cursor["gate"] = 1000
+        daemon.run_hubpoll_pass(app, {}, state, now=1300, secrets=_hub_secrets(),
+                                hub_for=_hub_for(hub), frame_for=_frames(tmp_path),
+                                time_str=lambda clip: "T",
+                                clip_frame_for=_clip_frames(tmp_path))
+    assert captions[0].startswith("👁 T")
+    assert captions[1].startswith("👁 gate · T")
 
 
 def test_hubpoll_does_not_reprocess_a_clip_it_already_sent(monkeypatch, tmp_path):
@@ -8266,6 +8296,20 @@ def test_loiter_sends_one_notice_for_a_lingering_person_in_a_sent_group(monkeypa
     assert state.groups["a"]["loiter_sent"] is True
 
 
+def test_loiter_notice_names_the_camera_when_asked(monkeypatch):
+    captions, _ = _run_loiter_ticks(monkeypatch, [0.9] * 6)
+    assert captions[0].startswith("🧍 t")
+    real = _loiter_app
+
+    def named(**kw):
+        app = real(**kw)
+        app.cameras[0].caption_camera = True
+        return app
+    monkeypatch.setattr(sys.modules[__name__], "_loiter_app", named)
+    captions, _ = _run_loiter_ticks(monkeypatch, [0.9] * 6)
+    assert captions[0].startswith("🧍 a · t")
+
+
 def test_loiter_does_not_fire_when_the_person_leaves(monkeypatch):
     captions, _ = _run_loiter_ticks(monkeypatch, [0.9, 0.9, 0.0, 0.9, 0.9, 0.0])
     assert captions == []
@@ -8348,6 +8392,32 @@ def test_sampler_alerts_a_vehicle_when_opted_in_and_nobody_is_there(monkeypatch)
     assert state.last_alert[("a", "vehicle")] == 1035
     assert ("a", "confirmed") not in state.last_alert and ("a", "motion") not in state.last_alert
     assert state.groups["a"]["sent"] is False     # the group still waits for a person
+
+
+def test_sampler_vehicle_caption_names_the_camera_when_asked(monkeypatch):
+    sent = []
+    state = daemon.MonitorState()
+    state.groups["a"] = _group()
+    app = _vehicle_app()
+    app.cameras[0].caption_camera = True
+    _run_vehicle_sampler(app, state, sent, monkeypatch,
+                         {"person": 0.0, "animal": 0.0, "vehicle": 0.8})
+    assert len(sent) == 1 and sent[0].startswith("🚗 a · T")
+
+
+def test_sampler_person_caption_names_the_camera_only_when_asked(monkeypatch):
+    captions = []
+    for opt_in in (False, True):
+        sent = []
+        app = _sampler_app()
+        app.cameras[0].caption_camera = opt_in
+        state = daemon.MonitorState()
+        state.groups["a"] = _group()
+        _run_sampler(app, state, 1035, sent, monkeypatch)
+        captions.append(sent[0][1])
+    assert captions[0].startswith("👁 T")
+    assert captions[1].startswith("👁 a · T")
+    assert captions[1].replace("a · ", "", 1) == captions[0]
 
 
 def test_sampler_vehicle_is_off_unless_opted_in(monkeypatch):
@@ -8444,6 +8514,25 @@ def test_sd_followup_alerts_a_vehicle_without_closing_or_delivering(monkeypatch)
     assert len(sent) == 1 and "🚗" in sent[0][1] and sent[0][0] == "/tmp/sdf_1000_1_00.jpg"
     assert state.last_alert[("a", "vehicle")] == 1300
     assert ("a", "confirmed") not in state.last_alert
+
+
+def test_sd_followup_vehicle_caption_names_the_camera_when_asked(monkeypatch):
+    sent = []
+    app, state, fetch = _vehicle_sd(["/tmp/sdf_1000_1_00.jpg"])
+    app.cameras[0].caption_camera = True
+    _vehicle_scores(monkeypatch, {"/tmp/sdf_1000_1_00.jpg": CAR})
+    _run_vehicle_sd(app, state, fetch, sent, monkeypatch)
+    assert len(sent) == 1 and sent[0][1].startswith("🚗 a · T")
+
+
+def test_sd_followup_person_caption_names_the_camera_when_asked(monkeypatch):
+    sent = []
+    frame = "/tmp/sdf_1000_1_05.jpg"
+    app, state, fetch = _vehicle_sd([frame], entry={"live_sent": False})
+    app.cameras[0].caption_camera = True
+    _vehicle_scores(monkeypatch, {frame: PERSON})
+    _run_vehicle_sd(app, state, fetch, sent, monkeypatch)
+    assert [img for img, _ in sent] == [frame] and sent[0][1].startswith("👤 a · T")
 
 
 def test_sd_followup_vehicle_is_off_unless_opted_in(monkeypatch):

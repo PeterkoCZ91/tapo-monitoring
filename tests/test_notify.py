@@ -85,6 +85,36 @@ def test_caption_says_nothing_when_light_is_unknown():
     assert "🔦" not in cap
 
 
+def test_caption_names_the_camera_when_given():
+    assert notify.build_caption("👤", "23:14", camera="front") == "👤 front · 23:14"
+
+
+def test_caption_camera_comes_before_the_detail_and_after_the_markers():
+    cap = notify.build_caption("👤", "23:14", detail="Jana", light=True, camera="garden",
+                               frame_time="23:14:40")
+    assert cap.startswith("👤🔦 garden · Jana 23:14 · frame 23:14:40")
+
+
+def test_caption_without_a_camera_is_unchanged():
+    kwargs = {"description": "person walking", "detail": "Jana", "count": 3,
+              "minutes_since_last": 12, "score": scorer.SubjectScore(0.91, 0.80),
+              "light": True, "lens": "wide", "frame_time": "23:14:40", "unverified": True}
+    expected = ('👤🐾🔦 Jana 23:14 · frame 23:14:40 · wide lens (unverified)\n'
+                '"person walking"\n📊 detection #3 today · last 12 min ago')
+    assert notify.build_caption("👤", "23:14", **kwargs) == expected
+    assert notify.build_caption("👤", "23:14", camera=None, **kwargs) == expected
+    assert notify.build_caption("👤", "23:14", camera="", **kwargs) == expected
+
+
+def test_caption_camera_is_the_name_only_when_the_camera_opts_in():
+    class Cam:
+        name = "front"
+        caption_camera = False
+    assert notify.caption_camera(Cam()) is None
+    Cam.caption_camera = True
+    assert notify.caption_camera(Cam()) == "front"
+
+
 # ── outage_alert_due ─────────────────────────────────────────────────────────
 
 def test_outage_no_failure():

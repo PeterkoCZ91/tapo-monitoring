@@ -270,6 +270,7 @@ Independent of `mac:`, two checks stop a false "back online":
 | Field | Values | Notes |
 | --- | --- | --- |
 | `name` | short unique string | Used in logs, state and notifications. Required. |
+| `caption_camera` | boolean (default `false`) | Opt-in: put the camera's `name` at the front of its alert captions (`👤 front · 23:14`), so alerts from several cameras in one chat can be told apart. Covers every alert photo (live, sampler, SD follow-up, hub clip, held frame, vehicle and lingering notices). Off leaves the caption exactly as before. |
 | `host` | LAN address/DNS name, or a list of them | Required; keep real values private. A list turns on [host failover](#host-failover-optional). |
 | `mac` | MAC address, unset | Opt-in [MAC rediscovery](#mac-rediscovery-optional): find the camera on the LAN after DHCP moved it. |
 | `role` | `tracking`, `static` | Tracking cameras follow policy; static cameras stay parked at `day_preset` (when set), re-asserted every control tick. |
@@ -1672,7 +1673,7 @@ and `pan_limit.tilt`, `light_trigger.enabled`, `reliability.enabled`, `auto_fix`
 `storage_health` and `latency_metrics`, `alerts.event_restart_enabled`,
 `observability.digital_twin`, `drift_alerts` and `ledger`, plus the options that were
 already strict (`mqtt.tls`, `mqtt.publish_images`, `detection_notice`, `hub_clip_worker`,
-`sampler.keep_sampling_on_defer` and others). Write booleans bare (`true` / `false`).
+`caption_camera`, `sampler.keep_sampling_on_defer` and others). Write booleans bare (`true` / `false`).
 Integer ranges are checked the same way (for example `loop.event_interval` and
 `loop.control_interval` must be >= 1, see [top-level sections](#top-level-sections)).
 

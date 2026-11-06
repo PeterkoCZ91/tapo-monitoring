@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Added
+- `caption_camera: true` (per camera, off by default) puts the camera's name at the
+  front of its alert captions (`👤 front · 23:14`), so alerts from several cameras in
+  one chat can be attributed. It covers every alert photo: live, sampler, SD
+  follow-up, hub clip, held frame, vehicle and lingering notices. Without it the
+  caption is byte-identical to before. Like the other booleans it must be written
+  bare; a quoted value fails the load.
+
 ## [0.13.0] - 2026-11-06
 
 ### Fixed

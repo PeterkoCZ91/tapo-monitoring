@@ -293,6 +293,21 @@ def test_strict_people_requires_a_boolean():
         }]})
 
 
+def test_caption_camera_is_off_by_default_and_opt_in():
+    assert cfg.load_config_from_dict(_minimal()).cameras[0].caption_camera is False
+    data = _minimal()
+    data["cameras"][0]["caption_camera"] = True
+    assert cfg.load_config_from_dict(data).cameras[0].caption_camera is True
+
+
+@pytest.mark.parametrize("value", ["true", "yes", 1, 0, None])
+def test_caption_camera_requires_a_boolean(value):
+    data = _minimal()
+    data["cameras"][0]["caption_camera"] = value
+    with pytest.raises(cfg.ConfigError, match="caption_camera"):
+        cfg.load_config_from_dict(data)
+
+
 def test_duplicate_camera_names_is_error():
     with pytest.raises(cfg.ConfigError):
         cfg.load_config_from_dict({"cameras": [

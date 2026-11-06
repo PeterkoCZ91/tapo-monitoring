@@ -148,6 +148,8 @@ cameras:
     # sd_dense_start: false    # optional; also take a frame every 2 s over the event's
     #                          # first 12 s (+3-6 frames). Unset = on with "largest"/"tallest".
     # telegram_alerts: true    # optional; false = record every alert as sent, send no photo
+    # caption_camera: false    # optional; true = start each alert caption with this
+    #                          # camera's name ("👤 front · 23:14")
     # privacy_notice: false    # optional; one Telegram message when privacy mode goes on/off
     # detection_notice: false  # optional; one message when motion or person detection is
     #                          # switched off in the app (and when back on). Person is read

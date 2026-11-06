@@ -551,7 +551,8 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                                 reason="vehicle_observe")
                 else:
                     v_caption = notify.build_caption(
-                        TYPE_EMOJI["vehicle"], time_str(event), lens=album_lens(image))
+                        TYPE_EMOJI["vehicle"], time_str(event), lens=album_lens(image),
+                        camera=notify.caption_camera(cfg))
                     v_incident = incident_id(cfg.name, event)
                     v_ok = (send_alert(image, v_caption, None, incident=v_incident,
                                        send_path="live", etype="vehicle")
@@ -707,7 +708,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             caption = notify.build_caption(
                 TYPE_EMOJI.get(etype, "👁"), time_str(event),
                 description=description or None, detail=label or None, score=s,
-                light=light, lens=album_lens(image),
+                light=light, lens=album_lens(image), camera=notify.caption_camera(cfg),
             )
             incident = incident_id(cfg.name, event)
             ok = (send_alert(image, caption, s, incident=incident, send_path="live",
