@@ -1870,14 +1870,15 @@ def send_alert_photo(cfg, secrets, image, caption, downscale=None, score=None,
 
     The same funnel feeds the opt-in outbox (:func:`_note_outbox`): a failed real send is
     kept on disk for a late delivery, and a delivered incident clears any copy an earlier
-    failure left there. ``etype`` (the camera's event type) is only read by the outbox,
-    which falls back to it when the frame could not be scored.
+    failure left there. ``etype`` (the camera's event type) tells the bridge a vehicle
+    alert from a person one, and the outbox falls back to it when the frame could not be
+    scored.
     """
     notify.clear_last_message_id()
     ok = _deliver_alert_photo(cfg, secrets, image, caption, downscale=downscale, score=score,
                               incident=incident, send_path=send_path)
     if ok:
-        mqtt.note_alert(cfg.name, image=image, score=score)
+        mqtt.note_alert(cfg.name, image=image, score=score, etype=etype)
         # Only a photo Telegram really took has an id: collect-only sends none.
         _clips.note_alert(cfg, incident, message_id=notify.last_message_id(),
                           caption=caption, now=_time.time())

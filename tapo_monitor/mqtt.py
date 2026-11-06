@@ -291,10 +291,16 @@ class Bridge:
         """The camera reported a detection event: motion on for ``motion_off_after``."""
         self._pulse(camera, "motion", self._clock())
 
-    def note_alert(self, camera, image=None, score=None):
-        """An alert went out (or was recorded): person on, last alert time/score, photo."""
+    def note_alert(self, camera, image=None, score=None, etype=None):
+        """An alert went out (or was recorded): person on, last alert time/score, photo.
+
+        ``etype`` is the alert's event type. A vehicle alert (``scorer.alert_vehicles``)
+        is still the camera's last alert, but it is no person: it leaves the person
+        sensor alone. Any other type, or none, turns it on as before.
+        """
         now = self._clock()
-        self._pulse(camera, "person", now)
+        if etype != "vehicle":
+            self._pulse(camera, "person", now)
         self._set(self.topics.camera(camera, "last_alert"), _iso(now))
         if score is not None:
             try:
@@ -579,8 +585,8 @@ def note_detect(camera):
     _guarded("detect", lambda b: b.note_detect(camera))
 
 
-def note_alert(camera, image=None, score=None):
-    _guarded("alert", lambda b: b.note_alert(camera, image=image, score=score))
+def note_alert(camera, image=None, score=None, etype=None):
+    _guarded("alert", lambda b: b.note_alert(camera, image=image, score=score, etype=etype))
 
 
 def observe(app, state):

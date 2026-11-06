@@ -254,6 +254,41 @@ def test_alert_turns_person_on_then_off_after_the_configured_seconds(tmp_path):
     assert client.last("tapo_monitor/front/person") == "OFF"
 
 
+def test_a_vehicle_alert_never_turns_the_person_sensor_on():
+    clock = Clock()
+    _app, bridge, client = make_bridge({"motion_off_after": 30}, clock=clock)
+    connect(bridge)
+    bridge.note_alert("front", image=None, score=None, etype="vehicle")
+    bridge.step(wait=0)
+    assert client.last("tapo_monitor/front/person") is None
+    assert client.last("tapo_monitor/front/last_alert") == "2026-09-21T14:13:20+00:00"
+    clock.now += 31
+    bridge.step(wait=0)
+    assert "tapo_monitor/front/person" not in client.topics()
+
+
+@pytest.mark.parametrize("etype", [None, "person", "motion"])
+def test_a_person_or_motion_alert_still_turns_the_person_sensor_on(etype):
+    _app, bridge, client = make_bridge()
+    connect(bridge)
+    bridge.note_alert("front", score=0.9, etype=etype)
+    bridge.step(wait=0)
+    assert client.last("tapo_monitor/front/person") == "ON"
+
+
+def test_a_vehicle_alert_leaves_a_running_person_pulse_alone():
+    clock = Clock()
+    _app, bridge, client = make_bridge({"motion_off_after": 30}, clock=clock)
+    connect(bridge)
+    bridge.note_alert("front", score=0.9, etype="person")
+    bridge.step(wait=0)
+    clock.now += 20
+    bridge.note_alert("front", etype="vehicle")      # must not extend the person pulse
+    clock.now += 10
+    bridge.step(wait=0)
+    assert client.last("tapo_monitor/front/person") == "OFF"
+
+
 def test_a_second_alert_extends_the_pulse_without_republishing_on():
     clock = Clock()
     _app, bridge, client = make_bridge({"motion_off_after": 30}, clock=clock)
@@ -490,7 +525,7 @@ def test_hook_errors_are_contained(monkeypatch, caplog):
 
 def test_send_alert_photo_tells_the_bridge_only_after_a_delivery(monkeypatch, tmp_path):
     seen = []
-    monkeypatch.setattr(mqtt, "note_alert", lambda cam, image=None, score=None:
+    monkeypatch.setattr(mqtt, "note_alert", lambda cam, image=None, score=None, etype=None:
                         seen.append((cam, image, score)))
     cfg = app_with(None, cameras=("front",)).cameras[0]
     image = tmp_path / "f.jpg"
@@ -502,6 +537,21 @@ def test_send_alert_photo_tells_the_bridge_only_after_a_delivery(monkeypatch, tm
     monkeypatch.setattr(daemon.notify, "send_photo", lambda *a, **k: True)
     assert daemon.send_alert_photo(cfg, secrets, str(image), "cap", score=0.7) is True
     assert seen == [("front", str(image), 0.7)]
+
+
+def test_send_alert_photo_tells_the_bridge_the_event_type(monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(mqtt, "note_alert", lambda cam, image=None, score=None, etype=None:
+                        seen.append(etype))
+    cfg = app_with(None, cameras=("front",)).cameras[0]
+    image = tmp_path / "f.jpg"
+    image.write_bytes(b"\xff\xd8")
+    secrets = {"telegram_token": "t", "telegram_chat": "c"}
+    monkeypatch.setattr(daemon.notify, "send_photo", lambda *a, **k: True)
+    daemon.send_alert_photo(cfg, secrets, str(image), "cap", etype="vehicle")
+    daemon.send_alert_photo(cfg, secrets, str(image), "cap", score=0.7, etype="person")
+    daemon.send_alert_photo(cfg, secrets, str(image), "cap", score=0.7)
+    assert seen == ["vehicle", "person", None]
 
 
 def test_monitor_detect_audit_reaches_the_bridge(monkeypatch):

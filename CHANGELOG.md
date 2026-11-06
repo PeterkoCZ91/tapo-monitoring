@@ -12,6 +12,12 @@ All notable changes to this project are documented here.
   caption is byte-identical to before. Like the other booleans it must be written
   bare; a quoted value fails the load.
 
+### Fixed
+- A vehicle alert (`scorer.alert_vehicles`) no longer turns the MQTT / Home Assistant
+  Person sensor on. The alert path now hands the bridge the event type; a vehicle
+  alert still updates Last alert (and the alert photo with `publish_images`), and
+  every other alert turns Person on as before. No entity or topic changed.
+
 ## [0.13.0] - 2026-11-06
 
 ### Fixed

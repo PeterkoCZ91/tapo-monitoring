@@ -40,7 +40,7 @@ Each camera becomes a device named after the camera, linked to one daemon device
 
 | Entity | Type | State | Source |
 | --- | --- | --- | --- |
-| Person | `binary_sensor` (occupancy) | `ON` when an alert is delivered, `OFF` `motion_off_after` s after the last one | the alert send path |
+| Person | `binary_sensor` (occupancy) | `ON` when an alert is delivered (not a vehicle alert), `OFF` `motion_off_after` s after the last one | the alert send path |
 | Motion | `binary_sensor` (motion) | `ON` when the camera reports a detection event, `OFF` after `motion_off_after` s | the `audit … action=detect` point (getEvents cameras; a hub-polled battery camera has none, so its Motion stays unknown) |
 | Reachable | `binary_sensor` (connectivity) | the latest reachability probe | outage watchdog |
 | Privacy mode | `binary_sensor` | `ON` while the lens is parked | control-pass read, else the twin probe |
@@ -56,7 +56,8 @@ raised) and **Dropped MQTT messages**.
 "Person" follows the daemon's alert decision, so it is on for exactly the alerts that
 reached Telegram. A camera with `telegram_alerts: false` (or silenced by
 `follow_app_notifications`) records its alerts without sending them; those still turn
-Person on, so MQTT can be the only alert channel for such a camera.
+Person on, so MQTT can be the only alert channel for such a camera. A vehicle alert
+(`scorer.alert_vehicles`) updates Last alert (and the photo) but never turns Person on.
 
 A value the daemon has never read is not published, and Home Assistant shows it as
 unknown: privacy mode needs a control-pass read (`privacy_notice`, `pan_limit` or a preset
