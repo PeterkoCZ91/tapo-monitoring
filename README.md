@@ -55,6 +55,10 @@ see [camera reports](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/do
 
 ## What's new
 
+**0.13.0** can find a camera by its MAC when the router hands it a new address (`mac:`, opt-in),
+no longer posts an alert twice when Telegram's answer times out on a slow uplink, keeps the
+PTZ guards alive and memory flat through long camera outages, logs why a camera dropped off
+the network and can send the whole frame instead of a tiny blurred crop (`crop_min_px_delivery`);
 **0.12.0** adds opt-in event sources for card-less Tapo cameras (`lastalarm`) and Reolink
 cameras (`reolink`), a short video clip as a reply to each alert photo (`clip_video`,
 `clip_url`) and quieter scorer outage notices; **0.11.0** connects to cameras that switched to the newer TPAP login (pytapo 3.4.28)

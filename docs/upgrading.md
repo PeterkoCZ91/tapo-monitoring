@@ -1,3 +1,18 @@
+# Upgrading to 0.13.0
+
+No action is needed when coming from 0.12.0: install the new package and restart. Both new
+options are off unless set.
+
+- **`mac:`** (per camera) lets the monitor find the camera again after DHCP moved it; see
+  the [configuration reference](configuration.md). Without it nothing changes.
+- **`crop_min_px_delivery`** (default 0 = off) sends the whole frame instead of a crop
+  narrower than that many pixels.
+- A Telegram request whose answer does not arrive after the upload is now counted as
+  delivered and logged as a warning (`no answer after upload`) instead of being retried,
+  so it is no longer posted twice.
+
+Coming from 0.11.0 or older, also read the 0.12.0 notes below.
+
 # Upgrading to 0.12.0
 
 Install the new package on the monitor hosts as usual. Most changes need no action, but

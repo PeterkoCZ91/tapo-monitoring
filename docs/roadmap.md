@@ -5,19 +5,19 @@ reliability and detection-quality control plane. It is intentionally capability-
 camera models and firmware expose different methods, so an empty or unsupported response
 is evidence about that device, not a reason to guess.
 
-## Current priorities — 2026-10-28
+## Current priorities — 2026-11-06
 
-The latest released package is **0.11.0**. Release history is in the [changelog](../CHANGELOG.md). Unreleased local candidates on top of it (Reolink detection source, stricter C216 limits, quiet `lastalarm` errors, ONVIF failure categories, Stop-only adaptive budget) are in soak and not published.
+The latest released package is **0.13.0** (2026-11-06). Release history is in the [changelog](../CHANGELOG.md). 0.12.0 shipped the former local candidates (Reolink detection source, C216 vehicle-detection handling, quiet `lastalarm` errors, ONVIF failure categories, the Stop-only adaptive budget, alert clips, the scorer-outage notice delay and `outbox.max_bytes`). 0.13.0 adds the long-outage guard fixes, network diagnosis lines, opt-in MAC rediscovery, the Telegram duplicate-on-timeout fix and `crop_min_px_delivery`. Release does not mean acceptance: the trials below stay open.
 Code implemented in a local candidate, a production trial and a completed acceptance
 review are separate milestones; a checked implementation item does not close its trial.
 
 | Priority | Implemented / deployed | Still open |
 |---|---|---|
-| Virtual PTZ endstops (10.15) | **Deployed candidate, not accepted.** A local read-only soak report separates observed crossings from Stop RPC failures | A later 24-hour review found configured-limit crossings, including peaks after verified OFF. The 2026-10-24 review was not clean either: 129 of 217 Stop failures fell in three hours when a card-reading job ran beside the daemon, and the one "crossing" was the lens standing beyond the limit while its position could not be read. A new untouched 24-hour soak started 2026-10-24. 2026-10-26: still not clean, with about 38 % of Stop calls failing (2621 of 6962 in 24 h), 6 observed limit crossings and 25 peaks after verified OFF. Rebooting the camera did not help, so uptime is not the cause. Failures are now logged with a fixed category (mostly read timeouts). A Stop-only adaptive time budget (0.8 s, stretched to 1.6 s after a failed Stop, hard cap 2 s; position reads stay at 0.8 s because the guard rejects a pose older than 1 s) was soaked from 2026-10-26 and did not help: about 37 % of Stop calls still failed after 18.5 h, and about 98 % of episodes ended at the home pose while the lens stood still (about 50 per hour, also at night), so the camera briefly stops answering rather than the budget being too short. A/B trial since 2026-10-27: `stop_poll_interval` 0.15 -> 0.3 s on that camera (baseline about 110 failures per hour); the first 15 h showed about 31 % failures, a small change that needs the full window. Candidate if it does not help: do not trip the guard on a read outage while the pose is far from the limit. That is a safety change and needs its own candidate. The failure-category logging and adaptive budget are local commits, not released |
+| Virtual PTZ endstops (10.15) | **Deployed candidate, not accepted.** A local read-only soak report separates observed crossings from Stop RPC failures | A later 24-hour review found configured-limit crossings, including peaks after verified OFF. The 2026-10-24 review was not clean either: 129 of 217 Stop failures fell in three hours when a card-reading job ran beside the daemon, and the one "crossing" was the lens standing beyond the limit while its position could not be read. A new untouched 24-hour soak started 2026-10-24. 2026-10-26: still not clean, with about 38 % of Stop calls failing (2621 of 6962 in 24 h), 6 observed limit crossings and 25 peaks after verified OFF. Rebooting the camera did not help, so uptime is not the cause. Failures are now logged with a fixed category (mostly read timeouts). A Stop-only adaptive time budget (0.8 s, stretched to 1.6 s after a failed Stop, hard cap 2 s; position reads stay at 0.8 s because the guard rejects a pose older than 1 s) was soaked from 2026-10-26 and did not help: about 37 % of Stop calls still failed after 18.5 h, and about 98 % of episodes ended at the home pose while the lens stood still (about 50 per hour, also at night), so the camera briefly stops answering rather than the budget being too short. A/B trial since 2026-10-27: `stop_poll_interval` 0.15 -> 0.3 s on that camera (baseline about 110 failures per hour); the first 15 h showed about 31 % failures, a small change that needs the full window. Candidate if it does not help: do not trip the guard on a read outage while the pose is far from the limit. That is a safety change and needs its own candidate. The failure-category logging and adaptive budget were released in 0.12.0; 0.13.0 keeps the guard alive through long camera outages. One site has since switched `pan_limit` from `mode: stop` back to the default recall mode, because the stop guard tripped on position-read timeouts over a weak link (16–25 per hour at night) |
 | Detector quality (10.14) | **Production trial reviewed on two cameras.** The 2026-10-23 hand review covered 516 frames and confirmed threshold 0.35 for that sample | Review other cameras, scorer fallback and an unbiased recording sample; a scorer outage can still send unverified frames. 2026-10-27: a labelled week (346 decisive frames, sample biased toward model disagreements, so not a production recall or false-alarm rate) ranked the production model first: recall 73 % with 19 false positives, against 51 % / 8 for the large RF-DETR, 36 % / 95 for YOLOX 960 and 19 % / 56 for YOLOX 640; on the 198 frames all four scored, 68 % / 6. Still missing: a per-camera and day/night breakdown |
-| Alert correctness and photo selection (10.5, 10.6, 10.13) | **Released in 0.10.0–0.10.2:** photo selection, late-event deduplication and partial-scoring fixes | Review delivered passages, photo quality and cross-path duplicates at incident level |
-| Outbox resilience (10.9) | Existing opt-in outbox **released**; `max_bytes`, safe replacement and full-disk handling **locally tested, not deployed** | First real outage review, controlled send-failure/restart trial and release soak remain open |
-| Alert clips (10.17) | **New, in a candidate soak since 2026-10-24** on one camera-card site and one recorder-backed camera; first clips arrived about 3 minutes after the event, about 1 MB each | A clean 24-hour soak: a clip for every alert photo, no slower card follow-ups, playable on a phone at night. 2026-10-25: on the card site with a weak Wi-Fi link (about -72 dBm) many clips failed (`no card read`, 150 s download timeout) and the clip trial was switched off there; a clip path must not add retries or notices on a poor link before wider rollout |
+| Alert correctness and photo selection (10.5, 10.6, 10.13) | **Released in 0.10.0–0.10.2:** photo selection, late-event deduplication and partial-scoring fixes; **0.13.0:** no duplicate post when Telegram's answer times out, opt-in `crop_min_px_delivery`, opt-in MAC rediscovery | Review delivered passages, photo quality and cross-path duplicates at incident level |
+| Outbox resilience (10.9) | Existing opt-in outbox **released**; `max_bytes`, safe replacement and full-disk handling **released in 0.12.0** | First real outage review, controlled send-failure/restart trial and release soak remain open |
+| Alert clips (10.17) | **Released opt-in in 0.12.0**; candidate soak since 2026-10-24 on one camera-card site and one recorder-backed camera; first clips arrived about 3 minutes after the event, about 1 MB each | A clean 24-hour soak: a clip for every alert photo, no slower card follow-ups, playable on a phone at night. 2026-10-25: on the card site with a weak Wi-Fi link (about -72 dBm) many clips failed (`no card read`, 150 s download timeout) and the clip trial was switched off there; a clip path must not add retries or notices on a poor link before wider rollout |
 | Poor-link behaviour (new) | **Not implemented.** On one site with a weak Wi-Fi link and an unstable uplink, a day showed 176 scorer timeouts and 23 Telegram send failures; alerts arrive in bursts after each outage rather than as duplicates. The existing outbox already merges late alerts into one outage summary | A poor-link mode: fewer retries, merged late alerts, no clip or card-read retries on a weak link. It needs a measurable trigger (for example a sustained scorer-timeout rate) and a decision on how stale an alert may be before it is not sent late |
 | Alert latency (10.4) | Card follow-ups attributed: the live frame is taken 17–19 s after the event, when `getEvents` reports it, and is empty for most of them | Trial `sd_early_look` on the second card site after the current soak; consider a lower freshness guard or a local recorder |
 | Quiet digests (10.16) and other opt-ins (10.12–10.13) | Problems-only digest **deployed candidate**; zones, vehicles and loitering **released opt-in** | Verify degraded/unknown digest behavior and complete observe-only site trials before wider promotion |
@@ -788,6 +788,9 @@ closest.
   zoom photo instead of arriving as an unreadable thumbnail; the native frame a crop was
   cut from is archived for review, and an alert that went out without a score is captioned
   `(unverified)`. Shipped in 0.9.0.
+- [x] `crop_min_px_delivery` (opt-in, default 0 = off): a crop cut from the delivery-width
+  frame (SD clip frames without a native grab) narrower than the floor is dropped and the
+  whole frame is sent instead of a blown-up 150 px patch. Released in 0.13.0.
 - [ ] Review card-source photo quality with each camera's own clips and current frame
   selection; the earlier single-clip result is insufficient for a general recommendation.
   Separate download latency, extraction cost and photo quality in the comparison.
@@ -825,6 +828,10 @@ closest.
   through motion or the sampler, using camera event time rather than only wall-clock cooldown.
 - [ ] Validate this against real delayed events and check duplicates across delivery paths;
   a check for repeated identical incident/path pairs alone cannot exclude every duplicate.
+- [x] A photo, album or clip is no longer posted twice when Telegram received it but its
+  answer timed out on a slow uplink. The retry runs only when the request certainly did not
+  reach Telegram; a missing answer after the upload counts as delivered, is logged as a
+  warning and is not queued in the outbox again. Released in 0.13.0.
 
 ### 10.8 — Tell the owner when a camera stops watching
 
@@ -925,16 +932,29 @@ often what photographs the person seconds later.
 - [ ] 0.9.0 shipped these features opt-in. Soak them for at least five days on real hosts
   in observe mode before changing any default; release gates are alert volume within 30 % of the baseline and
   no unexpected restart or traceback.
-- [ ] Host failover does not yet cover the recorder paths, the CLI commands, MQTT or hub
-  cameras, and never returns to the primary address by itself.
+- [ ] Host failover does not yet cover the recorder paths, MQTT or hub cameras. Return to
+  the primary address (three good probes in a row) and CLI commands following the saved
+  address were released in 0.12.0.
 - [x] Scorer service authentication: optional shared token (`TAPO_SCORER_TOKEN[_FILE]` on
   the service, `scorer.token_env` on the clients); `/health` stays open.
 - [x] `soak_sim` covers `daemon.tick`, the stall watchdog and the `statusd` view
   (`--wrapper`), counts leaked archive and temp files, and runs in CI as a three-seed
   matrix. Still not covered: the HTTP server thread itself and orphan-dir cleanup at a real
   start.
+- [x] Opt-in MAC rediscovery (`mac:` per camera): a camera unreachable for three control
+  passes is looked up by its MAC in the neighbour table, then by a gentle sweep of its
+  directly connected subnet; the address found is used by every client once a login
+  confirms the MAC, logged as a move and sent once as a notice. Released in 0.13.0; it
+  covers only the host's own subnet.
+- [x] An address the monitoring host itself took over (DHCP gave the host the camera's old
+  address after a router outage) no longer counts as the camera being back, and after an
+  outage the recovery notice waits for a working login when every login since the outage
+  failed. Released in 0.13.0.
 - [ ] MAC-to-address resolution through a host on the camera's own network, for sites
   whose DHCP or router changes (ARP is invisible across a subnet route).
+- [ ] `soak_report` should report the first-delivery median per path. Live (about 25 s) and
+  card (about 150 s) differ by design, and a mixed median looked like a regression when the
+  share of card alerts changed.
 
 ### 10.14 — A better detector
 
@@ -1018,6 +1038,17 @@ often what photographs the person seconds later.
 Status: **candidate deployed; production acceptance open**.
 
 - [ ] 2026-10-27: the adaptive Stop budget soak was not clean (about 37 % failures). A/B `stop_poll_interval` 0.3 s is running; decide after the review.
+- [x] Keep the guards alive through long camera outages (released in 0.13.0). About 35
+  minutes of failed Stops overflowed the exponential backoff and killed the stop guard
+  thread until a restart; every exponential backoff now clamps its exponent and the guard
+  loop survives a failure in its own error handling. The pan guard no longer rebuilds its
+  ONVIF client on every poll while the camera is offline (a memory leak that ended in an
+  out-of-memory kill about hourly on a small host); a failed build backs off up to 300 s.
+- [ ] One site switched `pan_limit` from `mode: stop` back to the default recall mode: over
+  its weak link the stop guard tripped on position-read timeouts, 16–25 times per hour at
+  night. A read-outage tolerance (above) is a precondition for `mode: stop` on such a link.
+- [ ] A `pan_limit` recall should send `GotoPreset` before the archive RTSP grab; the grab
+  in front of it added about 3 s before the lens turned back.
 
 - [x] Observe ONVIF pan position independently of the alert loop and stop before an
   explicitly configured preset boundary, with a configurable margin and a right-only option.
@@ -1115,6 +1146,11 @@ The photo says someone was there; it rarely shows what they did. An owner asked 
 - [x] Log SD transfer start and finish timestamps, elapsed time and failures for
   comparison with network history. This supports investigation; sparse overlapping
   probes cannot establish causality.
+- [x] A `network diagnosis` line at the start of a camera outage, every 30 minutes during
+  it and on recovery: the host's neighbour state for the camera, the host's own Wi-Fi link
+  when the route is wireless and the camera's last reported Wi-Fi signal with its age (read
+  at most every 5 minutes). The stop guard logs outage and recovery lines at a low rate.
+  Released in 0.13.0.
 
 ### 10.7 — A public reference for the local API
 
@@ -1127,7 +1163,7 @@ The photo says someone was there; it rarely shows what they did. An owner asked 
 
 ## Planning horizons
 
-Updated **2026-10-23**. These horizons are review priorities, not release promises.
+Updated **2026-11-06**. These horizons are review priorities, not release promises.
 Keep implementation, deployment and acceptance separate. Promote a policy only when
 its own evidence is available, and keep unreviewed features opt-in.
 
@@ -1157,6 +1193,8 @@ its own evidence is available, and keep unreviewed features opt-in.
 - Finish TC46 device evidence: native ONVIF movement tests and a daytime lamp/API check
   do not establish stopping autonomous tracking or automatic night-light quality. SD,
   power-loss and real night scenarios still need their own acceptance evidence.
+- The firmware smart lamp lights about 20 s late while the PTZ moves (auto-track or a
+  recall). Trial a night without tracking on that camera to see whether the delay goes.
 
 ### Next month — bound slow paths and validate opt-in policies
 
@@ -1165,9 +1203,11 @@ its own evidence is available, and keep unreviewed features opt-in.
 - [x] Give the outbox a total byte budget for complete entries next to its entry and age
   limits; report evictions and ensure a full filesystem cannot interrupt live delivery.
   Local implementation and failure-path tests cover full disk, replacement atomicity and
-  concurrent drains; outage/restart acceptance (10.9) remains open. This is not deployed.
+  concurrent drains; outage/restart acceptance (10.9) remains open. Released in 0.12.0.
 - Soak zones, loitering, vehicles and failover candidates in observe mode for at least
   five days before any default changes (10.12, 10.13).
+- Opt-in fixed clock end for night tracking: the sunrise offset drifts across the season,
+  so a fixed end time would keep the tracking window stable.
 - Revisit the site-specific verifier (9.4) only if labelled residual errors justify it
   after the detector change; keep it independent of endstop acceptance.
 

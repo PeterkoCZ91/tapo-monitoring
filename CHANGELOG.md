@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.13.0] - 2026-11-06
 
 ### Fixed
 - A photo, album or clip is no longer posted twice when Telegram received it but its
