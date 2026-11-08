@@ -27,6 +27,7 @@ mqtt:
   base_topic: tapo_monitor     # set a distinct one per daemon when several share a broker
   publish_images: false        # true: also publish the last alert photo (see Privacy)
   motion_off_after: 60         # seconds person/motion stay on after the last event
+  separate_event_types: false  # true: add a Vehicle sensor, keep pet/tamper off Person
 ```
 
 Unknown keys are refused at load time, like everywhere else in `cameras.yaml`.
@@ -48,6 +49,7 @@ Each camera becomes a device named after the camera, linked to one daemon device
 | Health | `sensor` | Digital Twin health status (`ok`, `degraded`, …); layers and drift count as attributes | `observability.digital_twin` |
 | Last alert | `sensor` (timestamp) | when the last alert went out | the alert send path |
 | Last alert score | `sensor` | the scorer's subject confidence of that alert | the alert send path |
+| Vehicle | `binary_sensor` | `ON` when a vehicle alert is delivered, `OFF` `motion_off_after` s after the last one | only with `separate_event_types: true` |
 | Last alert photo | `image` | the whole-scene frame of the last alert | only with `publish_images: true` |
 
 The daemon device carries **Running** (`online`/`offline`), **Loop failing** (a tick
@@ -58,6 +60,20 @@ reached Telegram. A camera with `telegram_alerts: false` (or silenced by
 `follow_app_notifications`) records its alerts without sending them; those still turn
 Person on, so MQTT can be the only alert channel for such a camera. A vehicle alert
 (`scorer.alert_vehicles`) updates Last alert (and the photo) but never turns Person on.
+
+By default a pet or tamper alert turns Person on like any other alert. Set
+`separate_event_types: true` to tell them apart:
+
+- each camera gets a **Vehicle** `binary_sensor` (state topic `<base>/<camera>/vehicle`),
+  `ON` when a vehicle alert is delivered and `OFF` `motion_off_after` s after the last one;
+- pet and tamper alerts no longer turn Person on. They have no sensor of their own and
+  still update Last alert (and the photo);
+- person alerts, and motion alerts that passed the daemon's checks, turn Person on as before.
+
+The option follows the event type the camera reported. A person the camera files as a pet
+stays off Person even when the scorer confirmed the photo, so leave it off if your camera
+mislabels people that way. Turning it off again leaves the Vehicle entity behind in Home
+Assistant until you delete it or clear its retained discovery topic.
 
 A value the daemon has never read is not published, and Home Assistant shows it as
 unknown: privacy mode needs a control-pass read (`privacy_notice`, `pan_limit` or a preset
@@ -74,6 +90,7 @@ All states are retained and published only when they change.
 <base>/daemon/dropped                  integer
 <base>/<camera>/person                 ON | OFF
 <base>/<camera>/motion                 ON | OFF
+<base>/<camera>/vehicle                ON | OFF   (separate_event_types only)
 <base>/<camera>/connectivity           ON | OFF
 <base>/<camera>/privacy                ON | OFF
 <base>/<camera>/detection_off          ON | OFF

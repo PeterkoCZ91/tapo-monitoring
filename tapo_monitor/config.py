@@ -505,6 +505,8 @@ class MqttConfig:
     publish_images: bool = False
     # Seconds the person/motion binary sensors stay on after the last alert/detection.
     motion_off_after: int = 60
+    # Off by default: true adds a Vehicle sensor and keeps pet and tamper alerts off Person.
+    separate_event_types: bool = False
 
     @property
     def enabled(self) -> bool:
@@ -1276,6 +1278,8 @@ def _mqtt(data, cameras):
         raise ConfigError("mqtt.password_env needs mqtt.user_env as well")
     tls = _check_bool(data.get("tls", False), "tls", "mqtt")
     publish_images = _check_bool(data.get("publish_images", False), "publish_images", "mqtt")
+    separate_event_types = _check_bool(data.get("separate_event_types", False),
+                                       "separate_event_types", "mqtt")
     off_after = data.get("motion_off_after", 60)
     if isinstance(off_after, bool) or not isinstance(off_after, int) or off_after < 1:
         raise ConfigError("mqtt.motion_off_after must be an integer >= 1 (seconds)")
@@ -1297,6 +1301,7 @@ def _mqtt(data, cameras):
         base_topic=_topic_part(data.get("base_topic", "tapo_monitor"), "base_topic"),
         publish_images=publish_images,
         motion_off_after=off_after,
+        separate_event_types=separate_event_types,
     )
 
 

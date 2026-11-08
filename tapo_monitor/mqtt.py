@@ -128,6 +128,8 @@ _CAMERA_ENTITIES = (
     ("last_alert_score", "sensor", "Last alert score",
      {"state_class": "measurement", "suggested_display_precision": 2, "icon": "mdi:account-eye"}),
 )
+# Only with ``mqtt.separate_event_types``, so a default config announces exactly the above.
+_VEHICLE_ENTITY = ("vehicle", "binary_sensor", "Vehicle", {"icon": "mdi:car"})
 
 
 def discovery_messages(mqtt_cfg, camera_names, version="0"):
@@ -174,7 +176,9 @@ def discovery_messages(mqtt_cfg, camera_names, version="0"):
         device = {"identifiers": [f"{t.node}_{object_id}"], "name": str(name),
                   "manufacturer": "TP-Link", "model": "Tapo camera (tapo-monitor)",
                   "via_device": daemon_id}
-        for key, component, label, extra in _CAMERA_ENTITIES:
+        entities = (_CAMERA_ENTITIES + (_VEHICLE_ENTITY,) if mqtt_cfg.separate_event_types
+                    else _CAMERA_ENTITIES)
+        for key, component, label, extra in entities:
             extra = dict(extra)
             attributes = extra.pop("json_attributes", False)
             payload = {"name": label, "unique_id": f"{t.node}_{slug}_{key}", "device": device,
@@ -291,16 +295,28 @@ class Bridge:
         """The camera reported a detection event: motion on for ``motion_off_after``."""
         self._pulse(camera, "motion", self._clock())
 
+    def _alert_sensor(self, etype):
+        """The binary sensor an alert of ``etype`` pulses, or None when it pulses none."""
+        separate = self.cfg.separate_event_types
+        if etype == "vehicle":
+            return "vehicle" if separate else None
+        if separate and etype in ("pet", "tamper"):
+            return None
+        return "person"
+
     def note_alert(self, camera, image=None, score=None, etype=None):
-        """An alert went out (or was recorded): person on, last alert time/score, photo.
+        """An alert went out (or was recorded): a sensor pulse, last alert time/score, photo.
 
         ``etype`` is the alert's event type. A vehicle alert (``scorer.alert_vehicles``)
         is still the camera's last alert, but it is no person: it leaves the person
-        sensor alone. Any other type, or none, turns it on as before.
+        sensor alone. Any other type, or none, turns it on as before. With
+        ``mqtt.separate_event_types`` a vehicle alert pulses its own sensor and pet and
+        tamper alerts leave the person sensor alone too.
         """
         now = self._clock()
-        if etype != "vehicle":
-            self._pulse(camera, "person", now)
+        sensor = self._alert_sensor(etype)
+        if sensor is not None:
+            self._pulse(camera, sensor, now)
         self._set(self.topics.camera(camera, "last_alert"), _iso(now))
         if score is not None:
             try:

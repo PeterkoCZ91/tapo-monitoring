@@ -142,6 +142,8 @@ def test_mqtt_block_defaults():
     ({"host": BROKER, "port": "1883"}, "mqtt.port"),
     ({"host": BROKER, "tls": "yes"}, "'tls' must be true or false"),
     ({"host": BROKER, "publish_images": 1}, "'publish_images' must be true or false"),
+    ({"host": BROKER, "separate_event_types": "yes"},
+     "'separate_event_types' must be true or false"),
     ({"host": BROKER, "motion_off_after": 0}, "motion_off_after"),
     ({"host": BROKER, "base_topic": "a/+/b"}, "mqtt.base_topic"),
     ({"host": BROKER, "base_topic": "tapo/"}, "mqtt.base_topic"),
@@ -287,6 +289,87 @@ def test_a_vehicle_alert_leaves_a_running_person_pulse_alone():
     clock.now += 10
     bridge.step(wait=0)
     assert client.last("tapo_monitor/front/person") == "OFF"
+
+
+def test_separate_event_types_is_off_by_default():
+    assert app_with({"host": BROKER}).mqtt.separate_event_types is False
+    assert app_with().mqtt.separate_event_types is False
+
+
+def test_without_separate_event_types_discovery_is_unchanged():
+    _app, default, _client = make_bridge()
+    _app, off, _client = make_bridge({"separate_event_types": False})
+    assert (mqtt.discovery_messages(default.cfg, default.camera_names, "1")
+            == mqtt.discovery_messages(off.cfg, off.camera_names, "1"))
+    assert not [t for t in discovery(default) if "/vehicle/" in t]
+
+
+@pytest.mark.parametrize("etype", ["pet", "tamper"])
+def test_without_separate_event_types_pet_and_tamper_still_turn_person_on(etype):
+    _app, bridge, client = make_bridge()
+    connect(bridge)
+    bridge.note_alert("front", score=0.9, etype=etype)
+    bridge.step(wait=0)
+    assert client.last("tapo_monitor/front/person") == "ON"
+
+
+def test_without_separate_event_types_a_vehicle_alert_publishes_no_vehicle_state():
+    _app, bridge, client = make_bridge()
+    connect(bridge)
+    bridge.note_alert("front", etype="vehicle")
+    bridge.step(wait=0)
+    assert "tapo_monitor/front/vehicle" not in client.topics()
+
+
+def test_separate_event_types_announces_a_vehicle_sensor_per_camera():
+    _app, bridge, _client = make_bridge({"separate_event_types": True})
+    msgs = discovery(bridge)
+    cfg_front = msgs["homeassistant/binary_sensor/tapo_monitor_cam_front/vehicle/config"]
+    assert cfg_front["name"] == "Vehicle"
+    assert cfg_front["state_topic"] == "tapo_monitor/front/vehicle"
+    assert cfg_front["unique_id"] == "tapo_monitor_front_vehicle"
+    assert cfg_front["availability_topic"] == "tapo_monitor/status"
+    assert cfg_front["device"]["identifiers"] == ["tapo_monitor_cam_front"]
+    assert "homeassistant/binary_sensor/tapo_monitor_cam_back_yard/vehicle/config" in msgs
+    # The option only adds: every default entity is still announced as before.
+    _app, default, _client = make_bridge()
+    assert set(discovery(default)) < set(msgs)
+
+
+def test_separate_event_types_a_vehicle_alert_pulses_vehicle_only():
+    clock = Clock()
+    _app, bridge, client = make_bridge({"separate_event_types": True, "motion_off_after": 30},
+                                       clock=clock)
+    connect(bridge)
+    bridge.note_alert("front", etype="vehicle")
+    bridge.step(wait=0)
+    assert client.last("tapo_monitor/front/vehicle") == "ON"
+    assert "tapo_monitor/front/person" not in client.topics()
+    assert client.last("tapo_monitor/front/last_alert") == "2026-09-21T14:13:20+00:00"
+    clock.now += 30
+    bridge.step(wait=0)
+    assert client.last("tapo_monitor/front/vehicle") == "OFF"
+
+
+@pytest.mark.parametrize("etype", ["pet", "tamper"])
+def test_separate_event_types_pet_and_tamper_leave_person_alone(etype):
+    _app, bridge, client = make_bridge({"separate_event_types": True})
+    connect(bridge)
+    bridge.note_alert("front", score=0.9, etype=etype)
+    bridge.step(wait=0)
+    assert "tapo_monitor/front/person" not in client.topics()
+    assert "tapo_monitor/front/vehicle" not in client.topics()
+    assert client.last("tapo_monitor/front/last_alert") == "2026-09-21T14:13:20+00:00"
+
+
+@pytest.mark.parametrize("etype", [None, "person", "motion"])
+def test_separate_event_types_person_and_motion_alerts_still_turn_person_on(etype):
+    _app, bridge, client = make_bridge({"separate_event_types": True})
+    connect(bridge)
+    bridge.note_alert("front", score=0.9, etype=etype)
+    bridge.step(wait=0)
+    assert client.last("tapo_monitor/front/person") == "ON"
+    assert "tapo_monitor/front/vehicle" not in client.topics()
 
 
 def test_a_second_alert_extends_the_pulse_without_republishing_on():

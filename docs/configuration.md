@@ -1533,6 +1533,7 @@ mqtt:
   base_topic: tapo_monitor
   publish_images: false
   motion_off_after: 60
+  separate_event_types: false
 ```
 
 - The block's presence is the switch; `host` is then required. Absent, nothing is
@@ -1543,6 +1544,8 @@ mqtt:
 - `publish_images` sends the last alert photo to the broker; off by default because the
   photos show people.
 - `motion_off_after` (≥ 1 s) is how long Person and Motion stay on after the last event.
+- `separate_event_types` adds a Vehicle `binary_sensor` per camera and keeps pet and
+  tamper alerts from turning Person on. Off by default, which publishes what it always did.
 - Camera names become topic levels with anything outside `A-Z a-z 0-9 _ -` replaced by
   `_`; two cameras that collide that way are refused.
 
