@@ -17,11 +17,13 @@ the fixed HH:MM window from NIGHT_START/NIGHT_END is used. No coordinates are ha
 """
 
 import os
+import re
 import sys
 from datetime import datetime, timedelta
 
 DEFAULT_SUNSET_OFFSET = 30
 DEFAULT_SUNRISE_OFFSET = 30
+NOON_MINUTE = 12 * 60
 
 # The daemon asks is_night() every poll (~4 s); an unset NIGHT_TZ would otherwise
 # repeat the same fallback warning ~20 000 times a day and drown the journal.
@@ -149,6 +151,43 @@ def in_clock_window(window, now=None):
     if start < end:
         return start <= cur < end
     return cur >= start or cur < end
+
+
+def parse_clock_time(spec):
+    """Parse a strict "HH:MM" string into minutes after midnight; ValueError otherwise.
+
+    An unquoted YAML ``14:30`` arrives as the sexagesimal integer 870, which is why a
+    non-string is refused here rather than read as an hour.
+    """
+    if not isinstance(spec, str):
+        raise ValueError(f"expected a quoted 'HH:MM' clock time, got {spec!r}")
+    match = re.fullmatch(r"([01][0-9]|2[0-3]):([0-5][0-9])", spec)
+    if match is None:
+        raise ValueError(f"expected a quoted 'HH:MM' clock time, got {spec!r}")
+    return int(match.group(1)) * 60 + int(match.group(2))
+
+
+def night_with_fixed_end(night, end_minute, clock=None):
+    """The shared ``night`` with its end moved to a fixed wall-clock minute.
+
+    The evening still starts when the shared night does; only the end stops following
+    the sun. An end before noon closes the night that began the evening before, and it
+    keeps that night open even past sunrise. An end from noon on closes the same
+    evening's night, so nothing is left of it after midnight.
+    """
+    clock = clock or datetime.now()
+    current = clock.hour * 60 + clock.minute
+    reached = current >= end_minute
+    if not reached and clock.fold:
+        # The repeated hour of the autumn clock change: the wall clock runs back past an
+        # end it already reached on the first pass, and that must not reopen the night.
+        first = clock.replace(hour=end_minute // 60, minute=end_minute % 60, fold=0)
+        reached = first.timestamp() <= clock.timestamp()
+    if end_minute < NOON_MINUTE:
+        return bool(night) if current >= NOON_MINUTE else not reached
+    if current < NOON_MINUTE:
+        return False
+    return bool(night) and not reached
 
 
 def describe_window(now=None):

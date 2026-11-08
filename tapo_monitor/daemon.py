@@ -174,9 +174,16 @@ def plan_night_vision_mode(cfg: CameraConfig, clock: datetime | None = None) -> 
 
 def plan_camera(cfg: CameraConfig, night: bool, rain_active: bool,
                 clock: datetime | None = None) -> CameraPlan:
-    """Pure: decide the camera-control actions for one tick (``clock`` = local time)."""
+    """Pure: decide the camera-control actions for one tick (``clock`` = local time).
+
+    ``tracking.night_end`` moves the end of the night for tracking and its presets only.
+    ``night`` itself, which the forced-IR plan below reads, stays the shared one.
+    """
+    tracking_night = night
+    if cfg.tracking.night_end is not None:
+        tracking_night = scheduling.night_with_fixed_end(night, cfg.tracking.night_end, clock)
     autotrack_on, rain_parked = tracking.decide_tracking(
-        cfg.role, night, rain_active, cfg.weather.strategy, cfg.weather.storm_park
+        cfg.role, tracking_night, rain_active, cfg.weather.strategy, cfg.weather.storm_park
     )
     sensitivity = tracking.decide_motion_sensitivity(
         rain_active, cfg.weather.motion_normal, cfg.weather.motion_rain, cfg.weather.strategy

@@ -79,6 +79,10 @@ class TrackingConfig:
     # None/0 keep today's behaviour. Night only: see plan_camera.
     back_time: int | None = None
     track_hold: int = 0
+    # Fixed local clock end of the tracking night, in minutes after midnight, instead of
+    # the sunrise that moves through the year. None keeps the shared night. Tracking and
+    # its presets only: see plan_camera.
+    night_end: int | None = None
 
 
 @dataclass
@@ -814,12 +818,19 @@ def _tracking(data, where):
         raise ConfigError(f"{where}: tracking.back_time must not be negative")
     if track_hold < 0:
         raise ConfigError(f"{where}: tracking.track_hold must not be negative")
+    night_end = None
+    if d.get("night_end") is not None:
+        try:
+            night_end = scheduling.parse_clock_time(d["night_end"])
+        except ValueError as exc:
+            raise ConfigError(f"{where}: tracking.night_end {exc}") from None
     return TrackingConfig(
         smarttrack=list(smarttrack),
         day_preset=d.get("day_preset"),
         night_preset=d.get("night_preset"),
         back_time=back_time,
         track_hold=track_hold,
+        night_end=night_end,
     )
 
 
@@ -1564,6 +1575,9 @@ def _camera(data, index):
                                   f"{lens!r} (known: {', '.join(sorted(lens_names))})")
     pan_limit = _pan_limit(data.get("pan_limit"), where)
     tracking_cfg = _tracking(data.get("tracking"), where)
+    if tracking_cfg.night_end is not None and schedule != "astral":
+        raise ConfigError(f"{where}: tracking.night_end needs schedule: astral, because "
+                          f"schedule: {schedule} already fixes the night")
     weather_cfg = _weather(data.get("weather"), where)
     rain_parks = weather_cfg.storm_park or weather_cfg.strategy == "disable_tracking"
     if rain_parks and tracking_cfg.day_preset is None:

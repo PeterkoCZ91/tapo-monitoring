@@ -189,6 +189,7 @@ cameras:
       smarttrack: [people]   # subset of: people, vehicle, pet, baby
       day_preset: "2"        # PTZ preset to park at during the day (static)
       night_preset:          # optional preset for night
+      # night_end: "04:30"   # optional fixed end of tracking, instead of sunrise (quoted HH:MM)
       # How long the camera keeps looking where auto-track took it (night only — a
       # tracking camera tracks only at night). Two halves of one dwell and the SHORTER
       # one decides, so setting either alone changes nothing:

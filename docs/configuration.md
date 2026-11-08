@@ -566,6 +566,22 @@ pan/tilt camera that should be brought back to a view; up to 0.11 an unset value
 `"2"`. `storm_park` or `strategy: disable_tracking` without a `day_preset` logs a
 warning at load: rain then only stops tracking. `night_preset` is optional and recalled only while a tracking camera tracks.
 
+`night_end` is an optional fixed clock end for the tracking night, a quoted `"HH:MM"`
+string, for example `night_end: "04:30"`. Unset, tracking follows the shared night, whose
+end moves with sunrise through the year. Set, tracking stops and the camera returns to
+`day_preset` at that time every day, even when that is before or after sunrise; the
+evening start still follows the shared night. An end before noon closes the night that
+began the evening before, and an end from noon on closes the same evening's night. It
+uses the host's local time, like `quiet_hours`, so a container needs `TZ` set. When the
+clock goes back and the end falls in the repeated hour, the first pass ends the night;
+when the end falls in the skipped hour of spring, the night ends at the first minute
+after the jump. It needs `schedule: astral`, the default, and changes nothing on a
+`static` camera.
+
+`night_end` changes tracking, `night_preset`, `day_preset` and `back_time` only. Forced
+IR (`night_vision: ir`), `scorer.night_threshold`, `scorer.unscored_at_night`,
+`night_only` and the lamp window keep using the shared night or their own clock window.
+
 `smarttrack` accepts `people`, `vehicle`, `pet` and `baby` where firmware supports them.
 The current control policy re-asserts person detection, disables vehicle detection and
 applies auto-track last. `person_sensitivity` is an optional integer from 0 to 100; unset
