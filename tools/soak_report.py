@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tapo_monitor.audit import parse_audit_line  # noqa: E402
 
 BASELINE_VERSION = 1
+FIRST_ALERT_PATH_ORDER = ("live", "sampler", "sd")
 DEFAULT_TOLERANCE = 0.30
 # Below this many alerts of difference a "+300 %" is two alerts, not a regression.
 MIN_ABS_ALERT_DELTA = 5
@@ -241,6 +242,7 @@ def _journal_stats(lines):
     stopguard_crossings_after_off = 0
     sent: dict = {}
     first_age: dict = {}
+    first_path: dict = {}
     gates: dict = {}
     would: dict = {}
     for line in lines:
@@ -261,6 +263,7 @@ def _journal_stats(lines):
                         key = (camera, str(rec.get("etype")), start)
                         if key not in first_age or age < first_age[key]:
                             first_age[key] = float(age)
+                            first_path[key] = path
                 elif rec.get("telegram") is False:
                     cell["failed"] += 1
                 else:
@@ -314,13 +317,19 @@ def _journal_stats(lines):
             hub_errors += 1
 
     ages_by_camera: dict = {}
-    for (camera, _etype, _start), age in first_age.items():
-        ages_by_camera.setdefault(camera, []).append(age)
+    ages_by_path: dict = {}
+    for key, age in first_age.items():
+        ages_by_camera.setdefault(key[0], []).append(age)
+        ages_by_path.setdefault(first_path[key], []).append(age)
     all_ages = [age for ages in ages_by_camera.values() for age in ages]
     first_alert = {"n": len(all_ages), "median_s": median(all_ages),
                    "p90_s": percentile(all_ages, 0.9),
                    "by_camera": {c: {"n": len(a), "median_s": median(a), "p90_s": percentile(a, 0.9)}
-                                 for c, a in sorted(ages_by_camera.items())}}
+                                 for c, a in sorted(ages_by_camera.items())},
+                   # Paths differ by design (a card send waits for the recording), so a shift in
+                   # the mix moves the summary above without anything getting slower.
+                   "by_path": {p: {"n": len(a), "median_s": median(a), "p90_s": percentile(a, 0.9)}
+                               for p, a in sorted(ages_by_path.items())}}
     sent_ok = sum(c["ok"] for paths in sent.values() for c in paths.values())
     sent_failed = sum(c["failed"] for paths in sent.values() for c in paths.values())
     return {
@@ -519,6 +528,14 @@ def render_host(name, entry):
     fa = entry["first_alert"]
     lines.append(f"   first      median {_fmt(fa['median_s'], suffix=' s')} p90 {_fmt(fa['p90_s'], suffix=' s')} "
                  f"(n={fa['n']}, first delivered send per event)")
+    by_path = fa.get("by_path") or {}  # absent from a record saved by an older version
+    if by_path:
+        known = [p for p in FIRST_ALERT_PATH_ORDER if p in by_path]
+        order = known + sorted(p for p in by_path if p not in FIRST_ALERT_PATH_ORDER)
+        cells = ", ".join(f"{p} {_fmt(by_path[p]['median_s'], suffix=' s')} "
+                          f"p90 {_fmt(by_path[p]['p90_s'], suffix=' s')} (n={by_path[p]['n']})"
+                          for p in order)
+        lines.append(f"              {cells}")
     gate_total: Counter = Counter()
     for counts in entry["gates"].values():
         gate_total.update(counts)

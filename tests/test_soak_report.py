@@ -59,6 +59,84 @@ def test_healthy_host_numbers():
     assert rec["resources"]["cpu_pct"] == pytest.approx(720 / 10200.5 * 100, rel=1e-3)
 
 
+def _rendered(record, name="a"):
+    return soak.render_host(name, soak.build_report({name: record})["hosts"][name])
+
+
+def test_first_alert_is_also_split_by_the_path_that_delivered_it():
+    fa = probe("host-a")["first_alert"]
+    # The event at start=1000 was delivered live twice; only its earliest send counts.
+    assert fa["by_path"] == {
+        "live": {"n": 2, "median_s": 65.0, "p90_s": pytest.approx(93.0)},
+        "sampler": {"n": 1, "median_s": 70.0, "p90_s": 70.0},
+        "sd": {"n": 1, "median_s": 190.0, "p90_s": 190.0},
+    }
+    # The summary and its per-camera split keep their meaning and their keys.
+    assert fa["n"] == 4 and fa["median_s"] == 85
+    assert set(fa["by_camera"]) == {"cam-a", "cam-b"}
+
+
+def _audit(start, path, age, delivered="true"):
+    return (f"INFO audit camera=cam-a path={path} action=send etype=person start={start} "
+            f"event_age_s={age} telegram={delivered}")
+
+
+def _first_alert(lines):
+    raw = (FIXTURES / "host-a.raw").read_text().splitlines()
+    kept = [line for line in raw if "audit " not in line]
+    at = next(i for i, line in enumerate(raw) if "audit " in line)
+    return soak.analyze("\n".join(kept[:at] + lines + kept[at:]) + "\n", 24)["first_alert"]
+
+
+def test_first_alert_path_is_the_earliest_delivery_not_the_first_logged():
+    """A card send logged first but older than a later live send must not claim the event."""
+    fa = _first_alert([_audit(1000, "sd", 150), _audit(1000, "live", 20)])
+    assert set(fa["by_path"]) == {"live"}
+    assert fa["by_path"]["live"]["median_s"] == 20
+
+
+def test_first_alert_ignores_a_failed_send_when_choosing_the_path():
+    fa = _first_alert([_audit(1000, "live", 20, "false"), _audit(1000, "sd", 150)])
+    assert set(fa["by_path"]) == {"sd"}
+
+
+def test_first_alert_by_path_is_empty_without_deliveries():
+    assert _first_alert([])["by_path"] == {}
+
+
+def test_terminal_report_shows_the_split_in_a_fixed_order():
+    lines = _rendered(probe("host-a")).splitlines()
+    at = next(i for i, line in enumerate(lines) if "first      median" in line)
+    assert lines[at + 1].strip() == "live 65 s p90 93 s (n=2), sampler 70 s p90 70 s (n=1), sd 190 s p90 190 s (n=1)"
+
+
+def test_terminal_report_omits_the_split_when_nothing_was_delivered():
+    rec = probe("host-a")
+    rec["first_alert"].update(n=0, median_s=None, p90_s=None, by_path={})
+    lines = _rendered(rec).splitlines()
+    at = next(i for i, line in enumerate(lines) if "first      median" in line)
+    assert " p90 " not in lines[at + 1]
+
+
+def test_terminal_report_accepts_a_record_without_the_split():
+    """A report saved by an older version has no by_path; rendering it must not fail."""
+    rec = probe("host-a")
+    del rec["first_alert"]["by_path"]
+    assert "first      median" in _rendered(rec)
+
+
+def test_a_baseline_saved_before_the_split_still_compares(tmp_path, capsys):
+    base = tmp_path / "base.json"
+    args = [f"a={FIXTURES / 'host-a.raw'}", "--baseline", str(base)]
+    assert soak.main(args) == 0
+    saved = json.loads(base.read_text())
+    saved["hosts"]["a"]["first_alert"].pop("by_path")
+    base.write_text(json.dumps(saved))
+    capsys.readouterr()
+    assert soak.main(args) == 0
+    assert "vs baseline" not in capsys.readouterr().out
+
+
 def test_errors_are_counted_from_content_and_grouped():
     rec = probe("host-bad")
     assert rec["errors"] == 4
