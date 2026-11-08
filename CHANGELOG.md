@@ -11,6 +11,18 @@ All notable changes to this project are documented here.
   follow-up, hub clip, held frame, vehicle and lingering notices. Without it the
   caption is byte-identical to before. Like the other booleans it must be written
   bare; a quoted value fails the load.
+- `mqtt.separate_event_types` (off by default) adds a Vehicle binary sensor per camera
+  and keeps pet and tamper alerts from turning on the Person sensor. Without it the
+  bridge publishes exactly what it did before.
+- `tracking.night_end: "HH:MM"` (per camera, unset by default) is a fixed clock end for
+  the tracking night and its presets, so parking before a morning routine no longer
+  drifts with sunrise. It needs `schedule: astral` and leaves every other use of the
+  night alone (forced IR, night thresholds, `night_only`, the firmware lamp).
+- `pan_limit.evidence_budget` (seconds, unset by default) caps how long a recall waits
+  for its live evidence frame, which could otherwise hold it for up to `rtsp_timeout`
+  on a hung stream. A frame that arrives after the recall is discarded.
+- `tools/soak_report.py` prints the first-alert median and p90 per delivery path (live,
+  sampler, sd) beside the summary, and adds `first_alert.by_path` to `--json`.
 
 ### Fixed
 - A vehicle alert (`scorer.alert_vehicles`) no longer turns the MQTT / Home Assistant
