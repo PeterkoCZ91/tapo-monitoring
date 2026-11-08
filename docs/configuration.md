@@ -1356,6 +1356,7 @@ pan_limit:
   tilt_min: -1.0      # only presets inside this window may become a tilt bound
   tilt_max: -0.6
   hold_grace: 20      # while track_hold holds a subject, wait this long out of bounds
+  evidence_budget: 2  # at most this many seconds of waiting for the evidence frame (unset by default)
 ```
 
 The guard reads current/preset pan positions over ONVIF and recalls the nearest bounding
@@ -1364,6 +1365,14 @@ ONVIF errors are isolated from the event loop. While privacy mode is known to be
 by the last control pass, else by the twin), the guard does not poll at all: a parked lens
 can only refuse the move (`-64324`, "Privacy mode is ON"). A `GotoPreset` the motor refuses between control passes is
 counted as a privacy refusal and keeps the ONVIF client; only transport errors rebuild it.
+
+Where an archive directory is configured, a recall first saves a live RTSP frame of the
+out-of-bounds view, because the move erases it. Unset, `evidence_budget` waits for that
+frame, usually about 3 s and up to `rtsp_timeout` when the stream hangs. With a positive
+number of seconds the recall goes out once the budget is spent; a frame that arrives later
+is discarded, since it would show the swing back. Only one grab per camera runs at a time,
+and a recall made while one is still running goes without a frame. The budget caps the
+wait, it does not shorten a normal grab, so one below the usual grab time means no frames.
 
 The guard needs the `onvif-zeep` package: `pip install -e ".[onvif]"` (or
 `pip install onvif-zeep`) into the daemon's venv. The import is deliberately lazy — it

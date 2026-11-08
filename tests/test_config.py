@@ -166,6 +166,20 @@ def test_pan_limit_parses():
     assert pl.onvif_user_env == "ONVIF_USER" and pl.onvif_port == 2020
 
 
+@pytest.mark.parametrize("value", [0, -1, True, "soon", float("nan"), float("inf")])
+def test_pan_limit_evidence_budget_rejects_bad_values(value):
+    data = {"cameras": [{"name": "a", "host": "203.0.113.10",
+                         "pan_limit": {"evidence_budget": value}}]}
+    with pytest.raises(cfg.ConfigError, match="evidence_budget"):
+        cfg.load_config_from_dict(data)
+
+
+def test_pan_limit_evidence_budget_parses():
+    data = {"cameras": [{"name": "a", "host": "203.0.113.10",
+                         "pan_limit": {"evidence_budget": 1.5}}]}
+    assert cfg.load_config_from_dict(data).cameras[0].pan_limit.evidence_budget == 1.5
+
+
 def test_pan_limit_hold_grace_defaults_to_twenty_seconds():
     pl = cfg.load_config_from_dict(_minimal()).cameras[0].pan_limit
     assert pl.hold_grace == 20

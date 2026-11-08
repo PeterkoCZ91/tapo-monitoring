@@ -4841,13 +4841,16 @@ def _in_panlimit_window(state, name, when):
                for start, end in state.pan_limit_out_of_bounds.get(name, ()))
 
 
-def _archive_panlimit_frame(cfg, axis, value, *, now):
+def _archive_panlimit_frame(cfg, axis, value, *, now, abandoned=None):
     """Best-effort frame of the out-of-bounds view, grabbed before the recall erases it.
 
     Deep-night guard interventions were undecidable after the fact — nothing below
     threshold is archived, so whether the guard pulled the camera off a wall or off a
     person was guesswork. Straight RTSP with the config credentials (no pytapo client
-    needed); any failure is a debug line, never a reason to skip or delay the recall.
+    needed); any failure is a debug line, never a reason to skip the recall.
+
+    ``abandoned`` is set once the recall stopped waiting: a frame captured after that
+    shows the swing back rather than the out-of-bounds view, so it is thrown away.
     """
     out_dir = sentlog.panlimit_dir_from_env()
     if out_dir is None:
@@ -4860,6 +4863,10 @@ def _archive_panlimit_frame(cfg, axis, value, *, now):
         if not image:
             log.debug("pan_limit %s: evidence grab returned nothing", cfg.name)
             return
+        if abandoned is not None and abandoned.is_set():
+            log.debug("pan_limit %s: evidence frame arrived after the recall", cfg.name)
+            _safe_unlink(image)
+            return
         try:
             sentlog.archive_panlimit_frame(out_dir, image, cfg.name,
                                            str(axis).split()[0], value, now=now)
@@ -4867,6 +4874,45 @@ def _archive_panlimit_frame(cfg, axis, value, *, now):
             _safe_unlink(image)
     except Exception:  # noqa: BLE001 - evidence must never block the recall
         log.debug("pan_limit %s: evidence grab failed", cfg.name, exc_info=True)
+
+
+# Cameras with an evidence grab still running. A stream that hangs must not collect one
+# stuck capture per recall.
+_panlimit_grabs: set[str] = set()
+_panlimit_grabs_lock = threading.Lock()
+
+
+def _archive_panlimit_frame_bounded(cfg, axis, value, *, now, budget):
+    """``_archive_panlimit_frame`` that holds the recall for at most ``budget`` seconds."""
+    if sentlog.panlimit_dir_from_env() is None:
+        return
+    with _panlimit_grabs_lock:
+        if cfg.name in _panlimit_grabs:
+            log.debug("pan_limit %s: previous evidence grab still running", cfg.name)
+            return
+        _panlimit_grabs.add(cfg.name)
+    abandoned = threading.Event()
+
+    def grab():
+        try:
+            _archive_panlimit_frame(cfg, axis, value, now=now, abandoned=abandoned)
+        finally:
+            with _panlimit_grabs_lock:
+                _panlimit_grabs.discard(cfg.name)
+
+    worker = threading.Thread(target=grab, name=f"panlimit-evidence-{cfg.name}", daemon=True)
+    try:
+        worker.start()
+    except RuntimeError:
+        with _panlimit_grabs_lock:
+            _panlimit_grabs.discard(cfg.name)
+        log.debug("pan_limit %s: evidence grab not started", cfg.name, exc_info=True)
+        return
+    worker.join(budget)
+    if worker.is_alive():
+        abandoned.set()
+        log.info("pan_limit %s: evidence grab took over %gs, recalling without it",
+                 cfg.name, budget)
 
 
 # A failed ONVIF build is retried after poll_interval * 2**fails, at most this many seconds.
@@ -4981,7 +5027,11 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
                 g["refused"] = move.reason
                 continue
             g.pop("refused", None)
-            _archive_panlimit_frame(cfg, axis, value, now=now)
+            if pl.evidence_budget is None:
+                _archive_panlimit_frame(cfg, axis, value, now=now)
+            else:
+                _archive_panlimit_frame_bounded(cfg, axis, value, now=now,
+                                                budget=pl.evidence_budget)
             try:
                 panlimit.goto_preset(g["ptz"], g["token"], target)
             except Exception as e:  # noqa: BLE001 - classified below, re-raised if transport

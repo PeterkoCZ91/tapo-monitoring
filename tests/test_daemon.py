@@ -2,6 +2,8 @@ import json
 import logging
 import os
 import sys
+import threading
+import time
 from unittest.mock import sentinel
 
 import pytest
@@ -2910,6 +2912,129 @@ def test_pan_guard_evidence_failure_never_blocks_recall(monkeypatch, tmp_path):
     assert gotos == ["3"]
     assert state.pan_limit_recall_at["camera-a"] == 100
     assert "ptz" in state.pan_guard["camera-a"]   # not treated as an ONVIF failure
+
+
+def _budget_app(monkeypatch, tmp_path, budget):
+    monkeypatch.setenv("TAPO_REVIEW_LOG_DIR", str(tmp_path / "review-log"))
+    raw = _raw_cam_dict()
+    raw["pan_limit"]["evidence_budget"] = budget
+    return cfg.load_config_from_dict({"cameras": [raw]})
+
+
+def _frame_file(tmp_path, name="snap.jpg"):
+    frame = tmp_path / name
+    frame.write_bytes(b"\xff\xd8EVIDENCE")
+    return frame
+
+
+def _wait_for_grabs_to_finish():
+    deadline = time.monotonic() + 5
+    while daemon._panlimit_grabs and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not daemon._panlimit_grabs
+
+
+def test_pan_guard_without_budget_grabs_on_the_guard_thread(monkeypatch, tmp_path):
+    monkeypatch.setenv("TAPO_REVIEW_LOG_DIR", str(tmp_path / "review-log"))
+    app = cfg.load_config_from_dict({"cameras": [_raw_cam_dict()]})
+    assert app.cameras[0].pan_limit.evidence_budget is None
+    threads = []
+
+    def capture(*a, **k):
+        threads.append(threading.current_thread())
+        return str(_frame_file(tmp_path))
+
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp", capture)
+    _patch_panlimit(monkeypatch, pan_x=0.63, gotos=[])
+    daemon._pan_guard_pass(app, {}, daemon.MonitorState(), now=100, secrets={}, night=True)
+    assert threads == [threading.current_thread()]
+
+
+def test_pan_guard_budget_keeps_a_grab_that_finishes_in_time(monkeypatch, tmp_path):
+    app = _budget_app(monkeypatch, tmp_path, 5)
+    calls = []
+
+    def capture(*a, **k):
+        calls.append("grab")
+        return str(_frame_file(tmp_path))
+
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp", capture)
+    _patch_panlimit(monkeypatch, pan_x=0.63, gotos=calls)
+    daemon._pan_guard_pass(app, {}, daemon.MonitorState(), now=100, secrets={}, night=True)
+    assert calls == ["grab", "3"]
+    assert len(list((tmp_path / "panlimit-log").glob("panlimit_camera-a_*.jpg"))) == 1
+    _wait_for_grabs_to_finish()
+
+
+def test_pan_guard_budget_recalls_past_a_hung_grab_and_drops_the_late_frame(monkeypatch, tmp_path):
+    # A frame that arrives after the recall shows the swing back, not the out-of-bounds
+    # view, so it must not land in the log looking like evidence.
+    app = _budget_app(monkeypatch, tmp_path, 0.05)
+    release = threading.Event()
+    frame = _frame_file(tmp_path)
+
+    def capture(*a, **k):
+        assert release.wait(5)
+        return str(frame)
+
+    gotos = []
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp", capture)
+    _patch_panlimit(monkeypatch, pan_x=0.63, gotos=gotos)
+    state = daemon.MonitorState()
+    daemon._pan_guard_pass(app, {}, state, now=100, secrets={}, night=True)
+    assert gotos == ["3"]                     # the grab is still hanging here
+    assert state.pan_limit_recall_at["camera-a"] == 100
+    release.set()
+    _wait_for_grabs_to_finish()
+    assert not list((tmp_path / "panlimit-log").glob("*.jpg"))
+    assert not frame.exists()                 # the late capture's temp file is removed
+
+
+def test_pan_guard_budget_failed_grab_does_not_cost_the_recall(monkeypatch, tmp_path):
+    app = _budget_app(monkeypatch, tmp_path, 5)
+    gotos = []
+
+    def broken(*a, **k):
+        raise RuntimeError("rtsp timeout")
+
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp", broken)
+    _patch_panlimit(monkeypatch, pan_x=0.63, gotos=gotos)
+    daemon._pan_guard_pass(app, {}, daemon.MonitorState(), now=100, secrets={}, night=True)
+    assert gotos == ["3"]
+    _wait_for_grabs_to_finish()
+
+
+def test_pan_guard_budget_never_stacks_grabs_for_one_camera(monkeypatch, tmp_path):
+    app = _budget_app(monkeypatch, tmp_path, 0.05)
+    release = threading.Event()
+    grabs = []
+
+    def capture(*a, **k):
+        grabs.append("grab")
+        assert release.wait(5)
+        return str(_frame_file(tmp_path))
+
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp", capture)
+    cam = app.cameras[0]
+    for now in (100, 104):
+        daemon._archive_panlimit_frame_bounded(cam, "pan", 0.63, now=now, budget=0.05)
+    assert grabs == ["grab"]
+    release.set()
+    _wait_for_grabs_to_finish()
+
+
+def test_pan_guard_budget_survives_a_thread_that_cannot_start(monkeypatch, tmp_path):
+    app = _budget_app(monkeypatch, tmp_path, 5)
+    gotos = []
+
+    def no_thread(self):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(daemon.threading.Thread, "start", no_thread)
+    _patch_panlimit(monkeypatch, pan_x=0.63, gotos=gotos)
+    daemon._pan_guard_pass(app, {}, daemon.MonitorState(), now=100, secrets={}, night=True)
+    assert gotos == ["3"]
+    assert not daemon._panlimit_grabs
 
 
 def test_pan_guard_skips_grab_without_archive_dir(monkeypatch):

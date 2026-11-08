@@ -218,6 +218,9 @@ class PanLimitConfig:
     # While a track_hold keeps the lens on a subject, the guard waits this long of
     # continuous out-of-bounds before recalling (0 = recall at once, as before).
     hold_grace: int = 20
+    # Most seconds the recall waits for its evidence frame. None waits for the grab as
+    # before, which is up to rtsp_timeout when the stream hangs.
+    evidence_budget: float | None = None
     # Opt-in predictive stop: explicit presets define each restricted side; an omitted
     # side is unrestricted. Separate from the legacy span-and-recall guard.
     mode: str = "recall"
@@ -1141,6 +1144,13 @@ def _pan_limit(data, where):
         raise ConfigError(f"{where}: pan_limit tilt_min/tilt_max must be numbers") from None
     if tilt_min is not None and tilt_max is not None and tilt_min >= tilt_max:
         raise ConfigError(f"{where}: pan_limit tilt_min must be below tilt_max")
+    evidence_budget = d.get("evidence_budget")
+    if evidence_budget is not None:
+        if (isinstance(evidence_budget, bool) or not isinstance(evidence_budget, (int, float))
+                or not math.isfinite(evidence_budget) or evidence_budget <= 0):
+            raise ConfigError(f"{where}: pan_limit evidence_budget must be a positive "
+                              "number of seconds")
+        evidence_budget = float(evidence_budget)
     mode = d.get("mode", "recall")
     if mode not in ("recall", "stop"):
         raise ConfigError(f"{where}: pan_limit mode must be recall or stop")
@@ -1180,6 +1190,7 @@ def _pan_limit(data, where):
         tilt_min=tilt_min,
         tilt_max=tilt_max,
         hold_grace=hold_grace,
+        evidence_budget=evidence_budget,
         mode=mode,
         **sides,
         stop_margin=stop_margin,
