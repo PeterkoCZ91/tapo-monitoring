@@ -28,7 +28,7 @@ import sys
 import threading
 import time as _time
 
-from . import apiguard, camera, snapshot
+from . import apiguard, camera, logsafe, snapshot
 
 log = logging.getLogger(__name__)
 
@@ -567,7 +567,7 @@ def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
         _remove_abandoned_downloads(out_dir, started_wall)
         log.info("SD transfer finish %s: at=%.3f elapsed=%.1fs outcome=%s",
                  camera_name, _time.time(), _time.monotonic() - started, type(exc).__name__)
-        log.warning("SD subprocess failed to run: %r", exc)
+        log.warning("SD subprocess failed to run: %s", logsafe.describe(exc))
         return []
     log.info("SD transfer finish %s: at=%.3f elapsed=%.1fs exit=%s",
              camera_name, _time.time(), _time.monotonic() - started, proc.returncode)
@@ -575,7 +575,9 @@ def fetch_sd_frames_subprocess(cfg, start_time, out_dir="/tmp", span=SD_SPAN,
     # empty result, so the journal never showed *why* SD produced nothing. Log its exit
     # code + stderr tail whenever it yields no frames, so the next daytime person reveals
     # the actual cause (auth/media-session/freshness/extraction) in `journalctl`.
-    stderr_tail = (proc.stderr or "").strip()[-800:]
+    # ffmpeg and pytapo echo URLs (RTSP credentials, /stok= sessions) and addresses:
+    # mask first, then take the tail, so a cut cannot leave half a credential behind.
+    stderr_tail = logsafe.mask_text((proc.stderr or "").strip())[-800:]
     if proc.returncode != 0:
         log.warning("SD subprocess exit=%s; stderr: %s", proc.returncode, stderr_tail)
         return []
@@ -728,9 +730,11 @@ def fetch_sd_clip_subprocess(cfg, start_time, out_dir, pre_roll=2, seconds=30,
         proc = run(argv, capture_output=True, text=True, timeout=timeout)
     except Exception as exc:
         _remove_abandoned_downloads(out_dir, started_wall)
-        log.warning("SD clip subprocess failed to run: %r", exc)
+        log.warning("SD clip subprocess failed to run: %s", logsafe.describe(exc))
         return None, None
-    stderr_tail = (proc.stderr or "").strip()[-800:]
+    # ffmpeg and pytapo echo URLs (RTSP credentials, /stok= sessions) and addresses:
+    # mask first, then take the tail, so a cut cannot leave half a credential behind.
+    stderr_tail = logsafe.mask_text((proc.stderr or "").strip())[-800:]
     if proc.returncode != 0:
         log.warning("SD clip subprocess exit=%s; stderr: %s", proc.returncode, stderr_tail)
         return None, None

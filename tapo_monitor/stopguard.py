@@ -8,12 +8,13 @@ Every other motor owner must honor ``tracking_allowed`` at the actual write.
 
 import logging
 import math
+import sys
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
 
-from . import ptzrpc
+from . import logsafe, ptzrpc
 from .backoff import capped_exp
 
 log = logging.getLogger(__name__)
@@ -735,7 +736,8 @@ class StopGuard:
             try:
                 self._stop_if_due()
             except Exception:  # noqa: BLE001 - shutdown Stop is best effort
-                log.exception("PTZ stop guard final Stop failed %s", self.name)
+                log.error("PTZ stop guard final Stop failed %s\n%s", self.name,
+                          logsafe.masked_traceback(sys.exc_info()[1]))
 
     def _loop_failed(self, exc):
         # Fail closed: unknown guard state means no tracking, then keep observing.
@@ -750,10 +752,11 @@ class StopGuard:
                 streak = self._loop_streak_log.count
                 self._loop_warned = True
             if due:
-                log.error("PTZ stop guard loop error %s: %s errors=%d", self.name,
-                          type(exc).__name__, streak, exc_info=exc)
+                log.error("PTZ stop guard loop error %s: %s errors=%d\n%s", self.name,
+                          type(exc).__name__, streak, logsafe.masked_traceback(exc))
         except Exception:  # noqa: BLE001 - the loop itself must survive
-            log.exception("PTZ stop guard loop error handling failed %s", self.name)
+            log.error("PTZ stop guard loop error handling failed %s\n%s", self.name,
+                      logsafe.masked_traceback(sys.exc_info()[1]))
         try:
             self._trip("guard_error")
             self._stop_if_due()

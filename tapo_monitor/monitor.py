@@ -14,7 +14,7 @@ import time as _time
 import weakref
 from datetime import datetime
 
-from . import camera, detection, enrich, notify, scheduling, sentlog, snapshot
+from . import camera, detection, enrich, logsafe, notify, scheduling, sentlog, snapshot
 from . import mqtt as mqtt_bridge
 from .incident import incident_id
 from .snapshot import album_lens
@@ -394,20 +394,9 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
     except Exception as exc:
         # Camera exception text can contain a session URL (/stok=...), credentials
         # and addresses. Log only a fixed diagnosis, never a slice of that text.
-        text = str(exc).lower()
-        if "connecttimeout" in text or "connect timeout" in text:
-            reason = "connect timeout"
-        elif "readtimeout" in text or "read timed out" in text:
-            reason = "read timeout"
-        elif "invalid stok" in text or "unauthorized" in text or "authentication" in text:
-            reason = "authentication failure"
-        elif "connection refused" in text:
-            reason = "connection refused"
-        else:
-            reason = "other"
         log.warning("getEvents failed camera=%s protocol=native operation=getEvents "
                     "class=%s reason=%s", cfg.name, type(exc).__name__,
-                    reason.replace(" ", "_"))
+                    logsafe.failure_category(exc))
         audit_error(cfg, exc, now=now)
         _health_observe(poll_observe, False, exc)
         return last_seen

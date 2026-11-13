@@ -16,6 +16,8 @@ import logging
 import time as _time
 from collections.abc import Mapping
 
+from . import logsafe
+
 log = logging.getLogger(__name__)
 
 SMARTTRACK_KEYS = {
@@ -129,9 +131,10 @@ def set_autotrack(cam, enabled, back_time=None):
         if key not in _BACK_TIME_WARNED:
             _BACK_TIME_WARNED.add(key)
             log.warning("camera refused the combined auto-track/back_time call (%s); "
-                        "falling back to the plain switch", first_exc)
+                        "falling back to the plain switch", logsafe.describe(first_exc))
         else:
-            log.debug("combined auto-track/back_time call refused again (%s)", first_exc)
+            log.debug("combined auto-track/back_time call refused again (%s)",
+                      logsafe.describe(first_exc))
     if hasattr(cam, "setAutoTrackTarget"):
         try:
             cam.setAutoTrackTarget(enabled)

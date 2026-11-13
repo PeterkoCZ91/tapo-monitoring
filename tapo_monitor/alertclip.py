@@ -31,7 +31,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
-from . import notify, sdclip, sdworker
+from . import logsafe, notify, sdclip, sdworker
 
 log = logging.getLogger(__name__)
 
@@ -192,7 +192,8 @@ def read_clip(cfg, entry, *, work_dir=None, fetch=None):
         raw, window_start = fetch(cfg, entry.start, job_dir, cfg.clip_pre_roll,
                                   cfg.clip_seconds, cfg.sd_fresh_guard)
     except Exception as exc:  # noqa: BLE001 - a failed read must not end the worker
-        log.warning("clip %s: card read failed for %s: %s", cfg.name, entry.incident, exc)
+        log.warning("clip %s: card read failed for %s: %s", cfg.name, entry.incident,
+                    logsafe.describe(exc))
         raw, window_start = None, None
     if not raw:
         log.warning("clip %s: no card read for %s", cfg.name, entry.incident)

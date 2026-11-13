@@ -26,6 +26,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from . import logsafe
+
 log = logging.getLogger(__name__)
 
 # Every follow-up gets its own temp dir under this prefix, with the owning daemon's pid
@@ -135,13 +137,16 @@ def run_job(key, fn):
     """``(key, value, error)`` for one job; an exception is returned, never raised."""
     try:
         return key, fn(), None
-    except TimeoutError as exc:
-        # Expected when a card read outlasts its limit: no traceback, and no exception
-        # text, which may carry part of a camera reply. The caller falls back as for any error.
-        log.warning("SD follow-up job outcome=sd_timeout")
-        return key, None, exc
     except Exception as exc:  # noqa: BLE001 - a failed follow-up must not end the loop
-        log.exception("SD follow-up job failed: %s", exc)
+        # Never the exception text or a traceback: a pytapo/requests failure can echo a
+        # session URL, an address or part of the camera's reply. Class, fixed category and
+        # raise site keep it debuggable. A timeout (builtin or ``requests``) is expected
+        # when a card read outlasts its limit; the caller falls back as for any error.
+        if logsafe.is_timeout(exc):
+            log.warning("SD follow-up job outcome=sd_timeout")
+        else:
+            log.error("SD follow-up job failed %s where=%s", logsafe.describe(exc),
+                      logsafe.where(exc))
         return key, None, exc
 
 

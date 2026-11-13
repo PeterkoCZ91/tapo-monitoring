@@ -497,4 +497,4 @@ def test_loop_survives_errors_in_its_own_error_handling(caplog):
     assert all(0 < d <= 2.0 for d in waits)        # bounded fallback delay
     assert guard.snapshot().loop_errors == 10     # each poll and each delay computation
     errors = [r for r in caplog.records if r.levelname == "ERROR"]
-    assert errors and errors[0].exc_info is not None
+    assert errors and "Traceback" in errors[0].getMessage()   # masked text, not exc_info

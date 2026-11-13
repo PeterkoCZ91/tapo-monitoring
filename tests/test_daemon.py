@@ -1375,7 +1375,9 @@ def test_apply_plan_reports_a_refused_self_heal(monkeypatch, caplog):
         daemon.apply_plan(cam, plan, repair_failures=failures)
 
     assert "person_detection" in caplog.text
-    assert "DEVICE_BUSY" in caplog.text
+    # Class and category only: a camera's refusal text may echo a session URL or address.
+    assert "class=RuntimeError" in caplog.text
+    assert "DEVICE_BUSY" not in caplog.text
     assert failures == {"person_detection": 1}
 
 

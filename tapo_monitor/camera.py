@@ -22,7 +22,7 @@ import subprocess
 import threading
 import time as _time
 
-from . import apiguard
+from . import apiguard, logsafe
 
 log = logging.getLogger(__name__)
 
@@ -489,14 +489,14 @@ def _trigger_whitelamp_locked(client, force_time):
                 _time.sleep(1)
                 if lamp_on():
                     return True
-                log.warning("failed to trigger whitelamp: %s", exc)
+                log.warning("failed to trigger whitelamp: %s", logsafe.describe(exc))
                 return False
             return True
         if hasattr(client, "setForceWhitelampState"):
             client.setForceWhitelampState(True)
             return True
     except Exception as exc:  # noqa: BLE001
-        log.warning("failed to trigger whitelamp: %s", exc)
+        log.warning("failed to trigger whitelamp: %s", logsafe.describe(exc))
         return False
     return False
 
@@ -508,7 +508,7 @@ def set_lens_distortion_correction(client, enabled: bool) -> bool:
             client.setLensDistortionCorrection(bool(enabled))
             return True
     except Exception as exc:
-        log.warning("failed to set LDC (%s): %s", enabled, exc)
+        log.warning("failed to set LDC (%s): %s", enabled, logsafe.describe(exc))
     return False
 
 
@@ -519,7 +519,7 @@ def set_tamper_detection(client, enabled: bool, sensitivity: str = "normal") -> 
             client.setTamperDetection(bool(enabled), sensitivity)
             return True
     except Exception as exc:
-        log.warning("failed to set tamper detection: %s", exc)
+        log.warning("failed to set tamper detection: %s", logsafe.describe(exc))
     return False
 
 
@@ -574,7 +574,7 @@ def read_lens_setting(client, kind: str, channels) -> dict:
                     if isinstance(common_chn.get(str(c)), dict)
                     and common_chn[str(c)].get("inf_type") is not None}
     except Exception as exc:  # noqa: BLE001 - an optional read must not stop the pass
-        log.debug("per-lens %s read failed: %s", kind, exc)
+        log.debug("per-lens %s read failed: %s", kind, logsafe.describe(exc))
     return {}
 
 
@@ -597,7 +597,7 @@ def set_osd_safe(client, label: str = "", date_enabled: bool = True, week_enable
         client.executeFunction("setOsd", payload)
         return True
     except Exception as exc:
-        log.warning("failed to set OSD safely: %s", exc)
+        log.warning("failed to set OSD safely: %s", logsafe.describe(exc))
         return False
 
 

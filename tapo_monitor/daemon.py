@@ -53,6 +53,7 @@ from . import (
     incident,
     incident_archive,
     ledger,
+    logsafe,
     monitor,
     motion,
     mqtt,
@@ -320,7 +321,7 @@ def _repair(name, call, failures):
     try:
         call()
     except Exception as exc:  # noqa: BLE001 - a camera control failure must not stop polling
-        log.warning("self-heal %s refused by camera: %s", name, exc)
+        log.warning("self-heal %s refused by camera: %s", name, logsafe.describe(exc))
         if failures is not None:
             failures[name] = failures.get(name, 0) + 1
         return False
@@ -413,7 +414,8 @@ def _apply_night_vision_mode(cam, mode, camera=None, failures=None):
     try:
         cam.setNightVisionModeConfig(mode)
     except Exception as exc:  # noqa: BLE001 - a camera control failure must not stop polling
-        log.warning("self-heal night_vision_mode refused by camera: %s", exc)
+        log.warning("self-heal night_vision_mode refused by camera: %s",
+                    logsafe.describe(exc))
         if failures is not None:
             failures["night_vision_mode"] = failures.get("night_vision_mode", 0) + 1
         return
@@ -476,7 +478,8 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
         try:
             cam.setDayNightMode(plan.night_vision)
         except Exception as exc:  # noqa: BLE001 - a camera control failure must not stop polling
-            log.warning("failed to set day/night mode %s: %s", plan.night_vision, exc)
+            log.warning("failed to set day/night mode %s: %s", plan.night_vision,
+                        logsafe.describe(exc))
     # Self-heal AI person detection (events_1 bit 19). It silently went 'off'
     # after a daemon restart (2026-06-15), demoting people to bare motion that the
     # funnel then dropped. Re-assert ON every tick. When a per-camera
@@ -655,7 +658,7 @@ def read_privacy(cam):
     try:
         return twin.privacy_from_reading(getter())
     except Exception as exc:  # noqa: BLE001 - an optional read must not stop the pass
-        log.debug("privacy read failed: %s", exc)
+        log.debug("privacy read failed: %s", logsafe.describe(exc))
         return None
 
 
@@ -691,7 +694,7 @@ def read_detection(cam):
             try:
                 value = _switch_state(getter())
             except Exception as exc:  # noqa: BLE001 - an optional read must not stop the pass
-                log.debug("%s detection read failed: %s", kind, exc)
+                log.debug("%s detection read failed: %s", kind, logsafe.describe(exc))
         out[kind] = value
     return out
 
@@ -737,7 +740,8 @@ def read_lenses(cam, channels):
             try:
                 raw = getter(chn_id=list(chn))
             except Exception as exc:  # noqa: BLE001 - an optional read must not stop the pass
-                log.debug("per-lens %s detection read failed: %s", kind, exc)
+                log.debug("per-lens %s detection read failed: %s", kind,
+                          logsafe.describe(exc))
         if isinstance(raw, Mapping):
             for c in chn:
                 lens = raw.get(str(c), raw.get(c))
@@ -869,7 +873,7 @@ def read_app_notifications(cam, camera=None):
     try:
         value = getter()
     except Exception as exc:  # noqa: BLE001 - an optional read must not stop the pass
-        log.debug("app notification read failed for %s: %s", camera, exc)
+        log.debug("app notification read failed for %s: %s", camera, logsafe.describe(exc))
         return None
     return app_notifications_from_reading(value, camera)
 
@@ -3782,10 +3786,11 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
         if error is not None or pick is None:
             # A timeout was already recorded by the worker without camera response text.
             # Zero checked frames is no evidence of absence: continue with fallback.
-            if isinstance(error, TimeoutError):
+            if logsafe.is_timeout(error):
                 monitor.audit_event(cfg, event, etype, "sd", "error", reason="sd_timeout")
             else:
-                log.warning("SD follow-up %s for %s failed: %s", etype, cfg.name, error)
+                log.warning("SD follow-up %s for %s failed %s", etype, cfg.name,
+                            logsafe.describe(error))
             pick = _SdPick()
         if (pick.fetch_seconds is not None and app.reliability.enabled
                 and app.reliability.latency_metrics):
@@ -5577,7 +5582,9 @@ def tick(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
         tick_ok = True
     except Exception as e:  # noqa: BLE001 - one bad tick must not end the daemon
         tick_ok = False
-        log.exception("tick error: %s", e)
+        # A traceback keeps real bugs debuggable; masked so a camera URL, token or
+        # address inside an exception text never reaches the journal.
+        log.error("tick error: %s", logsafe.masked_traceback(e))
     state.last_tick_ok = tick_ok
     state.last_tick_at = now
     stall_watchdog(app, state, secrets, ok=tick_ok, now=now)
@@ -6260,7 +6267,8 @@ def _connect_camera(cam_clients, state=None, now=None):
                            camera.authentication_retry_after(err) or 0)
                 if now is not None:
                     state.connect_backoff_until[name] = now + wait
-                log.warning("connect %s failed (#%d): %s; backing off %ds", name, fails, err, wait)
+                log.warning("connect %s failed (#%d): %s; backing off %ds", name, fails,
+                            logsafe.describe(err), wait)
         if client is not None:
             cam_clients[name] = client
             if state is not None:
