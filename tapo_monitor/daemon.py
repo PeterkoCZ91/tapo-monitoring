@@ -3780,9 +3780,12 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
     fallback_image = None
     try:
         if error is not None or pick is None:
-            # The job logged its traceback. Zero checked frames is no evidence of
-            # absence: carry on as a read that produced nothing.
-            log.warning("SD follow-up %s for %s failed: %s", etype, cfg.name, error)
+            # A timeout was already recorded by the worker without camera response text.
+            # Zero checked frames is no evidence of absence: continue with fallback.
+            if isinstance(error, TimeoutError):
+                monitor.audit_event(cfg, event, etype, "sd", "error", reason="sd_timeout")
+            else:
+                log.warning("SD follow-up %s for %s failed: %s", etype, cfg.name, error)
             pick = _SdPick()
         if (pick.fetch_seconds is not None and app.reliability.enabled
                 and app.reliability.latency_metrics):

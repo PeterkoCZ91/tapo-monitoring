@@ -4633,6 +4633,28 @@ def test_pending_drops_an_empty_live_grab_after_a_failed_card_read(monkeypatch, 
     assert not image.exists()
 
 
+def test_pending_sd_timeout_falls_back_without_logging_camera_reply(monkeypatch, caplog):
+    sent = []
+    app, state, _, snapshot_for = _pending({}, sent)
+    state.pending_sd = [{"camera": "a", "etype": "person",
+                         "event": {"start_time": 1000}, "due_at": 1075, "live_sent": False}]
+
+    def timed_out(*args, **kwargs):
+        raise TimeoutError("raw-camera-reply-private")
+
+    with caplog.at_level("INFO"):
+        _run_pending(app, state, {"a": object()}, 1080, timed_out, snapshot_for,
+                     sent, monkeypatch)
+    assert len(sent) == 1
+    failures = [r.getMessage() for r in caplog.records
+                if r.name == daemon.monitor.__name__ and "action=error" in r.getMessage()]
+    assert len(failures) == 1
+    assert "camera=a path=sd action=error etype=person" in failures[0]
+    assert "reason=sd_timeout" in failures[0]
+    assert "raw-camera-reply-private" not in caplog.text
+    assert "Traceback" not in caplog.text
+
+
 def test_pending_sends_a_live_grab_that_shows_a_person(monkeypatch, tmp_path):
     sent, _state, _image = _run_scored_fallback(monkeypatch, tmp_path, person=0.9)
     assert len(sent) == 1

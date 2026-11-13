@@ -101,6 +101,23 @@ def test_a_failing_job_comes_back_as_a_result_and_the_thread_keeps_working():
     worker.shutdown(wait=True)
 
 
+def test_a_timed_out_job_logs_one_sd_timeout_line_without_traceback_or_raw_text(caplog):
+    # An SD download past its limit is an expected outcome, not a crash: one structured
+    # line, no traceback, and nothing of the exception text (it may echo a camera reply).
+    timeout = TimeoutError("SD download did not finish within 150s: raw-camera-reply")
+
+    def slow():
+        raise timeout
+
+    with caplog.at_level("DEBUG", logger=sdworker.__name__):
+        result = sdworker.run_job(7, slow)
+    assert result == (7, None, timeout)
+    assert len(caplog.records) == 1
+    record = caplog.records[0]
+    assert record.exc_info is None and "sd_timeout" in record.getMessage()
+    assert "raw-camera-reply" not in caplog.text and "Traceback" not in caplog.text
+
+
 def test_a_key_is_pending_until_polled_and_cannot_be_submitted_twice():
     worker = ManualWorker()
     worker.submit("a", 7, lambda: 1)
