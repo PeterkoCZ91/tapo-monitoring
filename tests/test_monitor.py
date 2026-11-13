@@ -1258,7 +1258,28 @@ def test_get_events_failure_logs_a_fixed_diagnosis_not_the_exception_text(monkey
 
     assert watermark == 5
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
-    assert warnings == ["getEvents failed: Exception: authentication failure"]
+    assert warnings == ["getEvents failed camera=a protocol=native operation=getEvents "
+                        "class=Exception reason=authentication_failure"]
+
+
+def test_get_events_failure_never_logs_session_url_or_token(caplog):
+    cfg = _cfg_with_scorer()
+
+    class Cam:
+        def getEvents(self):
+            raise Exception("ConnectTimeout: url: /stok=dummy-session-value/ds "
+                            "host=203.0.113.10 connect timeout=10")
+
+    with caplog.at_level("WARNING", logger="tapo_monitor.monitor"):
+        monitor.run_monitor(
+            Cam(), cfg, 5, now=10, groq_key="", telegram_token="", telegram_chat="",
+            snapshot=lambda *a: None, time_str=lambda e: "t")
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings == ["getEvents failed camera=a protocol=native operation=getEvents "
+                        "class=Exception reason=connect_timeout"]
+    assert "dummy-session-value" not in caplog.text
+    assert "203.0.113.10" not in caplog.text
 
 
 def test_run_monitor_triggers_whitelamp_in_window():

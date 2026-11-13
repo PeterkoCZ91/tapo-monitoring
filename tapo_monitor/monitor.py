@@ -405,7 +405,9 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
             reason = "connection refused"
         else:
             reason = "other"
-        log.warning("getEvents failed: %s: %s", type(exc).__name__, reason)
+        log.warning("getEvents failed camera=%s protocol=native operation=getEvents "
+                    "class=%s reason=%s", cfg.name, type(exc).__name__,
+                    reason.replace(" ", "_"))
         audit_error(cfg, exc, now=now)
         _health_observe(poll_observe, False, exc)
         return last_seen
