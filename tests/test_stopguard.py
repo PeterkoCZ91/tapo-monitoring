@@ -365,6 +365,22 @@ def test_recall_refused_while_fresh_samples_move_away_from_the_target():
     guard.close()
 
 
+def test_refused_recall_keeps_the_latch_leaves_a_trace_and_is_retried_when_motion_turns():
+    guard, clock, trace = guard_for([0.75, 0.76, 0.73])
+    guard.poll_once()
+    await_off(guard)
+    clock.advance()
+    guard.poll_once()  # 0.75 -> 0.76: fresh motion away from the safe target
+    assert not guard.prepare_recovery(0.5)
+    assert guard.snapshot().latched
+    assert ("recall_refused", "outward_motion") in [
+        (kind, detail) for _, kind, detail in guard._episode.trace]
+    clock.advance()
+    guard.poll_once()  # 0.76 -> 0.73: a new fresh observation moving toward the target
+    assert guard.prepare_recovery(0.5)
+    guard.close()
+
+
 def test_recall_allowed_once_the_motion_stops():
     guard, clock, trace = guard_for([0.75, 0.75, 0.75])
     guard.poll_once()

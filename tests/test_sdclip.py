@@ -311,6 +311,35 @@ def test_fetch_frames_falls_back_to_guess_when_no_segment():
     assert calls["window"] == (1000, 1012)   # guessed window
 
 
+def test_fetch_frames_reports_why_a_read_gave_nothing():
+    def read(download, extract, segments=lambda c, s: (1000, 1100)):
+        stats = {}
+        out = sdclip.fetch_sd_frames(_Cam(), 1000, span=12, stats=stats, download=download,
+                                     extract_frames=extract, segment_bounds=segments)
+        return out, stats["reason"]
+
+    assert read(lambda *a, **k: "/tmp/c.mp4", lambda *a, **k: ["/tmp/a.jpg"]) == (
+        ["/tmp/a.jpg"], "ok")
+    assert read(lambda *a, **k: None, lambda *a, **k: ["/tmp/a.jpg"]) == ([], "no_segment")
+    assert read(lambda *a, **k: "/tmp/c.mp4", lambda *a, **k: []) == ([], "empty_frames")
+    stats = {}
+    assert sdclip.fetch_sd_frames(
+        _Cam(), 1000, span=12, offset=10, stats=stats,
+        download=lambda *a, **k: (_ for _ in ()).throw(AssertionError("nothing to download")),
+        segment_bounds=lambda c, s: (1000, 1005)) == []   # the segment ends before the offset
+    assert stats["reason"] == "window_empty"
+
+
+def test_card_read_log_line_carries_the_reason_when_there_is_one(caplog):
+    with caplog.at_level("INFO", logger="tapo_monitor.sdclip"):
+        sdclip.log_card_read("cam", '{"window": [1, 19], "reason": "no_segment"}', 0, 1.0)
+        sdclip.log_card_read("cam", '{"window": [1, 19], "reason": "bad reason\\n"}', 0, 1.0)
+        sdclip.log_card_read("cam", '{"window": [1, 19]}', 0, 1.0)
+    lines = [r.getMessage() for r in caplog.records]
+    assert lines[0].endswith("total=1.0s reason=no_segment")
+    assert "reason" not in lines[1] and "reason" not in lines[2]
+
+
 def test_segment_bounds_picks_closest_segment():
     class Cam:
         def getRecordingsUTC(self, start, end):

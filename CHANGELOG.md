@@ -30,6 +30,10 @@ All notable changes to this project are documented here.
   Telegram send is logged as a fixed category (`api_rejected`, `transport_timeout`,
   `dns_failure`, `connect_failure`, ...), never with curl's text, which can echo the
   bot URL. The messages keep their wording and need no newer curl.
+- The `SD read` log line ends with `reason=` (`ok`, `no_segment`, `empty_frames`,
+  `window_empty`) when the read says why it produced what it did, so a card read with
+  no frames is no longer ambiguous between "the card returned nothing" and "a file came
+  back but no frame could be cut from it".
 
 ### Fixed
 - The scorer-outage and recovery notices name the scorer by host and port only; an

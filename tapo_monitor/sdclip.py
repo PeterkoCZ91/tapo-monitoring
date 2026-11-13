@@ -423,7 +423,9 @@ def fetch_sd_frames(client, start_time, out_dir="/tmp", span=SD_SPAN, every=SD_F
     (the camera's index is what makes the download reliable), and the window is
     ``[segment start + offset, segment start + offset + span]``, clipped to the segment.
 
-    ``stats``, when a dict, receives the read's window, bytes and stage seconds.
+    ``stats``, when a dict, receives the read's window, bytes and stage seconds, and a
+    ``reason``: ``ok``, ``no_segment`` (the card returned nothing for the window),
+    ``empty_frames`` (a file arrived but no frame came out of it) or ``window_empty``.
     ``guard`` overrides pytapo's freshness guard (config ``sd_fresh_guard``).
     ``lookup_retry`` tries a failed segment lookup once more after
     :data:`SD_LOOKUP_RETRY_PAUSE` seconds on a fresh login (the daemon's card-read
@@ -447,6 +449,7 @@ def fetch_sd_frames(client, start_time, out_dir="/tmp", span=SD_SPAN, every=SD_F
     info.update(window=[int(dl_start), int(dl_end)], offset=offset, aligned=bool(seg),
                 lead=(int(start_time - seg[0]) if seg else None))
     if dl_end <= dl_start:
+        info["reason"] = "window_empty"
         print(f"SD fetch: the segment ends before offset {offset} "
               f"(segment={seg[0]}..{seg[1]})", file=sys.stderr)
         return []
@@ -456,6 +459,7 @@ def fetch_sd_frames(client, start_time, out_dir="/tmp", span=SD_SPAN, every=SD_F
                    **({"guard": guard} if guard is not None else {}))
     info["download_s"] = round(_time.monotonic() - started, 1)
     if not mp4:
+        info["reason"] = "no_segment"
         print(f"SD fetch: download returned no segment "
               f"(start={int(dl_start)}, end={int(dl_end)}, aligned={bool(seg)}, "
               f"tc={time_correction})", file=sys.stderr)
@@ -471,6 +475,7 @@ def fetch_sd_frames(client, start_time, out_dir="/tmp", span=SD_SPAN, every=SD_F
                  if dense else {})
         frames = extract_frames(mp4, out_dir, base, dl_span, every, rotate=rotate,
                                 clip_start=dl_start, **extra)
+        info["reason"] = "ok" if frames else "empty_frames"
         if not frames:
             print(f"SD fetch: extracted 0 frames from {mp4}", file=sys.stderr)
         return frames
@@ -498,11 +503,13 @@ def log_card_read(camera_name, stats_json, frames, total_seconds):
     def num(key, fmt="%.1f"):
         value = st.get(key)
         return "-" if value is None else fmt % value
+    reason = st.get("reason")
     log.info("SD read %s: window=%ss offset=%s lead=%s aligned=%s bytes=%s "
-             "connect=%ss download=%ss extract=%ss frames=%d total=%.1fs",
+             "connect=%ss download=%ss extract=%ss frames=%d total=%.1fs%s",
              camera_name, int(window[1]) - int(window[0]), st.get("offset", 0),
              st.get("lead"), st.get("aligned"), num("bytes", "%d"), num("connect_s"),
-             num("download_s"), num("extract_s"), frames, total_seconds)
+             num("download_s"), num("extract_s"), frames, total_seconds,
+             f" reason={reason}" if isinstance(reason, str) and reason.isidentifier() else "")
 
 
 def _remove_abandoned_downloads(out_dir, since):
