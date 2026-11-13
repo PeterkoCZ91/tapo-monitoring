@@ -389,3 +389,28 @@ def test_scorer_outage_is_announced_after_the_delay_and_recovery_follows(monkeyp
     assert len(sent) == 1 and "not answering" in sent[0]
     listener(P, True)
     assert len(sent) == 2 and "answers again" in sent[1]
+
+
+def test_scorer_notices_never_carry_url_credentials(monkeypatch):
+    import time
+
+    sent, listener = _watch_health(monkeypatch, notice_after=0.05)
+    url = "http://" + "operator" + ":" + "hunter2" + "@" + "scorer.example:8766/score"
+    listener(url, False)
+    deadline = time.time() + 2
+    while not sent and time.time() < deadline:
+        time.sleep(0.01)
+    listener(url, True)
+    assert len(sent) == 2
+    for text in sent:
+        assert "scorer.example:8766" in text
+        assert "operator" not in text and "hunter2" not in text and "@" not in text
+
+
+def test_scorer_label_handles_ipv6_and_a_missing_port():
+    from tapo_monitor import daemon
+
+    assert daemon._scorer_label("http://[2001:db8::1]:8766/score") == "[2001:db8::1]:8766"
+    assert daemon._scorer_label("https://scorer.example/score") == "scorer.example"
+    assert daemon._scorer_label("http://scorer.example:99999/score") == "scorer.example"
+    assert daemon._scorer_label("not a url") == "unknown"

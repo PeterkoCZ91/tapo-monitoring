@@ -32,6 +32,9 @@ All notable changes to this project are documented here.
   bot URL. The messages keep their wording and need no newer curl.
 
 ### Fixed
+- The scorer-outage and recovery notices name the scorer by host and port only; an
+  address configured with embedded credentials no longer puts them into the
+  Telegram message.
 - A vehicle alert (`scorer.alert_vehicles`) no longer turns the MQTT / Home Assistant
   Person sensor on. The alert path now hands the bridge the event type; a vehicle
   alert still updates Last alert (and the alert photo with `publish_images`), and

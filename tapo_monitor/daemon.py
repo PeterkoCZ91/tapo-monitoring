@@ -5766,6 +5766,19 @@ def watch_scorer_switches(state):
 SCORER_DOWN_NOTICE_AFTER = 600
 
 
+def _scorer_label(url):
+    """``host:port`` of a scorer URL for an operator message, never its userinfo or path."""
+    parsed = urllib.parse.urlsplit(url)
+    host = parsed.hostname or "unknown"
+    if ":" in host:  # keep an IPv6 literal unambiguous next to the port
+        host = f"[{host}]"
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    return f"{host}:{port}" if port is not None else host
+
+
 def watch_scorer_health(app, secrets, notice_after=None):
     """Probe the scorers outside of scoring and tell the operator when one stays down.
 
@@ -5782,7 +5795,7 @@ def watch_scorer_health(app, secrets, notice_after=None):
         notify.send_operational(secrets["telegram_token"], secrets["telegram_chat"], text)
 
     def announce_down(url):
-        host = urllib.parse.urlsplit(url).netloc
+        host = _scorer_label(url)
         with lock:
             if pending.pop(url, None) is None:
                 return
@@ -5790,7 +5803,7 @@ def watch_scorer_health(app, secrets, notice_after=None):
         send(f"🟠 Scorer {host} is not answering /health; scoring uses another candidate")
 
     def on_health(url, healthy):
-        host = urllib.parse.urlsplit(url).netloc
+        host = _scorer_label(url)
         with lock:
             timer = pending.pop(url, None)
             if timer is not None:
