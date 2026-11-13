@@ -14,6 +14,8 @@
 #   WATCH_COOLDOWN  seconds between repeat alerts while still down (default 1800)
 #   TAPO_ENV_FILE   env file carrying TELEGRAM_TOKEN / TELEGRAM_CHAT_ID
 #                   (default /etc/tapo-monitor/secrets.env, same as pi_notify.sh)
+#   WATCH_ORIGIN    name of this observer in outage alerts and log lines
+#                   (default: the short hostname)
 #
 # Ping and health are separate findings with separate state: a failing health URL on a
 # host that still answers ping means "service dead, host alive" and alerts on its own.
@@ -86,6 +88,7 @@ COOLDOWN="${WATCH_COOLDOWN:-1800}"
 : "${TELEGRAM_TOKEN:?TELEGRAM_TOKEN missing}"
 CHAT="${TELEGRAM_CHAT_ID:-${TELEGRAM_CHAT:?TELEGRAM_CHAT_ID missing}}"
 STATE_DIR="${WATCH_STATE_DIR:-/var/tmp/host-watch}"
+ORIGIN="${WATCH_ORIGIN:-$(hostname -s 2>/dev/null || echo unknown)}"
 
 mkdir -p "$STATE_DIR"
 NOW=$(date +%s)
@@ -95,17 +98,30 @@ failures=0
 # Callers must treat anything else as "not sent": an unconfirmed alert must not arm a
 # cooldown, and an unconfirmed recovery must not close an episode.
 send_telegram() {
-  local response
+  local response code reason
   # The URL carries the bot credential, so it goes in through a curl config on a pipe and
-  # never appears in argv (visible to every local user in /proc and ps).
-  response=$(curl -fsS --connect-timeout 5 --max-time 10 -X POST \
+  # never appears in argv (visible to every local user in /proc and ps). No --fail flag:
+  # Telegram's refusal then arrives as a body with "ok":false, which tells a rejected
+  # request from a transport failure without needing curl 7.76's --fail-with-body.
+  response=$(curl -sS --connect-timeout 5 --max-time 10 -X POST \
     --config <(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TELEGRAM_TOKEN") \
     --data-urlencode "chat_id=${CHAT}" \
-    --data-urlencode "text=$1" 2>&1) || true
-  case "$response" in
-    *'"ok":true'*) return 0 ;;
-    *) echo "host-watch: Telegram send failed (not confirmed)" >&2; return 1 ;;
+    --data-urlencode "text=$1" 2>&1)
+  code=$?
+  if [ "$code" -eq 0 ] && [[ "$response" == *'"ok":true'* ]]; then
+    return 0
+  fi
+  # Never log curl's raw output: an error may echo the credential-bearing URL.
+  case "$code" in
+    0) reason=invalid_response ;;
+    6) reason=dns_failure ;;
+    7) reason=connect_failure ;;
+    28) reason=transport_timeout ;;
+    *) reason=transport_error ;;
   esac
+  [[ "$response" == *'"ok":false'* ]] && reason=api_rejected
+  echo "host-watch: Telegram send failed (not confirmed): $reason target=${2:-unknown} observer=$ORIGIN" >&2
+  return 1
 }
 
 # Two echoes at a sub-second interval so a healthy pass costs about a second. Some ping
@@ -113,14 +129,25 @@ send_telegram() {
 # on a tool complaint (not a timeout) retry plainly with the echoes a second apart.
 ping_ok() {
   local err
-  if err=$(ping -n -q -c 2 -i 0.3 -W 2 "$1" 2>&1 >/dev/null); then
+  PING_REASON=ok
+  if err=$(ping -n -q -c 2 -i 0.3 -W 2 "$1" 2>&1); then
     return 0
   fi
   case "$err" in
     *nterval*|*permitted*|*privilege*|*nvalid*|*sage:*)
-      ping -n -q -c 2 -W 2 "$1" >/dev/null 2>&1 ;;
-    *) return 1 ;;
+      if err=$(ping -n -q -c 2 -W 2 "$1" 2>&1); then
+        return 0
+      fi ;;
   esac
+  # A cause name only, never ping's text: it echoes the target address.
+  case "$err" in
+    *"Network is unreachable"*|*"network is unreachable"*) PING_REASON=network_unreachable ;;
+    *"Name or service not known"*|*"Temporary failure in name resolution"*) PING_REASON=dns_failure ;;
+    *"Destination Host Unreachable"*|*"Destination Net Unreachable"*) PING_REASON=icmp_unreachable ;;
+    *"100% packet loss"*) PING_REASON=no_reply ;;
+    *) PING_REASON=ping_error ;;
+  esac
+  return 1
 }
 
 health_ok() {
@@ -136,8 +163,9 @@ minutes_since() {
 # One check = one state trio under $STATE_DIR: consecutive misses, the episode's first
 # miss, and an "alerted" flag recording that a recovery message is owed on return.
 #   $1 state slug   $2 "up"|"down"   $3 alert text   $4 recovery text
+#   $5 why the check failed (a cause name), for the log and the ping alert
 process() {
-  local slug="$1" state="$2" down_msg="$3" up_msg="$4"
+  local slug="$1" state="$2" down_msg="$3" up_msg="$4" reason="${5:-unknown}"
   local miss_f="$STATE_DIR/$slug.miss"
   local since_f="$STATE_DIR/$slug.down_since"
   local alerted_f="$STATE_DIR/$slug.alerted"
@@ -150,8 +178,8 @@ process() {
       mins=$(minutes_since "$since_f")
       # Recovery is delivery-gated like the alert itself: a failed send keeps the
       # episode open so the next pass retries, instead of closing it in silence.
-      if send_telegram "$up_msg (down ${mins} min)"; then
-        echo "host-watch: $slug recovery delivered"
+      if send_telegram "$up_msg (down ${mins} min)" "$slug"; then
+        echo "host-watch: $slug recovery delivered observer=$ORIGIN"
         rm -f "$alerted_f" "$stamp_f" "$since_f"
       else
         failures=$((failures + 1))
@@ -169,19 +197,26 @@ process() {
     # Never alert on a lone miss: a lost echo pair is routine on a wireless hop, and
     # the daemon already reports its own camera problems. Log it so a later "why did
     # the alert take six minutes" has an answer in the journal.
-    echo "host-watch: $slug miss $misses/$FAILS"
+    echo "host-watch: $slug miss $misses/$FAILS reason=$reason observer=$ORIGIN"
     return
   fi
   last=$(cat "$stamp_f" 2>/dev/null || echo 0)
   if [ $((NOW - last)) -lt "$COOLDOWN" ]; then
-    echo "host-watch: $slug still down, cooldown active"
+    echo "host-watch: $slug still down, cooldown active reason=$reason observer=$ORIGIN"
     return
   fi
   mins=$(minutes_since "$since_f")
   # The cooldown stamp is written only after Telegram confirms, mirroring pi_notify.sh:
   # an unconfirmed alert retries on the next pass instead of consuming its cooldown.
-  if send_telegram "$down_msg (${mins} min)"; then
-    echo "host-watch: $slug outage delivered"
+  # A ping outage says who observed it and why the echo failed: "network_unreachable"
+  # points at the watcher's own link, not at the target.
+  if [[ "$slug" == *.ping ]]; then
+    down_msg="$down_msg (${mins} min; ${reason}; seen from ${ORIGIN})"
+  else
+    down_msg="$down_msg (${mins} min)"
+  fi
+  if send_telegram "$down_msg" "$slug"; then
+    echo "host-watch: $slug outage delivered reason=$reason observer=$ORIGIN"
     echo "$NOW" > "$stamp_f"
     : > "$alerted_f"
   else
@@ -209,7 +244,7 @@ for target in $TARGETS; do
   if ping_ok "$addr"; then
     process "$slug.ping" up \
       "🔴 host-watch: $name unreachable" \
-      "🟢 host-watch: $name reachable again"
+      "🟢 host-watch: $name reachable again" ok
     if [ -n "$health" ]; then
       if health_ok "$health"; then
         process "$slug.health" up \
@@ -218,13 +253,13 @@ for target in $TARGETS; do
       else
         process "$slug.health" down \
           "🟠 host-watch: $name health check failing" \
-          "🟢 host-watch: $name health check ok again"
+          "🟢 host-watch: $name health check ok again" http_failure
       fi
     fi
   else
     process "$slug.ping" down \
       "🔴 host-watch: $name unreachable" \
-      "🟢 host-watch: $name reachable again"
+      "🟢 host-watch: $name reachable again" "$PING_REASON"
   fi
 done
 

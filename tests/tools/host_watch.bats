@@ -19,6 +19,7 @@ setup() {
 
     printf 'TELEGRAM_TOKEN=test-token\nTELEGRAM_CHAT_ID=1234567\n' >"$TEST_TMP/secrets.env"
     export HOST_WATCH_ENV_FILE="$TEST_TMP/host-watch.env"
+    export WATCH_ORIGIN="watcher-test"
     write_env "host1=192.0.2.1"
 
     # Down hosts and failing health URLs are listed in files the tests write, so a single
@@ -27,6 +28,10 @@ setup() {
 addr="${!#}"
 if grep -qxF "$addr" "$TEST_TMP/hosts-down"; then
     exit 1
+fi
+if grep -qxF "$addr network-unreachable" "$TEST_TMP/hosts-down"; then
+    echo "ping: connect: Network is unreachable" >&2
+    exit 2
 fi
 if grep -qxF "$addr flag-refused" "$TEST_TMP/hosts-down" && [[ "$*" == *" -i "* ]]; then
     # Some ping builds allow sub-second intervals only to root. A refused flag is a
@@ -46,7 +51,10 @@ case "$* $cfg" in
                 text=*) printf '%s\n' "${arg#text=}" >>"$TEST_TMP/telegram.log" ;;
             esac
         done
-        if [[ -f "$TEST_TMP/telegram-refuses" ]]; then
+        if [[ -f "$TEST_TMP/telegram-timeout" ]]; then
+            echo 'curl: (28) timeout at bot test-token' >&2
+            exit 28
+        elif [[ -f "$TEST_TMP/telegram-refuses" ]]; then
             echo '{"ok":false,"description":"Forbidden: bot was blocked by the user"}'
         else
             echo '{"ok":true,"result":{"message_id":1}}'
@@ -144,6 +152,54 @@ assert_no_telegram() {
     assert_file_contains "$STATE_DIR/host1.ping.miss" "1"
 }
 
+@test "a network-unreachable ping logs its cause but not the target address" {
+    write_env "host1=192.0.2.1" 3
+    echo "192.0.2.1 network-unreachable" >"$TEST_TMP/hosts-down"
+
+    run "$SCRIPT"
+
+    assert_status 0
+    assert_output_contains "host1.ping miss 1/3 reason=network_unreachable observer=watcher-test"
+    assert_output_not_contains "192.0.2.1"
+    assert_no_telegram
+}
+
+@test "a ping that is simply never answered is classified as no_reply" {
+    write_env "host1=192.0.2.1" 3
+    echo "192.0.2.1" >"$TEST_TMP/hosts-down"
+    stub_command ping <<'STUB'
+echo '2 packets transmitted, 0 received, 100% packet loss'
+exit 1
+STUB
+
+    run "$SCRIPT"
+
+    assert_status 0
+    assert_output_contains "host1.ping miss 1/3 reason=no_reply"
+}
+
+@test "a ping outage alert names the observer and the cause, the address stays out" {
+    echo "192.0.2.1 network-unreachable" >"$TEST_TMP/hosts-down"
+
+    run "$SCRIPT"
+
+    assert_status 0
+    assert_telegram_contains "host-watch: host1 unreachable"
+    assert_telegram_contains "network_unreachable"
+    assert_telegram_contains "seen from watcher-test"
+    [[ "$(telegram_messages)" != *"192.0.2.1"* ]]
+}
+
+@test "the observer defaults to the short hostname" {
+    unset WATCH_ORIGIN
+    echo "192.0.2.1" >"$TEST_TMP/hosts-down"
+
+    run "$SCRIPT"
+
+    assert_status 0
+    assert_telegram_contains "seen from $(hostname -s)"
+}
+
 @test "the alert comes on the configured miss, not before" {
     write_env "host1=192.0.2.1" 3
     echo "192.0.2.1" >"$TEST_TMP/hosts-down"
@@ -206,6 +262,45 @@ assert_no_telegram() {
     assert_output_contains "Telegram send failed"
     assert_file_absent "$STATE_DIR/host1.ping.last_alert"
     assert_file_absent "$STATE_DIR/host1.ping.alerted"
+}
+
+@test "a Telegram timeout logs a safe category and no bot credential" {
+    echo "192.0.2.1" >"$TEST_TMP/hosts-down"
+    touch "$TEST_TMP/telegram-timeout"
+
+    run "$SCRIPT"
+
+    assert_status 1
+    assert_output_contains "Telegram send failed (not confirmed): transport_timeout"
+    assert_output_not_contains "test-token"
+    assert_file_absent "$STATE_DIR/host1.ping.alerted"
+}
+
+@test "a Telegram API rejection is told apart from a transport failure" {
+    echo "192.0.2.1" >"$TEST_TMP/hosts-down"
+    touch "$TEST_TMP/telegram-refuses"
+
+    run "$SCRIPT"
+
+    assert_status 1
+    assert_output_contains "Telegram send failed (not confirmed): api_rejected"
+    assert_output_not_contains "test-token"
+}
+
+@test "the Telegram request needs no curl newer than 7.74" {
+    echo "192.0.2.1" >"$TEST_TMP/hosts-down"
+    stub_command curl <<'STUB'
+for a in "$@"; do
+    [[ "$a" == --fail-with-body ]] && { echo "curl: option --fail-with-body: is unknown" >&2; exit 2; }
+    [[ "$a" == text=* ]] && printf '%s\n' "${a#text=}" >>"$TEST_TMP/telegram.log"
+done
+echo '{"ok":true,"result":{"message_id":1}}'
+STUB
+
+    run "$SCRIPT"
+
+    assert_status 0
+    assert_telegram_contains "unreachable"
 }
 
 # ── recovery ──────────────────────────────────────────────────────────────────────────

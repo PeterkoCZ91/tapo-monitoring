@@ -23,6 +23,13 @@ All notable changes to this project are documented here.
   on a hung stream. A frame that arrives after the recall is discarded.
 - `tools/soak_report.py` prints the first-alert median and p90 per delivery path (live,
   sampler, sd) beside the summary, and adds `first_alert.by_path` to `--json`.
+- `tools/host_watch.sh`: a ping outage alert and every log line now name the observing
+  host (`WATCH_ORIGIN`, default the short hostname) and the cause of the failed echo
+  (`no_reply`, `network_unreachable`, `dns_failure`, `icmp_unreachable`), so an alert
+  from a watcher whose own link is down is not read as a dead target. A failed
+  Telegram send is logged as a fixed category (`api_rejected`, `transport_timeout`,
+  `dns_failure`, `connect_failure`, ...), never with curl's text, which can echo the
+  bot URL. The messages keep their wording and need no newer curl.
 
 ### Fixed
 - A vehicle alert (`scorer.alert_vehicles`) no longer turns the MQTT / Home Assistant

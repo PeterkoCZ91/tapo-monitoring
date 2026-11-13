@@ -1685,6 +1685,7 @@ WATCH_TARGETS="alpha=192.0.2.10 beta=198.51.100.20,health=http://198.51.100.20:8
 WATCH_FAILS=3
 WATCH_COOLDOWN=1800
 TAPO_ENV_FILE=/etc/tapo-monitor/secrets.env
+# WATCH_ORIGIN=watcher-a        # optional; default: the short hostname
 ```
 
 The quotes around `WATCH_TARGETS` matter: it is a space-separated list. Each entry is
@@ -1703,6 +1704,14 @@ Every send is confirmed against Telegram's `"ok":true` before it arms a cooldown
 closes an episode, so an unconfirmed message is retried on the next pass rather than
 lost. Counters and cooldown stamps live under `/var/tmp/host-watch/`, which survives a
 reboot of the watcher — a reboot must not forget that a peer is down.
+
+A ping outage message ends with the minutes down, the cause of the failed echo and the
+observer (`seen from watcher-a`), and the journal lines carry `reason=` and `observer=`.
+`network_unreachable` or `dns_failure` means the watcher's own link is the likelier
+culprit; `no_reply` means the network was fine and the target did not answer. A failed
+Telegram send is logged as a fixed category (`api_rejected`, `transport_timeout`,
+`dns_failure`, `connect_failure`, `transport_error`, `invalid_response`) and never with
+curl's own text, which can echo the bot URL.
 
 Install on each watching host:
 
