@@ -70,6 +70,37 @@ def _latched_with_permit(target, poses, **kwargs):
     return guard, clock, trace
 
 
+def test_startup_boundary_read_cannot_recall_without_direction_history():
+    guard, clock, _ = build([0.75, 0.75])
+    try:
+        guard.poll_once()
+        await_off(guard)
+        assert not guard.prepare_recovery(0.5)
+        clock.advance()
+        guard.poll_once()
+        assert guard.prepare_recovery(0.5)
+    finally:
+        guard.close()
+
+
+def test_pose_loss_requires_two_fresh_samples_before_home_recall():
+    guard, clock, _ = build([0.75, TimeoutErr(), 0.69, 0.68])
+    try:
+        guard.poll_once()
+        await_off(guard)
+        clock.advance()
+        guard.poll_once()  # unknown motion during the failed read
+        clock.advance()
+        guard.poll_once()  # one fresh safe sample cannot establish direction
+        assert guard.snapshot().latched
+        assert not guard.prepare_recovery(0.5)
+        clock.advance()
+        guard.poll_once()  # second fresh sample moves toward the target
+        assert guard.prepare_recovery(0.5)
+    finally:
+        guard.close()
+
+
 def test_recovery_permit_ends_when_lens_passes_target_toward_opposite_boundary():
     guard, clock, trace = _latched_with_permit(-0.6, [0.85, 0.85, -0.5, -0.9],
                                                left_limit=-0.8)

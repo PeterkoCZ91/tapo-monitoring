@@ -339,13 +339,17 @@ def test_recovery_permit_allows_acceleration_then_inward_motion():
     guard, clock, trace = guard_for([0.75, 0.75, 0.73, 0.65])
     guard.poll_once()
     await_off(guard)
+    assert not guard.prepare_recovery(0.5)
+    clock.advance()
+    guard.poll_once()  # two fresh samples establish stationary motion
     assert guard.prepare_recovery(0.5)
-    for _ in range(3):
+    stops_before_permit = trace.count("stop")
+    for _ in range(2):
         clock.advance()
         guard.poll_once()
         assert guard.snapshot().latched
         assert not guard.snapshot().tracking_allowed
-    assert trace.count("stop") == 1
+    assert trace.count("stop") == stops_before_permit
     guard.close()
 
 
@@ -374,30 +378,36 @@ def test_recall_allowed_once_the_motion_stops():
 
 
 def test_recovery_permit_outward_motion_forces_stop_and_cancels_permit():
-    guard, clock, trace = guard_for([0.75, 0.76, 0.76])
+    guard, clock, trace = guard_for([0.75, 0.75, 0.76, 0.76])
     guard.poll_once()
     await_off(guard)
-    assert guard.prepare_recovery(0.5)
-    clock.advance(0.01)  # safety cancellation bypasses normal Stop rate limit
-    guard.poll_once()
-    assert trace.count("stop") == 2
     clock.advance()
     guard.poll_once()
-    assert trace.count("stop") == 3
+    assert guard.prepare_recovery(0.5)
+    stops_before_permit = trace.count("stop")
+    clock.advance(0.01)  # safety cancellation bypasses normal Stop rate limit
+    guard.poll_once()
+    assert trace.count("stop") == stops_before_permit + 1
+    clock.advance()
+    guard.poll_once()
+    assert trace.count("stop") == stops_before_permit + 2
     guard.close()
 
 
 def test_expired_recovery_permit_resumes_stop_at_stationary_unsafe_pose():
-    guard, clock, trace = guard_for([0.75, 0.75, 0.75])
+    guard, clock, trace = guard_for([0.75, 0.75, 0.75, 0.75])
     guard.poll_once()
     await_off(guard)
+    clock.advance()
+    guard.poll_once()
     assert guard.prepare_recovery(0.5, timeout=0.3)
+    stops_before_permit = trace.count("stop")
     clock.advance()
     guard.poll_once()
-    assert trace.count("stop") == 1
+    assert trace.count("stop") == stops_before_permit
     clock.advance()
     guard.poll_once()
-    assert trace.count("stop") == 2
+    assert trace.count("stop") == stops_before_permit + 1
     guard.close()
 
 
@@ -625,23 +635,25 @@ def test_tracking_off_in_flight_keeps_stopping_even_inside_the_boundary():
 
 
 def test_retry_after_failed_stop_still_respects_verified_inward_recovery():
-    guard, clock, trace = guard_for([0.71, 0.6, 0.5])
+    guard, clock, trace = guard_for([0.71, 0.6, 0.5, 0.45])
     attempts = []
     def stop():
         attempts.append(clock())
-        if len(attempts) == 1:
+        if len(attempts) <= 2:
             raise ConnectionError('temporary transport failure')
     guard.stop = stop
     try:
         guard.poll_once()
         await_off(guard)
+        clock.advance()
+        guard.poll_once()
         assert guard.prepare_recovery(0.4)
         clock.advance()
         guard.poll_once()
-        assert len(attempts) == 1
+        assert len(attempts) == 2
         clock.advance(2.1)
         guard.poll_once()
-        assert len(attempts) == 2
+        assert len(attempts) == 3
     finally:
         guard.close()
 

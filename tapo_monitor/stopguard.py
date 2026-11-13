@@ -170,6 +170,7 @@ class StopGuard:
         self._disable_warned = self._stop_warned = False
         self._position = self._observed_at = None
         self._last_motion_delta = None
+        self._direction_lost = True
         self._safe_samples = 0
         self._healthy = self._latched = self._disable_ok = self._armed = False
         self._reason = "starting"
@@ -264,6 +265,7 @@ class StopGuard:
         with self._lock:
             self._healthy = self._armed = False
             self._last_motion_delta = None
+            self._direction_lost = True
             self._safe_samples = 0
             self._observed_at = None
             self._reason = "suspended"
@@ -544,6 +546,7 @@ class StopGuard:
             with self._lock:
                 self._healthy = False
                 self._last_motion_delta = None
+                self._direction_lost = True
                 self._safe_samples = 0
                 self._recovery_until = -math.inf
                 self._last_cause = cause
@@ -581,6 +584,10 @@ class StopGuard:
                 self._reason = "starting"
             previous = (self._position if self._healthy and self._observed_at is not None
                         and now - self._observed_at <= self.stale_after else None)
+            if previous is None and self._observed_at is not None:
+                self._direction_lost = True
+            elif previous is not None:
+                self._direction_lost = False
             self._last_motion_delta = position - previous if previous is not None else None
             self._position, self._observed_at, self._healthy = position, now, True
             self._observe_episode()
@@ -647,6 +654,9 @@ class StopGuard:
             state = self.snapshot()
             if (not state.latched or not state.healthy or state.disable_pending
                     or not self._disable_ok or not self._safe(target)):
+                return False
+            if self._direction_lost:
+                self._trace("recall_refused", "direction_unknown")
                 return False
             # A verified Stop/OFF does not prove the motor has ceased moving.
             # Do not issue a home preset while fresh observations show motion
