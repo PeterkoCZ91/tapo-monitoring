@@ -29,6 +29,7 @@ _READ_BACKOFF_FLOOR = 0.5  # first slowed gap after repeated non-transport (auth
 _READ_BACKOFF_CAP = 1.0
 _OFF_BACKOFF_CAP = 10.0  # slowest tracking-OFF retry gap
 _OFF_FAILS_TO_UNVERIFY = 2
+_DIRECTION_RETRY = 1.0   # retry gap after a recall was refused only because the direction is unknown
 _REVERIFY_EVERY = 30.0   # seconds between OFF re-checks while the latch is set
 _OUTAGE_LOG_EVERY = 600.0  # seconds between outage lines once the power-of-two counts thin out
 _READ_OUTAGE_FIRST = 4     # consecutive failed reads before a pose outage is worth a warning
@@ -192,6 +193,7 @@ class StopGuard:
         self.recover_attempts = recover_attempts
         self._recover_thread = None
         self._last_recover = -math.inf
+        self._recall_flags = threading.local()   # per-thread outcome of prepare_recovery
         self._recent: deque = deque(maxlen=14)
         self._last_cause = "none"
         self._rearm_block = None
@@ -354,12 +356,23 @@ class StopGuard:
 
     def _recover(self, episode):
         began = self.clock()
+        flags = self._recall_flags
+        flags.permitted, flags.direction_refused = False, False
         try:
             ok = self.recover() is True
             error = "none"
         except Exception as exc:  # noqa: BLE001 - a failed recall must not kill observation
             ok, error = False, type(exc).__name__
+        # prepare_recovery runs synchronously inside the callback, so its outcome is
+        # visible on this thread. A refusal for an unknown direction issued no motor
+        # command at all: it must not spend the per-episode budget meant for real
+        # recalls, and the next try need not wait the full interval either.
+        refused = not ok and flags.direction_refused and not flags.permitted
         with self._lock:
+            if refused and episode is self._episode and episode.recoveries > 0:
+                episode.recoveries -= 1
+                self._last_recover = min(self._last_recover,
+                                         self.clock() - self.recover_interval + _DIRECTION_RETRY)
             if episode is self._episode:
                 self._trace("home", f"{'ok' if ok else 'deferred ' + error} {self.clock() - began:.2f}s")
 
@@ -657,6 +670,7 @@ class StopGuard:
                 return False
             if self._direction_lost:
                 self._trace("recall_refused", "direction_unknown")
+                self._recall_flags.direction_refused = True
                 return False
             # A verified Stop/OFF does not prove the motor has ceased moving.
             # Do not issue a home preset while fresh observations show motion
@@ -669,6 +683,7 @@ class StopGuard:
             self._recovery_direction = 1 if target > self._position else -1
             self._recovery_target = target
             self._recovery_until = self.clock() + timeout
+            self._recall_flags.permitted = True
             return True
 
     def rearm(self):

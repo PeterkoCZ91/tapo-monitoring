@@ -794,6 +794,82 @@ def test_recall_attempts_are_bounded_per_episode():
     guard.close()
 
 
+def permit_guard(positions, outcome=True, **kwargs):
+    """Guard whose recall callback asks the real prepare_recovery, as the daemon does."""
+    clock = Clock()
+    poses = iter(positions)
+    calls = []
+
+    def recall():
+        permitted = guard.prepare_recovery(0.5)
+        calls.append((clock.now, permitted))
+        return permitted and outcome
+
+    guard = StopGuard(lambda: next(poses), lambda: None, lambda: True, right_limit=0.8,
+                      margin=0.1, clock=clock, recover=recall, **kwargs)
+    return guard, clock, calls
+
+
+def settle_latched(guard, clock):
+    for _ in range(2):
+        guard.poll_once()
+        clock.advance()
+    guard.poll_once()                       # first poll outside the band: latch + OFF
+    await_off(guard)
+    clock.advance()
+
+
+def poll_for(guard, clock, seconds, step=0.5):
+    for _ in range(int(seconds / step)):
+        guard.poll_once()
+        await_off(guard)
+        await_home(guard)
+        clock.advance(step)
+
+
+def test_recall_refused_for_unknown_direction_does_not_spend_the_attempt_budget():
+    # Reads older than stale_after keep the direction unknown, so every recall is
+    # refused before any motor command; these must not exhaust recover_attempts.
+    guard, clock, calls = permit_guard([0.5, 0.5] + [0.85] * 80, recover_attempts=2)
+    settle_latched(guard, clock)
+    for _ in range(8):                      # every poll is 6 s after the previous one
+        clock.advance(6)
+        guard.poll_once()
+        await_off(guard)
+        await_home(guard)
+    assert len(calls) >= 3 and not any(p for _, p in calls)
+    assert guard._episode.recoveries == 0
+    poll_for(guard, clock, 3)               # fast reads: the direction is known again
+    assert any(p for _, p in calls)         # the budget was still intact
+    guard.close()
+
+
+def test_refused_recall_is_retried_after_a_short_gap_not_the_full_interval():
+    guard, clock, calls = permit_guard([0.5, 0.5] + [0.85] * 80)
+    settle_latched(guard, clock)
+    clock.advance(6)
+    guard.poll_once()                       # unknown direction: refused
+    await_home(guard)
+    refused_at = calls[-1][0]
+    assert calls[-1][1] is False
+    poll_for(guard, clock, 4)               # well inside recover_interval (5 s)
+    permitted = [t for t, p in calls if p]
+    assert permitted and permitted[0] - refused_at < guard.recover_interval
+    guard.close()
+
+
+def test_permitted_recalls_that_fail_still_consume_the_budget():
+    guard, clock, calls = permit_guard([0.5, 0.5] + [0.85] * 200, outcome=False,
+                                       recover_attempts=2)
+    settle_latched(guard, clock)
+    for _ in range(10):
+        clock.advance(6)
+        poll_for(guard, clock, 3)
+    assert len([p for _, p in calls if p]) == 2
+    assert guard._episode.recoveries == 2
+    guard.close()
+
+
 @pytest.mark.parametrize("escalated", [False, True])
 def test_tracking_off_is_dispatched_before_a_stretched_stop(escalated):
     seen = []
