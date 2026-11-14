@@ -679,6 +679,12 @@ Strategies:
 `tracking.day_preset` during rain, as does `disable_tracking` (with no `day_preset`
 either one only stops tracking and warns at load). Weather needs top-level location coordinates.
 
+Dense fog counts as bad weather too: it scatters the IR light like rain does. A camera is
+treated as "in the rain" when open-meteo reports precipitation at or above
+`precip_threshold`, a fog weather code (45/48) or a visibility under `FOG_VISIBILITY_M`
+metres (environment variable, default 1000; `0` turns the fog condition off). Use of the
+weather needs the top-level `location:` block — without it the weather check is skipped.
+
 ### Live, SD and local-recorder media
 
 ```yaml

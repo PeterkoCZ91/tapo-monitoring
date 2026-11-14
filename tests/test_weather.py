@@ -91,3 +91,26 @@ def test_raining_now_skips_without_coordinates(monkeypatch, tmp_path):
                         lambda *a, **k: {"current": {"precipitation": 9.9}})
     assert weather.is_raining_now(now=5000, poll_interval=900, cache_path=cache,
                                   lat=None, lon=None) is False
+
+
+# ── fog ──────────────────────────────────────────────────────────────────────
+
+def test_fog_by_weather_code_counts_as_bad_weather():
+    assert weather.parse_precip({"current": {"precipitation": 0, "weather_code": 45}}) is True
+    assert weather.parse_precip({"current": {"weather_code": 48}}) is True
+
+
+def test_fog_by_low_visibility():
+    assert weather.parse_precip({"current": {"visibility": 400}}, fog_visibility=1000) is True
+    assert weather.parse_precip({"current": {"visibility": 5000}}, fog_visibility=1000) is False
+
+
+def test_clear_air_and_missing_fields_are_dry():
+    assert weather.parse_precip({"current": {"precipitation": 0, "weather_code": 3,
+                                             "visibility": 24000}}) is False
+    assert weather.parse_precip({"current": {"visibility": None}}) is False
+
+
+def test_fog_condition_can_be_switched_off():
+    assert weather.parse_precip({"current": {"weather_code": 45, "visibility": 100}},
+                                fog_visibility=0) is False

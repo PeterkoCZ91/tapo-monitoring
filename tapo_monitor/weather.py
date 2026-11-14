@@ -1,4 +1,4 @@
-"""Weather-based gating for auto-tracking cameras.
+"""Weather-based gating (rain and dense fog) for auto-tracking cameras.
 
 In the rain, an auto-tracking camera latches onto raindrops and IR reflections. This
 module tells the daemon whether it's currently raining so it can lower motion
@@ -55,6 +55,10 @@ LAT = _env_coord("RAIN_LAT", "NIGHT_LAT")
 LON = _env_coord("RAIN_LON", "NIGHT_LON")
 TZ = os.getenv("RAIN_TZ") or os.getenv("NIGHT_TZ") or "UTC"
 PRECIP_THRESHOLD = _env_number("RAIN_PRECIP_THRESHOLD", 0.1, float)
+# Dense fog (WMO: visibility < 1 km, or weather code 45/48) fools a camera like rain does:
+# the IR light scatters off the water droplets. 0 disables the fog condition.
+FOG_VISIBILITY_M = _env_number("FOG_VISIBILITY_M", 1000, float)
+_FOG_CODES = (45, 48)
 CLEAR_DELAY = _env_number("RAIN_CLEAR_DELAY", 1800, int)
 POLL_INTERVAL = _env_number("RAIN_POLL_INTERVAL", 900, int)
 # After a failed fetch, do not retry for this long (each attempt blocks up to 5 s).
@@ -74,7 +78,7 @@ def _fetch_weather(lat=LAT, lon=LON, tz=TZ, timeout=5):
     qs = urllib.parse.urlencode({
         "latitude": lat,
         "longitude": lon,
-        "current": "precipitation,rain,showers",
+        "current": "precipitation,rain,showers,weather_code,visibility",
         "timezone": tz,
     })
     req = urllib.request.Request(f"{_API}?{qs}", headers={"User-Agent": "tapo-monitor/1.0"})
@@ -82,8 +86,12 @@ def _fetch_weather(lat=LAT, lon=LON, tz=TZ, timeout=5):
         return json.load(resp)
 
 
-def parse_precip(api_json, threshold=PRECIP_THRESHOLD):
-    """Return True if the open-meteo response reports precipitation >= threshold (mm)."""
+def parse_precip(api_json, threshold=PRECIP_THRESHOLD, fog_visibility=None):
+    """True if the open-meteo response reports precipitation >= threshold (mm) or fog.
+
+    Fog is a weather code of 45/48 or a visibility under ``fog_visibility`` metres
+    (default :data:`FOG_VISIBILITY_M`; 0 turns the fog condition off).
+    """
     current = api_json.get("current") if isinstance(api_json, dict) else None
     if not isinstance(current, dict):
         return False
@@ -92,7 +100,19 @@ def parse_precip(api_json, threshold=PRECIP_THRESHOLD):
         current.get("rain", 0) or 0,
         current.get("showers", 0) or 0,
     )
-    return value >= threshold
+    if value >= threshold:
+        return True
+    return is_fog(current, FOG_VISIBILITY_M if fog_visibility is None else fog_visibility)
+
+
+def is_fog(current, fog_visibility=None):
+    limit = FOG_VISIBILITY_M if fog_visibility is None else fog_visibility
+    if limit <= 0:
+        return False
+    if current.get("weather_code") in _FOG_CODES:
+        return True
+    vis = current.get("visibility")
+    return isinstance(vis, (int, float)) and not isinstance(vis, bool) and 0 <= vis < limit
 
 
 def is_rain_active(now, last_seen, clear_delay=CLEAR_DELAY):
