@@ -35,6 +35,25 @@ All notable changes to this project are documented here.
   no frames is no longer ambiguous between "the card returned nothing" and "a file came
   back but no frame could be cut from it".
 
+### Changed
+- Weather (`weather:` with a `location:`) now treats dense fog like rain: a fog weather
+  code (45/48) or a visibility under `FOG_VISIBILITY_M` metres (default 1000) counts as
+  bad weather for `storm_park`, `disable_tracking` and `lower_sensitivity`, because fog
+  scatters the IR light and makes cameras see movement the same way rain does. Set
+  `FOG_VISIBILITY_M=0` to keep the rain-only behaviour.
+- The PTZ stop guard sends a home recall only when it has a fresh direction for the
+  camera. After a lost or stale position read it refuses the recall (logged as
+  `recall_refused direction_unknown`) instead of guessing; such a refusal does not use
+  up the episode's recovery attempts and is retried about a second later.
+- Log lines for camera, SD card, clip and event API failures carry a fixed category,
+  the exception class and, where set, its numeric code instead of the exception text,
+  which could hold a URL with a session token or password. ffmpeg stderr is masked
+  before it is cut, and stack traces of generic loops have URLs, tokens and addresses
+  masked. `getEvents` failures name the camera, protocol and operation.
+- An SD follow-up that runs past its time limit is recorded as `sd_timeout` in the
+  audit log instead of a warning with a traceback; the alert falls back as before. A
+  `requests` read timeout is handled like any other timeout.
+
 ### Fixed
 - The scorer-outage and recovery notices name the scorer by host and port only; an
   address configured with embedded credentials no longer puts them into the
