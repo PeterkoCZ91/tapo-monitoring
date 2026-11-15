@@ -55,6 +55,10 @@ see [camera reports](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/do
 
 ## What's new
 
+**0.14.0** can name the camera in alert captions (`caption_camera`), end the tracking night
+at a fixed clock time (`tracking.night_end`), offer a Home Assistant Vehicle sensor
+(`mqtt.separate_event_types`), treats dense fog like rain for weather parking and keeps
+passwords and session tokens out of the logs;
 **0.13.0** can find a camera by its MAC when the router hands it a new address (`mac:`, opt-in),
 no longer posts an alert twice when Telegram's answer times out on a slow uplink, keeps the
 PTZ guards alive and memory flat through long camera outages, logs why a camera dropped off

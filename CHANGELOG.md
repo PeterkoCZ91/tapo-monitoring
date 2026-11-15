@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.14.0] - 2026-11-15
 
 ### Added
 - `caption_camera: true` (per camera, off by default) puts the camera's name at the

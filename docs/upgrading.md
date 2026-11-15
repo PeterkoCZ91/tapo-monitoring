@@ -1,3 +1,24 @@
+# Upgrading to 0.14.0
+
+No action is needed when coming from 0.13.0: install the new package and restart. All new
+options are off unless set; one existing behaviour changes for cameras with a `weather:`
+policy.
+
+- **Fog counts as bad weather.** With a `weather:` policy and a `location:` block, a fog
+  weather code (45/48) or a visibility under `FOG_VISIBILITY_M` metres (default 1000) now
+  triggers `storm_park`, `disable_tracking` or `motion_rain` like rain does. Set
+  `FOG_VISIBILITY_M=0` in the environment to keep the rain-only behaviour.
+- **New opt-ins:** `caption_camera`, `tracking.night_end`, `pan_limit.evidence_budget`
+  and `mqtt.separate_event_types`; see the [configuration reference](configuration.md).
+- **PTZ stop guard:** a home recall is sent only with a fresh direction for the camera;
+  a refused recall is logged as `recall_refused direction_unknown` and retried.
+- **Logs:** camera, SD, clip and event API failures now log a fixed category and the
+  exception class instead of the exception text. Log filters that matched the old free
+  text may need updating.
+- A vehicle alert no longer turns the Home Assistant Person sensor on.
+
+Coming from 0.12.0 or older, also read the 0.13.0 notes below.
+
 # Upgrading to 0.13.0
 
 No action is needed when coming from 0.12.0: install the new package and restart. Both new
