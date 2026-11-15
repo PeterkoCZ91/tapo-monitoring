@@ -194,3 +194,41 @@ def test_absent_vehicle_identity_is_cached_per_client():
     for _ in range(4):
         capabilities.absent_vehicle_detection(c)
     assert C.calls == 1
+
+
+def test_whitelamp_lens_without_force_time_is_not_drift(caplog):
+    # C545D lens 2 answers only night_vision_mode + wtl_intensity_level: a key the
+    # lens does not report is "not supported", not drift, so no rewrite every pass.
+    daemon._LAMP_KEY_UNSUPPORTED_LOGGED.clear()
+    cam = LensCam(lamp={1: {"wtl_intensity_level": "5", "wtl_force_time": "300"},
+                        2: {"night_vision_mode": "md_night_vision",
+                            "wtl_intensity_level": "5"}})
+    with caplog.at_level("INFO", logger=daemon.log.name):
+        for _ in range(3):
+            _apply(cam, _plan(whitelamp_force_time=300, whitelamp_intensity=5))
+    assert [w for w in cam.writes if w[0] == "lamp"] == []
+    notes = [r for r in caplog.records if "wtl_force_time" in r.getMessage()]
+    assert len(notes) == 1                      # told once, not every pass
+    assert "md_night_vision" not in notes[0].getMessage()
+
+
+def test_whitelamp_present_but_different_key_still_drifts():
+    cam = LensCam(lamp={1: {"wtl_intensity_level": "5", "wtl_force_time": "300"},
+                        2: {"night_vision_mode": "md_night_vision",
+                            "wtl_intensity_level": "3"}})
+    _apply(cam, _plan(whitelamp_force_time=300, whitelamp_intensity=5))
+    assert [w for w in cam.writes if w[0] == "lamp"] == [("lamp", 300, 5, [2])]
+
+
+def test_whitelamp_force_time_different_still_drifts():
+    cam = LensCam(lamp={1: {"wtl_intensity_level": "5", "wtl_force_time": "60"},
+                        2: {"wtl_intensity_level": "5"}})
+    _apply(cam, _plan(whitelamp_force_time=300))
+    assert [w for w in cam.writes if w[0] == "lamp"] == [("lamp", 300, False, [1])]
+
+
+def test_whitelamp_single_lens_path_unchanged():
+    cam = LensCam(lamp={1: {"wtl_intensity_level": "5"}})
+    daemon.apply_plan(cam, _plan(whitelamp_force_time=300), repair_failures=None,
+                      camera="c", lenses=None)
+    assert [w for w in cam.writes if w[0] == "lamp"] == [("lamp", 300, False, None)]

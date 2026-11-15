@@ -555,16 +555,22 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
     if ((plan.whitelamp_force_time is not None or plan.whitelamp_intensity is not None)
             and lenses is not None and _repair_allowed(reliability_config, "whitelamp_config")):
         if hasattr(cam, "setWhitelampConfig"):
+            lamp_wanted = {key: value for key, value in (
+                ("wtl_force_time", plan.whitelamp_force_time),
+                ("wtl_intensity_level", plan.whitelamp_intensity)) if value is not None}
+
             def _lamp_drifted(lens):
                 if not isinstance(lens, Mapping):
                     return True
-                if "wtl_force_time" not in lens and "wtl_intensity_level" not in lens:
-                    return False        # this lens has no lamp: nothing to drift
-                if (plan.whitelamp_force_time is not None
-                        and str(lens.get("wtl_force_time")) != str(plan.whitelamp_force_time)):
-                    return True
-                return (plan.whitelamp_intensity is not None
-                        and str(lens.get("wtl_intensity_level")) != str(plan.whitelamp_intensity))
+                # Only keys the lens reports can drift. The C545D's second lens answers
+                # without wtl_force_time; treating that as drift rewrote it every pass.
+                drifted = False
+                for key, value in lamp_wanted.items():
+                    if key not in lens:
+                        _note_lamp_key_unsupported(camera, lens, key)
+                    elif str(lens[key]) != str(value):
+                        drifted = True
+                return drifted
 
             def _lamp_lenses(chn):
                 kwargs = {}
@@ -752,6 +758,19 @@ def read_lenses(cam, channels):
 
 
 UNREAD_REPAIR_SECONDS = 600
+
+_LAMP_KEY_UNSUPPORTED_LOGGED: set = set()  # (camera, key) already reported
+
+
+def _note_lamp_key_unsupported(camera, lens, key):
+    """Say once per camera and key that a lens does not report a configured lamp key."""
+    if "wtl_force_time" not in lens and "wtl_intensity_level" not in lens:
+        return                  # this lens has no lamp at all: nothing to report
+    if (camera, key) in _LAMP_KEY_UNSUPPORTED_LOGGED:
+        return
+    _LAMP_KEY_UNSUPPORTED_LOGGED.add((camera, key))
+    log.info("whitelamp_config: a lens of %s does not report %s; not applied there",
+             camera, key)
 
 
 def _repair_lenses(cam, lenses, name, drifted, write, failures, camera):

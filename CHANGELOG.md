@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Fixed
+- On dual-lens cameras the white-lamp self-heal now compares only the settings a lens
+  actually reports. A lens whose lamp config has no `wtl_force_time` (the second lens
+  of the C545D) was seen as drifted on every pass and rewritten each minute; a missing
+  key is now treated as unsupported, logged once per camera at info level, and left
+  alone. A key that is reported but differs is still repaired as before, and
+  single-lens cameras are unchanged.
+
 ## [0.14.0] - 2026-11-15
 
 ### Added
