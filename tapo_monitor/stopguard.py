@@ -358,22 +358,26 @@ class StopGuard:
     def _recover(self, episode):
         began = self.clock()
         flags = self._recall_flags
-        flags.permitted, flags.direction_refused = False, False
+        flags.permitted = flags.direction_refused = flags.state_refused = False
         try:
             ok = self.recover() is True
             error = "none"
         except Exception as exc:  # noqa: BLE001 - a failed recall must not kill observation
             ok, error = False, type(exc).__name__
         # prepare_recovery runs synchronously inside the callback, so its outcome is
-        # visible on this thread. A refusal for an unknown direction issued no motor
-        # command at all: it must not spend the per-episode budget meant for real
-        # recalls, and the next try need not wait the full interval either.
-        refused = not ok and flags.direction_refused and not flags.permitted
+        # visible on this thread. A refusal for an unknown direction, or because the
+        # guard state changed while the callback waited (stale pose, OFF re-check in
+        # flight), issued no motor command at all: it must not spend the per-episode
+        # budget meant for real recalls. Only the direction case retries early.
+        refused = not ok and not flags.permitted and (flags.direction_refused
+                                                      or flags.state_refused)
         with self._lock:
             if refused and episode is self._episode and episode.recoveries > 0:
                 episode.recoveries -= 1
-                self._last_recover = min(self._last_recover,
-                                         self.clock() - self.recover_interval + _DIRECTION_RETRY)
+                if flags.direction_refused:
+                    self._last_recover = min(
+                        self._last_recover,
+                        self.clock() - self.recover_interval + _DIRECTION_RETRY)
             if episode is self._episode:
                 self._trace("home", f"{'ok' if ok else 'deferred ' + error} {self.clock() - began:.2f}s")
 
@@ -666,8 +670,11 @@ class StopGuard:
             return False
         with self._lock:
             state = self.snapshot()
+            if not self._safe(target):
+                return False
             if (not state.latched or not state.healthy or state.disable_pending
-                    or not self._disable_ok or not self._safe(target)):
+                    or not self._disable_ok):
+                self._recall_flags.state_refused = True
                 return False
             if self._direction_lost:
                 self._trace("recall_refused", "direction_unknown")

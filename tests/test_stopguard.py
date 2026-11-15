@@ -830,8 +830,13 @@ def settle_latched(guard, clock):
     for _ in range(2):
         guard.poll_once()
         clock.advance()
-    guard.poll_once()                       # first poll outside the band: latch + OFF
+    # First poll outside the band: latch + OFF. If the OFF thread finishes before
+    # _maybe_recover takes the lock, this poll would also start a recall that runs
+    # concurrently with the caller's clock; keep it out so the setup is deterministic.
+    recover, guard.recover = guard.recover, None
+    guard.poll_once()
     await_off(guard)
+    guard.recover = recover
     clock.advance()
 
 
@@ -857,6 +862,59 @@ def test_recall_refused_for_unknown_direction_does_not_spend_the_attempt_budget(
     assert guard._episode.recoveries == 0
     poll_for(guard, clock, 3)               # fast reads: the direction is known again
     assert any(p for _, p in calls)         # the budget was still intact
+    guard.close()
+
+
+def blocked_recall_guard(off_gate=None):
+    """Guard whose recall callback waits (like a busy camera session) before asking."""
+    clock = Clock()
+    poses = iter([0.5, 0.5] + [0.85] * 40)
+    gate, entered, calls = threading.Event(), threading.Event(), []
+
+    def disable():
+        if off_gate is not None and getattr(guard, "hold_off", False):
+            off_gate.wait(2)
+        return True
+
+    def recall():
+        entered.set()
+        gate.wait(2)
+        permitted = guard.prepare_recovery(0.5)
+        calls.append(permitted)
+        return permitted
+
+    guard = StopGuard(lambda: next(poses), lambda: None, disable, right_limit=0.8,
+                      margin=0.1, clock=clock, recover=recall)
+    settle_latched(guard, clock)
+    clock.advance(6)
+    guard.poll_once()                       # starts the recall; it blocks before asking
+    assert entered.wait(2) and guard._episode.recoveries == 1
+    return guard, clock, gate, calls
+
+
+def test_recall_refused_on_a_pose_gone_stale_while_waiting_keeps_the_budget():
+    guard, clock, gate, calls = blocked_recall_guard()
+    clock.advance(6)                        # the pose read before the recall is now stale
+    gate.set()
+    await_home(guard)
+    assert calls == [False]
+    assert guard._episode.recoveries == 0
+    guard.close()
+
+
+def test_recall_refused_while_off_recheck_is_in_flight_keeps_the_budget():
+    off_gate = threading.Event()
+    guard, clock, gate, calls = blocked_recall_guard(off_gate)
+    guard.hold_off = True                   # from here on the OFF callback blocks
+    clock.advance(guard.reverify_interval)
+    guard.poll_once()                       # fresh pose, OFF re-check starts and blocks
+    assert guard.snapshot().disable_pending
+    gate.set()
+    await_home(guard)
+    assert calls == [False]
+    assert guard._episode.recoveries == 0
+    off_gate.set()
+    await_off(guard)
     guard.close()
 
 

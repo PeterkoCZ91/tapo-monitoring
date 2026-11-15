@@ -11,6 +11,11 @@ All notable changes to this project are documented here.
   key is now treated as unsupported, logged once per camera at info level, and left
   alone. A key that is reported but differs is still repaired as before, and
   single-lens cameras are unchanged.
+- The PTZ stop guard no longer spends one of an episode's recall attempts on a recall
+  it refused because the pose went stale or a tracking-OFF re-check was in flight while
+  the recall waited for the camera; such a refusal sent no motor command. It is retried
+  at the normal interval. A recall is still only sent with a fresh direction and a
+  verified OFF.
 
 ## [0.14.0] - 2026-11-15
 
