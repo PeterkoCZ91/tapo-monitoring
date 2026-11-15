@@ -180,10 +180,8 @@ See the complete [capability catalog](https://github.com/PeterkoCZ91/tapo-monito
 Requirements: Python 3.10+, `ffmpeg`, a supported Tapo camera with third-party access, and
 camera/RTSP credentials created in the Tapo app (see [credentials](docs/credentials.md)).
 
-Home Assistant OS: tapo-monitor is a standalone service, not an integration or App. Run it
-on a separate Linux host (a Raspberry Pi 4 is enough) and connect it to your broker over
-[MQTT](#home-assistant-mqtt); Container, Supervised and Core installs can run it on the
-same machine.
+Home Assistant OS: tapo-monitor is a separate service, not an integration or app yet, so
+it needs another machine or container host; see [Home Assistant OS](#home-assistant-os).
 
 Install the released package from PyPI (add extras as needed: `[mqtt]` for Home
 Assistant, `[scorer]` for the local scorer, `[onvif]` for the pan limit):
@@ -399,6 +397,19 @@ never delays an alert. Entities, topics and an example automation:
 [docs/mqtt.md](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/mqtt.md).
 Questions and setups from other Home Assistant users are welcome in the
 [community thread](https://community.home-assistant.io/t/tapo-monitor-tapo-alerts-where-the-photo-actually-shows-the-person-with-home-assistant-over-mqtt/1028479).
+
+### Home Assistant OS
+
+tapo-monitor is not a Home Assistant integration and has no app (formerly add-on) yet. It
+runs as its own Python service or as the published container image
+(`ghcr.io/peterkocz91/tapo-monitoring`, see
+[Docker](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/docker.md)) and
+reaches Home Assistant only through the MQTT broker. On Home Assistant OS that means a
+second machine: a Raspberry Pi, a NAS or any Linux box that can run Python or containers.
+If you use the Mosquitto broker app, point `mqtt.host` at the Home Assistant machine and
+give the monitor its own broker login. Container, Supervised and Core installs can run it
+on the same host as Home Assistant. An app is planned:
+[roadmap Phase 11](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/roadmap.md#phase-11--a-bridge-to-home-assistant-os).
 
 ## Safety and privacy
 

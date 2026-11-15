@@ -10,6 +10,11 @@ This is an outbound, publish-only client. It subscribes to nothing, opens no por
 accepts no commands: nothing on the broker can move a camera or change a setting. Telegram
 stays the alert channel; MQTT is a mirror for dashboards and automations.
 
+The monitor runs outside Home Assistant, as its own service or [container](docker.md);
+there is no Home Assistant app yet. On Home Assistant OS run it on a second machine and
+point `host` at your broker, for example the Mosquitto broker app. See
+[Home Assistant OS](../README.md#home-assistant-os) in the README.
+
 ## Install and enable
 
 ```bash

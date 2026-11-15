@@ -1174,7 +1174,7 @@ Home Assistant over MQTT discovery. That suits container and standalone installs
 Home Assistant OS user has no place to run it without a second machine. The forum
 feedback on the first announcement asked for exactly this.
 
-- [ ] Say it plainly in the README: on Home Assistant OS the monitor needs a separate
+- [x] Say it plainly in the README: on Home Assistant OS the monitor needs a separate
   host or container today, and MQTT is the bridge.
 - [ ] A Home Assistant app (formerly add-on) built on the published container image:
   the app's options map to `cameras.yaml` and the environment, credentials go through the
