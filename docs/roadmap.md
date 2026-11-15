@@ -1116,7 +1116,10 @@ The photo says someone was there; it rarely shows what they did. An owner asked 
   201 s after their events. A recorder clip of a 4K camera arrived in 4.5 s (26 MB) and
   encoded to 1.3 MB.
 - [ ] 24-hour soak on both kinds: a clip for every delivered photo, replies threaded, no
-  "giving up", and card follow-ups no slower than before.
+  "giving up", and card follow-ups no slower than before. Progress: one card camera has
+  sent clips since 2026-10-29 (70 clips for 75 alerts in four days, one card read
+  failed); the card site with the weak Wi-Fi link moved to a wired host and has clips
+  on again since 2026-11-15.
 - [ ] Reuse the card read of an SD follow-up for the clip when it already covers the
   window, instead of reading the card twice.
 
@@ -1163,6 +1166,25 @@ The photo says someone was there; it rarely shows what they did. An owner asked 
   in the `video_*` fields), event and recording searches (`channel`, `chn_events`,
   `getEvents` window), face recognition at API level, methods pytapo lacks, and the calls
   that drop the API. Draft reviewed for identifiers before it moves to `docs/`.
+
+## Phase 11 — A bridge to Home Assistant OS
+
+The monitor runs as a separate Python service (or the published container) and talks to
+Home Assistant over MQTT discovery. That suits container and standalone installs, but a
+Home Assistant OS user has no place to run it without a second machine. The forum
+feedback on the first announcement asked for exactly this.
+
+- [ ] Say it plainly in the README: on Home Assistant OS the monitor needs a separate
+  host or container today, and MQTT is the bridge.
+- [ ] A Home Assistant app (formerly add-on) built on the published container image:
+  the app's options map to `cameras.yaml` and the environment, credentials go through the
+  app's secret options, state lives in the app's data folder, and the Mosquitto app is
+  found through the Supervisor's MQTT service, so no broker address has to be typed.
+- [ ] Ship it from a separate app repository with the same release gate as the package
+  (a tagged image, a real overnight soak on one Home Assistant OS install).
+- [ ] Only after the app has users: decide whether a custom integration (config flow,
+  device registry, a service to re-park a camera) adds enough over MQTT discovery to be
+  worth a second code path. The detection loop stays in the monitor either way.
 
 ## Planning horizons
 
@@ -1222,6 +1244,7 @@ its own evidence is available, and keep unreviewed features opt-in.
   evidence (8.6); add event profiles only when observed bits support them.
 - When a second overlapping camera is available, trial the handoff coordinator against
   missed and duplicate incidents (Phase 5).
+- Home Assistant OS users: README note first, then the app (Phase 11).
 
 ## Research tracks
 
