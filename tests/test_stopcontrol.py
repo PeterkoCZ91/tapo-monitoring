@@ -91,11 +91,12 @@ class FakeGuard:
         return True
 
 
-def harness(cfg=None):
+def harness(cfg=None, clock=None):
     cfg = cfg or app_config().cameras[0]
     client, ptz = NativeClient(), FakePTZ()
+    extra = {} if clock is None else {"clock": clock}
     controller = stopcontrol.StopControl(cfg, lambda: client,
-        build_ptz=lambda *args: (ptz, "profile"), guard_factory=FakeGuard)
+        build_ptz=lambda *args: (ptz, "profile"), guard_factory=FakeGuard, **extra)
     controller.attach(client)
     return controller, client, ptz
 
@@ -288,6 +289,9 @@ def test_recall_retry_rechecks_recovery_permission_after_failed_attempt():
     {"right_preset": None}, {"right_preset": "right", "left_preset": "right"},
     {"tilt": True}, {"stop_margin": float("nan")}, {"stop_margin": 0},
     {"stop_poll_interval": 0.01}, {"stop_cooldown": 0},
+    {"stop_rearm_quiet_s": -1}, {"stop_rearm_quiet_s": 3601},
+    {"stop_rearm_quiet_s": float("nan")}, {"stop_rearm_quiet_s": "soon"},
+    {"stop_rearm_quiet_s": True},
 ])
 def test_invalid_stop_configuration_fails_before_any_camera_connection(settings):
     with pytest.raises(config.ConfigError):
@@ -490,3 +494,95 @@ def test_only_stop_gets_the_adaptive_budget(monkeypatch):
     assert "adaptive" not in calls[0] and "budget" not in calls[0]
     assert isinstance(calls[1]["adaptive"], stopcontrol.ptzrpc.AdaptiveBudget)
     assert guard.options["stop_escalated"]() is False
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def _quiet_harness(quiet):
+    clock = Clock()
+    controller, client, _ = harness(app_config(stop_rearm_quiet_s=quiet).cameras[0], clock)
+    controller.start()
+    controller.guard.confirm_rearm = True
+    night = daemon.CameraPlan(True, False, 60, ("people",), "home", back_time=30)
+    day = daemon.CameraPlan(False, False, 60, ("people",), "home")
+    return controller, clock, night, day
+
+
+def test_rearm_quiet_period_is_off_by_default():
+    assert app_config().cameras[0].pan_limit.stop_rearm_quiet_s == 0
+    assert app_config(stop_rearm_quiet_s=120).cameras[0].pan_limit.stop_rearm_quiet_s == 120
+    assert app_config(stop_rearm_quiet_s=3600).cameras[0].pan_limit.stop_rearm_quiet_s == 3600
+
+
+def test_without_quiet_period_a_fresh_rearm_allows_the_night_plan_at_once():
+    controller, clock, night, _ = _quiet_harness(0)
+    assert controller.control_plan(night) is night
+    controller.guard.allowed = False                   # trip
+    clock.now += 5
+    assert controller.control_plan(night) is night     # rearmed in the same pass
+
+
+def test_quiet_period_holds_tracking_off_after_rearm_until_it_elapses(caplog):
+    caplog.set_level("INFO", logger="tapo_monitor.stopcontrol")
+    controller, clock, night, _ = _quiet_harness(120)
+    held = controller.control_plan(night)
+    assert held.autotrack_on is False
+    assert held == night.__class__(**{**night.__dict__, "autotrack_on": False})
+    clock.now += 60
+    assert controller.control_plan(night).autotrack_on is False
+    clock.now += 59.9
+    assert controller.control_plan(night).autotrack_on is False
+    clock.now += 0.1
+    assert controller.control_plan(night) is night
+    clock.now += 60
+    assert controller.control_plan(night) is night
+    lines = [r.getMessage() for r in caplog.records if "rearm quiet" in r.getMessage()]
+    assert len(lines) == 2
+    assert "hold" in lines[0] and "release" in lines[1]
+
+
+def test_a_trip_restarts_the_quiet_timer():
+    controller, clock, night, _ = _quiet_harness(120)
+    assert controller.control_plan(night).autotrack_on is False
+    clock.now += 100
+    controller.guard.allowed = False                   # trip between passes...
+    clock.now += 10
+    # ...and the next pass rearms at once; the trip still restarts the timer.
+    assert controller.control_plan(night).autotrack_on is False
+    clock.now += 119
+    assert controller.control_plan(night).autotrack_on is False
+    clock.now += 1
+    assert controller.control_plan(night) is night
+
+
+def test_a_trip_after_release_holds_tracking_off_again():
+    controller, clock, night, _ = _quiet_harness(120)
+    controller.control_plan(night)
+    clock.now += 120
+    assert controller.control_plan(night) is night
+    controller.guard.allowed = False
+    clock.now += 60
+    assert controller.control_plan(night).autotrack_on is False
+    clock.now += 120
+    assert controller.control_plan(night) is night
+
+
+def test_quiet_period_leaves_the_day_plan_untouched():
+    controller, clock, _, day = _quiet_harness(120)
+    assert controller.control_plan(day) is day
+    clock.now += 10
+    assert controller.control_plan(day) is day
+
+
+def test_latched_guard_still_overrides_during_the_quiet_period():
+    controller, _, night, _ = _quiet_harness(120)
+    controller.guard.confirm_rearm = False
+    blocked = controller.control_plan(night)
+    assert blocked.autotrack_on is False
+    assert blocked.back_time is None

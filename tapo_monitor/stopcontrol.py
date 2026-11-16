@@ -50,6 +50,10 @@ class StopControl:
         self.positions = {}
         self.inner_low = self.inner_high = None
         self.last_reason = None
+        # Opt-in rearm quiet period: when the guard last became armed after a pass that
+        # found it tripped or unarmed (None = not armed), and whether a hold is logged.
+        self._armed_since = None
+        self._quiet_holding = False
 
     def _note(self, kind, detail):
         # Debug trace only; a guard without it (or failing to take it) never matters.
@@ -184,6 +188,10 @@ class StopControl:
         """Keep the latch authoritative over stale plans and recover only inward."""
         self._plan_preset = plan.preset
         if self.guard is not None:
+            # Only this pass rearms, so a trip since the last pass is still latched here
+            # even when the rearm below releases it at once.
+            if not self.guard.snapshot().tracking_allowed:
+                self._armed_since = None
             self.guard.rearm()
             snap = self.guard.snapshot()
             reason = (snap.reason, snap.healthy, snap.latched)
@@ -192,7 +200,8 @@ class StopControl:
                          self.cfg.name, snap.reason, snap.healthy, snap.latched, snap.position)
                 self.last_reason = reason
         if self.allowed():
-            return plan
+            return self._quiet_plan(plan)
+        self._armed_since = None
         # Never introduce a new return destination. Use the configured day/home view
         # only when it was verified against these explicit limits.
         candidates = (plan.preset, self.cfg.tracking.day_preset,
@@ -202,8 +211,38 @@ class StopControl:
         self._note("plan_override", f"autotrack=off preset={preset}")
         return replace(plan, autotrack_on=False, preset=preset, back_time=None)
 
+    def _quiet_plan(self, plan):
+        """Hold tracking OFF until the guard has stayed armed for the quiet period.
+
+        On a camera whose pose reads drop out, the next trip often follows a rearm within
+        seconds; switching tracking ON in between only to force it OFF again leaves the
+        firmware tracker moving. Release happens on a control pass, never mid-period.
+        """
+        quiet = self.cfg.pan_limit.stop_rearm_quiet_s
+        if quiet <= 0:
+            return plan
+        now = self.clock()
+        if self._armed_since is None:
+            self._armed_since = now
+        armed_for = now - self._armed_since
+        if armed_for >= quiet:
+            if self._quiet_holding:
+                self._quiet_holding = False
+                log.info("PTZ stop guard rearm quiet %s: release after %.0fs armed",
+                         self.cfg.name, armed_for)
+            return plan
+        if not plan.autotrack_on:
+            return plan
+        if not self._quiet_holding:
+            self._quiet_holding = True
+            log.info("PTZ stop guard rearm quiet %s: hold tracking OFF for %.0fs more",
+                     self.cfg.name, quiet - armed_for)
+        self._note("plan_override", f"autotrack=off rearm_quiet={quiet - armed_for:.0f}s")
+        return replace(plan, autotrack_on=False)
+
     def close(self):
         if self.guard is not None:
             if not self.guard.close(timeout=2):
                 log.warning("rotation stop %s: shutdown tracking OFF unconfirmed", self.cfg.name)
             self.guard = None
+        self._armed_since = None

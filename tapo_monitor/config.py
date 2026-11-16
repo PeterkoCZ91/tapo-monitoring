@@ -229,6 +229,9 @@ class PanLimitConfig:
     stop_margin: float = 0.15
     stop_poll_interval: float = 0.15
     stop_cooldown: float = 30.0
+    # Seconds the stop guard must stay armed without a trip before a control pass may
+    # switch native tracking back ON (0 = at the first pass after a rearm, as before).
+    stop_rearm_quiet_s: float = 0.0
 
 
 @dataclass
@@ -1172,6 +1175,12 @@ def _pan_limit(data, where):
         raise ConfigError(f"{where}: pan_limit stop_poll_interval must be 0.05..1 seconds")
     if not math.isfinite(stop_cooldown) or stop_cooldown < 1:
         raise ConfigError(f"{where}: pan_limit stop_cooldown must be >= 1 second")
+    stop_rearm_quiet_s = d.get("stop_rearm_quiet_s", 0)
+    if isinstance(stop_rearm_quiet_s, bool) or not isinstance(stop_rearm_quiet_s, (int, float)):
+        raise ConfigError(f"{where}: pan_limit stop_rearm_quiet_s must be a number of seconds")
+    stop_rearm_quiet_s = float(stop_rearm_quiet_s)
+    if not math.isfinite(stop_rearm_quiet_s) or not 0 <= stop_rearm_quiet_s <= 3600:
+        raise ConfigError(f"{where}: pan_limit stop_rearm_quiet_s must be 0..3600 seconds")
     if mode == "stop":
         if sides["right_preset"] is None:
             raise ConfigError(f"{where}: pan_limit stop mode needs right_preset")
@@ -1196,6 +1205,7 @@ def _pan_limit(data, where):
         stop_margin=stop_margin,
         stop_poll_interval=stop_poll_interval,
         stop_cooldown=stop_cooldown,
+        stop_rearm_quiet_s=stop_rearm_quiet_s,
     )
 
 

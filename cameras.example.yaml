@@ -223,6 +223,10 @@ cameras:
     #   tilt_max: -0.6         # cannot become a bound (one preset aimed at the sky would
     #                          # stretch the bound over nearly the whole travel); a window
     #                          # leaving <2 candidates disables the tilt guard.
+    #   # mode: stop instead sends ONVIF Stop before right_preset/left_preset (see
+    #   # docs/configuration.md); its keys: stop_margin, stop_poll_interval, stop_cooldown,
+    #   # stop_rearm_quiet_s: 0  # opt-in: seconds armed without a trip before tracking
+    #   #                        # may switch back ON (0 = at once, 0..3600)
 
     weather:
       strategy: lower_sensitivity   # none | disable_tracking | lower_sensitivity

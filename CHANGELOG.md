@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+- `pan_limit.stop_rearm_quiet_s` (stop mode, off by default) keeps native tracking OFF
+  after the stop guard rearms until it has stayed armed with no trip for that many
+  seconds (0..3600); any trip restarts the period. On a camera with frequent pose-read
+  outages the next trip often came seconds after a rearm, so tracking went ON and then
+  OFF again while the firmware tracker kept moving. Presets and non-tracking plans are
+  unchanged; one `PTZ stop guard rearm quiet` line marks the start and the release of
+  a hold. With the default `0` behaviour is unchanged.
+
 ### Fixed
 - On dual-lens cameras the white-lamp self-heal now compares only the settings a lens
   actually reports. A lens whose lamp config has no `wtl_force_time` (the second lens

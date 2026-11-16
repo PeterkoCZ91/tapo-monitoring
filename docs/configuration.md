@@ -1401,6 +1401,7 @@ pan_limit:
   stop_margin: 0.15       # stop this far inside the boundary, in ONVIF pan units
   stop_poll_interval: 0.15
   stop_cooldown: 30
+  stop_rearm_quiet_s: 0   # opt-in: seconds armed without a trip before tracking may resume
   onvif_user_env: CAM_ONVIF_USER
   onvif_password_env: CAM_ONVIF_PASSWORD
 ```
@@ -1419,7 +1420,21 @@ still honored. Known privacy suspends pose reads and motor commands. There
 is no second native camera login for the observer. Healthy stop-mode sessions survive
 routine control passes, so the observer retains its native OFF path. A failed event API,
 retired session or changed camera address requires a fresh connection; a stale client
-is closed before the replacement logs in. On stop-mode cameras the control pass also
+is closed before the replacement logs in.
+
+`stop_rearm_quiet_s` (default `0`, range 0..3600 seconds) is an opt-in hold after a
+rearm. With `0` a control pass that rearms the guard may switch native tracking ON in the
+same pass, as before. With a positive value the control pass keeps tracking OFF until
+the guard has stayed armed for that long with no trip; a trip, a lost position or a
+guard restart starts the period again. Release happens on the first control pass after
+the full period, so the guard never switches tracking ON only for a quick trip to force
+it OFF again (the firmware tracker can keep moving after such an OFF). Presets, the
+return timer and plans that do not track are unchanged. One `PTZ stop guard rearm quiet`
+line is logged when a hold starts and one when it is released. Useful on a camera
+whose pose reads drop out often, where the next trip tends to follow a rearm within
+seconds.
+
+On stop-mode cameras the control pass also
 reads motion/person/vehicle settings, day/night mode, lamp timing, SmartTrack and the
 tracking switch before rewriting them. Matching values need no write; a missing or
 unreadable value still takes the ordinary repair path. This avoids repeatedly resetting
