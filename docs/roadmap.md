@@ -5,7 +5,7 @@ reliability and detection-quality control plane. It is intentionally capability-
 camera models and firmware expose different methods, so an empty or unsupported response
 is evidence about that device, not a reason to guess.
 
-## Current priorities — 2026-11-08
+## Current priorities — 2026-11-16
 
 The latest released package is **0.14.0** (2026-11-15). Release history is in the [changelog](../CHANGELOG.md). 0.12.0 shipped the former local candidates (Reolink detection source, C216 vehicle-detection handling, quiet `lastalarm` errors, ONVIF failure categories, the Stop-only adaptive budget, alert clips, the scorer-outage notice delay and `outbox.max_bytes`). 0.13.0 adds the long-outage guard fixes, network diagnosis lines, opt-in MAC rediscovery, the Telegram duplicate-on-timeout fix and `crop_min_px_delivery`. 0.14.0 adds camera names in captions, a fixed tracking night end, the MQTT Vehicle sensor, fog as bad weather, the stop guard's fresh-direction rule and masked failure logs. Release does not mean acceptance: the trials below stay open.
 Code implemented in a local candidate, a production trial and a completed acceptance
@@ -13,7 +13,7 @@ review are separate milestones; a checked implementation item does not close its
 
 | Priority | Implemented / deployed | Still open |
 |---|---|---|
-| Virtual PTZ endstops (10.15) | **Deployed candidate, not accepted.** A local read-only soak report separates observed crossings from Stop RPC failures | A later 24-hour review found configured-limit crossings, including peaks after verified OFF. The 2026-10-24 review was not clean either: 129 of 217 Stop failures fell in three hours when a card-reading job ran beside the daemon, and the one "crossing" was the lens standing beyond the limit while its position could not be read. A new untouched 24-hour soak started 2026-10-24. 2026-10-26: still not clean, with about 38 % of Stop calls failing (2621 of 6962 in 24 h), 6 observed limit crossings and 25 peaks after verified OFF. Rebooting the camera did not help, so uptime is not the cause. Failures are now logged with a fixed category (mostly read timeouts). A Stop-only adaptive time budget (0.8 s, stretched to 1.6 s after a failed Stop, hard cap 2 s; position reads stay at 0.8 s because the guard rejects a pose older than 1 s) was soaked from 2026-10-26 and did not help: about 37 % of Stop calls still failed after 18.5 h, and about 98 % of episodes ended at the home pose while the lens stood still (about 50 per hour, also at night), so the camera briefly stops answering rather than the budget being too short. A/B trial since 2026-10-27: `stop_poll_interval` 0.15 -> 0.3 s on that camera (baseline about 110 failures per hour); the first 15 h showed about 31 % failures, a small change that needs the full window. Candidate if it does not help: do not trip the guard on a read outage while the pose is far from the limit. That is a safety change and needs its own candidate. The failure-category logging and adaptive budget were released in 0.12.0; 0.13.0 keeps the guard alive through long camera outages. One site has since switched `pan_limit` from `mode: stop` back to the default recall mode, because the stop guard tripped on position-read timeouts over a weak link (16–25 per hour at night) |
+| Virtual PTZ endstops (10.15) | **Deployed candidate, not accepted; both stop-mode sites now run recall mode.** A local read-only soak report separates observed crossings from Stop RPC failures. The failure-category logging and the Stop-only adaptive budget were released in 0.12.0; 0.13.0 keeps the guard alive through long camera outages. Local candidate (not released): an immediate Stop and tracking OFF when the lens moves toward a limit while the guard is latched, and opt-in `stop_rearm_quiet_s` | Stop calls kept failing (31–38 %); neither the adaptive budget nor `stop_poll_interval` 0.3 s fixed it. A 48-hour review (2026-11-16) on the camera with a weak link: about 41 trips per hour, almost all position-read outages while the lens stood at home, the guard latched 80 % of the time, so night tracking barely ran. **A read-outage tolerance is rejected:** in 12 outages the lens started moving while it could not be read, once past the limit, and a typical 2.4 s outage is long enough to travel from home past the limit. Daytime outages (tracking off) never moved the lens. **The firmware tracker can keep moving after a verified OFF:** twice the lens crossed the limit 39–64 s after OFF was written and read back, with every Stop confirmed; the pattern follows a re-arm that had switched tracking ON seconds earlier. Open: a night test whether also switching smart tracking off stops the motor, then a stop-mode soak of the local candidate |
 | Detector quality (10.14) | **Production trial reviewed on two cameras.** The 2026-10-23 hand review covered 516 frames and confirmed threshold 0.35 for that sample | Review other cameras, scorer fallback and an unbiased recording sample; a scorer outage can still send unverified frames. 2026-10-27: a labelled week (346 decisive frames, sample biased toward model disagreements, so not a production recall or false-alarm rate) ranked the production model first: recall 73 % with 19 false positives, against 51 % / 8 for the large RF-DETR, 36 % / 95 for YOLOX 960 and 19 % / 56 for YOLOX 640; on the 198 frames all four scored, 68 % / 6. Still missing: a per-camera and day/night breakdown |
 | Alert correctness and photo selection (10.5, 10.6, 10.13) | **Released in 0.10.0–0.10.2:** photo selection, late-event deduplication and partial-scoring fixes; **0.13.0:** no duplicate post when Telegram's answer times out, opt-in `crop_min_px_delivery`, opt-in MAC rediscovery; **0.14.0:** opt-in camera name in captions (`caption_camera`), vehicle alerts no longer pulse the MQTT person sensor, opt-in MQTT Vehicle sensor (`separate_event_types`), opt-in fixed tracking night end (`tracking.night_end`) | Review delivered passages, photo quality and cross-path duplicates at incident level |
 | Outbox resilience (10.9) | Existing opt-in outbox **released**; `max_bytes`, safe replacement and full-disk handling **released in 0.12.0** | First real outage review, controlled send-failure/restart trial and release soak remain open |
@@ -1037,7 +1037,20 @@ often what photographs the person seconds later.
 
 Status: **candidate deployed; production acceptance open**.
 
-- [ ] 2026-10-27: the adaptive Stop budget soak was not clean (about 37 % failures). A/B `stop_poll_interval` 0.3 s is running; decide after the review.
+- [x] 2026-10-27: the adaptive Stop budget soak was not clean (about 37 % failures); the
+  A/B `stop_poll_interval` 0.3 s trial was inconclusive (about 33 %).
+- [x] 2026-11-16: a read-outage tolerance was evaluated and rejected. Over 48 hours the
+  lens moved during 12 position-read outages, three times outward and once past the
+  limit, after reads that showed it standing still. No rule based on distance or on a
+  still lens is safe at night. The second stop-mode site was switched to recall mode too.
+- [ ] Native tracking OFF is verified only by reading the setting back. On one camera the
+  firmware tracker kept following a person after that check passed and crossed the limit
+  39–64 s later, every Stop confirmed. Local candidate: a lens that moves toward a limit
+  while the guard is latched gets an immediate Stop and a repeated OFF, logged as
+  `uncommanded motion`; opt-in `stop_rearm_quiet_s` keeps night tracking off until the
+  guard has stayed armed for a quiet period, so tracking is not switched ON and OFF
+  within seconds. Open: test at night whether also switching smart tracking off stops
+  the motor, then soak the candidate in stop mode.
 - [x] Keep the guards alive through long camera outages (released in 0.13.0). About 35
   minutes of failed Stops overflowed the exponential backoff and killed the stop guard
   thread until a restart; every exponential backoff now clamps its exponent and the guard
@@ -1046,7 +1059,8 @@ Status: **candidate deployed; production acceptance open**.
   out-of-memory kill about hourly on a small host); a failed build backs off up to 300 s.
 - [ ] One site switched `pan_limit` from `mode: stop` back to the default recall mode: over
   its weak link the stop guard tripped on position-read timeouts, 16–25 times per hour at
-  night. A read-outage tolerance (above) is a precondition for `mode: stop` on such a link.
+  night. A read-outage tolerance was the planned precondition for `mode: stop` on such a
+  link; it was rejected on 2026-11-16 (above).
 - [ ] A `pan_limit` recall waits for a live RTSP evidence grab before `GotoPreset`: about
   3 s, and up to `rtsp_timeout` when the stream hangs. The order is deliberate, because a
   grab after the move no longer shows the out-of-bounds view. The opt-in
