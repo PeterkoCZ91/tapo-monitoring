@@ -16,6 +16,17 @@ All notable changes to this project are documented here.
   the recall waited for the camera; such a refusal sent no motor command. It is retried
   at the normal interval. A recall is still only sent with a fresh direction and a
   verified OFF.
+- The PTZ stop guard now stops the lens at once when it moves toward a limit while the
+  guard is latched and tracking OFF has been verified. A camera's tracker was seen to
+  keep stepping the lens past the limit for up to a minute after OFF read back as off,
+  and the guard only noticed at its next periodic re-check. Such a move now sends Stop
+  without waiting for the Stop interval and writes tracking OFF again without waiting
+  for the 30 s re-check, adds an `uncommanded_motion` event to the episode trace,
+  counts it in the stats and episode lines (`uncommanded=`), and logs one warning per
+  episode. A home recall the guard permitted, an inward move, a still lens and the
+  first read after a pose outage are not counted. A new episode's first OFF is no
+  longer held back by an OFF sent late in the previous episode. Re-arm conditions are
+  unchanged.
 
 ## [0.14.0] - 2026-11-15
 

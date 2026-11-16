@@ -371,6 +371,7 @@ def test_refused_recall_keeps_the_latch_leaves_a_trace_and_is_retried_when_motio
     await_off(guard)
     clock.advance()
     guard.poll_once()  # 0.75 -> 0.76: fresh motion away from the safe target
+    await_off(guard)   # the outward move re-sends OFF; a recall waits for it
     assert not guard.prepare_recovery(0.5)
     assert guard.snapshot().latched
     assert ("recall_refused", "outward_motion") in [
@@ -558,7 +559,9 @@ def test_left_limit_peak_and_episodes_reset_after_rearm(caplog):
     assert "beyond_limit=True" in first.getMessage()
     assert "peak_at=+0.20s" in first.getMessage()
     assert "beyond_limit=False" in second.getMessage()
-    assert "stops=2 stops_failed=0" in second.getMessage()  # OFF retry was still pending
+    # The new episode's OFF is sent at once, not held back by the previous episode's.
+    assert "stops=1 stops_failed=0" in second.getMessage()
+    assert "off=verified+0.00s" in second.getMessage()
     guard.close()
     assert len(episode_lines(caplog)) == 2  # shutdown alone is not a trip
 
@@ -953,4 +956,164 @@ def test_tracking_off_is_dispatched_before_a_stretched_stop(escalated):
     guard.poll_once()
     await_off(guard)
     assert seen == [escalated]
+    guard.close()
+
+
+def uncommanded_events(guard):
+    return [detail for _, kind, detail in guard._episode.trace if kind == "uncommanded_motion"]
+
+
+def latched_after_pose_loss(positions, **kwargs):
+    """Trip on a failed read inside the band, verify OFF, then replay ``positions``."""
+    guard, clock, trace = guard_for([0.5, 0.5, None] + positions, name="cam", **kwargs)
+    for _ in range(3):
+        guard.poll_once()
+        await_off(guard)
+        clock.advance()
+    assert guard.snapshot().latched and guard._disable_ok
+    trace.clear()
+    return guard, clock, trace
+
+
+def test_uncommanded_motion_while_latched_reissues_off_and_stop_at_once(caplog):
+    caplog.set_level("INFO", logger="tapo_monitor.stopguard")
+    guard, clock, trace = latched_after_pose_loss([0.5, 0.5, 0.53, 0.56])
+    for _ in range(2):                      # first read after the loss, then a still lens
+        guard.poll_once()
+        await_off(guard)
+        clock.advance()
+    assert trace == []                      # verified OFF, acknowledged Stop: nothing to do
+    guard.poll_once()                       # 0.50 -> 0.53 with no recall permitted
+    await_off(guard)
+    assert trace == ["stop", "off"]
+    assert uncommanded_events(guard) == ["dx=+0.0300 x=0.5300"]
+    assert guard._stats["uncommanded"] == 1
+    clock.advance(0.05)                     # inside stop_interval: the next step still stops
+    guard.poll_once()
+    await_off(guard)
+    assert trace == ["stop", "off", "stop", "off"]
+    assert guard._stats["uncommanded"] == 2
+    assert guard.snapshot().latched
+    warnings = [r for r in caplog.records if "uncommanded motion" in r.getMessage()]
+    assert len(warnings) == 1 and warnings[0].levelname == "WARNING"
+    assert "PTZ stop guard uncommanded motion cam: " in warnings[0].getMessage()
+    guard.close()
+    episode = next(r.getMessage() for r in caplog.records if "stop guard episode" in r.getMessage())
+    assert "uncommanded=2" in episode
+
+
+def test_uncommanded_outward_step_beyond_the_boundary_stops_once_without_waiting():
+    guard, clock, trace = guard_for([0.5, 0.5, 0.75, 0.75, 0.78])
+    for _ in range(3):
+        guard.poll_once()
+        await_off(guard)
+        clock.advance()
+    guard.poll_once()                       # still lens outside the band: periodic Stop
+    await_off(guard)
+    stops, offs = trace.count("stop"), trace.count("off")
+    clock.advance(0.05)                     # inside stop_interval
+    guard.poll_once()                       # 0.75 -> 0.78 outward, OFF already verified
+    await_off(guard)
+    assert trace.count("stop") == stops + 1  # one immediate Stop, not two
+    assert trace.count("off") == offs + 1
+    assert uncommanded_events(guard) == ["dx=+0.0300 x=0.7800"]
+    guard.close()
+
+
+def test_stationary_latched_lens_reports_no_uncommanded_motion():
+    guard, clock, trace = latched_after_pose_loss([0.5, 0.501, 0.5, 0.5015, 0.5])
+    for _ in range(5):                      # jitter within the stable tolerance
+        guard.poll_once()
+        await_off(guard)
+        clock.advance()
+    assert trace == []
+    assert uncommanded_events(guard) == []
+    assert guard._stats["uncommanded"] == 0
+    guard.close()
+
+
+def test_permitted_home_recall_is_not_uncommanded_motion_after_the_permit_expires():
+    guard, clock, trace = guard_for([0.5, 0.5, 0.85, 0.85,
+                                     0.82, 0.78, 0.74, 0.70, 0.65, 0.58, 0.52, 0.50])
+    for _ in range(4):
+        guard.poll_once()
+        await_off(guard)
+        clock.advance()
+    assert guard.prepare_recovery(0.5)
+    stops, offs = trace.count("stop"), trace.count("off")
+    for _ in range(8):                      # the move outlives the two-second permit
+        clock.advance(0.5)
+        guard.poll_once()
+        await_off(guard)
+    assert uncommanded_events(guard) == []
+    assert guard._stats["uncommanded"] == 0
+    assert (trace.count("stop"), trace.count("off")) == (stops, offs)
+    guard.close()
+
+
+def test_recall_overshoot_past_the_target_is_uncommanded():
+    guard, clock, trace = guard_for([0.5, 0.5, 0.85, 0.85, 0.78, 0.70, 0.62, 0.55, 0.505, 0.20],
+                                    left_limit=0.0)
+    for _ in range(4):
+        guard.poll_once()
+        await_off(guard)
+        clock.advance()
+    assert guard.prepare_recovery(0.5)
+    for _ in range(5):                      # the permit expires after four of these
+        clock.advance(0.5)
+        guard.poll_once()
+        await_off(guard)
+    assert uncommanded_events(guard) == []
+    clock.advance(0.5)
+    guard.poll_once()                       # 0.505 -> 0.20: past the target, toward the left limit
+    await_off(guard)
+    assert uncommanded_events(guard) == ["dx=-0.3050 x=0.2000"]
+    guard.close()
+
+
+def test_first_read_after_an_outage_is_not_uncommanded_motion():
+    guard, clock, trace = latched_after_pose_loss([0.5, 0.5, None, 0.6, 0.6])
+    for _ in range(3):
+        guard.poll_once()
+        await_off(guard)
+        clock.advance()
+    stops = trace.count("stop")             # the failed read itself stops as before
+    guard.poll_once()                       # 0.5 before the outage, 0.6 after: unknown path
+    await_off(guard)
+    assert guard._direction_lost
+    clock.advance()
+    guard.poll_once()                       # same pose again: direction known, no motion
+    await_off(guard)
+    assert uncommanded_events(guard) == []
+    assert trace.count("stop") == stops
+    assert not guard._direction_lost
+    guard.close()
+
+
+def test_uncommanded_motion_never_runs_two_off_requests_at_once():
+    guard, clock, trace = latched_after_pose_loss([0.5, 0.5, 0.53, 0.56, 0.59])
+    entered, release, calls = threading.Event(), threading.Event(), []
+
+    def off():
+        calls.append(1)
+        entered.set()
+        release.wait(2)
+        return True
+
+    for _ in range(2):
+        guard.poll_once()
+        clock.advance()
+    guard.disable_tracking = off
+    try:
+        guard.poll_once()                   # 0.50 -> 0.53: OFF requested again, blocks
+        assert entered.wait(1)
+        for _ in range(2):
+            clock.advance()
+            guard.poll_once()               # more steps while OFF is still in flight
+        assert len(calls) == 1
+        assert trace.count("stop") == 3
+        assert guard._stats["uncommanded"] == 3
+    finally:
+        release.set()
+        await_off(guard)
     guard.close()

@@ -66,6 +66,7 @@ class _Episode:
     off: float | None = None
     off_failed: int = 0
     recoveries: int = 0
+    uncommanded: int = 0
     # Debug context, never used for decisions: the pre-trip samples and a bounded
     # timeline of observed position changes and guard/camera events.
     pre: list = field(default_factory=list)
@@ -180,6 +181,9 @@ class StopGuard:
         self._recovery_until = -math.inf
         self._recovery_direction = 0
         self._recovery_target = 0.0
+        # Set while a recall the guard permitted in this episode may still be moving
+        # the lens toward its target, after the short acceleration permit has expired.
+        self._recall_heading = False
         self.reverify_interval = reverify_interval
         self._last_verified = -math.inf
         self._read_failures = self._stop_failures = self._off_failures = 0
@@ -200,7 +204,7 @@ class StopGuard:
         self._rearm_block = None
         self._stats_at = None
         self._stats = {"reads": 0, "failed": 0, "slow": 0, "max": 0.0, "sum": 0.0,
-                       "stops": 0, "stops_failed": 0}
+                       "stops": 0, "stops_failed": 0, "uncommanded": 0}
 
     def note(self, kind, detail=""):
         """Add a camera/daemon event (recall permit, plan) to the open episode's trace."""
@@ -242,11 +246,12 @@ class StopGuard:
             self._stats_at = now
             reads = max(1, stats["reads"])
             log.info("PTZ stop guard stats %s: reads=%d failed=%d slow>%.1fs=%d "
-                     "read_mean=%.3fs read_max=%.3fs stops=%d stops_failed=%d",
+                     "read_mean=%.3fs read_max=%.3fs stops=%d stops_failed=%d uncommanded=%d",
                      self.name, stats["reads"], stats["failed"], _SLOW_READ, stats["slow"],
-                     stats["sum"] / reads, stats["max"], stats["stops"], stats["stops_failed"])
+                     stats["sum"] / reads, stats["max"], stats["stops"], stats["stops_failed"],
+                     stats["uncommanded"])
             self._stats.update(reads=0, failed=0, slow=0, max=0.0, sum=0.0,
-                               stops=0, stops_failed=0)
+                               stops=0, stops_failed=0, uncommanded=0)
 
     def _safe(self, position):
         return position < self.right_inner and (self.left_inner is None or position > self.left_inner)
@@ -286,13 +291,17 @@ class StopGuard:
             return GuardSnapshot(self._position, healthy, self._latched, allowed, pending,
                                  self._reason, alive, self._loop_errors)
 
-    def _request_disable(self):
+    def _request_disable(self, *, again=False):
+        # ``again`` re-sends OFF although it was verified recently: the lens moved on
+        # its own. The failure backoff and the single OFF thread still apply.
         with self._lock:
             pending = self._disable_thread is not None and self._disable_thread.is_alive()
             now = self.clock()
             stale = self._latched and now - self._last_verified >= self.reverify_interval
             gap = capped_exp(self.retry_interval, self._off_failures - 1, _OFF_BACKOFF_CAP)
-            if (self._disable_ok and not stale) or pending or now - self._last_disable < gap:
+            if again and self._off_failures == 0:
+                gap = 0.0
+            if (self._disable_ok and not stale and not again) or pending or now - self._last_disable < gap:
                 return
             self._last_disable = now
             self._disable_thread = threading.Thread(target=self._disable, daemon=True,
@@ -392,9 +401,11 @@ class StopGuard:
                 self._disable_ok = False
                 self._safe_samples = 0
                 self._recovery_until = -math.inf
-                # The first Stop of a new episode is never held back by old failures.
+                self._recall_heading = False
+                # The first Stop and OFF of a new episode are never held back by old
+                # failures or by an OFF re-sent late in the previous episode.
                 self._stop_failures = self._off_failures = 0
-                self._last_stop = -math.inf
+                self._last_stop = self._last_disable = -math.inf
                 if reason != "closed":
                     self._episode = _Episode(self._trip_at, self._position)
                     self._episode.pre = [(t - self._trip_at, x, rd, c)
@@ -443,12 +454,13 @@ class StopGuard:
                                     or episode.off is None) else logging.INFO
         log.log(level, "PTZ stop guard episode %s: reason=%s duration=%.2fs trip_x=%s peak_x=%s "
                 "beyond_limit=%s reads_failed=%d stops=%d stops_failed=%d first_stop_ok=%s "
-                "off=%s off_failed=%d peak_at=%s min_x=%s max_x=%s end=%s",
+                "off=%s off_failed=%d peak_at=%s min_x=%s max_x=%s end=%s uncommanded=%d",
                 self.name, ",".join(episode.reasons), self.clock() - episode.started,
                 pose(episode.trip_x), pose(peak), episode.beyond_limit, episode.reads_failed,
                 episode.stops, episode.stops_failed, offset(episode.first_stop_ok),
                 "unverified" if episode.off is None else "verified" + offset(episode.off),
-                episode.off_failed, offset(peak_at), pose(episode.low), pose(episode.high), end)
+                episode.off_failed, offset(peak_at), pose(episode.low), pose(episode.high), end,
+                episode.uncommanded)
         self._trace_episode(episode, end, level)
 
     def _trace_episode(self, episode, end, level):
@@ -624,6 +636,9 @@ class StopGuard:
                 max(self.stable_tolerance * 5, 0.01))
             if overshoot:
                 recovery_outward = True
+            uncommanded = self._uncommanded(position, previous, latched, recovering)
+            if recovery_outward:
+                self._recall_heading = False
             if recovery_outward or previous is None:
                 self._recovery_until = -math.inf
             if previous is None:
@@ -639,6 +654,16 @@ class StopGuard:
                 self._trip("boundary", dispatch=False)
         if recovery_outward:
             self._stop_if_due(force=True)
+        if uncommanded:
+            # Tracking OFF was verified, yet the lens moved: the firmware tracker may
+            # still be running. Stop now (once per poll; later calls in this poll are
+            # inside stop_interval) and re-send OFF without waiting for the re-check.
+            escalated = self.stop_escalated()
+            if escalated:
+                self._request_disable(again=True)
+            self._stop_if_due(force=True)
+            if not escalated:
+                self._request_disable(again=True)
         if not safe:
             # Stop before dispatching the slower native API work, unless Stop may now
             # block this thread for up to the stretched budget: OFF runs in its own
@@ -658,6 +683,45 @@ class StopGuard:
             if needs_stop:
                 self._stop_if_due()   # retains the verified inward-recovery permit
             self._request_disable()
+
+    def _limit_distance(self, position):
+        right = self.right_limit - position
+        return right if self.left_limit is None else min(right, position - self.left_limit)
+
+    def _uncommanded(self, position, previous, latched, recovering):
+        """Note an outward move of the latched lens after OFF was verified.
+
+        Called with the lock held, before the permit state is updated for this read.
+        Not counted: an unknown previous pose (startup, outage, stale read), a move
+        within the stable tolerance, a move that does not bring the lens closer to a
+        configured limit (inward recovery stays allowed), the acceleration permit
+        window, and a move toward the target of a recall permitted in this episode up
+        to the same overshoot margin the permit uses.
+        """
+        if (not latched or not self._disable_ok or previous is None or recovering
+                or self._episode is None):
+            return False
+        delta = position - previous
+        outward = self._limit_distance(position) < self._limit_distance(previous)
+        if abs(delta) <= self.stable_tolerance or not outward:
+            return False
+        direction = self._recovery_direction
+        overshoot = max(self.stable_tolerance * 5, 0.01)
+        if (self._recall_heading and delta * direction > 0
+                and (position - self._recovery_target) * direction <= overshoot):
+            return False
+        episode = self._episode
+        episode.uncommanded += 1
+        self._stats["uncommanded"] += 1
+        detail = f"dx={delta:+.4f} x={position:.4f}"
+        self._trace("uncommanded_motion", detail)
+        if episode.uncommanded == 1:
+            verified = "none" if self._last_verified == -math.inf else (
+                f"{self.clock() - self._last_verified:.1f}s")
+            log.warning("PTZ stop guard uncommanded motion %s: %s off_verified_ago=%s "
+                        "reason=%s; tracking OFF and Stop sent again",
+                        self.name, detail, verified, self._reason)
+        return True
 
     def prepare_recovery(self, target, timeout=2.0):
         """Permit up to two seconds for a verified-OFF safe-home move to accelerate.
@@ -691,6 +755,7 @@ class StopGuard:
             self._recovery_direction = 1 if target > self._position else -1
             self._recovery_target = target
             self._recovery_until = self.clock() + timeout
+            self._recall_heading = True
             self._recall_flags.permitted = True
             return True
 
@@ -714,6 +779,7 @@ class StopGuard:
             self._latched, self._reason, self._armed = False, "armed", True
             self._disable_ok = False
             self._recovery_until = -math.inf
+            self._recall_heading = False
             self._finish_episode("rearm")
             return True
 
