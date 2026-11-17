@@ -98,9 +98,20 @@ extra camera calls are made for it. The probe interval (default 900 s) is the re
 a 60 s lamp can fall between two probes, so this shows long or permanent lighting, not
 every short one.
 
-Unknown and unsupported actual values never trigger alerts. Stable drift keys deduplicate
-repeated mismatches; with `drift_alerts: true`, Telegram receives only newly observed drift
-and its later recovery.
+**Lamp without cause.** When a probe finds the lamp lit with no explanation, one `WARNING`
+line is written per episode (grep `lamp without cause:`): `camera`, `night_vision_mode`,
+`expected`, `status`, `rest_time`, `reason`, `detection_in_window`. The same start is stored
+in the event ledger (`state_changes`, key `lamp_without_cause`, value = reason), so counts
+and durations can be worked out afterwards. It is log and ledger only: no Telegram notice
+and nothing is ever written to the camera. A lamp counts as unexplained when the camera is
+in plain IR (the lamp should stay dark; detections are irrelevant), or, in the smart mode of
+a firmware `light_trigger`, when the ledger has no camera `person`/`motion` detection in the
+lamp's on-time plus 90 s before the probe (getEvents lags 13-20 s). Every camera whose
+`getWhitelampStatus` answered is judged; cameras with an explicit `night_vision:` key or a
+software `light_trigger` are skipped, and so is the smart-mode check when there is no
+ledger. Limit: the probe runs about every 900 s, so a 60 s light usually falls between two
+probes and only a long or permanent light is caught; the episode is recorded when first
+seen, not when it began. Denser night sampling of `getWhitelampStatus` is not implemented.
 
 Latest state is stored atomically with mode `0600` at
 `$XDG_STATE_HOME/tapo-monitor/twin.json` (normally

@@ -55,9 +55,10 @@ _SAFE_METADATA_KEYS = frozenset({
     "whitelamp_status",
     "zone",
 })
-# Camera state a twin probe saw change (lamp on/off, night-vision mode). Only these keys
+# Camera state a twin probe saw change (lamp on/off, night-vision mode) and the start
+# of a lamp-without-cause episode (the value is the reason). Only these keys
 # are accepted: the table is for transitions, never for a sampled time series.
-STATE_KEYS = frozenset({"night_vision_mode", "whitelamp_status"})
+STATE_KEYS = frozenset({"night_vision_mode", "whitelamp_status", "lamp_without_cause"})
 # Keyword tells plus value shapes. The shapes are defence in depth: callers already
 # keep addresses and session material out of the ledger, but a pytapo failure text can
 # carry the camera's address and its stok, so the sanitiser itself must catch them.

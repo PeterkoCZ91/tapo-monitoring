@@ -177,6 +177,28 @@ def lamp_status(snapshot):
     return lit, rest
 
 
+def lamp_without_cause(snapshot, *, expected_mode, detected_recently):
+    """Why a lit white lamp has no cause, or None. Pure.
+
+    ``expected_mode`` None means the config owns the night-vision setting (explicit key or
+    software light_trigger): no claim. A lamp lit while the camera is in plain IR is always
+    an anomaly; in any other mode it needs a camera detection shortly before, and
+    ``detected_recently`` None (no ledger to ask) is unknown, not a claim.
+    """
+    if expected_mode is None:
+        return None
+    lit, _rest = lamp_status(snapshot)
+    if lit != 1:
+        return None
+    mode = night_vision_mode(snapshot)
+    effective = mode if isinstance(mode, str) else expected_mode
+    if effective == "inf_night_vision":
+        return "lit_in_ir_mode"
+    if detected_recently is False:
+        return "no_detection"
+    return None
+
+
 def state_changes(previous, current, *, at):
     """Lamp status and night-vision mode transitions between two fleet entries. Pure.
 

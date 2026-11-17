@@ -5,6 +5,12 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- A lit white lamp with no cause is logged once per episode (`lamp without cause:` with
+  camera, night-vision mode, status, remaining lamp time, reason and whether a detection
+  was in the window) and its start is stored in the event ledger. It counts when the camera
+  is in plain IR, or in smart mode without a camera detection shortly before. Log and
+  ledger only: no notice, nothing is written to the camera. The probe interval is the
+  resolution, so a short light can be missed.
 - The Digital Twin reads `getNightVisionModeConfig` (one extra read per probe, never
   written) and reports a `light.night_vision.mode` drift (warning) when it differs from
   the expected mode: plain IR for a camera with no `light_trigger` and no `night_vision:`

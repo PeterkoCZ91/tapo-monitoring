@@ -1160,6 +1160,8 @@ class MonitorState:
     twin_last_probe: dict = field(default_factory=dict)
     twin_fleet: dict = field(default_factory=dict)
     twin_alerted: dict = field(default_factory=dict)
+    # Lamp-without-cause: cameras whose current episode is already on record.
+    twin_lamp_episode: dict = field(default_factory=dict)
     twin_path: str | None = None
     event_ledger: object | None = None
     tick_fail_since: float | None = None
@@ -4869,6 +4871,7 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
         )
         entry["alerted_keys"] = sorted(alerted)
         _record_light_states(state, cfg.name, state.twin_fleet.get(cfg.name), entry, now)
+        _check_lamp_without_cause(state, cfg, plan, entry, now)
         warnings = capabilities.storage_warnings(snapshot_data)
         if warnings:
             # Storage health already reads degraded; this says why, in the state file and
@@ -4892,6 +4895,57 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
     if changed and state.twin_path:
         twin.save_state(state.twin_path, state.twin_fleet, logger=log)
     return state.twin_fleet
+
+
+# getEvents reports about 13-20 s late; a detection this long before the lamp came on
+# still counts as its cause.
+LAMP_CAUSE_LEAD = 90
+_LAMP_CAUSE_EVENTS = frozenset({"person", "motion"})
+
+
+def _check_lamp_without_cause(state, cfg, plan, entry, now):
+    """Log, once per episode, a white lamp that is lit for no known cause.
+
+    Log and ledger only: no notice, no write to the camera. It reads the snapshot the twin
+    probe already took and the event ledger. Only a camera whose ``getWhitelampStatus``
+    answered can be judged; an unread lamp is no claim. The probe interval is the
+    resolution, so only a long or permanent light is seen. Returns the reason or None.
+    Never raises.
+    """
+    name = cfg.name
+    try:
+        expected = getattr(plan, "night_vision_expect", None)
+        snapshot = (entry or {}).get("snapshot") or {}
+        events = getattr(state, "event_ledger", None)
+        detected = None
+        if events is not None:
+            force = getattr(cfg, "whitelamp_force_time", None) or camera.LAMP_DEFAULT_FORCE_TIME
+            seen = events.observations(
+                camera=name, start=max(0.0, now - force - LAMP_CAUSE_LEAD), end=now,
+                source="camera")
+            detected = any(o.event_type in _LAMP_CAUSE_EVENTS for o in seen)
+        reason = twin.lamp_without_cause(
+            snapshot, expected_mode=expected, detected_recently=detected)
+        if reason is None:
+            state.twin_lamp_episode.pop(name, None)
+            return None
+        if state.twin_lamp_episode.get(name):
+            return reason                       # same episode, already on record
+        state.twin_lamp_episode[name] = True
+        mode = twin.night_vision_mode(snapshot)
+        mode = mode if isinstance(mode, str) else "unknown"
+        status, rest = twin.lamp_status(snapshot)
+        seen_text = "unknown" if detected is None else ("yes" if detected else "no")
+        log.warning("lamp without cause: camera=%s night_vision_mode=%s expected=%s status=%s "
+                    "rest_time=%s reason=%s detection_in_window=%s",
+                    name, mode, expected, status, rest, reason, seen_text)
+        if events is not None:
+            events.record_state_change(camera=name, key="lamp_without_cause", at=now,
+                                       value=reason, rest_time=rest)
+        return reason
+    except Exception as exc:  # noqa: BLE001 - observability must not block probes
+        log.warning("lamp anomaly check failed for %s: %s", name, type(exc).__name__)
+        return None
 
 
 def _record_light_states(state, name, previous, entry, now):
