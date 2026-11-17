@@ -178,12 +178,11 @@ Devices and network:
 release can change behaviour without warning.
 
 **Current state.** A weekly workflow opens an issue when PyPI has a newer release than
-`.github/tested-versions.txt`; only pytapo is listed, and a release is soaked on real
-cameras before the line is bumped. The [local API reference](tapo-local-api.md) is
-published (was 10.7); it records the tracker moving after a verified OFF (was 10.15).
+`.github/tested-versions.txt`, which lists every camera library (pytapo, onvif-zeep,
+reolink-aio); a release is soaked on real cameras before the line is bumped. The
+[local API reference](tapo-local-api.md) is published (was 10.7); it records the tracker
+moving after a verified OFF (was 10.15).
 
-- [ ] Add `reolink-aio` and `onvif-zeep` to `.github/tested-versions.txt`, so the
-  dependency watch covers every camera library.
 - [ ] Camera firmware watch: notice when a camera's firmware version changes, say so in
   the digest, and re-run the camera report for that model so its fixture stays current.
 - [ ] Add confirmed device findings to the local API reference as they land.

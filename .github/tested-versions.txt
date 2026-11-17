@@ -2,3 +2,5 @@
 # dependency-watch workflow opens an issue when PyPI has something newer than this.
 # Bump a line once the new release has soaked on the fleet, not before.
 pytapo==3.4.28
+onvif-zeep==0.2.12
+reolink-aio==0.21.18
