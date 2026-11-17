@@ -96,6 +96,16 @@ zone. The labelled data is still biased toward model disagreements.
 - [ ] Trial zones, loitering and vehicle alerts in observe mode on one fixed camera for
   five days (vehicle threshold 0.5 is untested). Gate: alert volume within 30 % of the
   baseline, no unexpected restart or traceback (was 10.12, 10.13).
+- [ ] Night live photos from a tracking camera can be smeared by the lens motion (the whole
+  frame, background included, blurs) while the alert clip of the same event is sharp. The
+  live path sends the first frame above the threshold and does not choose by sharpness.
+  A first measurement on one tracking camera (Laplacian variance of 466 sent frames over
+  ten days) found such a frame rare: the reported one sat among the blurriest
+  2 % of night frames, and night live and card frames had a similar median (about
+  1000 against 4700 by day). Keep measuring on the other cameras and tie it to the lens
+  state when the frame was grabbed, and only if it stays common trial an opt-in remedy:
+  pick a frame while the lens is still, or follow the live photo with a sharp frame taken
+  from the clip. Do not add latency to the first alert for it.
 - [ ] Review delivered photos and first-alert latency after the frame-selection rollout,
   per camera and day or night, including card-source photo quality against each camera's
   own clips. Keep face preference opt-in until clips show a gain (was 10.5).
