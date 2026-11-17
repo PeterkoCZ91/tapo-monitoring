@@ -18,9 +18,24 @@ is safe to run nightly (for example from a user timer):
 tools/collect_frames.sh ~/tapo-dataset host-a host-b    # SSH aliases of the hosts
 ```
 
-It never deletes: frames stay after the host prunes them, and each host's
-`index.jsonl` is merged into the local one rather than copied over it, so entries the
-host has already forgotten are kept. Raise `TAPO_SENT_LOG_RETENTION_DAYS` /
+It never deletes: frames stay after the host prunes them, a frame already in the dataset
+is never overwritten, and each host's `index.jsonl` is merged into the local one rather
+than copied over it, so entries the host has already forgotten are kept. Only the
+`*.jpg` frames and the index are read from a log directory. Each log gets one line with
+its new frames, bytes and index lines, and each host a total.
+
+```bash
+# Check first: counts what a real run would add, copies nothing.
+tools/collect_frames.sh --dry-run ~/tapo-dataset host-a host-b
+# Take the log directories from the host's env file (only those two values are read)...
+tools/collect_frames.sh ~/tapo-dataset --env-file '~/tapo/tapo-camera.env' host-a host-b
+# ...or name them, and reach a host through another remote shell (rsync -e).
+tools/collect_frames.sh ~/tapo-dataset --rsh 'ssh -J jump-host' \
+    --sent-dir /srv/tapo/sent-log --review-dir /srv/tapo/review-log host-c
+```
+
+Options apply to every host after them. A host that cannot be reached is reported, the
+others are still collected, and the run exits 1. Raise `TAPO_SENT_LOG_RETENTION_DAYS` /
 `TAPO_REVIEW_LOG_RETENTION_DAYS` on the hosts if the collector cannot run daily. Any
 other layout works too — a plain `rsync -a host:…/sent-log dataset/host/` is enough.
 

@@ -39,6 +39,11 @@ All notable changes to this project are documented here.
   OFF again while the firmware tracker kept moving. Presets and non-tracking plans are
   unchanged; one `PTZ stop guard rearm quiet` line marks the start and the release of
   a hold. With the default `0` behaviour is unchanged.
+- `tools/collect_frames.sh` takes `--dry-run`, reads the log directories from a host's
+  env file (`--env-file`, only the two `*_LOG_DIR` values) or from `--sent-dir` /
+  `--review-dir`, and reaches a host through `--rsh` (default `RSYNC_RSH`, then ssh). It
+  prints new frames and bytes per log and per host. It now copies only `*.jpg` frames
+  (owner-only) and the index, and never overwrites a frame already in the dataset.
 
 ### Fixed
 - A camera follow-up from the SD card that delivers a photo showing a person now also

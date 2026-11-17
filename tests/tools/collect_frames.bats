@@ -25,6 +25,7 @@ setup() {
     # unreachable one. Everything else is the real rsync, so --exclude and friends hold.
     touch "$TEST_TMP/down"
     stub_command rsync <<'STUB'
+echo "$*" >>"$TEST_TMP/rsync-args"
 args=()
 for arg in "$@"; do
     if [[ "$arg" == *:* && "$arg" != -* ]]; then
@@ -62,7 +63,7 @@ add_frame() {
     [ -f "$DATASET/site-a/sent-log/20260901-000002.jpg" ]
     [ "$(wc -l < "$DATASET/site-a/sent-log/index.jsonl")" -eq 2 ]
     [ "$(wc -l < "$DATASET/site-b/sent-log/index.jsonl")" -eq 1 ]
-    assert_output_contains "site-a sent-log: +2 index line(s)"
+    assert_output_contains "site-a sent-log: 2 new frame(s), 48 bytes, +2 index line(s)"
 }
 
 @test "frames and index lines the host has pruned are kept locally" {
@@ -78,7 +79,7 @@ add_frame() {
     [ -f "$DATASET/site-a/sent-log/20260901-000001.jpg" ]
     [ -f "$DATASET/site-a/sent-log/20260902-000001.jpg" ]
     [ "$(wc -l < "$DATASET/site-a/sent-log/index.jsonl")" -eq 3 ]
-    assert_output_contains "site-a sent-log: +1 index line(s)"
+    assert_output_contains "site-a sent-log: 1 new frame(s), 24 bytes, +1 index line(s)"
 }
 
 @test "a rerun with nothing new adds nothing" {
@@ -86,14 +87,14 @@ add_frame() {
     run "$SCRIPT" "$DATASET" site-a
     assert_status 0
     [ "$(wc -l < "$DATASET/site-a/sent-log/index.jsonl")" -eq 2 ]
-    assert_output_contains "site-a sent-log: +0 index line(s)"
+    assert_output_contains "site-a sent-log: 0 new frame(s), 0 bytes, +0 index line(s)"
 }
 
 @test "a log that has no index yet is not a failure" {
     # site-a's review log exists but has never archived a frame.
     run "$SCRIPT" "$DATASET" site-a
     assert_status 0
-    assert_output_contains "site-a review-log: no index yet"
+    assert_output_contains "site-a review-log: 0 new frame(s), 0 bytes, no index yet"
 }
 
 @test "an unreachable host is reported and does not cost the others their run" {
@@ -136,4 +137,96 @@ add_frame() {
     assert_status 0
     [ "$(wc -l < "$DATASET/site-a/sent-log/index.jsonl")" -eq 2 ]
     ! grep -q half "$DATASET/site-a/sent-log/index.jsonl"
+}
+
+@test "--dry-run reports what a run would add and copies nothing" {
+    run "$SCRIPT" --dry-run "$DATASET" site-a
+    assert_status 0
+    assert_output_contains "site-a sent-log: 2 new frame(s), 48 bytes, +2 index line(s)"
+    assert_output_contains "site-a: 2 new frame(s), 48 bytes (dry run, nothing copied)"
+    [ ! -e "$DATASET" ]
+
+    # After a real run, a dry run counts only what is new since.
+    run "$SCRIPT" "$DATASET" site-a
+    add_frame site-a sent-log 20260902-000001.jpg
+    run "$SCRIPT" "$DATASET" --dry-run site-a
+    assert_status 0
+    assert_output_contains "site-a sent-log: 1 new frame(s), 24 bytes, +1 index line(s)"
+    [ ! -e "$DATASET/site-a/sent-log/20260902-000001.jpg" ]
+    [ "$(wc -l < "$DATASET/site-a/sent-log/index.jsonl")" -eq 2 ]
+}
+
+@test "only frames and the index are copied, never other files in the log dir" {
+    printf 'x' >"$REMOTE/site-a/tapo-monitor/sent-log/.index.lock"
+    printf 'x' >"$REMOTE/site-a/tapo-monitor/sent-log/notes.txt"
+    mkdir -p "$REMOTE/site-a/tapo-monitor/sent-log/sub"
+    printf 'x' >"$REMOTE/site-a/tapo-monitor/sent-log/sub/deep.jpg"
+    run "$SCRIPT" "$DATASET" site-a
+    assert_status 0
+    [ "$(find "$DATASET/site-a/sent-log" -mindepth 1 -printf "%P\n" | sort | tr '\n' ' ')" = \
+        "20260901-000001.jpg 20260901-000002.jpg index.jsonl " ]
+    # Frames show people: owner-only locally even when the source file is not.
+    [ "$(stat -c %a "$DATASET/site-a/sent-log/20260901-000001.jpg")" = 600 ]
+}
+
+@test "a local frame is never overwritten by a changed remote one" {
+    run "$SCRIPT" "$DATASET" site-a
+    printf 'changed' >"$REMOTE/site-a/tapo-monitor/sent-log/20260901-000001.jpg"
+    run "$SCRIPT" "$DATASET" site-a
+    assert_status 0
+    [ "$(cat "$DATASET/site-a/sent-log/20260901-000001.jpg")" = "jpeg 20260901-000001.jpg" ]
+}
+
+@test "--env-file reads only the two log dirs from the host" {
+    mkdir -p "$REMOTE/site-a/custom/sent" "$REMOTE/site-a/tapo"
+    printf 'jpeg' >"$REMOTE/site-a/custom/sent/20260903-000001.jpg"
+    cat >"$REMOTE/site-a/tapo/camera.env" <<'ENV'
+TAPO_TELEGRAM_TOKEN=secret-value
+export TAPO_SENT_LOG_DIR="/custom/sent"
+TAPO_SENT_LOG_RETENTION_DAYS=14
+ENV
+    # ssh HOST CMD runs CMD in the fake host's home and records what came back.
+    stub_command ssh <<'STUB'
+host="$1"; shift
+cd "$REMOTE/$host" && HOME="$REMOTE/$host" bash -c "$*" | tee -a "$TEST_TMP/ssh-output"
+STUB
+    # shellcheck disable=SC2088  # the literal ~ is for the (fake) remote shell.
+    run "$SCRIPT" "$DATASET" --env-file '~/tapo/camera.env' site-a
+    assert_status 0
+    [ -f "$DATASET/site-a/sent-log/20260903-000001.jpg" ]
+    [ ! -e "$DATASET/site-a/sent-log/20260901-000001.jpg" ]
+    assert_output_contains "site-a review-log: not configured on the host, skipped"
+    grep -qF /custom/sent "$TEST_TMP/ssh-output"
+    if grep -q secret "$TEST_TMP/ssh-output"; then false; fi
+}
+
+@test "--sent-dir and --review-dir apply to the sources after them" {
+    mkdir -p "$REMOTE/site-b/other/sent"
+    printf 'jpeg' >"$REMOTE/site-b/other/sent/20260904-000001.jpg"
+    run "$SCRIPT" "$DATASET" site-a --sent-dir /other/sent site-b
+    assert_status 0
+    [ -f "$DATASET/site-a/sent-log/20260901-000001.jpg" ]
+    [ -f "$DATASET/site-b/sent-log/20260904-000001.jpg" ]
+    [ ! -e "$DATASET/site-b/sent-log/20260901-000003.jpg" ]
+}
+
+@test "--rsh is handed to rsync as the remote shell" {
+    run "$SCRIPT" "$DATASET" --rsh "ssh -p 2200" site-a
+    assert_status 0
+    [ -f "$DATASET/site-a/sent-log/20260901-000001.jpg" ]
+    grep -qF -- "-e ssh -p 2200" "$TEST_TMP/rsync-args"
+}
+
+@test "RSYNC_RSH from the environment is still the remote shell" {
+    # Existing timers set RSYNC_RSH for a host behind a jump; the copy must keep using it.
+    RSYNC_RSH="ssh -p 2201" run "$SCRIPT" "$DATASET" site-a
+    assert_status 0
+    grep -qF -- "-e ssh -p 2201" "$TEST_TMP/rsync-args"
+    if grep -qE -- "-e ssh( |$)[^-]" "$TEST_TMP/rsync-args"; then false; fi
+}
+
+@test "an unknown option prints usage" {
+    run "$SCRIPT" "$DATASET" --bogus site-a
+    assert_status 2
+    assert_output_contains "Usage:"
 }
