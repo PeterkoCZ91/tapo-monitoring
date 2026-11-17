@@ -151,6 +151,8 @@ class CameraPlan:
     # Firmware night-vision mode ("md_night_vision" = smart: the camera lights its own white
     # lamp on detection), or None to leave it alone. Set only by light_trigger mode firmware.
     night_vision_mode: str | None = None
+    # Desired firmware auto-upgrade switch for the twin's drift check only; never applied.
+    firmware_auto_upgrade: bool | None = None
 
 
 SMART_NIGHT_VISION = "md_night_vision"
@@ -223,6 +225,7 @@ def plan_camera(cfg: CameraConfig, night: bool, rain_active: bool,
         whitelamp_force_time=cfg.whitelamp_force_time,
         whitelamp_intensity=cfg.whitelamp_intensity,
         night_vision_mode=plan_night_vision_mode(cfg, clock),
+        firmware_auto_upgrade=cfg.firmware_auto_upgrade,
     )
 
 
@@ -5112,6 +5115,32 @@ def _recorder_rank(status):
     return {"ok": 2, "unknown": 0}.get(status, 3)
 
 
+# A firmware change stays in the digest for one day after the probe that saw it.
+FIRMWARE_CHANGE_WINDOW = 86400.0
+
+
+def _digest_firmware(observed, now):
+    """The digest's firmware view of one twin entry, or None when nothing was read. Pure.
+
+    Version and auto-upgrade come from the last probe; a version change the twin saw in
+    the last day is added as ``changed``. Detail only, never a failed check.
+    """
+    if not isinstance(observed, Mapping):
+        return None
+    info = observed.get("firmware")
+    if not isinstance(info, Mapping) or (info.get("version") is None
+                                         and info.get("auto_upgrade") is None):
+        return None
+    view = {key: info.get(key) for key in ("version", "auto_upgrade", "auto_upgrade_time")}
+    change = twin.last_firmware_change(observed)
+    at = change.get("at") if change is not None else None
+    if (isinstance(at, (int, float)) and math.isfinite(at)
+            and 0 <= now - at <= FIRMWARE_CHANGE_WINDOW):
+        view["changed"] = {"from": change.get("from"), "to": change.get("to"),
+                           "age_s": max(0.0, float(now - at))}
+    return view
+
+
 def fleet_health_snapshot(app: AppConfig, state: MonitorState, *, now,
                           fetch_metrics=None, env=None):
     """Assemble the fleet snapshot the daily digest renders. Never raises.
@@ -5157,6 +5186,9 @@ def fleet_health_snapshot(app: AppConfig, state: MonitorState, *, now,
                 if isinstance(inhibition, Mapping) and inhibition.get("active") is True:
                     control_view["tracking_inhibition"] = dict(inhibition)
                 entry["control_health"] = control_view
+        firmware = _digest_firmware(state.twin_fleet.get(cfg.name), now)
+        if firmware is not None:
+            entry["firmware"] = firmware
         if hasattr(state, "scene_coordinator") and state.scene_coordinator is not None:
             clock_offset = state.scene_coordinator.clock_offset(cfg.name)
             if clock_offset is not None:

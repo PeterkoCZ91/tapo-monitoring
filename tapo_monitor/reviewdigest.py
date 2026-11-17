@@ -21,7 +21,7 @@ import re
 import time
 from pathlib import Path
 
-from . import ledger, notify, sentlog
+from . import ledger, notify, sentlog, twin
 from .shadowscan import SUMMARY_MAX_AGE, SUMMARY_NAME
 
 # Seconds a producer clock may run ahead of ours before its timestamp is rejected.
@@ -317,6 +317,19 @@ def fleet_lines(health):
             f"{n} {notify.format_duration(s['last_event_age'])} ago"
             if s.get("last_event_age") is not None else f"{n} none since start"
             for n, s in hubs.items()))
+
+    # Firmware is information, never a failed check: whether a camera may update itself
+    # (a new firmware can change how it logs in) and any update seen in the last day.
+    firmware = {n: s["firmware"] for n, s in sorted(cameras.items())
+                if isinstance((s or {}).get("firmware"), dict)}
+    if firmware:
+        detail.append("firmware: " + "; ".join(
+            f"{n} {twin.firmware_text(f)}" for n, f in firmware.items()))
+    changed = [f"{n} {f['changed'].get('from')} \u2192 {f['changed'].get('to')}"
+               f" ({notify.format_duration(f['changed'].get('age_s') or 0)} ago)"
+               for n, f in firmware.items() if isinstance(f.get("changed"), dict)]
+    if changed:
+        detail.append("firmware changed: " + "; ".join(changed))
 
     tick = health.get("tick") or {}
     if tick.get("ok") is False:

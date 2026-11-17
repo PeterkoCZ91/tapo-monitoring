@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from collections.abc import Mapping
 
@@ -18,6 +19,7 @@ from . import capabilities, drift
 SCHEMA_VERSION = 1
 # Bounded so the always-rewritten state file cannot grow without limit when a camera flaps.
 HISTORY_LIMIT = 50
+_HHMM = re.compile(r"[0-2][0-9]:[0-5][0-9]")
 
 
 def default_state_path(env=None, home=None):
@@ -110,6 +112,12 @@ def evaluate_snapshot(camera_name, plan, snapshot):
                     desired["tracking.smart.vehicle_enabled"] = ("vehicle" in plan.smarttrack)
                     actual["tracking.smart.vehicle_enabled"] = _enabled(st_info.get("vehicle_enabled"))
                     severities["tracking.smart.vehicle_enabled"] = "warning"
+    if getattr(plan, "firmware_auto_upgrade", None) is not None:
+        # Report only: the monitor never writes this setting, whichever way it drifts.
+        desired["firmware.auto_upgrade.enabled"] = bool(plan.firmware_auto_upgrade)
+        actual["firmware.auto_upgrade.enabled"] = _auto_upgrade_enabled(
+            _probe_value(snapshot, "firmware", "auto_upgrade"))
+        severities["firmware.auto_upgrade.enabled"] = "warning"
     _dual_lens_paths(snapshot, desired, actual, severities)
     report = drift.evaluate_drift(
         desired, actual, severities=severities, scope=str(camera_name)
@@ -147,6 +155,70 @@ def _dual_lens_paths(snapshot, desired, actual, severities):
                 desired[path] = True
                 actual[path] = _enabled(person[chn])
                 severities[path] = "critical"
+
+
+def firmware_info(snapshot):
+    """The firmware version and auto-upgrade setting read by one snapshot. Pure.
+
+    ``auto_upgrade`` is True/False only for an answer the camera actually gave
+    (``getFirmwareAutoUpgradeConfig``: ``{"auto_upgrade": {"common": {"enabled": "on",
+    "time": "03:00", ...}}}``); anything else is ``None``, never a guess.
+    """
+    version = None
+    info = _probe_value(snapshot, "basic", "info")
+    if isinstance(info, Mapping):
+        device = info.get("device_info")
+        basic = device.get("basic_info") if isinstance(device, Mapping) else None
+        raw = basic.get("sw_version") if isinstance(basic, Mapping) else None
+        if isinstance(raw, str) and raw.strip():
+            version = raw.strip()
+    common = _auto_upgrade_common(_probe_value(snapshot, "firmware", "auto_upgrade"))
+    enabled = _auto_upgrade_enabled(common)
+    raw_time = common.get("time") if isinstance(common, Mapping) else None
+    window = raw_time if isinstance(raw_time, str) and _HHMM.fullmatch(raw_time) else None
+    return {"version": version,
+            "auto_upgrade": enabled if isinstance(enabled, bool) else None,
+            "auto_upgrade_time": window}
+
+
+def firmware_text(info):
+    """``"<version>, auto-upgrade: on (03:00)"`` / ``off`` / ``unknown``. Pure."""
+    info = info if isinstance(info, Mapping) else {}
+    version = info.get("version") or "unknown"
+    return f"{version}, auto-upgrade: {auto_upgrade_text(info)}"
+
+
+def auto_upgrade_text(info):
+    """``on (03:00)``, ``on``, ``off`` or ``unknown`` for a :func:`firmware_info`. Pure."""
+    enabled = info.get("auto_upgrade") if isinstance(info, Mapping) else None
+    if enabled is True:
+        window = info.get("auto_upgrade_time")
+        return f"on ({window})" if window else "on"
+    if enabled is False:
+        return "off"
+    return "unknown"
+
+
+def entry_firmware_version(entry):
+    """The firmware version a persisted fleet entry recorded, or None. Pure.
+
+    Entries written before the ``firmware`` block existed still carry the snapshot.
+    """
+    if not isinstance(entry, Mapping):
+        return None
+    block = entry.get("firmware")
+    if isinstance(block, Mapping):
+        return block.get("version")
+    return firmware_info(entry.get("snapshot") or {}).get("version")
+
+
+def last_firmware_change(entry):
+    """The newest ``firmware`` history transition of a fleet entry, or None. Pure."""
+    history = entry.get("history") if isinstance(entry, Mapping) else None
+    for item in reversed(history or []):
+        if isinstance(item, Mapping) and item.get("kind") == "firmware":
+            return item
+    return None
 
 
 def cameras_in_privacy(fleet):
@@ -206,6 +278,12 @@ def transitions(previous, current, *, at):
         changes.append({"at": float(at), "kind": "drift", "event": "opened", "path": path})
     for path in sorted(before - after):
         changes.append({"at": float(at), "kind": "drift", "event": "cleared", "path": path})
+    # A firmware update is worth a line in the history (a new firmware may log in
+    # differently), but it is not a fault: it never becomes drift. Only two versions
+    # actually read count; an unreadable one is not a change.
+    old_fw, new_fw = entry_firmware_version(previous), entry_firmware_version(current)
+    if old_fw and new_fw and old_fw != new_fw:
+        changes.append({"at": float(at), "kind": "firmware", "from": old_fw, "to": new_fw})
     return tuple(changes)
 
 
@@ -232,6 +310,7 @@ def fleet_entry(*, captured_at, snapshot, health, evaluation, previous=None):
         "snapshot": snapshot,
         "health": health.to_dict() if hasattr(health, "to_dict") else health,
         **evaluation,
+        "firmware": firmware_info(snapshot),
     }
     if previous is not None:
         entry["history"] = extend_history(
@@ -363,6 +442,22 @@ def _enabled(value):
         if raw.lower() in {"off", "false", "0", "disabled"}:
             return False
     return drift.UNKNOWN
+
+
+def _auto_upgrade_common(value):
+    if not isinstance(value, Mapping):
+        return value
+    inner = value.get("auto_upgrade", value)
+    if isinstance(inner, Mapping):
+        inner = inner.get("common", inner)
+    return inner
+
+
+def _auto_upgrade_enabled(value):
+    common = _auto_upgrade_common(value)
+    if not isinstance(common, Mapping):
+        return common if common in (drift.UNKNOWN, drift.UNSUPPORTED) else drift.UNKNOWN
+    return _enabled(common)
 
 
 def _sensitivity(value):

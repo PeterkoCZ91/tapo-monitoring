@@ -283,6 +283,7 @@ Independent of `mac:`, two checks stop a false "back online":
 | `tamper_sensitivity` | `low`, `normal`, `high` | Tamper detection sensitivity level (default `normal`). |
 | `whitelamp_force_time` | 5–300, unset | Scaled duration (seconds) for floodlight pulse on detection (overrides 300 s default). |
 | `whitelamp_intensity` | 1–100, unset | Floodlight pulse brightness percentage. |
+| `firmware_auto_upgrade` | boolean, unset | Desired firmware auto-upgrade switch; a different camera setting is reported as Digital Twin drift. Report only, never written. Unset = no check. |
 
 ### Credentials and streams
 
@@ -655,6 +656,24 @@ whitelamp_intensity: 100
 - `whitelamp_force_time` (5 to 300 seconds, default unset) — overrides the 300-second (5 minute)
   firmware floodlight timer on detection triggers, allowing polite, short night pulses (e.g. 30 s).
 - `whitelamp_intensity` (1 to 100 %, default unset) — sets the floodlight brightness level.
+
+### Firmware auto-upgrade (report only)
+
+```yaml
+firmware_auto_upgrade: false
+```
+
+The Digital Twin reads every camera's firmware auto-upgrade setting
+(`getFirmwareAutoUpgradeConfig`) and shows it with the firmware version in
+`tapo-monitor twin-status`, `tapo-monitor probe` and the daily digest, e.g.
+`auto-upgrade: on (03:00)`. A camera that updates itself overnight can come back on a
+firmware that logs in differently, so it is worth knowing which cameras may do that.
+
+- `firmware_auto_upgrade` (`true`/`false`, default unset) — the setting you expect. When the
+  camera reports a different value, the twin records a `firmware.auto_upgrade.enabled`
+  drift (`warning`, alerted with `drift_alerts: true`). The monitor **never writes** this
+  setting; change it in the Tapo app. Unset means no check; a camera that cannot report the
+  setting is `unsupported`, never drift.
 
 ### Weather policy
 

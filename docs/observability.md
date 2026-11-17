@@ -79,6 +79,7 @@ The desired-state comparison validates hardware state against policy every contr
 | `motion.sensitivity` | `warning` | Digital motion sensitivity matches weather plan. |
 | `autotrack.enabled` | `warning` | PTZ tracking master switch matches role and day/night schedule. |
 | `clock.synchronized` | `warning` | Camera clock within skew tolerance (≤5.0 s). |
+| `firmware.auto_upgrade.enabled` | `warning` | Firmware auto-upgrade matches `firmware_auto_upgrade` (opt-in, report only — never written). |
 
 Unknown and unsupported actual values never trigger alerts. Stable drift keys deduplicate
 repeated mismatches; with `drift_alerts: true`, Telegram receives only newly observed drift
@@ -101,7 +102,14 @@ opening or clearing, with the timestamp it happened. A snapshot answers "what is
 now"; only the history answers "since when", which is what reconstructing an incident
 needs. It keeps the newest 50 transitions per camera, so a flapping camera cannot grow the
 file without limit, and a camera's first observation records nothing — there is no previous
-state to have moved away from.
+state to have moved away from. A firmware version change is recorded there too
+(`"kind": "firmware"`, with `from` and `to`); it is information, never drift.
+
+Each entry also has a `firmware` block — the firmware version and the auto-upgrade switch
+and time read by the last probe. `twin-status` and `probe` print it as a second table
+(`firmware`, `auto-upgrade`: `on (03:00)` / `off` / `unknown`, and the previous version
+after a change); the daily digest lists it as a detail line, plus any firmware change seen
+in the last 24 hours.
 
 ### One-shot probe
 

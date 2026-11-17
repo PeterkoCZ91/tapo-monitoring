@@ -327,7 +327,37 @@ def _twin_status(path=None, *, json_output=False):
             str(counts.get("unknown", 0)),
         ))
     _print_table(headers, rendered)
+    _print_firmware_table(fleet)
     return 0
+
+
+def _print_firmware_table(fleet):
+    """Firmware version, auto-upgrade switch and last version change per camera.
+
+    A camera that updates itself overnight may come back speaking a different login
+    protocol, so the operator sees whether it is allowed to. Entries written before the
+    twin read firmware are summarised from their snapshot; nothing is printed when no
+    entry has any firmware information at all.
+    """
+    from . import twin
+
+    rows = []
+    for name in sorted(fleet):
+        entry = fleet[name] if isinstance(fleet[name], dict) else {}
+        info = entry.get("firmware")
+        if not isinstance(info, dict):
+            info = twin.firmware_info(entry.get("snapshot") or {})
+        change = twin.last_firmware_change(entry)
+        changed = ""
+        if change is not None:
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(change["at"])))
+            changed = f"was {str(change.get('from') or '?').split()[0]} (changed by {when})"
+        rows.append((name, str(info.get("version") or "unknown"),
+                     twin.auto_upgrade_text(info), changed))
+    if all(row[1] == "unknown" and row[2] == "unknown" for row in rows):
+        return
+    print()
+    _print_table(("camera", "firmware", "auto-upgrade", "changed"), rows)
 
 
 def _probe_camera(cfg, night):
@@ -417,6 +447,7 @@ def _probe(argv):
                 str(counts.get("unknown", 0)),
             ))
         _print_table(headers, rows)
+        _print_firmware_table(fleet)
     return 1 if failed and not fleet else 0
 
 

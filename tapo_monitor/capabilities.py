@@ -30,6 +30,9 @@ _SAFE_PROBES = (
     ("basic", "info", "getBasicInfo"),
     ("basic", "clock_correction", "getTimeCorrection"),
     ("firmware", "update_status", "getFirmwareUpdateStatus"),
+    # Read only, never set: a camera that updates itself overnight can come back on a
+    # firmware with a different login protocol, so whether it may do so is worth knowing.
+    ("firmware", "auto_upgrade", "getFirmwareAutoUpgradeConfig"),
     ("storage", "sd_card", "getSDCard"),
     ("storage", "record_plan", "getRecordPlan"),
     ("storage", "circular_recording", "getCircularRecordingConfig"),

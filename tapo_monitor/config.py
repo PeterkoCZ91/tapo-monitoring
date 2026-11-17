@@ -457,6 +457,9 @@ class CameraConfig:
     tamper_sensitivity: str | None = None
     whitelamp_force_time: int | None = None
     whitelamp_intensity: int | None = None
+    # Desired firmware auto-upgrade switch, reported as drift when the camera differs;
+    # None = not checked. Read only: the monitor never writes it.
+    firmware_auto_upgrade: bool | None = None
 
 
 @dataclass
@@ -1551,6 +1554,9 @@ def _camera(data, index):
     ldc = data.get("ldc")
     if ldc is not None and not isinstance(ldc, bool):
         raise ConfigError(f"{where}: 'ldc' must be a boolean")
+    firmware_auto_upgrade = data.get("firmware_auto_upgrade")
+    if firmware_auto_upgrade is not None and not isinstance(firmware_auto_upgrade, bool):
+        raise ConfigError(f"{where}: 'firmware_auto_upgrade' must be a boolean")
     tamper_detection = data.get("tamper_detection")
     if tamper_detection is not None and not isinstance(tamper_detection, bool):
         raise ConfigError(f"{where}: 'tamper_detection' must be a boolean")
@@ -1724,6 +1730,7 @@ def _camera(data, index):
         tamper_sensitivity=tamper_sensitivity,
         whitelamp_force_time=whitelamp_force_time,
         whitelamp_intensity=whitelamp_intensity,
+        firmware_auto_upgrade=firmware_auto_upgrade,
     )
 
 

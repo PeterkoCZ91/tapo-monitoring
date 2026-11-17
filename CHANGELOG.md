@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- The Digital Twin reads each camera's firmware auto-upgrade setting
+  (`getFirmwareAutoUpgradeConfig`, read only — the monitor never changes it) and shows it
+  with the firmware version in `twin-status`, `probe` and the daily digest
+  (`auto-upgrade: on (03:00)` / `off` / `unknown`). A camera that updated itself can come
+  back on a firmware that logs in differently. A firmware version change between two
+  probes is recorded in the twin history and named in the next digest as a detail line,
+  not a failed check. The opt-in camera key `firmware_auto_upgrade: true|false` reports a
+  `firmware.auto_upgrade.enabled` drift when the camera differs; unset means no check.
 - `pan_limit.stop_rearm_quiet_s` (stop mode, off by default) keeps native tracking OFF
   after the stop guard rearms until it has stayed armed with no trip for that many
   seconds (0..3600); any trip restarts the period. On a camera with frequent pose-read

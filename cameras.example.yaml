@@ -91,6 +91,9 @@ cameras:
     #                          # that smears moving subjects; IR runs a faster shutter, so the
     #                          # event frame is sharper. "auto" re-asserts the camera's own
     #                          # day/night switch instead. Unset leaves the camera untouched.
+    # firmware_auto_upgrade: false  # optional; report drift (Digital Twin) when the camera's
+    #                          # firmware auto-upgrade differs. Read only: the monitor never
+    #                          # changes it. Unset = no check (the setting is still shown).
 
     # Camera login. Values below are ENV VAR NAMES, not the secrets themselves.
     user_env: CAM_USER             # env var holding the camera username
