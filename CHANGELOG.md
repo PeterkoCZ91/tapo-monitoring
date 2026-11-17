@@ -19,6 +19,13 @@ All notable changes to this project are documented here.
   counted again, and a vehicle and a person alert of one event are one incident. Sends
   from a package that does not log `event_age_s` are counted separately and a saved
   baseline from an older version prints `n/a` instead of failing.
+- `pan_limit.recall_evidence` (recall mode, default `true`). Set to `false`, the soft
+  pan limit sends `GotoPreset` as soon as a recall is cleared instead of first grabbing
+  the evidence frame of the out-of-bounds view, which usually took about 3 s (up to
+  `rtsp_timeout`) while the lens could keep moving past the limit. No frame is taken
+  after the recall either. Hold grace, linkage and privacy refusals are unchanged;
+  `evidence_budget` together with `recall_evidence: false` is rejected, and stop mode
+  ignores the key. With the default behaviour is unchanged.
 - `pan_limit.stop_rearm_quiet_s` (stop mode, off by default) keeps native tracking OFF
   after the stop guard rearms until it has stayed armed with no trip for that many
   seconds (0..3600); any trip restarts the period. On a camera with frequent pose-read

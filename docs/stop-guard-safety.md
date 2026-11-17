@@ -23,6 +23,13 @@ for position peaks after confirmed Stop/OFF, not just counts of failed Stop RPCs
 Production acceptance requires a separate observation period with actual
 boundary interventions; an offline test pass is not acceptance.
 
+`pan_limit.recall_evidence` belongs to recall mode only and does not change any of
+the above: stop mode takes no evidence frame, accepts the key and ignores it. In recall
+mode, `recall_evidence: false` removes the evidence grab (usually about 3 s) from in
+front of `GotoPreset`, so the lens has less time to travel past the limit before the
+recall goes out. It removes a delay, not a check: hold grace, linkage and privacy
+refusals still gate the recall exactly as before.
+
 Camera exception messages can contain session URLs and addresses. Event API
 failures therefore log only the exception class and a fixed diagnosis category;
 never copy raw exception text into an operator report or public issue.

@@ -3025,6 +3025,95 @@ def test_pan_guard_budget_never_stacks_grabs_for_one_camera(monkeypatch, tmp_pat
     _wait_for_grabs_to_finish()
 
 
+def _recall_order_app(monkeypatch, tmp_path, **pan_limit):
+    monkeypatch.setenv("TAPO_REVIEW_LOG_DIR", str(tmp_path / "review-log"))
+    raw = _raw_cam_dict()
+    raw["pan_limit"].update(pan_limit)
+    return cfg.load_config_from_dict({"cameras": [raw]})
+
+
+def _slow_capture(tmp_path, calls, clock, seconds=3.0):
+    """A grab that costs ``seconds`` on a fake clock, like a real RTSP keyframe wait."""
+    def capture(*a, **k):
+        calls.append("grab")
+        clock[0] += seconds
+        return str(_frame_file(tmp_path))
+    return capture
+
+
+def _clocked_gotos(calls, clock, sent_at):
+    def goto(ptz, tok, target):
+        calls.append(target)
+        sent_at.append(clock[0])
+    return goto
+
+
+@pytest.mark.parametrize("extra", [{}, {"recall_evidence": True},
+                                   {"recall_evidence": True, "evidence_budget": 5}])
+def test_pan_guard_default_grabs_the_frame_before_the_recall(monkeypatch, tmp_path, extra):
+    app = _recall_order_app(monkeypatch, tmp_path, **extra)
+    calls, clock, sent_at = [], [0.0], []
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp", _slow_capture(tmp_path, calls, clock))
+    _patch_panlimit(monkeypatch, pan_x=0.63, gotos=[])
+    monkeypatch.setattr(daemon.panlimit, "goto_preset", _clocked_gotos(calls, clock, sent_at))
+    daemon._pan_guard_pass(app, {}, daemon.MonitorState(), now=100, secrets={}, night=True)
+    assert calls == ["grab", "3"]
+    assert sent_at == [3.0]                   # the recall waited for the grab
+    _wait_for_grabs_to_finish()
+
+
+@pytest.mark.parametrize("extra", [{}, {"tilt": True, "tilt_min": -1.0, "tilt_max": -0.6}])
+def test_pan_guard_recall_first_sends_goto_preset_without_any_grab(monkeypatch, tmp_path,
+                                                                   extra):
+    # Opt-out: the 3 s grab is gone from in front of GotoPreset, and no frame is taken
+    # after the recall either, since that would show the swing back.
+    app = _recall_order_app(monkeypatch, tmp_path, recall_evidence=False, **extra)
+    calls, clock, sent_at = [], [0.0], []
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp", _slow_capture(tmp_path, calls, clock))
+    _patch_panlimit(monkeypatch, pan_x=0.63, gotos=[])
+    monkeypatch.setattr(daemon.panlimit, "read_preset_tilt_bounds",
+                        lambda ptz, tok, low, high: (-1.0, "1", -0.87, "4"))
+    monkeypatch.setattr(daemon.panlimit, "goto_preset", _clocked_gotos(calls, clock, sent_at))
+    state = daemon.MonitorState()
+    daemon._pan_guard_pass(app, {}, state, now=100, secrets={}, night=True)
+    assert calls == ["3"]
+    assert sent_at == [0.0]
+    assert state.pan_limit_recall_at["camera-a"] == 100
+    assert state.pan_limit_out_of_bounds["camera-a"]          # sampler window still recorded
+    assert not daemon._panlimit_grabs
+    assert not list((tmp_path / "panlimit-log").glob("*.jpg"))
+
+
+def test_pan_guard_recall_first_keeps_the_parked_lens_refusal(monkeypatch, tmp_path):
+    app = _recall_order_app(monkeypatch, tmp_path, recall_evidence=False)
+    calls = []
+    monkeypatch.setattr(daemon.snapshot, "capture_rtsp",
+                        lambda *a, **k: calls.append("grab"))
+    _patch_panlimit(monkeypatch, pan_x=0.63, gotos=[])
+
+    def refused(ptz, tok, target):
+        calls.append(target)
+        raise RuntimeError("-64324 Privacy mode is ON")
+
+    monkeypatch.setattr(daemon.panlimit, "goto_preset", refused)
+    monkeypatch.setattr(daemon.panlimit, "is_motor_refusal", lambda e: True)
+    state = daemon.MonitorState()
+    daemon._pan_guard_pass(app, {}, state, now=100, secrets={}, night=True)
+    assert calls == ["3"]
+    assert state.pan_guard["camera-a"]["refused"] == daemon.motion.PRIVACY
+    assert "ptz" in state.pan_guard["camera-a"]
+    assert "camera-a" not in state.pan_limit_recall_at
+
+
+def test_pan_guard_stop_mode_ignores_recall_evidence(monkeypatch, tmp_path):
+    app = _recall_order_app(monkeypatch, tmp_path, recall_evidence=False, mode="stop",
+                            right_preset="3")
+    assert app.cameras[0].pan_limit.recall_evidence is False
+    monkeypatch.setattr(daemon.panlimit, "build_ptz",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no recall pass")))
+    daemon._pan_guard_pass(app, {}, daemon.MonitorState(), now=100, secrets={}, night=True)
+
+
 def test_pan_guard_budget_survives_a_thread_that_cannot_start(monkeypatch, tmp_path):
     app = _budget_app(monkeypatch, tmp_path, 5)
     gotos = []

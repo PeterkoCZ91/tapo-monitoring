@@ -5057,9 +5057,11 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
                 g["refused"] = move.reason
                 continue
             g.pop("refused", None)
-            if pl.evidence_budget is None:
+            # recall_evidence false (recall first): nothing stands between the decision
+            # and GotoPreset, so the lens gets no extra grab time to travel further.
+            if pl.recall_evidence and pl.evidence_budget is None:
                 _archive_panlimit_frame(cfg, axis, value, now=now)
-            else:
+            elif pl.recall_evidence:
                 _archive_panlimit_frame_bounded(cfg, axis, value, now=now,
                                                 budget=pl.evidence_budget)
             try:

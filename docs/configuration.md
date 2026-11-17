@@ -1382,6 +1382,7 @@ pan_limit:
   tilt_max: -0.6
   hold_grace: 20      # while track_hold holds a subject, wait this long out of bounds
   evidence_budget: 2  # at most this many seconds of waiting for the evidence frame (unset by default)
+  # recall_evidence: false  # opt-in recall first: no evidence frame (default true)
 ```
 
 The guard reads current/preset pan positions over ONVIF and recalls the nearest bounding
@@ -1398,6 +1399,16 @@ number of seconds the recall goes out once the budget is spent; a frame that arr
 is discarded, since it would show the swing back. Only one grab per camera runs at a time,
 and a recall made while one is still running goes without a frame. The budget caps the
 wait, it does not shorten a normal grab, so one below the usual grab time means no frames.
+
+`recall_evidence` (default `true`) keeps that grab. Set it to `false` for recall first:
+`GotoPreset` goes out as soon as the recall is cleared, with no frame taken before it and
+none after it (a later frame would show the swing back). Use it where the lens travelling
+further past the limit during the grab matters more than the frame. Nothing else
+changes: the hold grace, linkage and privacy refusals, the recall stamp and the sampler's
+out-of-bounds window behave as before. Setting `evidence_budget` together with
+`recall_evidence: false` is a config error. Without an archive directory no frame is
+grabbed anyway, so the key changes nothing there. Stop mode takes no evidence frame and
+ignores the key.
 
 The guard needs the `onvif-zeep` package: `pip install -e ".[onvif]"` (or
 `pip install onvif-zeep`) into the daemon's venv. The import is deliberately lazy — it

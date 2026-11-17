@@ -131,7 +131,8 @@ somewhere it must not.
 during read outages, once past the limit), and the firmware tracker crossed the limit
 39–64 s after a verified tracking OFF. Both stop-mode sites run recall mode. An unreleased
 candidate stops the lens at once on uncommanded motion and adds opt-in
-`stop_rearm_quiet_s`. See [stop guard safety](stop-guard-safety.md).
+`stop_rearm_quiet_s`. Recall mode has an unreleased opt-in recall first
+(`recall_evidence: false`) that sends `GotoPreset` without the 3 s evidence grab. See [stop guard safety](stop-guard-safety.md).
 
 Endstops (was 10.15):
 
@@ -140,8 +141,6 @@ Endstops (was 10.15):
 - [ ] Explain the observed limit crossings from natural episodes (a Stop acknowledgement
   does not prove the tracker stopped), then accept only after 24 hours with several real
   boundary interventions, no crossing and confirmed Stop and OFF in every episode.
-- [ ] An opt-in recall-first mode without the evidence frame, for sites where the 3 s
-  grab before `GotoPreset` matters more than the frame.
 - [ ] Decide the stop guard's status from the soak evidence: if Stop calls keep failing
   and the tracker still crosses the limit after a verified OFF, document recall mode as
   the recommended setting and stop mode as best-effort, instead of another round of fixes.

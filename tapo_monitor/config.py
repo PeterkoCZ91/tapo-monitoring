@@ -221,6 +221,9 @@ class PanLimitConfig:
     # Most seconds the recall waits for its evidence frame. None waits for the grab as
     # before, which is up to rtsp_timeout when the stream hangs.
     evidence_budget: float | None = None
+    # False = recall first: GotoPreset goes out with no evidence grab in front of it (and
+    # none after, which would show the swing back). Recall mode only; stop mode ignores it.
+    recall_evidence: bool = True
     # Opt-in predictive stop: explicit presets define each restricted side; an omitted
     # side is unrestricted. Separate from the legacy span-and-recall guard.
     mode: str = "recall"
@@ -1157,6 +1160,11 @@ def _pan_limit(data, where):
             raise ConfigError(f"{where}: pan_limit evidence_budget must be a positive "
                               "number of seconds")
         evidence_budget = float(evidence_budget)
+    recall_evidence = _check_bool(d.get("recall_evidence", True), "recall_evidence",
+                                  f"{where}: pan_limit")
+    if not recall_evidence and evidence_budget is not None:
+        raise ConfigError(f"{where}: pan_limit evidence_budget has no frame to wait for "
+                          "when recall_evidence is false; drop one of them")
     mode = d.get("mode", "recall")
     if mode not in ("recall", "stop"):
         raise ConfigError(f"{where}: pan_limit mode must be recall or stop")
@@ -1203,6 +1211,7 @@ def _pan_limit(data, where):
         tilt_max=tilt_max,
         hold_grace=hold_grace,
         evidence_budget=evidence_budget,
+        recall_evidence=recall_evidence,
         mode=mode,
         **sides,
         stop_margin=stop_margin,

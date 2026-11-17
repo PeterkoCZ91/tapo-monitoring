@@ -180,6 +180,39 @@ def test_pan_limit_evidence_budget_parses():
     assert cfg.load_config_from_dict(data).cameras[0].pan_limit.evidence_budget == 1.5
 
 
+def test_pan_limit_recall_evidence_defaults_on():
+    assert cfg.load_config_from_dict(_minimal()).cameras[0].pan_limit.recall_evidence is True
+
+
+def test_pan_limit_recall_evidence_parses_off():
+    data = {"cameras": [{"name": "a", "host": "203.0.113.10",
+                         "pan_limit": {"recall_evidence": False}}]}
+    assert cfg.load_config_from_dict(data).cameras[0].pan_limit.recall_evidence is False
+
+
+@pytest.mark.parametrize("value", ["no", 0, 1, None, "false"])
+def test_pan_limit_recall_evidence_rejects_non_bool(value):
+    data = {"cameras": [{"name": "a", "host": "203.0.113.10",
+                         "pan_limit": {"recall_evidence": value}}]}
+    with pytest.raises(cfg.ConfigError, match="recall_evidence"):
+        cfg.load_config_from_dict(data)
+
+
+def test_pan_limit_recall_evidence_off_rejects_an_evidence_budget():
+    # A budget for a frame that is never grabbed is a contradiction, not a no-op.
+    data = {"cameras": [{"name": "a", "host": "203.0.113.10", "pan_limit": {
+        "recall_evidence": False, "evidence_budget": 2}}]}
+    with pytest.raises(cfg.ConfigError, match="evidence_budget.*recall_evidence"):
+        cfg.load_config_from_dict(data)
+
+
+def test_pan_limit_recall_evidence_is_accepted_and_ignored_in_stop_mode():
+    data = {"cameras": [{"name": "a", "host": "203.0.113.10", "pan_limit": {
+        "mode": "stop", "right_preset": "4", "recall_evidence": False}}]}
+    pl = cfg.load_config_from_dict(data).cameras[0].pan_limit
+    assert pl.mode == "stop" and pl.recall_evidence is False
+
+
 def test_pan_limit_hold_grace_defaults_to_twenty_seconds():
     pl = cfg.load_config_from_dict(_minimal()).cameras[0].pan_limit
     assert pl.hold_grace == 20
