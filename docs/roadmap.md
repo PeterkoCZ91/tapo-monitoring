@@ -980,7 +980,18 @@ often what photographs the person seconds later.
   `TAPO_SCORER_ENSEMBLE_TRUST` (audit: >= 0.30 caught 19/19 visits at about 1.4 false
   positives per 1000 frames, 0.45 missed 3) and its marginal scores are remapped into the
   host's hold band; default unchanged (TRUST = HOST). Enabling 0.30 live is still open.
-- [ ] Label the audit dataset and compute precision per model and the persons both missed.
+- [x] Label the audit dataset and compute precision per model and the persons both missed.
+  The 207 audit frames were labelled on 2026-10-03: both models reach 96–97 % precision at
+  0.30 and 100 % at 0.45; the frames both missed are estimated at about 16 of 1233 low-score
+  frames (95 % 5–58). One camera only, and the production model did not score them.
+- [x] 2026-11-17: per-camera and day/night split of the labelled week (night by sun
+  elevation). The production model's errors concentrate on one camera, which holds about
+  half of the missed persons and half of the false alarms, the false alarms all at night
+  under a colour lamp. Recall is 80 % by day and 62 % at night (wide intervals on a
+  disagreement-biased sample); 19 of the 42 misses are small persons (under 10 % of the
+  frame height).
+- [ ] Decide from that split whether a night threshold (9.2) for the camera with the colour
+  lamp removes its night false alarms without losing its night persons.
 - [x] Production trial review, 2026-10-23: 516 frames from two cameras since the M896
   switch (15/16 Oct to 23 Oct), every frame hand-labelled with the model's boxes shown;
   scorer fallback windows excluded. False alarms 6 of 405 sent frames: 4 were sent unscored
