@@ -5122,6 +5122,61 @@ def test_sampler_notes_the_light_when_enabled(monkeypatch):
     assert "🔦" in sent[0]
 
 
+def _sd_then_sampler(monkeypatch, *, sd_score, sampler_start=1000, sd_start=1000):
+    """An SD follow-up delivers at t=1100, the sampler group is due again at t=1250.
+
+    Returns the photos the sampler tick sent. 150 s later the 120 s wall-clock cooldown
+    is over, so only the SD delivery recorded on the group can stop a second message.
+    """
+    sent = []
+    app = _keep_app()
+    camera = app.cameras[0]
+    state = daemon.MonitorState()
+    state.groups["a"] = {
+        "camera": "a", "etype": "person", "event": {"start_time": sampler_start},
+        "started": sampler_start, "last_event_at": 1240, "frames": 1, "next_due": 1250,
+        "sent": False, "delivered": False, "pir_backed": True}
+    entry = {"camera": "a", "etype": "person", "event": {"start_time": sd_start},
+             "due_at": 0, "live_sent": False}
+    state.pending_sd.append(entry)
+    job = daemon._SdJob(entry=entry, cfg=camera, out_dir="/nonexistent", span=36,
+                        offset=0, full_span=36, scored=True)
+    pick = daemon._SdPick(frames=["/card.jpg"], image="/card.jpg", score=sd_score)
+    monkeypatch.setattr(daemon, "send_alert_photo",
+                        lambda *a, **k: sent.append(k["send_path"]) or True)
+    monkeypatch.setattr(daemon, "_caption_describe", lambda *a, **k: "")
+    daemon._finish_sd_followup(app, {}, state, job, pick, None, now=1100.0,
+                               secrets={"groq_key": "", "face_names": {}},
+                               snapshot_for=None, time_str=lambda _e: "T", night=True)
+    assert sent == ["sd"]
+    monkeypatch.setattr(daemon.scorer, "score_image",
+                        lambda url, img, timeout=10, tiles=1, **kw:
+                        {"person": 0.9, "animal": 0.0})
+    monkeypatch.setattr(daemon, "_safe_unlink", lambda p: None)
+    daemon.process_sampler(app, {"a": object()}, state, now=1250,
+                           secrets={"groq_key": "", "face_names": {}},
+                           snapshot_for=lambda c: (lambda cam, ev: "/tmp/f.jpg"),
+                           time_str=lambda ev: "T")
+    return sent[1:]
+
+
+def test_sampler_does_not_repeat_a_person_the_sd_follow_up_delivered(monkeypatch):
+    # Field bug: SD delivered the person, the still-open sampler group scored a frame
+    # past the wall-clock cooldown and sent the same incident again.
+    assert _sd_then_sampler(monkeypatch, sd_score=0.8) == []
+
+
+def test_sampler_still_sends_after_an_sd_photo_of_nobody(monkeypatch):
+    # Recall: an SD photo below the person threshold is not this passage's person.
+    assert len(_sd_then_sampler(monkeypatch, sd_score=0.2)) == 1
+
+
+def test_sampler_sends_a_new_incident_after_an_sd_person_delivery(monkeypatch):
+    # The SD delivery belongs to an earlier incident (start 400 s before this group).
+    assert len(_sd_then_sampler(monkeypatch, sd_score=0.8, sampler_start=1000,
+                                sd_start=600)) == 1
+
+
 def test_sampler_due_group_scores_and_sends(monkeypatch):
     sent = []
     app = _sampler_app()

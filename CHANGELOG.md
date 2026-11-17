@@ -35,6 +35,13 @@ All notable changes to this project are documented here.
   a hold. With the default `0` behaviour is unchanged.
 
 ### Fixed
+- A camera follow-up from the SD card that delivers a photo showing a person now also
+  closes the still-open sampler group of that passage. The group has no event start for
+  the alert gate, so once the 120 s wall-clock cooldown was over, a later frame of the
+  same visit was sent as a second message. A card photo of nobody does not close the
+  group, and a separate incident (a new group, or one starting a cooldown later) is
+  unaffected. Seen as 2 repeats per week on one camera that keeps sampling while an SD
+  follow-up is pending.
 - On dual-lens cameras the white-lamp self-heal now compares only the settings a lens
   actually reports. A lens whose lamp config has no `wtl_force_time` (the second lens
   of the C545D) was seen as drifted on every pass and rewritten each minute; a missing

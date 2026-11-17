@@ -3970,10 +3970,14 @@ def _finish_sd_followup(app, cam_clients, state, job, pick, error, *, now, secre
                 # of the same passage may skip its duplicate follow-up.
                 open_group["delivered"] = True
             start = _start_of(event)
+            person_photo = photo_had_person(
+                selected_score, cfg.scorer.threshold if job.scored else None)
+            if open_group is not None and person_photo and start is not None:
+                # The sampler checks this against its group's span (one visit, one message).
+                open_group["sd_person_start"] = start
             note_passage_delivered(
                 state, entry["camera"], start, start, cooldown=app.alerts.cooldown,
-                person_photo=photo_had_person(
-                    selected_score, cfg.scorer.threshold if job.scored else None))
+                person_photo=person_photo)
         else:
             log.warning("alert %s Telegram delivery failed [sd]; retry queued", etype)
             entry["due_at"] = now + 60
@@ -4221,6 +4225,20 @@ def _sampler_vehicle_alert(app, cfg, state, group, image, s, *, now, secrets, ti
         on_alert("vehicle", group["event"])
 
 
+def _sd_delivered_person(group, cooldown):
+    """True when an SD follow-up delivered a person photo inside this group's passage.
+
+    ``sd_person_start`` is the camera start of the card event that was sent; it counts
+    when it lies within ``cooldown`` of the group's first and newest event starts, so a
+    later, separate incident that merely reuses the group is not suppressed.
+    """
+    start = group.get("sd_person_start")
+    if start is None:
+        return False
+    first, newest = group_span(group)
+    return first - cooldown < start < newest + cooldown
+
+
 def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
                     time_str=None, night=True, loiter_zone=None):
     """Advance sampler groups: follow-up grabs across each open event window.
@@ -4335,6 +4353,15 @@ def process_sampler(app, cam_clients, state, *, now, secrets, snapshot_for=None,
             if unscored:
                 log.warning("scorer unavailable; sampler passes %s frame through", cfg.name)
                 monitor.audit_event(cfg, group["event"], etype, "sampler", "scorer_unavailable")
+            if _sd_delivered_person(group, app.alerts.cooldown):
+                # The card follow-up already put this passage's person on the phone. The
+                # wall-clock cooldown may be over by now (the group outlives it), but the
+                # gate has no event here, so it cannot tell: skip the repeat.
+                log.info("skip %s: SD already delivered this passage [sampler]", etype)
+                monitor.audit_event(cfg, group["event"], etype, "sampler", "cooldown",
+                                    reason="passage_already_alerted")
+                group["sent"] = True
+                continue
             can_alert, on_alert = alert_gate(state, cfg.name, app.alerts.cooldown, now)
             if (not can_alert(etype) and keeps_sampling(cfg)
                     and photo_had_person(s, cfg.scorer.threshold if score is not None else None)
