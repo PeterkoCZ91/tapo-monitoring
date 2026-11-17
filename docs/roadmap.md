@@ -142,6 +142,9 @@ Endstops (was 10.15):
   boundary interventions, no crossing and confirmed Stop and OFF in every episode.
 - [ ] An opt-in recall-first mode without the evidence frame, for sites where the 3 s
   grab before `GotoPreset` matters more than the frame.
+- [ ] Decide the stop guard's status from the soak evidence: if Stop calls keep failing
+  and the tracker still crosses the limit after a verified OFF, document recall mode as
+  the recommended setting and stop mode as best-effort, instead of another round of fixes.
 
 Alert delivery:
 
@@ -157,6 +160,8 @@ Alert delivery:
   recorder-backed soak; reuse an SD follow-up's card read for the clip (was 10.17).
 - [ ] Problems-only digest: finish the soak and verify degraded and unknown health in
   normal operation before recommending it (was 10.16).
+- [ ] Check that something outside the monitored hosts alerts when the whole fleet or its
+  scorer goes silent (a dead-man's switch), not only per-host watchers.
 
 Devices and network:
 
@@ -183,6 +188,10 @@ published (was 10.7).
   the digest, and re-run the camera report for that model so its fixture stays current.
 - [ ] Add confirmed device findings to the local API reference as they land, for example
   the tracker moving after a verified OFF (10.15).
+- [ ] Prove backup and restore of a host: back up `cameras.yaml` and the twin state, then
+  restore onto a clean machine and confirm the monitor starts with the same fingerprint.
+- [ ] Run [getting started](getting-started.md) once on a clean machine, as a new user
+  would, and fix every step that needs unwritten knowledge.
 
 ## Later / parked
 
