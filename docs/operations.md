@@ -1301,7 +1301,10 @@ tools/soak_report.sh --json host-a                      # machine-readable
 Per host it prints the service state and package fingerprint (`tapo-monitor version`, the
 `current` release), starts in the window, `Traceback|ERROR|CRITICAL` lines (grepped from the
 journal text, not `journalctl -p`), alerts sent per camera and path, the median and p90 of
-the first delivered alert per event (`event_age_s` of the audit `send` rows), `drop`, `hold`
+the first delivered alert per incident (`event_age_s` of the audit `send` rows; follow-ups of an
+incident do not count) overall, per camera and per delivery path (`live`, `sampler`, `sd`,
+`hubpoll`, `hubpoll_retry`, `hold_rescue`, `hold_expiry`; a path with no delivery is not listed, and
+a record or package without `event_age_s` shows as `n/a` or `+N without event_age_s`), `drop`, `hold`
 and `cooldown` counts, `would_*` observe rows per camera, `host_switch`, outbox and hub
 lines, and service memory and CPU from `systemctl show`. The endstop line separately
 counts observed configured-limit crossings, peaks measured after verified tracking OFF,

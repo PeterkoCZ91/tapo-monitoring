@@ -67,18 +67,20 @@ def test_first_alert_is_also_split_by_the_path_that_delivered_it():
     fa = probe("host-a")["first_alert"]
     # The event at start=1000 was delivered live twice; only its earliest send counts.
     assert fa["by_path"] == {
-        "live": {"n": 2, "median_s": 65.0, "p90_s": pytest.approx(93.0)},
-        "sampler": {"n": 1, "median_s": 70.0, "p90_s": 70.0},
-        "sd": {"n": 1, "median_s": 190.0, "p90_s": 190.0},
+        "live": {"n": 2, "median_s": 65.0, "p90_s": pytest.approx(93.0), "untimed": 0},
+        "sampler": {"n": 1, "median_s": 70.0, "p90_s": 70.0, "untimed": 0},
+        "sd": {"n": 1, "median_s": 190.0, "p90_s": 190.0, "untimed": 0},
     }
     # The summary and its per-camera split keep their meaning and their keys.
     assert fa["n"] == 4 and fa["median_s"] == 85
     assert set(fa["by_camera"]) == {"cam-a", "cam-b"}
 
 
-def _audit(start, path, age, delivered="true"):
-    return (f"INFO audit camera=cam-a path={path} action=send etype=person start={start} "
-            f"event_age_s={age} telegram={delivered}")
+def _audit(start, path, age, delivered="true", etype="person", reason=None, camera="cam-a"):
+    age_field = "" if age is None else f" event_age_s={age}"
+    reason_field = f" reason={reason}" if reason else ""
+    return (f"INFO audit camera={camera} path={path} action=send etype={etype} start={start}"
+            f"{age_field}{reason_field} telegram={delivered}")
 
 
 def _first_alert(lines):
@@ -104,25 +106,106 @@ def test_first_alert_by_path_is_empty_without_deliveries():
     assert _first_alert([])["by_path"] == {}
 
 
+def test_an_incident_counts_once_across_event_types():
+    """A vehicle and a person alert of one camera event are one incident: its first
+    delivery is the earlier of the two, and the later one is a follow-up, not a first."""
+    fa = _first_alert([_audit(1000, "live", 20, etype="person"),
+                       _audit("1000.0", "sd", 150, etype="vehicle")])
+    assert fa["n"] == 1
+    assert set(fa["by_path"]) == {"live"}
+
+
+def test_the_incident_field_groups_sends_when_present():
+    fa = _first_alert([
+        _audit(1000, "sd", 150) + " incident=cam-a-1000",
+        _audit("1000.4", "live", 20, etype="vehicle") + " incident=cam-a-1000",
+    ])
+    assert fa["n"] == 1 and fa["by_path"]["live"]["median_s"] == 20
+
+
+def test_the_same_start_on_two_cameras_is_two_incidents():
+    fa = _first_alert([_audit(1000, "live", 20), _audit(1000, "sd", 150, camera="cam-b")])
+    assert fa["n"] == 2 and set(fa["by_path"]) == {"live", "sd"}
+
+
+@pytest.mark.parametrize("path, reason, expected", [
+    ("hubpoll", "retry", "hubpoll_retry"),
+    ("sampler", "hold_rescue_recall", "hold_rescue"),
+    ("sampler", "hold_expiry_send", "hold_expiry"),
+    ("sampler", None, "sampler"),
+    ("hubpoll", None, "hubpoll"),
+    ("sd", "scorer_unavailable", "sd"),
+])
+def test_sends_that_wait_by_design_get_a_path_of_their_own(path, reason, expected):
+    """Named as in the sent log (sentlog.SEND_PATHS): a hub retry or a hold that expired
+    is slow on purpose and must not drag the plain path's median."""
+    fa = _first_alert([_audit(1000, path, 90, reason=reason)])
+    assert set(fa["by_path"]) == {expected}
+
+
+def test_a_delivery_without_an_event_age_is_untimed_not_dropped():
+    """An older package logs no event_age_s: the incident still counts for its path, with
+    no time, instead of vanishing or turning into a zero."""
+    fa = _first_alert([_audit(1000, "live", None), _audit(2000, "live", 30),
+                       _audit(3000, "sd", None), _audit(3000, "live", None)])
+    assert fa["n"] == 1
+    assert fa["untimed"] == 2
+    # Without any age the path of the first logged delivery stands for the incident.
+    assert fa["by_path"]["live"] == {"n": 1, "median_s": 30.0, "p90_s": 30.0, "untimed": 1}
+    assert fa["by_path"]["sd"] == {"n": 0, "median_s": None, "p90_s": None, "untimed": 1}
+
+
+def test_a_timed_delivery_wins_over_an_untimed_one_of_the_same_incident():
+    fa = _first_alert([_audit(1000, "sd", None), _audit(1000, "live", 25)])
+    assert fa["untimed"] == 0
+    assert set(fa["by_path"]) == {"live"}
+
+
+def _per_path_block(lines):
+    at = lines.index("   first delivery per path (event start to the first delivered alert "
+                     "of an incident)")
+    block = []
+    for line in lines[at + 1:]:
+        if not line.startswith("              "):
+            break
+        block.append(line.strip())
+    return block
+
+
 def test_terminal_report_shows_the_split_in_a_fixed_order():
     lines = _rendered(probe("host-a")).splitlines()
-    at = next(i for i, line in enumerate(lines) if "first      median" in line)
-    assert lines[at + 1].strip() == "live 65 s p90 93 s (n=2), sampler 70 s p90 70 s (n=1), sd 190 s p90 190 s (n=1)"
+    assert _per_path_block(lines) == [
+        "live          n=2    median 65 s   p90 93 s",
+        "sampler       n=1    median 70 s   p90 70 s",
+        "sd            n=1    median 190 s  p90 190 s",
+    ]
 
 
-def test_terminal_report_omits_the_split_when_nothing_was_delivered():
+def test_terminal_report_puts_unknown_paths_after_the_known_ones_and_shows_untimed():
+    rec = probe("host-a")
+    rec["first_alert"]["by_path"] = {
+        "zz_new": {"n": 1, "median_s": 5.0, "p90_s": 5.0, "untimed": 0},
+        "hold_expiry": {"n": 0, "median_s": None, "p90_s": None, "untimed": 3},
+        "live": {"n": 1, "median_s": 9.0, "p90_s": 9.0, "untimed": 0},
+    }
+    assert _per_path_block(_rendered(rec).splitlines()) == [
+        "live          n=1    median 9 s    p90 9 s",
+        "hold_expiry   n=0    median n/a    p90 n/a   (+3 without event_age_s)",
+        "zz_new        n=1    median 5 s    p90 5 s",
+    ]
+
+
+def test_terminal_report_says_so_when_nothing_was_delivered():
     rec = probe("host-a")
     rec["first_alert"].update(n=0, median_s=None, p90_s=None, by_path={})
-    lines = _rendered(rec).splitlines()
-    at = next(i for i, line in enumerate(lines) if "first      median" in line)
-    assert " p90 " not in lines[at + 1]
+    assert _per_path_block(_rendered(rec).splitlines()) == ["none delivered"]
 
 
 def test_terminal_report_accepts_a_record_without_the_split():
     """A report saved by an older version has no by_path; rendering it must not fail."""
     rec = probe("host-a")
     del rec["first_alert"]["by_path"]
-    assert "first      median" in _rendered(rec)
+    assert _per_path_block(_rendered(rec).splitlines()) == ["n/a (record has no per-path split)"]
 
 
 def test_a_baseline_saved_before_the_split_still_compares(tmp_path, capsys):

@@ -154,8 +154,7 @@ Alert delivery:
   across delivery paths at incident level (was 10.6).
 - [ ] Latency: card follow-ups take about 150 s. Trial `sd_early_look`, then
   `sd_early_span: 12`, and `hub_clip_worker` on a hub site; consider a lower freshness
-  guard or a local recorder (was 10.4). Report the first-delivery median per path in
-  `soak_report` (was 10.13).
+  guard or a local recorder (was 10.4).
 - [ ] Alert clips: confirm night playback on a phone, card follow-ups no slower, a clean
   recorder-backed soak; reuse an SD follow-up's card read for the clip (was 10.17).
 - [ ] Problems-only digest: finish the soak and verify degraded and unknown health in

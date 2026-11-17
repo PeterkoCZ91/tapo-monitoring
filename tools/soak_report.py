@@ -28,7 +28,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tapo_monitor.audit import parse_audit_line  # noqa: E402
 
 BASELINE_VERSION = 1
-FIRST_ALERT_PATH_ORDER = ("live", "sampler", "sd")
+# The delivery paths of the audit `send` rows, in the order the report lists them. The
+# sends a path makes only after waiting by design (a hub clip retry, a recalled or
+# expired hold) are told apart by `reason` and get the sent log's name for them
+# (tapo_monitor.sentlog.SEND_PATHS), so their wait does not move the plain path's median.
+FIRST_ALERT_PATH_ORDER = ("live", "sampler", "sd", "hubpoll", "hubpoll_retry",
+                          "hold_rescue", "hold_expiry")
+DELIVERY_SUBPATHS = {("hubpoll", "retry"): "hubpoll_retry",
+                     ("sampler", "hold_rescue_recall"): "hold_rescue",
+                     ("sampler", "hold_expiry_send"): "hold_expiry"}
 DEFAULT_TOLERANCE = 0.30
 # Below this many alerts of difference a "+300 %" is two alerts, not a regression.
 MIN_ABS_ALERT_DELTA = 5
@@ -243,6 +251,7 @@ def _journal_stats(lines):
     sent: dict = {}
     first_age: dict = {}
     first_path: dict = {}
+    untimed_path: dict = {}
     gates: dict = {}
     would: dict = {}
     for line in lines:
@@ -256,14 +265,18 @@ def _journal_stats(lines):
                 cell = bucket.setdefault(path, {"ok": 0, "failed": 0, "unknown": 0})
                 if rec.get("telegram") is True:
                     cell["ok"] += 1
+                    key = _incident_key(camera, rec)
+                    delivery = DELIVERY_SUBPATHS.get((path, rec.get("reason")), path)
                     age = rec.get("event_age_s")
-                    start = rec.get("start")
                     if isinstance(age, (int, float)) and not isinstance(age, bool) \
                             and math.isfinite(age) and age >= 0:
-                        key = (camera, str(rec.get("etype")), start)
                         if key not in first_age or age < first_age[key]:
                             first_age[key] = float(age)
-                            first_path[key] = path
+                            first_path[key] = delivery
+                    else:
+                        # No age (a package older than event_age_s): the first logged
+                        # delivery stands for the incident unless a timed one turns up.
+                        untimed_path.setdefault(key, delivery)
                 elif rec.get("telegram") is False:
                     cell["failed"] += 1
                 else:
@@ -318,18 +331,26 @@ def _journal_stats(lines):
 
     ages_by_camera: dict = {}
     ages_by_path: dict = {}
+    untimed_by_path: Counter = Counter()
     for key, age in first_age.items():
         ages_by_camera.setdefault(key[0], []).append(age)
         ages_by_path.setdefault(first_path[key], []).append(age)
+    for key, path in untimed_path.items():
+        if key not in first_age:
+            untimed_by_path[path] += 1
     all_ages = [age for ages in ages_by_camera.values() for age in ages]
     first_alert = {"n": len(all_ages), "median_s": median(all_ages),
                    "p90_s": percentile(all_ages, 0.9),
+                   "untimed": sum(untimed_by_path.values()),
                    "by_camera": {c: {"n": len(a), "median_s": median(a), "p90_s": percentile(a, 0.9)}
                                  for c, a in sorted(ages_by_camera.items())},
                    # Paths differ by design (a card send waits for the recording), so a shift in
                    # the mix moves the summary above without anything getting slower.
-                   "by_path": {p: {"n": len(a), "median_s": median(a), "p90_s": percentile(a, 0.9)}
-                               for p, a in sorted(ages_by_path.items())}}
+                   "by_path": {p: {"n": len(ages_by_path.get(p, [])),
+                                   "median_s": median(ages_by_path.get(p, [])),
+                                   "p90_s": percentile(ages_by_path.get(p, []), 0.9),
+                                   "untimed": untimed_by_path[p]}
+                               for p in sorted(set(ages_by_path) | set(untimed_by_path))}}
     sent_ok = sum(c["ok"] for paths in sent.values() for c in paths.values())
     sent_failed = sum(c["failed"] for paths in sent.values() for c in paths.values())
     return {
@@ -358,6 +379,21 @@ def _journal_stats(lines):
         "gates": {c: dict(v) for c, v in sorted(gates.items())},
         "would": {c: dict(v) for c, v in sorted(would.items())},
     }
+
+
+def _incident_key(camera, rec):
+    """One incident per camera event: the audit's `incident` (`<camera>-<start>`), else
+    the camera and the whole-second start it is named after. Not the event type: a
+    vehicle and a person alert of one event are one incident with one first delivery."""
+    incident = rec.get("incident")
+    if incident:
+        return (camera, str(incident))
+    start = rec.get("start")
+    try:
+        whole = int(float(start))
+    except (TypeError, ValueError):
+        return (camera, str(start))
+    return (camera, f"{camera}-{whole}")
 
 
 def _signature(line):
@@ -527,15 +563,8 @@ def render_host(name, entry):
         lines.append(f"              {camera}: {cells}")
     fa = entry["first_alert"]
     lines.append(f"   first      median {_fmt(fa['median_s'], suffix=' s')} p90 {_fmt(fa['p90_s'], suffix=' s')} "
-                 f"(n={fa['n']}, first delivered send per event)")
-    by_path = fa.get("by_path") or {}  # absent from a record saved by an older version
-    if by_path:
-        known = [p for p in FIRST_ALERT_PATH_ORDER if p in by_path]
-        order = known + sorted(p for p in by_path if p not in FIRST_ALERT_PATH_ORDER)
-        cells = ", ".join(f"{p} {_fmt(by_path[p]['median_s'], suffix=' s')} "
-                          f"p90 {_fmt(by_path[p]['p90_s'], suffix=' s')} (n={by_path[p]['n']})"
-                          for p in order)
-        lines.append(f"              {cells}")
+                 f"(n={fa['n']}, first delivered send per incident)")
+    lines += _render_first_by_path(fa)
     gate_total: Counter = Counter()
     for counts in entry["gates"].values():
         gate_total.update(counts)
@@ -557,6 +586,26 @@ def render_host(name, entry):
     for deviation in entry["deviations"]:
         lines.append(f"   ~ vs baseline: {deviation}")
     return "\n".join(lines)
+
+
+def _render_first_by_path(fa):
+    lines = ["   first delivery per path (event start to the first delivered alert of an incident)"]
+    by_path = fa.get("by_path")
+    if by_path is None:  # a record saved by an older version
+        return lines + ["              n/a (record has no per-path split)"]
+    if not by_path:
+        return lines + ["              none delivered"]
+    known = [p for p in FIRST_ALERT_PATH_ORDER if p in by_path]
+    for path in known + sorted(p for p in by_path if p not in FIRST_ALERT_PATH_ORDER):
+        cell = by_path[path]
+        untimed = cell.get("untimed") or 0
+        line = (f"{path:<13} {'n=' + str(cell['n']):<6} "
+                f"median {_fmt(cell['median_s'], suffix=' s'):<6} "
+                f"p90 {_fmt(cell['p90_s'], suffix=' s'):<5}")
+        if untimed:
+            line += f" (+{untimed} without event_age_s)"
+        lines.append("              " + line.rstrip())
+    return lines
 
 
 def render(report):

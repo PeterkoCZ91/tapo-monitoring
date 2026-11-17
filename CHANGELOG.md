@@ -13,6 +13,12 @@ All notable changes to this project are documented here.
   probes is recorded in the twin history and named in the next digest as a detail line,
   not a failed check. The opt-in camera key `firmware_auto_upgrade: true|false` reports a
   `firmware.auto_upgrade.enabled` drift when the camera differs; unset means no check.
+- `tools/soak_report` reports the time from event start to the first delivered alert of an
+  incident per delivery path (live, sampler, SD follow-up, hub clip and its retry, hold
+  rescue, hold expiry) with count, median and p90. Follow-ups of an incident are not
+  counted again, and a vehicle and a person alert of one event are one incident. Sends
+  from a package that does not log `event_age_s` are counted separately and a saved
+  baseline from an older version prints `n/a` instead of failing.
 - `pan_limit.stop_rearm_quiet_s` (stop mode, off by default) keeps native tracking OFF
   after the stop guard rearms until it has stayed armed with no trip for that many
   seconds (0..3600); any trip restarts the period. On a camera with frequent pose-read
