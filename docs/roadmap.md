@@ -990,8 +990,17 @@ often what photographs the person seconds later.
   under a colour lamp. Recall is 80 % by day and 62 % at night (wide intervals on a
   disagreement-biased sample); 19 of the 42 misses are small persons (under 10 % of the
   frame height).
-- [ ] Decide from that split whether a night threshold (9.2) for the camera with the colour
-  lamp removes its night false alarms without losing its night persons.
+- [x] Decide from that split whether a night threshold (9.2) for the camera with the colour
+  lamp removes its night false alarms without losing its night persons. Decided 2026-11-17:
+  no. On its production nights 0.35 caught all 93 person incidents with one false alarm, and
+  0.50 would lose 11 of them; the shadow-week false alarms were mostly one lamp-lit static
+  object, which needs a zone, not a threshold.
+- [ ] Collect unbiased data: switch on the random sample of dropped frames
+  (`TAPO_REVIEW_DROP_SAMPLE`), so missed persons can be counted, and keep review and sent
+  frames beyond the 14-day retention in one labelling set.
+- [ ] Feedback buttons under each Telegram alert (false alarm / correct), opt-in, so everyday
+  use labels the delivered frames; the labels feed thresholds, zones and any later
+  fine-tuning.
 - [x] Production trial review, 2026-10-23: 516 frames from two cameras since the M896
   switch (15/16 Oct to 23 Oct), every frame hand-labelled with the model's boxes shown;
   scorer fallback windows excluded. False alarms 6 of 405 sent frames: 4 were sent unscored
