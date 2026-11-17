@@ -75,8 +75,9 @@ misses are small persons; a night threshold for that camera was rejected in favo
 zone. The labelled data is still biased toward model disagreements.
 
 - [ ] Collect unbiased data: switch on the random sample of dropped frames
-  (`TAPO_REVIEW_DROP_SAMPLE`) and keep review and sent frames beyond the 14-day retention
-  in one labelling set (was 10.14).
+  (`TAPO_REVIEW_DROP_SAMPLE`) on the busy cameras (was 10.14). Review and sent frames
+  already outlive the hosts' 14-day retention: a nightly `tools/collect_frames.sh` run
+  copies them into one labelling set and pre-labels them.
 - [ ] Review production quality on the remaining cameras, per camera and day or night:
   misses, false alerts, latency and fallback use; confirm the fallback before retiring
   any serving path. Label high-mounted night views, where clearly visible people scored
