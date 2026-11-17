@@ -188,31 +188,3 @@ def night_with_fixed_end(night, end_minute, clock=None):
     if current < NOON_MINUTE:
         return False
     return bool(night) and not reached
-
-
-def describe_window(now=None):
-    """Return (mode, info_string) for logging."""
-    try:
-        from zoneinfo import ZoneInfo
-
-        from astral import LocationInfo
-        from astral.sun import sun
-
-        lat_env = os.getenv("NIGHT_LAT")
-        lon_env = os.getenv("NIGHT_LON")
-        tz_name = os.getenv("NIGHT_TZ")
-        if not (lat_env and lon_env and tz_name):
-            raise RuntimeError("NIGHT_LAT/NIGHT_LON/NIGHT_TZ not set")
-        lat = float(lat_env)
-        lon = float(lon_env)
-        sunset_off = int(os.getenv("NIGHT_SUNSET_OFFSET_MIN", DEFAULT_SUNSET_OFFSET))
-        sunrise_off = int(os.getenv("NIGHT_SUNRISE_OFFSET_MIN", DEFAULT_SUNRISE_OFFSET))
-        tz = ZoneInfo(tz_name)
-        now = now or datetime.now(tz)
-        loc = LocationInfo("custom", "custom", tz_name, lat, lon)
-        s = sun(loc.observer, date=now.date(), tzinfo=tz)
-        ns = (s["sunset"] - timedelta(minutes=sunset_off)).strftime("%H:%M")
-        ne = (s["sunrise"] + timedelta(minutes=sunrise_off)).strftime("%H:%M")
-        return ("astral", f"night={ns}-{ne} (sunset={s['sunset'].strftime('%H:%M')}, sunrise={s['sunrise'].strftime('%H:%M')})")
-    except Exception:
-        return ("hhmm", f"NIGHT_START={os.getenv('NIGHT_START', '22')} NIGHT_END={os.getenv('NIGHT_END', '6')}")
