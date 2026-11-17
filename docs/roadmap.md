@@ -56,6 +56,7 @@ The latest release is **0.14.0** (2026-11-15). Details per version are in the
 | Network history, network diagnosis lines, camera address failover and MAC rediscovery | Released (0.13.0 for diagnosis and MAC rediscovery); helper-host MAC lookup across a subnet route (`mac_helper`) unreleased opt-in |
 | Virtual PTZ endstops (stop guard) | Deployed candidate, **not accepted** (see theme C) |
 | Problems-only daily digest | Released opt-in (0.11.0); soak open |
+| Night-vision mode drift and a log of a white lamp lit for no cause | Deployed candidate, **not accepted** (see theme C) |
 
 ## Themes
 
@@ -116,6 +117,11 @@ second machine; forum feedback asked for exactly this.
   the Supervisor's MQTT service (was Phase 11).
 - [ ] Ship it from a separate app repository with the same release gate as the package: a
   tagged image and a real overnight soak on one Home Assistant OS install (was Phase 11).
+- [ ] An opt-in OpenAI-compatible vision endpoint for the optional captions, so a local
+  server (llama.cpp, vLLM, Ollama, LM Studio) or any hosted provider can replace Groq:
+  configurable base URL, model and key variable, the same JSON reply contract, and the
+  same fail-closed behaviour on any error. Default stays Groq; frames then go only to the
+  endpoint the operator chose (offered upstream in issue 9).
 - [ ] Update the README and [getting started](getting-started.md) once the app exists.
 - [ ] Only after the app has users: decide whether a custom integration (config flow,
   device registry, re-park service) is worth a second code path (was Phase 11).
@@ -166,6 +172,13 @@ Devices and network:
 - [ ] Dual-lens camera (C545D): grow the event sample (night, pets, vehicles) and re-check
   the 180 s hold; compare `lens_pick_stream` photos with wide-lens ones and decide from
   per-lens scores whether the pan/tilt lens goes first or gets a lower threshold (was 8.6).
+- [ ] White lamp: read the first week of `lamp without cause:` lines and the
+  `night_vision` drift warnings per camera. The intended setup is IR at night and the
+  white light only after a detection, unless a camera is configured otherwise. Then
+  decide per camera whether the config needs an explicit mode, whether to add opt-in
+  dense night sampling of `getWhitelampStatus` (15–60 s; the 15-minute probe sees only a
+  long or permanent lit lamp, not a 60 s pulse) and a one-line digest count from the
+  ledger's `state_changes`. Log only, no alerts and no camera writes.
 
 ### D. Maintenance
 
