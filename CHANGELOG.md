@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- The Digital Twin reads `getNightVisionModeConfig` (one extra read per probe, never
+  written) and reports a `light.night_vision.mode` drift (warning) when it differs from
+  the expected mode: plain IR for a camera with no `light_trigger` and no `night_vision:`
+  key, the planned mode for a firmware `light_trigger`; explicit settings are exceptions.
+  An empty or unreadable answer is unknown, not drift. Lamp status (with `rest_time`) and
+  night-vision mode changes seen between two probes are recorded once in the event ledger
+  (`state_changes`), only on change; the probe interval is the resolution.
 - The Digital Twin reads each camera's firmware auto-upgrade setting
   (`getFirmwareAutoUpgradeConfig`, read only — the monitor never changes it) and shows it
   with the firmware version in `twin-status`, `probe` and the daily digest

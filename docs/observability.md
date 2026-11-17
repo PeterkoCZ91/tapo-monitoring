@@ -80,6 +80,23 @@ The desired-state comparison validates hardware state against policy every contr
 | `autotrack.enabled` | `warning` | PTZ tracking master switch matches role and day/night schedule. |
 | `clock.synchronized` | `warning` | Camera clock within skew tolerance (≤5.0 s). |
 | `firmware.auto_upgrade.enabled` | `warning` | Firmware auto-upgrade matches `firmware_auto_upgrade` (opt-in, report only — never written). |
+| `light.night_vision.mode` | `warning` | Night-vision mode is the expected one (see below). Report only — never written by the twin. |
+
+**Night-vision mode.** A camera with no enabled `light_trigger` and no `night_vision:` key is
+expected to sit in plain IR (`inf_night_vision`): white light only when something lights
+it. With a firmware `light_trigger` the expectation follows the planned mode (smart inside
+the window, IR outside). An explicit `night_vision: ir|auto` or a software `light_trigger`
+is a deliberate exception and nothing is checked. An empty, unreadable or channel-keyed
+answer is `unknown`, not drift. The probe costs one extra read (`getNightVisionModeConfig`,
+no `chn_id`) per probe per camera; it answers for the first lens of a dual-lens camera.
+
+**Lamp and mode history.** When the lamp status (`getWhitelampStatus`, already part of the
+probe, never with `chn_id`) or the night-vision mode differs from the previous probe, the
+change is written once to the event ledger (`state_changes` table, with the lamp's
+`rest_time` at that moment). Nothing is written while the state stays the same, and no
+extra camera calls are made for it. The probe interval (default 900 s) is the resolution:
+a 60 s lamp can fall between two probes, so this shows long or permanent lighting, not
+every short one.
 
 Unknown and unsupported actual values never trigger alerts. Stable drift keys deduplicate
 repeated mismatches; with `drift_alerts: true`, Telegram receives only newly observed drift

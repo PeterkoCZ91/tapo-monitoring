@@ -291,3 +291,116 @@ def test_whitelamp_force_time_drift_reports_warning():
     assert results["light.whitelamp.force_time"]["expected"] == 60
     assert evaluation["desired"]["light.whitelamp.force_time"] == 60
 
+
+
+# -- night-vision mode drift and lamp state changes -------------------------------------
+
+def _light_snapshot(mode=None, lamp=None, rest=0):
+    groups = {"light": {}}
+    if mode is not None:
+        groups["light"]["night_vision_mode"] = {
+            "state": "available",
+            "value": {"image": {"switch": {"night_vision_mode": mode}}}}
+    if lamp is not None:
+        groups["light"]["whitelamp_status"] = {
+            "state": "available", "value": {"status": lamp, "rest_time": rest}}
+    return {"schema_version": 1, "groups": groups}
+
+
+def _nv_results(plan, snapshot):
+    evaluation = twin.evaluate_snapshot("camera-a", plan, snapshot)
+    return evaluation, {i["path"]: i for i in evaluation["drift"]["results"]}
+
+
+def test_night_vision_mode_drift_is_a_warning():
+    plan = _plan(night_vision_expect="inf_night_vision")
+    evaluation, results = _nv_results(plan, _light_snapshot(mode="md_night_vision"))
+    item = results["light.night_vision.mode"]
+    assert item["severity"] == "warning"
+    assert item["expected"] == "inf_night_vision"
+    assert item["actual"] == "md_night_vision"
+    assert "light.night_vision.mode" in {i["path"] for i in twin.alertable_results(evaluation)}
+
+
+def test_night_vision_mode_matching_is_clean():
+    plan = _plan(night_vision_expect="inf_night_vision")
+    evaluation, results = _nv_results(plan, _light_snapshot(mode="inf_night_vision"))
+    assert results["light.night_vision.mode"]["status"] != "drift"
+    assert twin.alertable_keys(evaluation) == set()
+
+
+@pytest.mark.parametrize("value", [
+    None, {}, {"image": {}}, {"image": {"switch": {}}},
+    {"image": {"switch": {"night_vision_mode": ""}}},
+    {"image": {"switch": {"night_vision_mode": 3}}},
+    {"1": {"night_vision_mode": "md_night_vision"}},
+])
+def test_night_vision_mode_empty_or_unreadable_is_unknown_not_drift(value):
+    snapshot = {"schema_version": 1, "groups": {"light": {"night_vision_mode": {
+        "state": "available", "value": value}}}}
+    evaluation, results = _nv_results(
+        _plan(night_vision_expect="inf_night_vision"), snapshot)
+    assert twin.alertable_keys(evaluation) == set()
+    assert results["light.night_vision.mode"]["status"] == "unknown"
+
+
+def test_night_vision_mode_missing_probe_is_not_drift():
+    evaluation, _ = _nv_results(_plan(night_vision_expect="inf_night_vision"),
+                                {"schema_version": 1, "groups": {}})
+    assert twin.alertable_keys(evaluation) == set()
+
+
+def test_night_vision_mode_not_checked_without_an_expectation():
+    plan = _plan()
+    evaluation, results = _nv_results(plan, _light_snapshot(mode="md_night_vision"))
+    assert "light.night_vision.mode" not in results
+    assert "light.night_vision.mode" not in evaluation["desired"]
+
+
+def test_night_vision_mode_reads_flat_dual_lens_answer():
+    snapshot = {"schema_version": 1, "groups": {"light": {"night_vision_mode": {
+        "state": "available",
+        "value": {"night_vision_mode": "wtl_night_vision", "wtl_intensity_level": "80"}}}}}
+    _, results = _nv_results(_plan(night_vision_expect="inf_night_vision"), snapshot)
+    assert results["light.night_vision.mode"]["actual"] == "wtl_night_vision"
+
+
+def _entry(snapshot):
+    return {"snapshot": snapshot}
+
+
+def test_state_changes_report_only_transitions():
+    before = _entry(_light_snapshot(mode="inf_night_vision", lamp=0))
+    same = _entry(_light_snapshot(mode="inf_night_vision", lamp=0))
+    assert twin.state_changes(before, same, at=10) == ()
+    after = _entry(_light_snapshot(mode="md_night_vision", lamp=1, rest=58))
+    changes = {c["key"]: c for c in twin.state_changes(before, after, at=10)}
+    assert changes["night_vision_mode"]["from"] == "inf_night_vision"
+    assert changes["night_vision_mode"]["to"] == "md_night_vision"
+    assert changes["whitelamp_status"]["from"] == 0
+    assert changes["whitelamp_status"]["to"] == 1
+    # rest_time rides along with the lamp transition, it is never a trigger by itself.
+    assert changes["whitelamp_status"]["rest_time"] == 58
+    assert changes["night_vision_mode"]["at"] == 10.0
+
+
+def test_state_changes_ignore_rest_time_countdown():
+    lit = _entry(_light_snapshot(lamp=1, rest=50))
+    later = _entry(_light_snapshot(lamp=1, rest=20))
+    assert twin.state_changes(lit, later, at=1) == ()
+
+
+def test_state_changes_need_two_known_values():
+    known = _entry(_light_snapshot(mode="inf_night_vision", lamp=0))
+    unreadable = _entry({"schema_version": 1, "groups": {"light": {
+        "night_vision_mode": {"state": "unknown", "reason": "empty_response"},
+        "whitelamp_status": {"state": "unknown", "reason": "empty_response"}}}})
+    assert twin.state_changes(known, unreadable, at=1) == ()
+    assert twin.state_changes(unreadable, known, at=1) == ()
+    assert twin.state_changes(None, known, at=1) == ()
+
+
+def test_state_changes_do_not_touch_history_transitions():
+    before = {**_entry(_light_snapshot(lamp=0)), "health": {"status": "ok"}}
+    after = {**_entry(_light_snapshot(lamp=1)), "health": {"status": "ok"}}
+    assert twin.transitions(before, after, at=1) == ()

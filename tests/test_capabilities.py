@@ -197,3 +197,21 @@ def test_sd_card_absent_only_when_every_slot_reports_offline():
                                             {"hd_info_2": {"detect_status": "abnormal"}}])) is False
     assert capabilities.sd_card_absent(_sd(empty, state="error")) is False
     assert capabilities.sd_card_absent({}) is False
+
+
+def test_night_vision_mode_is_probed_once_without_a_channel_id():
+    calls = []
+
+    class Client:
+        def __getattr__(self, name):
+            def call(*args, **kwargs):
+                calls.append((name, kwargs))
+                return {"enabled": "off"}
+            return call
+
+    snapshot = capabilities.collect_snapshot(Client())
+    assert ("light", "night_vision_mode", "getNightVisionModeConfig") in capabilities._SAFE_PROBES
+    assert snapshot["groups"]["light"]["night_vision_mode"]["state"] == "available"
+    assert [c for c in calls if c[0] == "getNightVisionModeConfig"] == [
+        ("getNightVisionModeConfig", {})]
+    assert len(calls) == len(capabilities._SAFE_PROBES)

@@ -153,6 +153,9 @@ class CameraPlan:
     night_vision_mode: str | None = None
     # Desired firmware auto-upgrade switch for the twin's drift check only; never applied.
     firmware_auto_upgrade: bool | None = None
+    # Night-vision mode the twin expects, for its drift check only; never applied. None
+    # = no expectation (explicit night_vision / software light_trigger in the config).
+    night_vision_expect: str | None = None
 
 
 SMART_NIGHT_VISION = "md_night_vision"
@@ -172,6 +175,24 @@ def plan_night_vision_mode(cfg: CameraConfig, clock: datetime | None = None) -> 
         return None
     if lt.window is None or scheduling.in_clock_window(lt.window, clock):
         return SMART_NIGHT_VISION
+    return IR_NIGHT_VISION
+
+
+def expected_night_vision_mode(cfg: CameraConfig, clock: datetime | None = None) -> str | None:
+    """Pure: the night-vision mode the twin should find, or None for "no expectation".
+
+    Firmware light_trigger: whatever the plan writes. No (enabled) light_trigger and no
+    ``night_vision:`` key: plain IR, white light only when something sets it. Any other
+    explicit setting is an exception the config owns, so nothing is expected of it.
+    """
+    planned = plan_night_vision_mode(cfg, clock)
+    if planned is not None:
+        return planned
+    lt = getattr(cfg, "light_trigger", None)
+    if lt is not None and lt.enabled:
+        return None
+    if getattr(cfg, "night_vision", None) is not None:
+        return None
     return IR_NIGHT_VISION
 
 
@@ -226,6 +247,7 @@ def plan_camera(cfg: CameraConfig, night: bool, rain_active: bool,
         whitelamp_intensity=cfg.whitelamp_intensity,
         night_vision_mode=plan_night_vision_mode(cfg, clock),
         firmware_auto_upgrade=cfg.firmware_auto_upgrade,
+        night_vision_expect=expected_night_vision_mode(cfg, clock),
     )
 
 
@@ -4846,6 +4868,7 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
             previous=state.twin_fleet.get(cfg.name),
         )
         entry["alerted_keys"] = sorted(alerted)
+        _record_light_states(state, cfg.name, state.twin_fleet.get(cfg.name), entry, now)
         warnings = capabilities.storage_warnings(snapshot_data)
         if warnings:
             # Storage health already reads degraded; this says why, in the state file and
@@ -4869,6 +4892,24 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
     if changed and state.twin_path:
         twin.save_state(state.twin_path, state.twin_fleet, logger=log)
     return state.twin_fleet
+
+
+def _record_light_states(state, name, previous, entry, now):
+    """Write lamp / night-vision transitions between two twin probes to the ledger.
+
+    Transitions only (see ``twin.state_changes``); never raises, a ledger problem must not
+    cost a probe.
+    """
+    events = getattr(state, "event_ledger", None)
+    if events is None or not previous:
+        return
+    try:
+        for change in twin.state_changes(previous, entry, at=now):
+            events.record_state_change(
+                camera=name, key=change["key"], at=change["at"], value=change["to"],
+                previous=change["from"], rest_time=change.get("rest_time"))
+    except Exception as exc:  # noqa: BLE001 - observability must not block probes
+        log.warning("light state ledger write failed for %s: %s", name, type(exc).__name__)
 
 
 # How long after a recall the lens may still be travelling back to the preset. Frames

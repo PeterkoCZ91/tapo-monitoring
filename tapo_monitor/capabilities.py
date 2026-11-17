@@ -58,6 +58,9 @@ _SAFE_PROBES = (
     ("track", "rotation", "getRotationStatus"),
     ("light", "whitelamp_status", "getWhitelampStatus"),
     ("light", "whitelamp_config", "getWhitelampConfig"),
+    # Which night-vision mode the camera is in (IR only, smart, full colour). Read-only and
+    # without chn_id: it only tells "may the lamp light" apart from "it lit on its own".
+    ("light", "night_vision_mode", "getNightVisionModeConfig"),
     ("video", "qualities", "getVideoQualities"),
     ("video", "capability", "getVideoCapability"),
     ("video", "ldc", "getLensDistortionCorrection"),

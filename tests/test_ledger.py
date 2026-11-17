@@ -488,3 +488,44 @@ def test_storage_usage_unreadable_files_are_unknown_not_zero(tmp_path, monkeypat
         name: {"status": "unreadable", "bytes": None, "files": None}
         for name in ("db", "wal")}
     assert ledger.storage_usage("bad\x00path")["db"]["status"] == "unreadable"
+
+
+def test_state_changes_are_stored_once_and_read_back(tmp_path):
+    events = ledger.EventLedger(tmp_path / "events.sqlite3")
+    first = events.record_state_change(camera="front", key="whitelamp_status", at=10,
+                                       value=1, previous=0, rest_time=58)
+    again = events.record_state_change(camera="front", key="whitelamp_status", at=10,
+                                       value=1, previous=0, rest_time=58)
+    events.record_state_change(camera="front", key="night_vision_mode", at=12,
+                               value="md_night_vision", previous="inf_night_vision")
+    assert first == again
+    rows = events.state_changes(camera="front", start=0, end=20)
+    assert [r["key"] for r in rows] == ["whitelamp_status", "night_vision_mode"]
+    assert rows[0]["metadata"] == {"rest_time": 58}
+    assert rows[0]["previous"] == 0 and rows[0]["value"] == 1
+    assert rows[1]["value"] == "md_night_vision"
+
+
+def test_state_changes_reject_unknown_keys_and_stay_out_of_observations(tmp_path):
+    events = ledger.EventLedger(tmp_path / "events.sqlite3")
+    with pytest.raises(ValueError):
+        events.record_state_change(camera="front", key="password", at=1, value=1)
+    events.record_state_change(camera="front", key="whitelamp_status", at=1, value=1)
+    assert events.observations(camera="front", start=0, end=5) == []
+
+
+def test_state_changes_follow_retention(tmp_path):
+    events = ledger.EventLedger(tmp_path / "events.sqlite3")
+    events.record_state_change(camera="front", key="whitelamp_status", at=1, value=1)
+    events.record_state_change(camera="front", key="whitelamp_status", at=50, value=0)
+    assert events.cleanup(10, now=60) >= 1
+    assert [r["at"] for r in events.state_changes(camera="front", start=0, end=100)] == [50.0]
+    events.record_state_change(camera="front", key="whitelamp_status", at=2, value=1)
+    assert events.cleanup_bounded(10, now=60) >= 1
+
+
+def test_sanitize_metadata_keeps_the_lamp_fields():
+    kept = ledger.sanitize_metadata({"night_vision_mode": "inf_night_vision",
+                                     "whitelamp_status": 0, "rest_time": 12, "other": 1})
+    assert kept == {"night_vision_mode": "inf_night_vision", "whitelamp_status": 0,
+                    "rest_time": 12}

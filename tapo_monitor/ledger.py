@@ -46,12 +46,18 @@ _SAFE_METADATA_KEYS = frozenset({
     "label",
     "model",
     "model_version",
+    "night_vision_mode",
     "reason",
+    "rest_time",
     "score",
     "threshold",
     "track_id",
+    "whitelamp_status",
     "zone",
 })
+# Camera state a twin probe saw change (lamp on/off, night-vision mode). Only these keys
+# are accepted: the table is for transitions, never for a sampled time series.
+STATE_KEYS = frozenset({"night_vision_mode", "whitelamp_status"})
 # Keyword tells plus value shapes. The shapes are defence in depth: callers already
 # keep addresses and session material out of the ledger, but a pytapo failure text can
 # carry the camera's address and its stok, so the sanitiser itself must catch them.
@@ -125,6 +131,19 @@ CREATE TABLE IF NOT EXISTS scene_events (
 );
 CREATE INDEX IF NOT EXISTS scene_events_time
     ON scene_events(group_name, event_at, id);
+CREATE TABLE IF NOT EXISTS state_changes (
+    id INTEGER PRIMARY KEY,
+    camera TEXT NOT NULL,
+    state_key TEXT NOT NULL,
+    event_at REAL NOT NULL,
+    observed_at REAL NOT NULL,
+    value_json TEXT NOT NULL,
+    previous_json TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    fingerprint TEXT NOT NULL UNIQUE
+);
+CREATE INDEX IF NOT EXISTS state_changes_camera_time
+    ON state_changes(camera, event_at, id);
 """
 
 
@@ -445,6 +464,74 @@ class EventLedger:
             ).fetchone()
         return int(row["id"])
 
+    def record_state_change(self, *, camera: str, key: str, at: float, value,
+                            previous=None, rest_time=None,
+                            observed_at: float | None = None) -> int:
+        """Persist one camera state transition idempotently (lamp status, night mode).
+
+        ``rest_time`` is the lamp's remaining seconds at the transition; it is context
+        for the transition and never a trigger of its own.
+        """
+        camera = _safe_identifier(camera, "camera")
+        if key not in STATE_KEYS:
+            raise ValueError("unsupported state key")
+        at = _finite_timestamp(at, "at")
+        observed_at = _finite_timestamp(
+            time.time() if observed_at is None else observed_at, "observed_at")
+        clean_value = _safe_metadata_value(value)
+        clean_previous = _safe_metadata_value(previous)
+        if clean_value is None:
+            raise ValueError("state value must be a safe scalar")
+        metadata = {"rest_time": rest_time} if rest_time is not None else {}
+        metadata_json = json.dumps(
+            sanitize_metadata(metadata), sort_keys=True, separators=(",", ":"))
+        identity = [camera, key, at, clean_value, clean_previous]
+        fingerprint = hashlib.sha256(json.dumps(
+            identity, ensure_ascii=True, separators=(",", ":")).encode()).hexdigest()
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                """INSERT INTO state_changes(
+                    camera, state_key, event_at, observed_at, value_json,
+                    previous_json, metadata_json, fingerprint
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(fingerprint) DO NOTHING""",
+                (camera, key, at, observed_at, json.dumps(clean_value),
+                 None if clean_previous is None else json.dumps(clean_previous),
+                 metadata_json, fingerprint),
+            )
+            row = connection.execute(
+                "SELECT id FROM state_changes WHERE fingerprint = ?", (fingerprint,)
+            ).fetchone()
+        return int(row["id"])
+
+    def state_changes(self, *, camera: str, start: float, end: float,
+                      key: str | None = None) -> list[dict]:
+        """Return a camera's recorded state transitions in time order."""
+        camera = _safe_identifier(camera, "camera")
+        start = _finite_timestamp(start, "start")
+        end = _finite_timestamp(end, "end")
+        if end < start:
+            raise ValueError("end must not precede start")
+        clauses = ["camera = ?", "event_at >= ?", "event_at <= ?"]
+        params: list = [camera, start, end]
+        if key is not None:
+            if key not in STATE_KEYS:
+                raise ValueError("unsupported state key")
+            clauses.append("state_key = ?")
+            params.append(key)
+        with closing(self._connect()) as connection, connection:
+            rows = connection.execute(
+                "SELECT camera, state_key, event_at, observed_at, value_json, "
+                "previous_json, metadata_json FROM state_changes WHERE "
+                + " AND ".join(clauses) + " ORDER BY event_at, id", params).fetchall()
+        return [{
+            "camera": r["camera"], "key": r["state_key"], "at": r["event_at"],
+            "observed_at": r["observed_at"], "value": json.loads(r["value_json"]),
+            "previous": (None if r["previous_json"] is None
+                         else json.loads(r["previous_json"])),
+            "metadata": json.loads(r["metadata_json"]),
+        } for r in rows]
+
     def scene_events(self, *, start: float, end: float, group: str | None = None) -> list[dict]:
         """Return durable scene summaries in event-time order."""
         start = _finite_timestamp(start, "start")
@@ -609,7 +696,11 @@ class EventLedger:
             scene_events = connection.execute(
                 "DELETE FROM scene_events WHERE event_at < ?", (cutoff,)
             )
-        return observations.rowcount + decisions.rowcount + scene_events.rowcount
+            states = connection.execute(
+                "DELETE FROM state_changes WHERE event_at < ?", (cutoff,)
+            )
+        return (observations.rowcount + decisions.rowcount + scene_events.rowcount
+                + states.rowcount)
 
     def cleanup(self, retention_seconds: float, *, now: float | None = None) -> int:
         """Apply an age-based retention policy and return the number removed."""
@@ -631,7 +722,7 @@ class EventLedger:
         cutoff = max(0.0, now - retention_seconds)
         deadline = time.monotonic() + max_seconds
         removed = 0
-        for table in ("observations", "decisions", "scene_events"):
+        for table in ("observations", "decisions", "scene_events", "state_changes"):
             while time.monotonic() < deadline:
                 connection = self._connect()
                 try:

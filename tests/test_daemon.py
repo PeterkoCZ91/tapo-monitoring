@@ -9001,3 +9001,56 @@ def test_sampler_grabs_without_a_control_client(monkeypatch):
                            snapshot_for=lambda c: (lambda cam, ev: "/tmp/f.jpg"),
                            time_str=lambda ev: "T")
     assert len(sent) == 1
+
+
+def test_plan_expects_ir_night_vision_unless_configured_otherwise():
+    from datetime import datetime
+    inside, outside = datetime(2026, 1, 1, 3, 4), datetime(2026, 1, 1, 23, 1)
+    # No light_trigger and no night_vision: plain IR is the intended mode.
+    assert daemon.plan_camera(_cam(), True, False, inside).night_vision_expect == "inf_night_vision"
+    # Firmware light_trigger: the planned mode follows its window.
+    firmware = _cam(light_trigger={"window": "00:30-04:30", "mode": "firmware"})
+    assert daemon.plan_camera(firmware, True, False, inside).night_vision_expect == "md_night_vision"
+    assert daemon.plan_camera(firmware, True, False, outside).night_vision_expect == "inf_night_vision"
+    # Explicit settings are exceptions: nothing is expected, so nothing can drift.
+    assert daemon.plan_camera(_cam(night_vision="auto"), True, False, inside).night_vision_expect is None
+    assert daemon.plan_camera(_cam(night_vision="ir"), True, False, inside).night_vision_expect is None
+    assert daemon.plan_camera(
+        _cam(light_trigger="00:30-04:30"), True, False, inside).night_vision_expect is None
+
+
+def _light_entry(mode, lamp, rest=0):
+    return {"snapshot": {"groups": {"light": {
+        "night_vision_mode": {"state": "available", "value": {
+            "image": {"switch": {"night_vision_mode": mode}}}},
+        "whitelamp_status": {"state": "available", "value": {
+            "status": lamp, "rest_time": rest}}}}}}
+
+
+def test_record_light_states_writes_transitions_to_the_ledger_and_survives_errors():
+    from types import SimpleNamespace
+
+    class Ledger:
+        def __init__(self):
+            self.rows = []
+
+        def record_state_change(self, **row):
+            self.rows.append(row)
+
+    ledger_ = Ledger()
+    state = SimpleNamespace(event_ledger=ledger_)
+    daemon._record_light_states(state, "cam", _light_entry("inf_night_vision", 0),
+                                _light_entry("inf_night_vision", 1, 60), 100.0)
+    assert [(r["camera"], r["key"], r["value"]) for r in ledger_.rows] == [
+        ("cam", "whitelamp_status", 1)]
+    assert ledger_.rows[0]["rest_time"] == 60
+    # No ledger, a first observation or a broken ledger never raise.
+    daemon._record_light_states(SimpleNamespace(event_ledger=None), "cam", None,
+                                _light_entry("a", 0), 1.0)
+
+    class Broken:
+        def record_state_change(self, **row):
+            raise OSError("disk")
+
+    daemon._record_light_states(SimpleNamespace(event_ledger=Broken()), "cam",
+                                _light_entry("a", 0), _light_entry("b", 1), 1.0)

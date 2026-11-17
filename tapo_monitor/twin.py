@@ -118,11 +118,89 @@ def evaluate_snapshot(camera_name, plan, snapshot):
         actual["firmware.auto_upgrade.enabled"] = _auto_upgrade_enabled(
             _probe_value(snapshot, "firmware", "auto_upgrade"))
         severities["firmware.auto_upgrade.enabled"] = "warning"
+    expected_mode = getattr(plan, "night_vision_expect", None)
+    if isinstance(expected_mode, str):
+        # Report only, never written back: a drifted mode is for a person to judge.
+        desired["light.night_vision.mode"] = expected_mode
+        actual["light.night_vision.mode"] = night_vision_mode(snapshot)
+        severities["light.night_vision.mode"] = "warning"
     _dual_lens_paths(snapshot, desired, actual, severities)
     report = drift.evaluate_drift(
         desired, actual, severities=severities, scope=str(camera_name)
     )
     return {"desired": desired, "actual": _json_actual(actual), "drift": report.to_dict()}
+
+
+_MODE_NAME = re.compile(r"[a-z][a-z0-9_]{0,39}")
+
+
+def night_vision_mode(snapshot):
+    """The night-vision mode string one snapshot read, or ``drift.UNKNOWN``. Pure.
+
+    ``getNightVisionModeConfig`` answers ``{"image": {"switch": {"night_vision_mode":
+    ...}}}``; a lens-level answer may be flat. Anything else (empty, keyed by channel, a
+    non-string) is unknown, never a guess.
+    """
+    value = _probe_value(snapshot, "light", "night_vision_mode")
+    if value is drift.UNSUPPORTED:
+        return value
+    if not isinstance(value, Mapping):
+        return drift.UNKNOWN
+    node = value
+    for key in ("image", "switch"):
+        inner = node.get(key)
+        if isinstance(inner, Mapping):
+            node = inner
+    mode = node.get("night_vision_mode")
+    if isinstance(mode, str) and _MODE_NAME.fullmatch(mode):
+        return mode
+    return drift.UNKNOWN
+
+
+def lamp_status(snapshot):
+    """``(lit, rest_time)`` from the snapshot's ``getWhitelampStatus``, ``(None, None)`` if unread."""
+    value = _probe_value(snapshot, "light", "whitelamp_status")
+    if not isinstance(value, Mapping):
+        return None, None
+    raw = value.get("status")
+    if isinstance(raw, bool):
+        lit = int(raw)
+    elif isinstance(raw, (int, str)) and str(raw) in ("0", "1"):
+        lit = int(raw)
+    else:
+        return None, None
+    rest = value.get("rest_time")
+    try:
+        rest = int(rest)
+    except (TypeError, ValueError):
+        rest = None
+    return lit, rest
+
+
+def state_changes(previous, current, *, at):
+    """Lamp status and night-vision mode transitions between two fleet entries. Pure.
+
+    Kept apart from :func:`transitions` so a flapping lamp cannot crowd health and drift out
+    of the bounded history. A change needs a known value on both sides; ``rest_time`` is the
+    remaining lamp seconds at the new observation and never triggers a change by itself.
+    """
+    if not previous or not current:
+        return ()
+    old, new = previous.get("snapshot") or {}, current.get("snapshot") or {}
+    changes = []
+    old_mode, new_mode = night_vision_mode(old), night_vision_mode(new)
+    if isinstance(old_mode, str) and isinstance(new_mode, str) and old_mode != new_mode:
+        changes.append({"at": float(at), "kind": "state", "key": "night_vision_mode",
+                        "from": old_mode, "to": new_mode})
+    old_lit, _ = lamp_status(old)
+    new_lit, rest = lamp_status(new)
+    if old_lit is not None and new_lit is not None and old_lit != new_lit:
+        item = {"at": float(at), "kind": "state", "key": "whitelamp_status",
+                "from": old_lit, "to": new_lit}
+        if rest is not None:
+            item["rest_time"] = rest
+        changes.append(item)
+    return tuple(changes)
 
 
 def _dual_lens_paths(snapshot, desired, actual, severities):
