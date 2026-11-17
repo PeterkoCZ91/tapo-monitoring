@@ -178,6 +178,28 @@ An earlier probe of the C260 reported face-gallery methods (`getFaceManagement`,
 HTTP traffic on the same firmware got an ordinary `-40210` for all of them, so we do not
 treat "connection aborted" as a sign that a method exists.
 
+### Auto-tracking keeps moving after it reads back off
+
+**A tracking OFF that reads back off does not mean the lens is still.** On a pan/tilt
+camera with native person tracking (pytapo 3.4.28), `setAutoTrackTarget(False)` followed
+by `getAutoTrackTarget()` returned `enabled: "off"` (both go to
+`target_track.target_track_info`), yet the lens kept moving for tens of seconds: up to
+about 64 s after the OFF, once past a configured pan limit. The moves looked like the
+firmware tracker: stepwise following in both directions, usually a few seconds after a
+camera person or motion event, and twice a return home about 30 s later, matching the
+tracker's `back_time`. ONVIF Stop calls that returned success did not hold it. It
+happened only when tracking had been switched on a few seconds before the OFF. *About ten
+episodes over two nights, one camera; none in daytime, when tracking was not re-enabled.*
+The read-back only checks the stored setting, not whether the tracker task is still
+running; which switch actually ends it is not yet known.
+
+What to do:
+
+- Verify OFF by position (ONVIF `GetStatus`, see above), not by reading the setting back.
+- Send an ONVIF PTZ Stop as well, and repeat it while the position still changes.
+- Do not toggle tracking ON and OFF within seconds; leave a gap after an ON before the
+  next OFF.
+
 ## 4. SD card
 
 ### Status — `getSdCardStatus` (pytapo `getSDCard()`)
