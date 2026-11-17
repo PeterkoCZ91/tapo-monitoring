@@ -207,11 +207,6 @@ ONVIF, ping, the SD download and the scene probe.
   to tapo-monitor. Not covered: MQTT and `hub_host` are separate settings.
   The CLI commands (`report`, `twin` probes) connect to the address saved in the health
   state file, so they follow the daemon's choice.
-- MAC resolution helper (`tapo_monitor/macresolve.py`, not wired into the daemon yet): `resolve_via_ssh(mac, ssh_host)`
-  runs a fixed `ssh -o BatchMode=yes ip neigh show` on a host inside the camera's network (ARP does not cross a
-  subnet route) and `candidates_from_mac(...)` collects the IPs. Trust: the helper host and its neighbour table are
-  trusted, and the SSH key must already be authorized (no prompts); the result only yields candidate addresses,
-  so the MAC identity check above still applies. `ssh_host` must match `[A-Za-z0-9._@-]+`; stale/failed entries are ignored.
 
 ### MAC rediscovery (optional)
 
@@ -242,6 +237,27 @@ monitor logs `mac rediscovery off` once and carries on. Not for Reolink or hub-o
   table is read again. Sweeps run at most every 10 minutes per camera, doubling after each
   miss up to an hour; a camera that answers again starts over. A camera behind a router
   (the route has a gateway) is only looked up in the table, since ARP does not cross it.
+- Helper host (opt-in `mac_helper:`, needs `mac:`): when the camera sits behind a subnet
+  route, its MAC never appears in this host's neighbour table. `mac_helper` names one
+  ssh destination (or a list of up to four, asked in order) on the camera's own LAN, for
+  example a small gateway host:
+
+  ```yaml
+      mac: "02:00:00:aa:bb:cc"
+      mac_helper: "gateway"   # or ["gw1", "gw2"]; ~/.ssh/config aliases or user@host
+  ```
+
+  When the local table has no entry, the monitor runs the fixed command
+  `ssh -o BatchMode=yes -o ConnectTimeout=5 <helper> ip neigh show` (8 s limit, on the
+  search's worker thread) and reads the MAC from its output; stale, failed and incomplete
+  entries are ignored. Helpers are asked on the sweep schedule (first search, then every
+  10 minutes doubling to an hour while the camera stays lost), before a local sweep; a hit
+  skips the sweep. Logs: `... seen at <ip> (helper host <h>)` or `... not seen by helper
+  host <h>` (info), `... helper host <h> did not answer` (warning; ssh output is never
+  logged), after which the search carries on as without a helper. The ssh key must already
+  be authorized for the service user (no prompts, no password). The helper's answer is only
+  a candidate: the login and the MAC check below decide. Destinations must match
+  `[A-Za-z0-9._@-]+` and not start with `-`. Unset, no ssh is ever run.
 - Switch: the address found becomes an extra `host` candidate and goes through the same
   path as [host failover](#host-failover-optional): one `camera.active_host` read by
   pytapo, RTSP/snapshots, ONVIF/`pan_limit`, the rotation stop guard and SD reads; the old
@@ -273,6 +289,7 @@ Independent of `mac:`, two checks stop a false "back online":
 | `caption_camera` | boolean (default `false`) | Opt-in: put the camera's `name` at the front of its alert captions (`👤 front · 23:14`), so alerts from several cameras in one chat can be told apart. Covers every alert photo (live, sampler, SD follow-up, hub clip, held frame, vehicle and lingering notices). Off leaves the caption exactly as before. |
 | `host` | LAN address/DNS name, or a list of them | Required; keep real values private. A list turns on [host failover](#host-failover-optional). |
 | `mac` | MAC address, unset | Opt-in [MAC rediscovery](#mac-rediscovery-optional): find the camera on the LAN after DHCP moved it. |
+| `mac_helper` | ssh destination or a list of up to 4, unset | Opt-in, needs `mac`: read the neighbour table of a host on the camera's LAN when ARP does not reach it across a subnet route ([MAC rediscovery](#mac-rediscovery-optional)). |
 | `role` | `tracking`, `static` | Tracking cameras follow policy; static cameras stay parked at `day_preset` (when set), re-asserted every control tick. |
 | `schedule` | `astral`, `always_night`, `always_day` | Controls day/night plan selection. |
 | `night_only` | boolean | Drains events but suppresses all Telegram traffic during daytime. |

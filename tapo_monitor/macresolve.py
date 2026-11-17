@@ -1,8 +1,8 @@
 """Resolve a camera MAC to an IP through a host on the camera's own network.
 
 ARP is not visible across a subnet route, so a helper host on the camera's LAN
-is asked for its neighbour table over ssh. Pure parser plus a small runner;
-nothing here is wired into the daemon.
+is asked for its neighbour table over ssh. Pure parser plus a small runner; the
+daemon uses it through ``tapo_monitor.rediscover`` for a camera with ``mac_helper:``.
 """
 
 from __future__ import annotations
@@ -59,20 +59,20 @@ def parse_neighbors(text: str) -> dict[str, str]:
     return out
 
 
-def resolve_via_ssh(
-    mac: str,
+def valid_ssh_host(ssh_host: object) -> bool:
+    """True for an ssh destination safe to put on the command line (no options, no shell)."""
+    return (isinstance(ssh_host, str) and bool(_SSH_HOST_RE.match(ssh_host))
+            and not ssh_host.startswith("-"))
+
+
+def neighbours_via_ssh(
     ssh_host: str,
     run: Callable[..., object] = subprocess.run,
     timeout: float = 8,
-) -> str | None:
-    """Ask `ssh_host` for its neighbour table and return the IP for `mac`."""
-    if not isinstance(ssh_host, str) or not _SSH_HOST_RE.match(ssh_host):
+) -> dict[str, str] | None:
+    """``{mac: ip}`` from `ssh_host`'s neighbour table, or None when it did not answer."""
+    if not valid_ssh_host(ssh_host):
         raise ValueError("invalid ssh_host")
-    if ssh_host.startswith("-"):
-        raise ValueError("invalid ssh_host")
-    want = normalize_mac(mac)
-    if want is None:
-        return None
     argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", ssh_host, "ip", "neigh", "show"]
     try:
         res = run(argv, capture_output=True, text=True, timeout=timeout, check=False)
@@ -80,7 +80,23 @@ def resolve_via_ssh(
         return None
     if getattr(res, "returncode", 1) != 0:
         return None
-    return parse_neighbors(getattr(res, "stdout", "") or "").get(want)
+    return parse_neighbors(getattr(res, "stdout", "") or "")
+
+
+def resolve_via_ssh(
+    mac: str,
+    ssh_host: str,
+    run: Callable[..., object] = subprocess.run,
+    timeout: float = 8,
+) -> str | None:
+    """Ask `ssh_host` for its neighbour table and return the IP for `mac`."""
+    if not valid_ssh_host(ssh_host):
+        raise ValueError("invalid ssh_host")
+    want = normalize_mac(mac)
+    if want is None:
+        return None
+    table = neighbours_via_ssh(ssh_host, run=run, timeout=timeout)
+    return None if table is None else table.get(want)
 
 
 def candidates_from_mac(

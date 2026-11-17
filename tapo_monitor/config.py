@@ -20,7 +20,7 @@ from dataclasses import dataclass, field, fields, is_dataclass
 
 from . import detection as event_detection
 from . import reliability, scheduling
-from .macresolve import normalize_mac
+from .macresolve import normalize_mac, valid_ssh_host
 
 log = logging.getLogger(__name__)
 
@@ -273,6 +273,9 @@ class CameraConfig:
     mac: str | None = None
     discovered_host: str | None = field(default=None, repr=False, compare=False,
                                         metadata={"runtime_only": True})
+    # Opt-in, needs ``mac``: ssh destinations on the camera's own LAN whose neighbour
+    # table is read when the local one has no entry (ARP does not cross a subnet route).
+    mac_helper: tuple[str, ...] = ()
     role: str = "tracking"
     schedule: str = "astral"
     # Names of env vars holding the camera credentials (never the secrets themselves).
@@ -1359,6 +1362,24 @@ def _mac(value, where):
     return mac
 
 
+MAX_MAC_HELPERS = 4
+
+
+def _mac_helper(value, mac, where):
+    """The optional ``mac_helper`` (an ssh destination or a list) as a tuple."""
+    if value is None:
+        return ()
+    items = [value] if isinstance(value, str) else value
+    if (not isinstance(items, list) or not items or len(items) > MAX_MAC_HELPERS
+            or not all(valid_ssh_host(h) for h in items) or len(set(items)) != len(items)):
+        raise ConfigError(f"{where}: 'mac_helper' must be an ssh host (letters, digits, "
+                          f"'.', '_', '@', '-'; not starting with '-') or a list of up to "
+                          f"{MAX_MAC_HELPERS} different ones")
+    if not mac:
+        raise ConfigError(f"{where}: 'mac_helper' needs 'mac' (the MAC it looks up)")
+    return tuple(items)
+
+
 def _camera(data, index):
     if not isinstance(data, dict):
         raise ConfigError(f"cameras[{index}]: must be a mapping")
@@ -1367,6 +1388,7 @@ def _camera(data, index):
     where = f"camera {name!r}"
     host, hosts = _hosts(_require(data, "host", where), where)
     mac = _mac(data.get("mac"), where)
+    mac_helper = _mac_helper(data.get("mac_helper"), mac, where)
     role = _check_enum(data.get("role", "tracking"), ROLES, "role", where)
     schedule = _check_enum(data.get("schedule", "astral"), SCHEDULES, "schedule", where)
     coord = data.get("coordinator") or {}
@@ -1656,6 +1678,7 @@ def _camera(data, index):
         host=host,
         hosts=hosts,
         mac=mac,
+        mac_helper=mac_helper,
         role=role,
         schedule=schedule,
         user_env=data.get("user_env"),

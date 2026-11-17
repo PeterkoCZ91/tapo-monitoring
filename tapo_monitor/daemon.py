@@ -6223,7 +6223,10 @@ def _connect_camera(cam_clients, state=None, now=None):
                 state.rediscovery.reset(cfg.name)
             elif (state.network_fails.get(cfg.name, 0) >= rediscover.SEARCH_AFTER_FAILS
                   and state.rediscovery.available()):
-                state.rediscovery.request(cfg.name, cfg.mac, camera.active_host(cfg), at)
+                helpers = getattr(cfg, "mac_helper", ())
+                extra = {"helpers": helpers} if helpers else {}
+                state.rediscovery.request(cfg.name, cfg.mac, camera.active_host(cfg), at,
+                                          **extra)
         return result
 
     def attempt(cfg: CameraConfig, moved_from):

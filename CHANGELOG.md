@@ -26,6 +26,12 @@ All notable changes to this project are documented here.
   after the recall either. Hold grace, linkage and privacy refusals are unchanged;
   `evidence_budget` together with `recall_evidence: false` is rejected, and stop mode
   ignores the key. With the default behaviour is unchanged.
+- `mac_helper` (per camera, needs `mac:`, unset by default) lets MAC rediscovery find a
+  camera behind a subnet route, where this host's neighbour table never sees it: the
+  neighbour table of one or more ssh hosts on the camera's LAN is read
+  (`ssh -o BatchMode=yes ... ip neigh show`) on the sweep schedule, before a local sweep.
+  A helper that does not answer logs one warning and the search goes on as before; the
+  login and MAC check still decide the switch. Unset, nothing changes and no ssh is run.
 - `pan_limit.stop_rearm_quiet_s` (stop mode, off by default) keeps native tracking OFF
   after the stop guard rearms until it has stayed armed with no trip for that many
   seconds (0..3600); any trip restarts the period. On a camera with frequent pose-read

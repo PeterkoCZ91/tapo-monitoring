@@ -7,6 +7,10 @@ camera's on-link subnet (at most a /24) is swept with single, slow pings at boun
 concurrency to fill the table, which is then read again. Sweeps run at most every
 ``SWEEP_EVERY`` seconds per camera, doubling after each miss up to ``SWEEP_MAX``.
 
+A camera behind a subnet route never shows up in this host's neighbour table. With the
+opt-in ``mac_helper:`` the neighbour table of a host on the camera's own LAN is read over
+ssh (``tapo_monitor.macresolve``) on the same schedule as a sweep, before it.
+
 Everything here runs on a worker thread (one search in flight per camera); the daemon only
 picks up the result on its next control pass and switches the camera through the existing
 host machinery after the login on the new address proved it is the same device.
@@ -30,7 +34,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from .backoff import capped_exp
-from .macresolve import normalize_mac
+from .macresolve import neighbours_via_ssh, normalize_mac
 from .netdiag import _json_list, _run
 
 log = logging.getLogger(__name__)
@@ -240,10 +244,11 @@ class Rediscovery:
         with self._lock:
             return self._found.pop(name, None)
 
-    def request(self, name, mac, ip, now):
+    def request(self, name, mac, ip, now, helpers=()):
         """Start a search for ``mac`` (camera ``name`` last at ``ip``) if one is due.
 
-        Returns True when a search was started. Never blocks on the network.
+        ``helpers`` are ssh hosts asked (in order) when the local neighbour table has no
+        entry. Returns True when a search was started. Never blocks on the network.
         """
         if not self.available():
             return False
@@ -264,7 +269,7 @@ class Rediscovery:
 
         def job():
             try:
-                self._search(name, mac, ip, exclude, do_sweep)
+                self._search(name, mac, ip, exclude, do_sweep, tuple(helpers))
             except Exception:  # noqa: BLE001 - a search must never become a fault
                 log.debug("rediscover: search failed for %s", name, exc_info=True)
             finally:
@@ -280,11 +285,31 @@ class Rediscovery:
             return False
         return True
 
-    def _search(self, name, mac, ip, exclude, do_sweep):
+    def _ask_helpers(self, name, mac, helpers, exclude):
+        """The address a helper host's neighbour table holds for ``mac``, or None."""
+        for host in helpers:
+            table = neighbours_via_ssh(host, run=self._run)
+            if table is None:
+                log.warning("mac rediscovery %s: helper host %s did not answer", name, host)
+                continue
+            found = table.get(mac)
+            if found is not None and found not in exclude:
+                log.info("mac rediscovery %s: mac %s seen at %s (helper host %s)",
+                         name, mac, found, host)
+                return found
+            log.info("mac rediscovery %s: mac %s not seen by helper host %s", name, mac, host)
+        return None
+
+    def _search(self, name, mac, ip, exclude, do_sweep, helpers=()):
         own = set(local_addresses(self._run) or ())
         exclude = set(exclude) | own
         found = find_mac(mac, neighbours(self._run), exclude)
         swept = None
+        asked = found is None and do_sweep and bool(helpers)
+        by_helper = False
+        if asked:
+            found = self._ask_helpers(name, mac, helpers, exclude)
+            by_helper = found is not None
         if found is None and do_sweep:
             targets = sweep_targets(ip, self._run, own=own)
             if targets is None:
@@ -300,9 +325,11 @@ class Rediscovery:
             if found is not None:
                 self._found[name] = found
                 self._misses.pop(name, None)
-            elif swept is not None:
+            elif swept is not None or asked:
                 self._misses[name] = self._misses.get(name, 0) + 1
-        if found is not None and swept is None:
+        if by_helper:
+            pass                     # _ask_helpers logged where it was seen
+        elif found is not None and swept is None:
             log.info("mac rediscovery %s: mac %s seen at %s (neighbour table, no sweep)",
                      name, mac, found)
         elif found is not None:

@@ -53,7 +53,7 @@ The latest release is **0.14.0** (2026-11-15). Details per version are in the
 | Shadow ledger, labelling, `label-stats`, `replay` and the detector comparison tools | Released |
 | Watch zones, loitering and vehicle alerts | Released opt-in (0.9.0); MQTT Vehicle sensor 0.14.0 |
 | Home Assistant over MQTT discovery | Released (0.8.0) |
-| Network history, network diagnosis lines, camera address failover and MAC rediscovery | Released (0.13.0 for diagnosis and MAC rediscovery) |
+| Network history, network diagnosis lines, camera address failover and MAC rediscovery | Released (0.13.0 for diagnosis and MAC rediscovery); helper-host MAC lookup across a subnet route (`mac_helper`) unreleased opt-in |
 | Virtual PTZ endstops (stop guard) | Deployed candidate, **not accepted** (see theme C) |
 | Problems-only daily digest | Released opt-in (0.11.0); soak open |
 
@@ -166,9 +166,6 @@ Devices and network:
 - [ ] Dual-lens camera (C545D): grow the event sample (night, pets, vehicles) and re-check
   the 180 s hold; compare `lens_pick_stream` photos with wide-lens ones and decide from
   per-lens scores whether the pan/tilt lens goes first or gets a lower threshold (was 8.6).
-- [ ] Wire in the helper-host MAC lookup (`macresolve`, not used by the daemon yet) for
-  sites where ARP is invisible across a subnet route (was 10.13). Network history and
-  diagnosis lines (was 10.11) are complete.
 
 ### D. Maintenance
 
