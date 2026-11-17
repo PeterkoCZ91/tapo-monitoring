@@ -409,7 +409,7 @@ second machine: a Raspberry Pi, a NAS or any Linux box that can run Python or co
 If you use the Mosquitto broker app, point `mqtt.host` at the Home Assistant machine and
 give the monitor its own broker login. Container, Supervised and Core installs can run it
 on the same host as Home Assistant. An app is planned:
-[roadmap Phase 11](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/roadmap.md#phase-11--a-bridge-to-home-assistant-os).
+[roadmap, theme B](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/roadmap.md#b-reach-home-assistant-os-and-docs).
 
 ## Safety and privacy
 
@@ -444,7 +444,7 @@ understand the session and sequential-request limitations.
 | [Troubleshooting](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/troubleshooting.md) | You hit authentication, RTSP, SD or firmware-specific problems. |
 | [`events_1` bitmask](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/events1-bitmask.md) | Your firmware returns incomplete event types. |
 | [Local API reference](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/tapo-local-api.md) | You call the camera's local API yourself: conventions, error codes, SD card, events, calls to avoid. |
-| [Roadmap](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/roadmap.md) | You want current gaps and planned product phases. |
+| [Roadmap](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/roadmap.md) | You want the open work by theme; the [phase record](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/docs/roadmap-history.md) keeps the history. |
 
 ## Development
 

@@ -58,7 +58,7 @@ camera names, addresses, credentials, coordinates and observations do not belong
 13. [Alert video clips](alert-clips.md) — a short video of each alert as a reply to its
     photo, from the camera card or from an HTTP recorder; options, log lines and
     troubleshooting.
-14. [Roadmap](roadmap.md) — remaining product phases and research tracks.
+14. [Roadmap](roadmap.md) — open work by theme, parked items and research tracks; the [phase record](roadmap-history.md) keeps the history.
 15. [Releasing](releasing.md) — how a GitHub release reaches PyPI, and the one-time
     Trusted Publishing setup.
 16. [Upgrading](upgrading.md) — changed defaults, optional features and
