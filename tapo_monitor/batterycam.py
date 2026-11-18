@@ -139,6 +139,33 @@ def download_recording(client, start, end, out_path):  # pragma: no cover - I/O
     return out_path if ok else None
 
 
+def download_snapshot(client, start, out_path):  # pragma: no cover - I/O
+    """The camera's own first-frame JPEG of the event at ``start`` (camera seconds), or None.
+
+    One tiny media-port request (about 0.1 s, 640x360); ``start`` must equal the event's
+    start as the camera lists it. Never raises.
+    """
+    import sys
+
+    from pytapo.media_stream.snapshot import getRecordingSnapshot
+
+    from . import sdclip
+
+    try:
+        client.getUserID()  # warm before the loop starts, see sdclip._download_segment
+        data = sdclip._run_in_fresh_loop(
+            lambda: getRecordingSnapshot(client, int(start), timeout=10), timeout=20)
+        if not data:
+            return None
+        with open(out_path, "wb") as fh:
+            fh.write(data)
+        return out_path
+    except Exception as exc:  # noqa: BLE001 - the caller treats a miss as "no frame"
+        print(f"battery snapshot failed: {type(exc).__name__}", file=sys.stderr)
+        sdclip._safe_unlink(out_path)
+        return None
+
+
 def extract_frames(clip, out_dir, duration, rotate=0):  # pragma: no cover - ffmpeg
     """Up to six event-spanning JPEGs from ``clip`` (see snapshot.frames_from_clip)."""
     from . import snapshot
@@ -165,7 +192,7 @@ def _unlink(path):
 
 def collect(cfg, client_factory, cursor, *, now=time.time, sleep=time.sleep,
             download=download_recording, extract=None, job_dir=sdworker.job_dir,
-            poll=POLL_SECONDS):
+            poll=POLL_SECONDS, snapshot=download_snapshot):
     """One wake: events and clips since ``cursor`` -> ``(jobs, new_cursor)``.
 
     ``cursor`` is the start of the last event handled; None (first run) returns
@@ -175,6 +202,8 @@ def collect(cfg, client_factory, cursor, *, now=time.time, sleep=time.sleep,
     Events still running when ``battery_wake.event_wait`` runs out, and every later
     one, are left for the next wake: the cursor stops before them. No exception escapes.
     ``extract(clip, dir, duration) -> [jpg]`` defaults to ffmpeg via snapshot.
+    ``snapshot(client, start, out_path) -> path | None`` is the fallback single frame
+    when the clip yields none.
     """
     if cursor is None:
         return [], now()
@@ -220,7 +249,8 @@ def collect(cfg, client_factory, cursor, *, now=time.time, sleep=time.sleep,
                                 cfg.name, type(exc).__name__)
                     recordings[date] = []
             rec = match_recording(start - tc, recordings[date])
-            jobs.append(_job(cfg, client, event, rec, download, extract, job_dir))
+            jobs.append(_job(cfg, client, event, rec, download, extract, job_dir,
+                              snapshot, tc))
             cursor = max(cursor, start)
     except Exception as exc:  # noqa: BLE001 - keep what is done, never raise
         log.warning("battery camera %s: collect stopped (%s: %s)",
@@ -240,24 +270,37 @@ def _ended(event, t) -> bool:
     return end is not None and end <= t
 
 
-def _job(cfg, client, event, rec, download, extract, job_dir) -> Job:
-    if rec is None:
-        return Job(cfg.name, event, [], None)
+def _job(cfg, client, event, rec, download, extract, job_dir, snapshot=None, tc=0) -> Job:
     directory = job_dir()
     clip = None
     frames: list[str] = []
-    try:
-        path = os.path.join(directory, f"battery_{rec['start_time']}.mp4")
-        clip = download(client, rec["start_time"], rec["end_time"], path)
-        if clip:
-            frames = spread(list(extract(clip, directory, rec["end_time"] - rec["start_time"])
-                                 or []), cfg.battery_wake.frames)
-    except Exception as exc:  # noqa: BLE001 - the event is still worth an alert
-        log.warning("battery camera %s: clip step failed (%s)", cfg.name, type(exc).__name__)
+    if rec is not None:
+        try:
+            path = os.path.join(directory, f"battery_{rec['start_time']}.mp4")
+            clip = download(client, rec["start_time"], rec["end_time"], path)
+            if clip:
+                frames = spread(list(extract(clip, directory,
+                                             rec["end_time"] - rec["start_time"]) or []),
+                                cfg.battery_wake.frames)
+        except Exception as exc:  # noqa: BLE001 - the event is still worth an alert
+            log.warning("battery camera %s: clip step failed (%s)", cfg.name, type(exc).__name__)
+    if not frames and snapshot is not None:
+        start = rec["start_time"] if rec is not None else int(float(event["start_time"]) - tc)
+        try:
+            shot = snapshot(client, start, os.path.join(directory, f"battery_{start}_snap.jpg"))
+            if shot:
+                frames = [shot]
+        except Exception as exc:  # noqa: BLE001 - no frame is today's behaviour
+            log.warning("battery camera %s: snapshot failed (%s)", cfg.name, type(exc).__name__)
     kept = set(frames)
     for name in os.listdir(directory):
         full = os.path.join(directory, name)
         if full != clip and full not in kept and full.endswith(".jpg"):
             _unlink(full)
+    if rec is None and not frames:
+        try:
+            os.rmdir(directory)
+        except OSError:
+            pass
+        return Job(cfg.name, event, [], None)
     return Job(cfg.name, event, frames, clip, directory)
-

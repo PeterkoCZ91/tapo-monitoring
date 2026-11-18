@@ -49,7 +49,8 @@ def _rec(start, end):
     return [{"search_video_results_0": {"startTime": start, "endTime": end, "vedio_type": 2}}]
 
 
-def _run(cfg, client, clock, cursor, tmp_path, frames=("a.jpg",), downloaded=True):
+def _run(cfg, client, clock, cursor, tmp_path, frames=("a.jpg",), downloaded=True,
+         snapshot=None):
     got = {}
 
     def download(c, s, e, out):
@@ -71,7 +72,8 @@ def _run(cfg, client, clock, cursor, tmp_path, frames=("a.jpg",), downloaded=Tru
         return out
 
     jobs, cur = bc.collect(cfg, lambda: client, cursor, now=clock.now, sleep=clock.sleep,
-                           download=download, extract=extract, job_dir=lambda: str(tmp_path))
+                           download=download, extract=extract, job_dir=lambda: str(tmp_path),
+                           snapshot=snapshot or (lambda c, s, o: None))
     return jobs, cur, got
 
 
@@ -214,3 +216,62 @@ def test_spread():
     assert bc.spread(list("abc"), 6) == list("abc")
     assert bc.spread(list("abcdef"), 1) == ["d"]
     assert len(bc.spread(list("abcdef"), 3)) == 3
+
+
+def _snap_ok(calls):
+    def snap(c, start, out):
+        calls.append(start)
+        with open(out, "wb") as f:
+            f.write(b"s")
+        return out
+    return snap
+
+
+def _one_event_client(clock, tc=0, recs=True):
+    return FakeClient(clock, [{"start_time": T0 + 10, "end_time": T0 + 20}],
+                      _rec(T0 + 10 - tc, T0 + 20 - tc) if recs else [], tc=tc)
+
+
+def test_snapshot_used_when_download_fails(tmp_path):
+    clock = Clock(T0 + 40)
+    calls = []
+    jobs, _, _ = _run(_cfg(), _one_event_client(clock), clock, T0, tmp_path,
+                      downloaded=False, snapshot=_snap_ok(calls))
+    assert len(jobs[0].frames) == 1 and jobs[0].frames[0].endswith("_snap.jpg")
+    assert os.path.exists(jobs[0].frames[0]) and jobs[0].clip is None
+    assert calls == [T0 + 10]
+
+
+def test_snapshot_used_when_extract_returns_nothing(tmp_path):
+    clock = Clock(T0 + 40)
+    calls = []
+    jobs, _, _ = _run(_cfg(), _one_event_client(clock), clock, T0, tmp_path,
+                      frames=(), snapshot=_snap_ok(calls))
+    assert len(jobs[0].frames) == 1 and len(calls) == 1
+
+
+def test_snapshot_not_called_when_clip_frames_exist(tmp_path):
+    clock = Clock(T0 + 40)
+    calls = []
+    jobs, _, _ = _run(_cfg(), _one_event_client(clock), clock, T0, tmp_path,
+                      snapshot=_snap_ok(calls))
+    assert calls == [] and len(jobs[0].frames) == 1 and jobs[0].clip
+
+
+def test_snapshot_failure_leaves_no_frames(tmp_path):
+    clock = Clock(T0 + 40)
+
+    def boom(c, s, o):
+        raise RuntimeError("x")
+
+    jobs, _, _ = _run(_cfg(), _one_event_client(clock), clock, T0, tmp_path,
+                      downloaded=False, snapshot=boom)
+    assert jobs[0].frames == [] and jobs[0].clip is None
+
+
+def test_snapshot_without_recording_uses_camera_time(tmp_path):
+    clock = Clock(T0 + 40)
+    calls = []
+    client = _one_event_client(clock, tc=7, recs=False)
+    jobs, _, _ = _run(_cfg(), client, clock, T0, tmp_path, snapshot=_snap_ok(calls))
+    assert calls == [T0 + 10 - 7] and len(jobs[0].frames) == 1
