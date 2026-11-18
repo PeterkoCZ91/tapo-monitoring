@@ -563,6 +563,26 @@ Notes and constraints:
   daemon logs a warning once and never polls that camera for clips, rather than alerting on
   every recorded segment.
 
+### Sleeping battery cameras with no hub (`batterywake`)
+
+```yaml
+detection:
+  sources: [batterywake]    # cannot be combined with other sources
+
+battery_wake:               # optional; every key has the default shown
+  ping_interval: 1.0        # seconds between pings, above 0
+  event_wait: 75            # seconds to wait after a wake for events to end, at least 20
+  frames: 6                 # frames cut from each clip
+  send_clip: true           # send the clip as a reply to the photo
+```
+
+For a battery camera that must never be woken by polling, such as the D205 doorbell. The
+monitor pings the camera and logs in once when it wakes by itself. A ring is always sent;
+a person goes through the scorer; vehicles and motion-only events are dropped.
+`clip_video`, `sd_snapshot` and `mac` are not allowed with it, and `battery_wake` is only
+valid with this source. Details and limits:
+[battery-doorbell-without-a-hub](battery-doorbell-without-a-hub.md).
+
 ### Tracking and detection policy
 
 ```yaml

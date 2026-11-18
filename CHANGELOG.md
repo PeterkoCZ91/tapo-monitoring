@@ -5,6 +5,17 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Opt-in detection source `batterywake` for a sleeping battery camera such as the Tapo
+  D205 doorbell, which must not be polled because every login wakes it. The camera is
+  only pinged; when it wakes by itself (motion, a person, a press) the monitor logs in
+  once, reads the new events, downloads their SD clips and cuts frames from them. A press
+  is always sent; a person is judged by the scorer; vehicles and plain motion are dropped.
+  The clip follows the photo as a reply, and the event's own snapshot stands in when the
+  clip cannot be downloaded. Options under `battery_wake:` (`ping_interval`, `event_wait`,
+  `frames`, `send_clip`); the source cannot be combined with other sources, and the
+  per-event cursor survives a restart. Audit and sent-log rows use the path
+  `batterywake`, which `tools/soak_report` lists. See
+  [docs/battery-doorbell-without-a-hub.md](docs/battery-doorbell-without-a-hub.md).
 - A lit white lamp with no cause is logged once per episode (`lamp without cause:` with
   camera, night-vision mode, status, remaining lamp time, reason and whether a detection
   was in the window) and its start is stored in the event ledger. It counts when the camera

@@ -39,11 +39,12 @@ INDEX_NAME = "index.jsonl"
 # way; the sends the audit tells apart only by ``reason`` get a name of their own here,
 # because each has its own latency: ``hubpoll_retry`` (audit ``hubpoll`` / ``retry``),
 # ``hold_rescue`` (``sampler`` / ``hold_rescue_recall``) and ``hold_expiry``
-# (``sampler`` / ``hold_expiry_send``). ``sd`` covers the SD clip and the recording
+# (``sampler`` / ``hold_expiry_send``); ``batterywake`` is the opt-in battery-camera
+# source (see tapo_monitor.batteryrunner). ``sd`` covers the SD clip and the recording
 # follow-up alike, as the audit does. ``outbox`` is a late delivery after an outage
 # (see tapo_monitor.outbox); its latency is the outage, not a pipeline's.
 SEND_PATHS = ("live", "sampler", "sd", "hubpoll", "hubpoll_retry", "hold_rescue",
-              "hold_expiry", "outbox")
+              "hold_expiry", "outbox", "batterywake")
 
 # Review log: the frames corroboration *suppressed* (held, never sent). The sent log only
 # keeps what went out, so it can't show whether a hold correctly dropped an animal/empty

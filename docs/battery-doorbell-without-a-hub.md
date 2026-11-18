@@ -139,3 +139,68 @@ What these measurements suggest for a client, not yet implemented:
 
 Still open: how much battery each awake session costs, and whether `alarm_event_num` can
 replace reading the event list on every wake.
+
+## Using it with tapo-monitor
+
+The `batterywake` detection source puts the steps above into the monitor. It is opt-in
+and has no effect on other cameras.
+
+```yaml
+cameras:
+  - name: front-door
+    host: 192.0.2.50
+    user_env: DOORBELL_USER           # Tapo account e-mail (env var name, not the value)
+    password_env: DOORBELL_PASSWORD   # Tapo account password
+    detection:
+      sources: [batterywake]
+    battery_wake:
+      ping_interval: 1.0   # seconds between pings (number above 0)
+      event_wait: 75       # seconds to wait after a wake for the event to end (min 20)
+      frames: 6            # frames cut from the clip for scoring
+      send_clip: true      # send the clip as a reply to the photo
+```
+
+All four `battery_wake` options are shown with their defaults; leave the block out to use
+them. `battery_wake` is rejected on a camera that does not use the source.
+
+How it behaves:
+
+- The monitor only pings the camera. It never logs in while the camera sleeps, so it
+  does not wake it.
+- When the camera becomes reachable after being unreachable, the monitor logs in once,
+  reads the events since the last one it handled, downloads their SD clips and cuts
+  `frames` frames from each. That one session is the only login per wake.
+- If an event is still running, the monitor keeps asking until all listed events have
+  ended or `event_wait` runs out; events still running then are handled on the next
+  wake.
+- A ring is always sent. It bypasses the scorer threshold, the alert cooldown and
+  `night_only` / quiet hours. The scorer only picks the best frame and puts its score on
+  the caption; without any frame the ring goes out as text. The caption says whether the
+  ring was answered or missed.
+- Other events are scored like a hub clip: a person above the threshold is sent,
+  vehicles and motion-only events are dropped, as are events outside the camera's alert
+  window.
+- With `send_clip: true` the clip follows the photo as a reply.
+- When the clip cannot be fetched or yields no frame, the event's own snapshot is used
+  instead. If no frame can be had at all, a ring is still sent as text and anything else
+  is skipped.
+- The cursor (the start of the last handled event) is saved with the runtime state, so a
+  restart does not repeat events. With no cursor yet it is set to now and nothing older is
+  replayed.
+- Audit and sent-log rows use the delivery path `batterywake`, and `tools/soak_report`
+  lists it next to the other paths.
+
+Not available with this source: `clip_video`, `sd_snapshot` and `mac` are rejected, and
+`batterywake` cannot be combined with any other detection source.
+
+Limits:
+
+- Wake detection needs the host running the monitor to reach the camera by ping. A camera
+  behind a subnet route or a firewall that drops ICMP will never look awake.
+- Anything else that wakes the camera (opening the app, another login) is noticed as a
+  wake too and triggers a login; keep other clients off it.
+- A long session keeps the camera awake and warms it up. A large `event_wait` or slow
+  clip downloads lengthen the session.
+- A camera with no saved cursor (first run, or runtime state lost) starts from now: events
+  that happened before are not replayed. After a normal restart the saved cursor is used,
+  so events that ended while the monitor was down are collected on the next wake.

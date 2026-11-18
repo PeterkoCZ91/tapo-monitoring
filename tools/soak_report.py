@@ -33,7 +33,7 @@ BASELINE_VERSION = 1
 # expired hold) are told apart by `reason` and get the sent log's name for them
 # (tapo_monitor.sentlog.SEND_PATHS), so their wait does not move the plain path's median.
 FIRST_ALERT_PATH_ORDER = ("live", "sampler", "sd", "hubpoll", "hubpoll_retry",
-                          "hold_rescue", "hold_expiry")
+                          "hold_rescue", "hold_expiry", "batterywake")
 DELIVERY_SUBPATHS = {("hubpoll", "retry"): "hubpoll_retry",
                      ("sampler", "hold_rescue_recall"): "hold_rescue",
                      ("sampler", "hold_expiry_send"): "hold_expiry"}

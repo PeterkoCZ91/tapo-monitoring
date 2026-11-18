@@ -135,6 +135,7 @@ def test_the_same_start_on_two_cameras_is_two_incidents():
     ("sampler", None, "sampler"),
     ("hubpoll", None, "hubpoll"),
     ("sd", "scorer_unavailable", "sd"),
+    ("batterywake", None, "batterywake"),
 ])
 def test_sends_that_wait_by_design_get_a_path_of_their_own(path, reason, expected):
     """Named as in the sent log (sentlog.SEND_PATHS): a hub retry or a hold that expired
@@ -391,3 +392,9 @@ def test_stopguard_missing_timing_is_unknown_not_zero():
     assert rec["stopguard_peak_after_off"] == 0
     assert rec["stopguard_peak_timing_unknown"] == 1
     assert probe("host-denied")["stopguard_limit_crossings"] is None
+
+
+def test_batterywake_is_a_listed_delivery_path_in_the_report_and_the_sent_log():
+    from tapo_monitor import sentlog
+    assert "batterywake" in soak.FIRST_ALERT_PATH_ORDER
+    assert "batterywake" in sentlog.SEND_PATHS
