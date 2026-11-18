@@ -325,7 +325,8 @@ def _hold_unscored(cfg, event, etype, image, *, defer, can_defer, on_alert, obse
     _observe(observe, event, etype, False)
 
 
-TYPE_EMOJI = {"person": "👤", "vehicle": "🚗", "pet": "🐾", "tamper": "⚠️", "motion": "👁"}
+TYPE_EMOJI = {"person": "👤", "vehicle": "🚗", "pet": "🐾", "tamper": "⚠️", "motion": "👁",
+              "ring": "🔔"}
 
 
 def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_chat,

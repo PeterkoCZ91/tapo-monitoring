@@ -40,6 +40,8 @@ from typing import Any
 from . import (
     alarminfo,
     alertclip,
+    batterycam,
+    batteryrunner,
     camera,
     capabilities,
     cli,
@@ -1239,6 +1241,9 @@ class MonitorState:
     # cursor is already past them, so this list (persisted) is the only copy of the alert.
     pending_hub_clips: list = field(default_factory=list)
     hub_clip_started: dict = field(default_factory=dict)   # (camera, start) -> submit time
+    # batterywake: camera -> start of the newest event collected (see batteryrunner); the
+    # runner owns the live value, the daemon copies it here so runtime.json carries it.
+    battery_cursor: dict = field(default_factory=dict)
     hub_cursor_path: str | None = None
     # Inactivity watchdog: newest clip start seen this process, next allowed hub query and
     # when the last notice went out (persisted beside the cursor so a restart cannot repeat it).
@@ -3049,34 +3054,35 @@ def _run_hubpoll_cameras(app, cam_clients, state, *, now, secrets, night, hub_fo
 
 
 def _deliver_hub_frames(cfg, state, clip, event, etype, image, clip_extra, *, score,
-                       can_alert, on_alert, secrets, time_str, now, hold_unscored=False):
+                       can_alert, on_alert, secrets, time_str, now, hold_unscored=False,
+                       path="hubpoll"):
     """Score, gate and send the frame(s) a hub clip produced; queue a failed send for retry.
 
     Shared by the inline path and the clip worker, so a clip decided on either is judged
     identically. ``image`` is one path or a list; every frame not queued for a retry is
-    deleted on the way out.
+    deleted on the way out. Returns the caption of the delivered photo, else None.
     """
     frames = image if isinstance(image, list) else [image]
     queued_image = None
     try:
         image, s = (frames[0], None) if score is None else _select_recording_frame(
-            cfg, event, etype, frames, score, path="hubpoll", keep_below=True,
+            cfg, event, etype, frames, score, path=path, keep_below=True,
             audit_extra=clip_extra)
         if score is not None and s is None and hold_unscored:
             # scorer.unscored_at_night: hold - no unverified hub photo at night.
-            log.warning("scorer unavailable at night; hubpoll %s clip held", cfg.name)
-            monitor.audit_event(cfg, event, etype, "hubpoll", "scorer_unavailable",
+            log.warning("scorer unavailable at night; %s %s clip held", path, cfg.name)
+            monitor.audit_event(cfg, event, etype, path, "scorer_unavailable",
                                 reason="held_at_night", extra=clip_extra)
             sentlog.archive_review_if_configured(
                 image, {**sentlog.review_meta(cfg.name, "hold", etype, None, event),
                         **{k: v for k, v in clip_extra.items() if v is not None}})
             return
         if score is not None and s is None:
-            log.warning("scorer unavailable; hubpoll passes %s frame through", cfg.name)
+            log.warning("scorer unavailable; %s passes %s frame through", path, cfg.name)
         elif s is not None and s < cfg.scorer.threshold:
             log.info("drop hub clip: score %.2f below threshold %.2f",
                      s, cfg.scorer.threshold)
-            monitor.audit_event(cfg, event, etype, "hubpoll", "drop", score=s,
+            monitor.audit_event(cfg, event, etype, path, "drop", score=s,
                                 threshold=cfg.scorer.threshold,
                                 reason="below_threshold", extra=clip_extra)
             # Same review-log the sampler's hold uses (no-op unless TAPO_REVIEW_LOG_DIR).
@@ -3085,8 +3091,8 @@ def _deliver_hub_frames(cfg, state, clip, event, etype, image, clip_extra, *, sc
                         **{k: v for k, v in clip_extra.items() if v is not None}})
             return
         if not can_alert(etype, event):
-            log.info("skip hub clip: cooldown active [hubpoll]")
-            monitor.audit_event(cfg, event, etype, "hubpoll", "cooldown", score=s,
+            log.info("skip hub clip: cooldown active [%s]", path)
+            monitor.audit_event(cfg, event, etype, path, "cooldown", score=s,
                                 threshold=cfg.scorer.threshold if s is not None else None,
                                 extra=clip_extra)
             return
@@ -3097,15 +3103,16 @@ def _deliver_hub_frames(cfg, state, clip, event, etype, image, clip_extra, *, sc
         )
         ok = send_alert_photo(cfg, secrets, image, caption, score=s,
                               incident=incident.incident_id(cfg.name, event),
-                              send_path="hubpoll", etype=etype)
-        monitor.audit_event(cfg, event, etype, "hubpoll", "send", score=s,
+                              send_path=path, etype=etype)
+        monitor.audit_event(cfg, event, etype, path, "send", score=s,
                             threshold=cfg.scorer.threshold if score is not None else None,
                             telegram=ok, extra=clip_extra)
         if ok:
-            log.info("alert hub clip sent for %s (score=%s) [hubpoll]",
-                     cfg.name, f"{s:.2f}" if s is not None else "n/a")
+            log.info("alert hub clip sent for %s (score=%s) [%s]",
+                     cfg.name, f"{s:.2f}" if s is not None else "n/a", path)
             on_alert(etype, event, score=s,
                      threshold=cfg.scorer.threshold if score is not None else None)
+            return caption
         else:
             log.warning("hub clip Telegram delivery failed for %s; retry queued",
                         cfg.name)
@@ -3123,6 +3130,143 @@ def _deliver_hub_frames(cfg, state, clip, event, etype, image, clip_extra, *, sc
             if frame != queued_image:
                 _safe_unlink(frame)
         _drop_job_dirs(frames)
+
+
+def run_batterywake_pass(app: AppConfig, state: MonitorState, runner, *, now, secrets,
+                         night=True, score_for=None, time_str=None):
+    """Alert on the events the battery runner collected since the last tick.
+
+    The runner (:class:`batteryrunner.BatteryRunner`) does all camera contact on its own
+    threads; this pass only drains finished jobs and delivers them. A ring is always sent
+    (no scorer threshold, no cooldown check); any other event is judged like a hubpoll
+    clip by :func:`_deliver_hub_frames` (person score only). The clip follows its photo as
+    a reply when ``battery_wake.send_clip``. Each job's temp dir is removed whatever
+    happened, unless a failed send queued a frame inside it for a retry.
+    """
+    score_for = score_for or _default_score_for
+    time_str = time_str or _default_time_str
+    jobs, cursors = runner.drain()
+    cameras = {cfg.name: cfg for cfg in app.cameras}
+    try:
+        for job in jobs:
+            cfg = cameras.get(job.camera)
+            try:
+                if cfg is not None:
+                    _deliver_battery_job(app, cfg, state, job, now=now, secrets=secrets,
+                                         night=night, score_for=score_for,
+                                         time_str=time_str)
+            except Exception:  # noqa: BLE001 - one bad job must not lose the others
+                log.exception("batterywake %s: delivering an event failed", job.camera)
+            finally:
+                _finish_battery_job(state, job)
+    finally:
+        if cursors != {k: state.battery_cursor.get(k) for k in cursors}:
+            state.battery_cursor.update(cursors)
+            runtime_state.save_if_changed(state, now, logger=log)
+
+
+def _finish_battery_job(state, job):
+    """Delete the job's clip, leftover frames and dir (not a frame awaiting a retry)."""
+    if job.clip:
+        _safe_unlink(job.clip)
+    if not job.dir:
+        return
+    prefix = os.path.join(job.dir, "")
+    if any(str(e.get("image", "")).startswith(prefix) for e in state.pending_hub
+           if isinstance(e, dict)):
+        for frame in job.frames:
+            if not any(e.get("image") == frame for e in state.pending_hub
+                       if isinstance(e, dict)):
+                _safe_unlink(frame)
+        return
+    shutil.rmtree(job.dir, ignore_errors=True)
+
+
+def _deliver_battery_job(app, cfg, state, job, *, now, secrets, night, score_for, time_str):
+    event = job.event
+    frames = list(job.frames)
+    ring = batterycam.is_ring(event)
+    # A press is for the owner whatever the schedule says: only detections are muted.
+    if not ring and camera_muted(cfg, night, now):
+        log.info("batterywake %s: event dropped outside the camera's alert window", cfg.name)
+        return
+    clip = {"start_time": event.get("start_time", now)}
+    if not ring and not frames:
+        log.info("batterywake %s: no frame for the event at %s; skipping",
+                 cfg.name, int(float(clip["start_time"])))
+        monitor.audit_event(cfg, event, "motion", "batterywake", "drop", reason="no_frame")
+        return
+    score = score_for(cfg)
+    can_alert, on_alert = alert_gate(state, cfg.name, app.alerts.cooldown, now)
+    if ring:
+        caption = _deliver_battery_ring(cfg, state, event, clip, frames, score=score,
+                                        on_alert=on_alert, secrets=secrets,
+                                        time_str=time_str, now=now)
+    else:
+        caption = _deliver_hub_frames(
+            cfg, state, clip, event, "motion", frames, {}, score=score,
+            can_alert=can_alert, on_alert=on_alert, secrets=secrets, time_str=time_str,
+            now=now, hold_unscored=holds_unscored(cfg, night), path="batterywake")
+    if not (caption and cfg.battery_wake.send_clip and job.clip and os.path.exists(job.clip)):
+        return
+    # Read straight after the photo: the id is per thread and the next send replaces it.
+    reply_to = notify.last_message_id()
+    if not notify.send_video(secrets["telegram_token"], secrets["telegram_chat"], job.clip,
+                             alertclip.caption(caption), reply_to=reply_to):
+        log.warning("batterywake %s: clip delivery failed", cfg.name)
+
+
+def _deliver_battery_ring(cfg, state, event, clip, frames, *, score, on_alert, secrets,
+                          time_str, now):
+    """Send a doorbell press unconditionally; returns the caption when it was delivered.
+
+    The scorer only picks the best frame (a visitor is the point) and puts its score on
+    the caption; it never decides whether the ring is sent. Without a frame the ring goes
+    out as text.
+    """
+    image, s = None, None
+    queued_image = None
+    try:
+        if frames and score is not None:
+            image, s = _select_recording_frame(cfg, event, "ring", frames, score,
+                                               path="batterywake", keep_below=True)
+        if image is None and frames:
+            image = frames[0]
+        state_word = batterycam.ring_state(event)
+        caption = notify.build_caption(
+            monitor.TYPE_EMOJI["ring"], time_str(clip),
+            description=f"ring {state_word}" if state_word else "ring",
+            score=s, camera=notify.caption_camera(cfg))
+        notify.clear_last_message_id()
+        if image:
+            ok = send_alert_photo(cfg, secrets, image, caption, score=s,
+                                  incident=incident.incident_id(cfg.name, event),
+                                  send_path="batterywake", etype="ring")
+        else:
+            ok = notify.send_text(secrets["telegram_token"], secrets["telegram_chat"],
+                                  caption)
+        monitor.audit_event(cfg, event, "ring", "batterywake", "send", score=s,
+                            telegram=ok)
+        if ok:
+            on_alert("ring", event, score=s,
+                     threshold=cfg.scorer.threshold if s is not None else None)
+            return caption
+        if image:
+            log.warning("ring Telegram delivery failed for %s; retry queued", cfg.name)
+            state.pending_hub.append({
+                "camera": cfg.name, "start_time": clip["start_time"],
+                "image": image, "caption": caption, "score": s, "etype": "ring",
+                "attempts": 1, "queued_at": now, "due_at": now + HUB_RETRY_DELAY,
+                "audit_extra": {},
+            })
+            queued_image = image
+        else:
+            log.warning("ring Telegram delivery failed for %s", cfg.name)
+        return None
+    finally:
+        for frame in frames:
+            if frame != queued_image:
+                _safe_unlink(frame)
 
 
 def _queue_hub_clip(state, cfg, clip, now):
@@ -5471,7 +5615,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
               run_control=None, watchdog=None, monitor=None, drain=None, sample=None,
               connect_factory=None, is_night=None, guard=None, inspect=None, digest=None,
               hubpoll=None, sd_worker=None, hub_worker=None, privacy_notice=None, detection_notice=None,
-              late=None):
+              late=None, battery_runner=None, batterywake=None):
     """One loop iteration with control decoupled from event polling.
 
     The slow, rarely-changing work (camera tracking/sensitivity/preset + the per-tick
@@ -5495,6 +5639,7 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
     watchdog = watchdog or _watchdog_pass
     monitor = monitor or run_monitor_pass
     hubpoll = hubpoll or run_hubpoll_pass
+    batterywake = batterywake or run_batterywake_pass
     drain = drain or process_pending_sd
     late = late or outbox_pass
     sample = sample or process_sampler
@@ -5555,6 +5700,8 @@ def loop_step(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
         health.save_state(state.health_path, state, logger=log)
     hub_kw = {"hub_worker": hub_worker} if hub_worker is not None else {}
     hubpoll(scoring, cam_clients, state, now=now, secrets=secrets, night=night, **hub_kw)
+    if battery_runner is not None:
+        batterywake(scoring, state, battery_runner, now=now, secrets=secrets, night=night)
     sample(scoring, cam_clients, state, now=now, secrets=secrets, night=night)
     drain_kw = {"worker": sd_worker} if sd_worker is not None else {}
     drain(scoring, cam_clients, state, now=now, secrets=secrets, night=night, **drain_kw)
@@ -5655,6 +5802,10 @@ def main(argv=None):  # pragma: no cover - thin entry point
     sd_worker = sdworker.SdWorker()
     hub_worker = (sdworker.SdWorker()
                   if any(c.hub_clip_worker for c in app.cameras) else None)
+    battery_runner = None
+    if any("batterywake" in c.detection.sources for c in app.cameras):
+        battery_runner = batteryrunner.BatteryRunner(app, cursors=state.battery_cursor)
+        battery_runner.start()
     cam_clients = {}
     last_control = None
 
@@ -5669,12 +5820,14 @@ def main(argv=None):  # pragma: no cover - thin entry point
                 last_control = tick(app, cam_clients, state, now=_time.time(),
                                     secrets=secrets, last_control=last_control,
                                     control_interval=control_interval,
-                                    sd_worker=sd_worker, hub_worker=hub_worker)
+                                    sd_worker=sd_worker, hub_worker=hub_worker,
+                                    battery_runner=battery_runner)
             if stop.requested:
                 break
             _time.sleep(poll_interval)
     finally:
-        shutdown(state, now=_time.time(), sd_worker=sd_worker, hub_worker=hub_worker)
+        shutdown(state, now=_time.time(), sd_worker=sd_worker, hub_worker=hub_worker,
+                 battery_runner=battery_runner)
 
 
 class GracefulStop:
@@ -5712,7 +5865,8 @@ class GracefulStop:
 SHUTDOWN_LEDGER_TIMEOUT = 5.0
 
 
-def shutdown(state: MonitorState, *, now, sd_worker=None, hub_worker=None):
+def shutdown(state: MonitorState, *, now, sd_worker=None, hub_worker=None,
+             battery_runner=None):
     """Leave nothing behind a stop that the next start would pay for. Never raises.
 
     A hub tolerates one session, and a dangling one makes the next start be accepted and
@@ -5739,6 +5893,11 @@ def shutdown(state: MonitorState, *, now, sd_worker=None, hub_worker=None):
             log.info("stopping with %d hub clip(s) downloading; queued for the restart",
                      hub_worker.in_flight())
         hub_worker.shutdown(wait=False)
+    if battery_runner is not None:
+        try:
+            battery_runner.stop()
+        except Exception:  # noqa: BLE001 - never block the rest of the shutdown
+            log.warning("battery runner stop failed")
     close_hub_clients(state)
     runtime_state.save_if_changed(state, now, logger=log)
     mqtt.stop()                       # says "offline" itself; bounded, never raises
@@ -5749,7 +5908,8 @@ def shutdown(state: MonitorState, *, now, sd_worker=None, hub_worker=None):
 
 
 def tick(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
-         last_control, control_interval, sd_worker=None, hub_worker=None):
+         last_control, control_interval, sd_worker=None, hub_worker=None,
+         battery_runner=None):
     """Run one loop iteration and report its outcome to the stall watchdog.
 
     Deliberately outside ``loop_step``: when the tick itself is what breaks, this is the
@@ -5760,7 +5920,7 @@ def tick(app: AppConfig, cam_clients, state: MonitorState, *, now, secrets,
         last_control = loop_step(
             app, cam_clients, state, now=now, secrets=secrets,
             last_control=last_control, control_interval=control_interval,
-            sd_worker=sd_worker, hub_worker=hub_worker,
+            sd_worker=sd_worker, hub_worker=hub_worker, battery_runner=battery_runner,
         )
         tick_ok = True
     except Exception as e:  # noqa: BLE001 - one bad tick must not end the daemon

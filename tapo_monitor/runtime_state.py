@@ -89,6 +89,14 @@ def _detection_announced(raw):
     return out
 
 
+def _cursor_map(raw):
+    """``{camera: epoch}`` of the finite numbers in ``raw``; anything else is dropped."""
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): float(v) for k, v in raw.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)}
+
+
 def snapshot(state, logger=None):
     """The persisted subset of a MonitorState, JSON-ready. ``saved_at`` is added on save."""
     return {
@@ -106,6 +114,7 @@ def snapshot(state, logger=None):
                                                  {}).items() if isinstance(v, bool)},
         "detection_announced": _detection_announced(
             getattr(state, "detection_announced", None)),
+        "battery_cursor": _cursor_map(getattr(state, "battery_cursor", None)),
     }
 
 
@@ -227,6 +236,8 @@ def load(path, state, now, logger=None, max_age=MAX_AGE):
     detection = payload.get("detection_announced") or {}
     if isinstance(detection, dict) and hasattr(state, "detection_announced"):
         state.detection_announced.update(_detection_announced(detection))
+    if hasattr(state, "battery_cursor"):
+        state.battery_cursor.update(_cursor_map(payload.get("battery_cursor")))
     state.runtime_saved = snapshot(state, logger)
     return {"pending_hub": len(kept_hub), "pending_sd": len(kept_sd),
             "pending_hub_clips": len(kept_clips),
