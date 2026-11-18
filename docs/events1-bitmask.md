@@ -27,6 +27,10 @@ the event's main code:
 | 6    | 5   | 32      | person |
 | 8    | 7   | 128     | vehicle |
 | 9    | 8   | 256     | pet |
+| 10   | 9   | 512     | doorbell ring |
+| 17   | 16  | 65536   | ring missed |
+| 18   | 17  | 131072  | ring answered |
+| 19   | 18  | 262144  | anti-theft |
 | 20   | 19  | 524288  | face (see below) |
 | 21 / 22 | 20 / 21 | | unfamiliar face / unfamiliar person |
 | 23–28 | 22–27 | | baby camera: left bed, caregiver, asleep, awake, face covered, out of safe fence |
@@ -37,11 +41,15 @@ the event's main code:
 | 36   | 35  | 2^35 | CO alarm |
 
 The app's list also has timing (1), baby cry (7), doorbell, bark, meow, glass break,
-smoke alarm (14), package (15 / 16), doorbell and anti-theft (10, 17–19) codes. Codes 34
+smoke alarm (14) and package (15 / 16) codes. Codes 34
 and 35 are in none of its lists, and **there is no PIR event code**: in the app PIR is a
 configuration module, not an event type. A missing `alarm_type` is read as 2 by the app.
 Codes 23–36 above are from the Tapo Android app 3.22.105 only; none of them has been seen
 on our cameras.
+
+The ring codes 10, 17 and 18 (named `RINGALARM`, ring missed and ring answered in the
+app's `PlayBackEventType` enum) **have been seen**, on a D205 battery doorbell; see
+[below](#model-specific-meaning). Anti-theft (19) has not.
 
 When `events_1` carries several codes, the app's timeline colours the event by the
 code that ranks first in its `AlarmTypePriority` (lowest value wins): baby-camera codes,
@@ -100,6 +108,21 @@ The per-model reading is a small table, `EVENT_PROFILES` in
 `alarm_type=6` to `person`. The audit line `event ... alarm_type=... channels=...
 profile=...` shows the raw values next to the verdict, so a row can be amended when more
 samples disagree — a new model gets a new row rather than a change to `default`.
+
+On the **D205 battery doorbell (firmware 1.2.8)** every ring carried code 10 (bit 9) plus
+code 17 or 18, with motion and person bits when someone was also moving in view:
+
+| `alarm_type` | `events_1` | codes |
+|-------------:|-----------:|-------|
+| 17 | 66050 | 2 motion, 10 ring, 17 ring missed |
+| 18 | 131618 | 2 motion, 6 person, 10 ring, 18 ring answered |
+| 18 | 131586 | 2 motion, 10 ring, 18 ring answered |
+| 18 | 131584 | 10 ring, 18 ring answered |
+
+A person walking past without ringing came as `alarm_type=6`, `events_1 = 34`, as on the
+C545D. The missed / answered reading is the app enum's; it was not cross-checked case by
+case against the app's call history. See
+[a battery doorbell without a hub](battery-doorbell-without-a-hub.md).
 
 The single-lens **C216 hardware 1.0 / firmware 1.3.2** also illustrates why missing
 fields and a model's event mapping must be treated separately: sampled type 2 and

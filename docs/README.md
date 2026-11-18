@@ -35,6 +35,8 @@ camera names, addresses, credentials, coordinates and observations do not belong
    the API down.
 5. [Battery cameras on a hub](battery-cameras-on-a-hub.md) — how a sleeping camera's events
    are read off the hub it records to, and the hub rules that shape the client.
+   [A battery doorbell without a hub](battery-doorbell-without-a-hub.md) covers the D205:
+   sleep and wake, ring events, and SD clips read off the doorbell itself.
 6. [Observability](observability.md) — Camera Digital Twin and Shadow Detection Auditor.
 7. [Camera reports](camera-reports.md) — produce an anonymized report of your own camera
    model so it can be supported without the maintainers owning one.
