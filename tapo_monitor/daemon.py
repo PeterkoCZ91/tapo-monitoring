@@ -88,6 +88,7 @@ from .config import (
     resolve_camera_credentials,
     resolve_hub_credentials,
     resolve_rtsp_credentials,
+    sleeps,
 )
 
 log = logging.getLogger(__name__)
@@ -4760,6 +4761,8 @@ def process_digital_twin(app, cam_clients, state, *, now, secrets, probe=None):
         cam = cam_clients.get(cfg.name)
         if cam is None or reolink.is_reolink(cfg):     # the probes are Tapo API calls
             continue
+        if "batterywake" in cfg.detection.sources:
+            continue
         last_probe = state.twin_last_probe.get(cfg.name)
         if last_probe is not None and now - last_probe < app.observability.probe_interval:
             continue
@@ -5095,6 +5098,8 @@ def _pan_guard_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, se
         pl = cfg.pan_limit
         if not pl.enabled or pl.mode == "stop":
             continue
+        if "batterywake" in cfg.detection.sources:      # ONVIF is a login too
+            continue
         g = state.pan_guard.setdefault(cfg.name, {})
         if g.get("last_poll") is not None and now - g["last_poll"] < pl.poll_interval:
             continue
@@ -5284,7 +5289,10 @@ def fleet_health_snapshot(app: AppConfig, state: MonitorState, *, now,
             "reachable": state.network_reachable.get(cfg.name),
             "events": state.events_reachable.get(cfg.name),
         }
-        if "hubpoll" not in cfg.detection.sources or "getevents" in cfg.detection.sources:
+        if sleeps(cfg) and "hubpoll" not in cfg.detection.sources:
+            entry["sleeps"] = True      # never logged in to: no control view to vouch for
+            entry["control_health"] = None
+        elif "hubpoll" not in cfg.detection.sources or "getevents" in cfg.detection.sources:
             entry["control_health"] = None
             observed = state.twin_fleet.get(cfg.name, {})
             if not isinstance(observed, Mapping):
@@ -5789,7 +5797,7 @@ def _watchdog_pass(app: AppConfig, cam_clients, state: MonitorState, *, now, sec
                 log.info("host move notice sent for %s", cfg.name)
             else:
                 log.warning("host move notification delivery failed for %s", cfg.name)
-        if "hubpoll" in cfg.detection.sources:
+        if "hubpoll" in cfg.detection.sources or sleeps(cfg):
             # A battery camera sleeps through nearly every ping (measured ~6 % answered in
             # deep night), so ICMP says nothing about its health and would alert nightly.
             # Its liveness comes from the hub poll instead (state.events_reachable).
@@ -6308,6 +6316,9 @@ def _connect_camera(cam_clients, state=None, now=None):
             # A hubpoll-only camera has no stok login to make and sleeps through the ping;
             # spending a control pass on both every minute buys nothing.
             return None, "hubpoll"
+        if sleeps(cfg):
+            # A battery camera is woken by any login or ping; its wake detector owns it.
+            return None, "sleeping"
         at = now if now is not None else _time.time()
         move = _take_rediscovered(cfg, state, cam_clients, at)
         result = attempt(cfg, move[0] if move else None)
