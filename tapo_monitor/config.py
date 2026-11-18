@@ -27,7 +27,8 @@ log = logging.getLogger(__name__)
 ROLES = {"tracking", "static"}
 SCHEDULES = {"astral", "always_night", "always_day"}
 WEATHER_STRATEGIES = {"none", "disable_tracking", "lower_sensitivity"}
-DETECTION_SOURCES = {"onvif", "getevents", "motion", "hubpoll", "lastalarm", "reolink"}
+DETECTION_SOURCES = {"onvif", "getevents", "motion", "hubpoll", "lastalarm", "reolink",
+                     "batterywake"}
 SMARTTRACK_KINDS = {"people", "vehicle", "pet", "baby"}
 SNAPSHOT_SOURCES = {"rtsp", "sd"}
 LIGHT_TRIGGER_TYPES = {"person", "motion", "pet", "tamper", "vehicle"}
@@ -258,6 +259,21 @@ class CoordinatorConfig:
 
 
 @dataclass
+class BatteryWakeConfig:
+    """Opt-in ``batterywake`` source: a sleeping battery camera that is never woken.
+
+    Its own wake-up (a visitor, a press) is noticed by pinging it; ``ping_interval`` is
+    the seconds between pings, ``event_wait`` how long after waking to wait for the
+    recording to show up, ``frames`` how many frames to cut from it and ``send_clip``
+    whether the clip is sent along with the photo.
+    """
+    ping_interval: float = 1.0
+    event_wait: int = 75
+    frames: int = 6
+    send_clip: bool = True
+
+
+@dataclass
 class CameraConfig:
     name: str
     host: str
@@ -443,6 +459,7 @@ class CameraConfig:
     # Name the camera at the front of its alert captions ("👤 front · 23:14"). Off by
     # default: the caption stays exactly as it was.
     caption_camera: bool = False
+    battery_wake: BatteryWakeConfig = field(default_factory=BatteryWakeConfig)
     # Days without a hub clip after which one Telegram notice is sent; None = off.
     inactivity_alert_days: int | None = None
     # The hub authenticates against the Tapo *account* (e-mail + account password), not a
@@ -806,6 +823,9 @@ def _detection(data, where):
     d = data or {}
     sources = d.get("sources", ["getevents"])
     _check_subset(sources, DETECTION_SOURCES, "detection.sources", where)
+    if "batterywake" in sources and len(sources) > 1:
+        raise ConfigError(f"{where}: detection source 'batterywake' (a sleeping camera "
+                          "that is never woken) cannot be combined with other sources")
     if "lastalarm" in sources and "getevents" in sources:
         raise ConfigError(f"{where}: detection.sources: pick one of 'getevents' (SD card) "
                           "or 'lastalarm' (no card), not both")
@@ -817,6 +837,25 @@ def _detection(data, where):
     if not isinstance(strict_people, bool):
         raise ConfigError(f"{where}: detection.strict_people must be a boolean")
     return DetectionConfig(sources=list(sources), strict_people=strict_people)
+
+
+def _battery_wake(data, where):
+    d = data or {}
+    ping = d.get("ping_interval", 1.0)
+    if isinstance(ping, bool) or not isinstance(ping, (int, float)) or not ping > 0:
+        raise ConfigError(f"{where}: battery_wake.ping_interval must be a number above 0")
+    return BatteryWakeConfig(
+        ping_interval=float(ping),
+        event_wait=_check_number(d, "event_wait", 75, f"{where}: battery_wake", minimum=20),
+        frames=_check_number(d, "frames", 6, f"{where}: battery_wake"),
+        send_clip=_check_bool(d.get("send_clip", True), "battery_wake.send_clip", where),
+    )
+
+
+def sleeps(cam):
+    """True for a camera that sleeps between events and must not be woken by polling."""
+    sources = cam.detection.sources
+    return "batterywake" in sources or ("hubpoll" in sources and "getevents" not in sources)
 
 
 def _tracking(data, where):
@@ -1537,6 +1576,14 @@ def _camera(data, index):
             or data.get("snapshot_source") == "recording"):
         raise ConfigError(f"{where}: detection source 'reolink' has no SD-card path; "
                           "sd_snapshot / sd_motion / recording are not allowed")
+    battery_wake = _battery_wake(data.get("battery_wake"), where)
+    if "batterywake" in detection.sources:
+        if data.get("sd_snapshot") or clip_video or mac:
+            raise ConfigError(f"{where}: detection source 'batterywake' has no SD-card or "
+                              "network-polled path; sd_snapshot, clip_video and mac are "
+                              "not allowed")
+    elif data.get("battery_wake") is not None:
+        raise ConfigError(f"{where}: 'battery_wake' requires detection source 'batterywake'")
     if clip_video and not clip_url and "getevents" not in detection.sources:
         raise ConfigError(f"{where}: clip_video reads the camera's SD card and needs "
                           "detection source 'getevents', or a recorder in 'clip_url'")
@@ -1740,6 +1787,7 @@ def _camera(data, index):
         hub_poll_interval=hub_poll_interval,
         hub_clip_worker=hub_clip_worker,
         caption_camera=caption_camera,
+        battery_wake=battery_wake,
         inactivity_alert_days=inactivity_alert_days,
         hub_user_env=data.get("hub_user_env"),
         hub_password_env=data.get("hub_password_env"),

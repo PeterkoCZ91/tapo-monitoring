@@ -1689,3 +1689,79 @@ def test_disable_tracking_without_day_preset_warns(caplog):
     _load_capturing(caplog, data)
 
     assert "disable_tracking" in caplog.text and "day_preset" in caplog.text
+
+
+# ── batterywake: a sleeping battery camera that is never woken ────────────────
+
+def _batterywake_camera(**overrides):
+    cam = {"name": "door", "host": "192.0.2.70",
+           "detection": {"sources": ["batterywake"]}}
+    cam.update(overrides)
+    return {"cameras": [cam]}
+
+
+def test_batterywake_source_accepted_with_defaults():
+    cam = cfg.load_config_from_dict(_batterywake_camera()).cameras[0]
+    assert cam.detection.sources == ["batterywake"]
+    assert cam.battery_wake == cfg.BatteryWakeConfig()
+    assert cam.battery_wake.ping_interval == 1.0
+    assert cam.battery_wake.event_wait == 75
+    assert cam.battery_wake.frames == 6
+    assert cam.battery_wake.send_clip is True
+
+
+def test_batterywake_must_be_the_only_source():
+    data = _batterywake_camera(detection={"sources": ["batterywake", "getevents"]})
+    with pytest.raises(cfg.ConfigError, match="batterywake"):
+        cfg.load_config_from_dict(data)
+
+
+def test_batterywake_requires_host():
+    data = _batterywake_camera()
+    del data["cameras"][0]["host"]
+    with pytest.raises(cfg.ConfigError, match="host"):
+        cfg.load_config_from_dict(data)
+
+
+def test_battery_wake_block_parses():
+    data = _batterywake_camera(battery_wake={"ping_interval": 0.5, "event_wait": 60,
+                                             "frames": 3, "send_clip": False})
+    bw = cfg.load_config_from_dict(data).cameras[0].battery_wake
+    assert bw == cfg.BatteryWakeConfig(ping_interval=0.5, event_wait=60, frames=3,
+                                       send_clip=False)
+
+
+@pytest.mark.parametrize("block", [
+    {"ping_interval": 0}, {"ping_interval": "x"}, {"ping_interval": True},
+    {"frames": 0}, {"frames": True}, {"event_wait": 19}, {"send_clip": "yes"},
+    {"bogus": 1},
+])
+def test_battery_wake_block_validates(block):
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config_from_dict(_batterywake_camera(battery_wake=block))
+
+
+def test_battery_wake_block_needs_the_source():
+    data = {"cameras": [{"name": "door", "host": "192.0.2.70",
+                         "battery_wake": {"frames": 3}}]}
+    with pytest.raises(cfg.ConfigError, match="battery_wake"):
+        cfg.load_config_from_dict(data)
+
+
+@pytest.mark.parametrize("extra", [
+    {"sd_snapshot": True}, {"clip_video": True}, {"mac": "02:00:00:aa:bb:cc"},
+])
+def test_batterywake_rejects_sd_and_clip_options(extra):
+    with pytest.raises(cfg.ConfigError, match="batterywake"):
+        cfg.load_config_from_dict(_batterywake_camera(**extra))
+
+
+def test_sleeps_helper():
+    def cam(sources):
+        data = {"cameras": [{"name": "c", "host": "192.0.2.71",
+                             "detection": {"sources": sources},
+                             "hub_host": "192.0.2.60", "go2rtc_src": "c"}]}
+        return cfg.load_config_from_dict(data).cameras[0]
+    assert cfg.sleeps(cam(["batterywake"])) is True
+    assert cfg.sleeps(cam(["hubpoll"])) is True
+    assert cfg.sleeps(cam(["getevents"])) is False
