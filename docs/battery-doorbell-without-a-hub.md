@@ -185,8 +185,9 @@ How it behaves:
   instead. If no frame can be had at all, a ring is still sent as text and anything else
   is skipped.
 - The cursor (the start of the last handled event) is saved with the runtime state, so a
-  restart does not repeat events. With no cursor yet it is set to now and nothing older is
-  replayed.
+  restart does not repeat events. With no cursor yet it is set to the moment the monitor
+  starts, so nothing older is replayed, but a press that wakes the camera afterwards is
+  collected on that very wake.
 - Audit and sent-log rows use the delivery path `batterywake`, and `tools/soak_report`
   lists it next to the other paths.
 
