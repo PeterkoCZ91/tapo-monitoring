@@ -208,3 +208,49 @@ def test_groq_describe_caps_images_at_groq_limit(monkeypatch, tmp_path):
     content = captured["payload"]["messages"][0]["content"]
     images = [part for part in content if part["type"] == "image_url"]
     assert len(images) == 5
+
+
+def test_vision_endpoint_uses_configured_base_url_and_model(monkeypatch, tmp_path):
+    # The same chat-completions request must go to a local OpenAI-compatible
+    # server (llama.cpp / vLLM / Ollama / LM Studio) when one is configured.
+    captured = {}
+    _fake_urlopen(monkeypatch, _vision_json(person=True, description="a person at the gate"), captured)
+    out = enrich.groq_describe("key", _img(tmp_path),
+                               base_url="http://192.168.2.215:11436/v1/",
+                               model="local-vision")
+
+    assert out == "a person at the gate"
+    assert captured["req"].full_url == "http://192.168.2.215:11436/v1/chat/completions"
+    assert captured["payload"]["model"] == "local-vision"
+
+
+def test_vision_endpoint_without_a_key_sends_no_authorization(monkeypatch, tmp_path):
+    # A local server needs no key and may reject an empty bearer token.
+    captured = {}
+    _fake_urlopen(monkeypatch, _vision_json(person=True, description="x"), captured)
+    enrich.groq_describe("", _img(tmp_path))
+    assert captured["req"].get_header("Authorization") is None
+
+
+def test_vision_endpoint_text_mode_when_json_is_unsupported(monkeypatch, tmp_path):
+    import json as _json
+    # A server without JSON mode still answers in text; the prompt carries the
+    # marker, so the whole reply is the description.
+    body = _json.dumps({"choices": [{"message": {"content": "a person at the gate"}}]}).encode()
+    captured = {}
+    _fake_urlopen(monkeypatch, body, captured)
+
+    out = enrich.groq_describe("key", _img(tmp_path), json_mode=False)
+
+    assert out == "a person at the gate"
+    assert "response_format" not in captured["payload"]
+
+
+def test_vision_endpoint_failure_is_no_description(monkeypatch, tmp_path):
+    # A server that rejects images or JSON mode must never yield a fake
+    # "empty scene" (which would veto a real alert) - just no description.
+    def boom(req, timeout=None):
+        raise OSError("400 unsupported response_format")
+
+    monkeypatch.setattr(enrich.urllib.request, "urlopen", boom)
+    assert enrich.groq_describe("key", _img(tmp_path)) == ""

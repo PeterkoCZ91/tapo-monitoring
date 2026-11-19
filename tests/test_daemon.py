@@ -1626,6 +1626,26 @@ def test_resolve_secrets_reads_env(monkeypatch):
                                   "max_tokens": 160, "timeout": 20, "json_mode": True}}
 
 
+def test_resolve_secrets_uses_configured_vision_endpoint(monkeypatch):
+    # Only the env var *name* lives in the config; the key itself never does.
+    monkeypatch.setenv("LOCAL_VISION_KEY", "kept-out-of-config")
+    app = cfg.load_config_from_dict({
+        "telegram": {"token_env": "TG_TOKEN", "chat_id_env": "TG_CHAT"},
+        "groq": {"api_key_env": "LOCAL_VISION_KEY",
+                 "base_url": "http://192.168.2.215:11436/v1",
+                 "model": "local-vision", "json_mode": False},
+        "cameras": [{"name": "a", "host": "203.0.113.10"}],
+    })
+
+    secrets = daemon.resolve_secrets(app)
+
+    assert secrets["groq_key"] == "kept-out-of-config"
+    assert secrets["vision"]["base_url"] == "http://192.168.2.215:11436/v1"
+    assert secrets["vision"]["model"] == "local-vision"
+    assert secrets["vision"]["json_mode"] is False
+    assert secrets["vision"]["base_url"] != enrich.DEFAULT_BASE_URL
+
+
 def test_resolve_secrets_missing_env_is_empty(monkeypatch):
     monkeypatch.delenv("MISSING_TOKEN", raising=False)
     app = cfg.load_config_from_dict({

@@ -1339,6 +1339,30 @@ enrich:
   groq: true
 ```
 
+The caption call is an OpenAI-compatible chat-completions request. By default it uses
+Groq's URL and model, so existing configs are unchanged. To keep camera frames on your
+own machine, add the endpoint settings to the top-level `groq:` block and point it at
+any OpenAI-compatible vision server (llama.cpp, vLLM, Ollama, LM Studio):
+
+```yaml
+groq:
+  api_key_env: LOCAL_VISION_KEY
+  base_url: http://192.168.2.215:11436/v1
+  model: local-vision
+  json_mode: false
+
+enrich:
+  groq: true
+```
+
+`base_url` is the server root (the `/chat/completions` path is added for you), `model`
+is the model name, and `api_key_env` names the environment variable holding the key —
+the key itself stays out of this file and out of the logs. A local server that needs
+no key can leave `api_key_env` unset: no `Authorization` header is sent. `json_mode`
+defaults to `true`; set it to `false` for a server that does not support
+`response_format` (the answer is then read as plain text). A server that rejects the
+request, or any other error, yields no description — never a fabricated "empty scene".
+
 `enrich.snapshot` is retained for configuration compatibility; the active follow-up source
 is selected by `sd_snapshot` and `snapshot_source`. Keep it at `rtsp` in new configs.
 
