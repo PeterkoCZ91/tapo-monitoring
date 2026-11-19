@@ -140,6 +140,94 @@ What these measurements suggest for a client, not yet implemented:
 Still open: how much battery each awake session costs, and whether `alarm_event_num` can
 replace reading the event list on every wake.
 
+## Quick responses (spoken replies to a visitor)
+
+The doorbell stores short audio clips that it plays through its speaker on request. The app
+shows them as "quick responses". `getAppComponentList` reports `quickResponse`, and pytapo's own
+`getQuickResponseList()` returns an empty dict because it sends no section. The app's request works:
+
+```json
+getQuickRespCapability  {"quick_response": {"name": ["capability"]}}
+getQuickRespList        {"quick_response": {"table": ["quick_resp_audio"]}}
+getQuickRespLanguage    {"quick_response": {"name": "language"}}
+```
+
+The firmware has five read-only English clips (ids 13056 to 13060, for example "I'll be there in a
+minute") and room for five user clips of up to 15 seconds from id 13184. The language reads `EN`.
+
+Playing one is a plain control-channel call (HTTPS 443, a `multipleRequest` like any other), and the
+doorbell **speaks out loud** when it is sent:
+
+```json
+{"method": "playQuickResp",
+ "params": {"quick_response": {"play_quick_resp_audio": {"id": "13058", "force": "1"}}}}
+{"method": "stopQuickResp", "params": {"quick_response": {"stop_quick_resp_audio": {}}}}
+```
+
+`id` is a string (the list returns an int). pytapo's `playQuickResponse` sends `"force": "force"`,
+which the app never does, so use `executeFunction` with the payload above. A battery doorbell is
+woken by the login that carries the call.
+
+### Custom quick responses: how the app uploads them (static analysis, not yet tested on a device)
+
+This section comes from reading the Tapo Android app (3.22.105) and the pytapo media session. It has not been
+run against a doorbell yet, so every byte-level detail marked "inferred" below still needs a live test.
+
+**Playing** a stored response is a plain control-channel call (HTTPS 443), see above.
+**Uploading** a user-defined response is different: it is not a JSON call on 443. The app records on the phone and
+sends the audio over the same port-8800 HTTP media session that carries two-way audio and SD clip downloads.
+
+Capability limits (from `getQuickRespCapability`): user clips use ids from `usr_def_start_id` (13184), at most
+`usr_def_audio_max_num` (5) clips, at most `usr_def_audio_max_duration` (15) seconds each. The built-in clips are
+read-only and English (`getQuickRespLanguage` returns `language_current`). Names are 1 to 255 UTF-8 bytes.
+
+Upload sequence on the 8800 session (digest login and AES key exchange as for clip downloads):
+
+1. Request, `Content-Type: application/json`:
+   ```json
+   {"type":"request","seq":1234,"params":{"method":"get","usr_def_audio":{
+     "name":"My clip","type":"quick_response",
+     "audio_config":{"encode_type":"G711ulaw","sample_rate":"16"}}}}
+   ```
+   `audio_config` is only sent for non-8 kHz-a-law audio. Add `"audio_file_id":"<id>"` to overwrite an existing
+   user clip instead of adding one.
+2. The device answers with `params.session_id`, `audio_file_id` (the allocated id) and `audio_file_index`
+   (`error_code` non-zero means refused; "line busy" while a call or talk session is active).
+3. The audio is sent as small multipart parts, `Content-Type: audio/mp2t`, `X-Session-Id: <session_id>`
+   (and `X-If-Encrypt: 1` with the session AES key on the legacy cipher). Each part is 1024 bytes of raw G.711
+   wrapped in a tiny, self-contained MPEG-TS stream: PAT (PID 0), PMT (PID 66, stream type `0x90` for a-law or
+   `0x91` for u-law, which matches what pytapo already parses from the device), one PES on PID 68 with stream id
+   `0xC0`, a 5-byte PTS that advances by the chunk duration (64 ms at 16 kHz), continuity counters restarting at 0
+   in every part, MPEG-2 CRC32 on the tables.
+4. Finish with `{"type":"request","seq":1235,"params":{"method":"do","finish":"null"}}` (header `X-Session-Id`);
+   `error_code` 0 in the answer within 8 seconds means the clip is stored. The app then sends `do stop` and
+   re-reads `getQuickRespList`. `setQuickRespList` is not part of the upload (it only renames or reorders).
+
+Audio format: the app chooses it from the device (`getAudioConfig` with
+`{"audio_capability":{"name":["device_sourcefile"]}}` for devices that report `audioSourceCapability`, otherwise
+from the microphone capability), preferring OPUS, AAC, G.722, G.711 u-law, G.711 a-law. A D205 reports G.711 for
+speaker and microphone, so expect raw 8-bit G.711, mono, 16 kHz u-law (or 8 kHz a-law), without any header:
+
+```sh
+ffmpeg -i clip.wav -t 15 -ac 1 -ar 16000 -c:a pcm_mulaw -f mulaw clip.ulaw
+ffmpeg -i clip.wav -t 15 -ac 1 -ar 8000  -c:a pcm_alaw  -f alaw  clip.alaw
+```
+
+Related calls: `delQuickResp` `{"quick_response":{"delete_usr_def_audio":{"id":["13184"]}}}`; rename via
+`setQuickRespList` with `{"quick_response":{"quick_resp_audio":[{"file_1":{"id":"13184","index":"1","name":"New"}}]}}`.
+Voice language packs (`support_new_language_download`) are fetched by the device itself from a cloud URL the app
+obtains from a voice-package listing (`setPreDownloadInfo`, then `getDownloadState`); which languages exist is
+decided by that cloud list, not by the app, so a pack for a given language cannot be assumed.
+
+What is needed in pytapo for a script of roughly 250 lines: the existing `HttpMediaSession` (digest, key exchange,
+framing) plus a small MPEG-TS muxer for G.711, the two JSON requests above and a socket read loop that does not
+assume every response carries a `session_id`. pytapo currently has no two-way-audio or user-audio upload.
+
+Inferred, not verified: the exact adaptation-field flag byte and PCR value of the app's muxer, the PMT PCR PID,
+whether the device accepts any standards-conforming TS, the real `device_sourcefile` codec list, and the error codes
+other than "line busy". Practical cautions: every login wakes a battery doorbell, an upload with an existing
+`audio_file_id` overwrites that clip, and uploading must not overlap a call or talk session.
+
 ## Using it with tapo-monitor
 
 The `batterywake` detection source puts the steps above into the monitor. It is opt-in
