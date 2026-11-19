@@ -1002,3 +1002,34 @@ def test_fetch_sd_clip_subprocess_window_start_none_without_stats(tmp_path):
             returncode=0, stdout=o, stderr="")
         assert sdclip.fetch_sd_clip_subprocess(_cfg(), 1000, str(tmp_path), run=run,
                                                python="PY") == (str(clip), None)
+
+
+def test_run_in_fresh_loop_closes_abandoned_async_generators(caplog):
+    """Returning from inside ``async for`` (pytapo getRecordingSnapshot) must not leave
+    pending aclose tasks behind ("Task was destroyed but it is pending!")."""
+    import gc
+    import logging
+
+    closed = []
+
+    async def inner():
+        try:
+            yield 1
+            yield 2
+        finally:
+            await asyncio.sleep(0.01)
+            closed.append(True)
+
+    async def outer():
+        async for x in inner():
+            yield x
+
+    async def first():
+        async for x in outer():
+            return x
+
+    with caplog.at_level(logging.ERROR, logger="asyncio"):
+        assert sdclip._run_in_fresh_loop(lambda: first()) == 1
+        gc.collect()
+    assert closed == [True]
+    assert not [r for r in caplog.records if "destroyed but it is pending" in r.getMessage()]

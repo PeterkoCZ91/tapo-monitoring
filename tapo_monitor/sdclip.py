@@ -165,6 +165,31 @@ def build_client(host, user, password, cloud_password):  # pragma: no cover - ne
     return apiguard.guard_client(Tapo(host, user, password, cloud_password or password))
 
 
+def _drain_loop(loop, grace=5.0):
+    """Let a finished loop's abandoned async generators close, then cancel what is left.
+
+    A coroutine that returns from inside ``async for`` (pytapo's getRecordingSnapshot)
+    leaves nested async generators suspended. When they are collected, the loop's
+    finalizer only *schedules* ``aclose()`` as a task, and ``shutdown_asyncgens`` no
+    longer knows them; closing the loop right away destroys those tasks pending and logs
+    "Task was destroyed but it is pending!" (and leaks the media session). So: let the
+    scheduled closers run to completion (bounded by ``grace``), cancel stragglers, and
+    shut the remaining generators down. Best effort, never raises.
+    """
+    try:
+        loop.run_until_complete(asyncio.sleep(0))   # finalizer callbacks create their tasks
+        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+        if pending:
+            _done, still = loop.run_until_complete(asyncio.wait(pending, timeout=grace))
+            for task in still:
+                task.cancel()
+            if still:
+                loop.run_until_complete(asyncio.gather(*still, return_exceptions=True))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+    except Exception:  # noqa: BLE001 - teardown only
+        pass
+
+
 def _run_in_fresh_loop(make_coro, timeout=SD_DOWNLOAD_TIMEOUT, cleanup=None):
     """Run ``make_coro()`` to completion on a dedicated thread with its own event loop.
 
@@ -204,10 +229,7 @@ def _run_in_fresh_loop(make_coro, timeout=SD_DOWNLOAD_TIMEOUT, cleanup=None):
             # stream) before tearing down the loop; otherwise closing leaves a pending
             # "async_generator_athrow" task and logs "coroutine 'aclose' was never
             # awaited" / "Task was destroyed but it is pending!".
-            try:
-                loop.run_until_complete(loop.shutdown_asyncgens())
-            except Exception:
-                pass
+            _drain_loop(loop)
             loop.close()
             asyncio.set_event_loop(None)
             with lock:
