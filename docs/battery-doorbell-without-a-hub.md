@@ -187,31 +187,35 @@ Upload sequence on the 8800 session (digest login and AES key exchange as for cl
    ```json
    {"type":"request","seq":1234,"params":{"method":"get","usr_def_audio":{
      "name":"My clip","type":"quick_response",
-     "audio_config":{"encode_type":"G711ulaw","sample_rate":"16"}}}}
+     "audio_config":{"encode_type":"G722","sample_rate":"16"}}}}
    ```
-   `audio_config` is only sent for non-8 kHz-a-law audio. Add `"audio_file_id":"<id>"` to overwrite an existing
+   `audio_config` is only sent for anything except 8 kHz G.711 a-law (for a D205 it is G.722, 16 kHz). Add `"audio_file_id":"<id>"` to overwrite an existing
    user clip instead of adding one.
 2. The device answers with `params.session_id`, `audio_file_id` (the allocated id) and `audio_file_index`
    (`error_code` non-zero means refused; "line busy" while a call or talk session is active).
 3. The audio is sent as small multipart parts, `Content-Type: audio/mp2t`, `X-Session-Id: <session_id>`
-   (and `X-If-Encrypt: 1` with the session AES key on the legacy cipher). Each part is 1024 bytes of raw G.711
-   wrapped in a tiny, self-contained MPEG-TS stream: PAT (PID 0), PMT (PID 66, stream type `0x90` for a-law or
-   `0x91` for u-law, which matches what pytapo already parses from the device), one PES on PID 68 with stream id
-   `0xC0`, a 5-byte PTS that advances by the chunk duration (64 ms at 16 kHz), continuity counters restarting at 0
-   in every part, MPEG-2 CRC32 on the tables.
+   (and `X-If-Encrypt: 1` with the session AES key on the legacy cipher). Each part is 1024 bytes of raw G.722
+   wrapped in a tiny, self-contained MPEG-TS stream: PAT (PID 0), PMT (PID 66, stream type `0x93` for G.722, `0x90`
+   a-law, `0x91` u-law; pytapo only parses the latter two), one PES on PID 68 with stream id `0xC0`, a 5-byte PTS
+   that advances by the chunk duration (128 ms per 1024 G.722 bytes at 16 kHz, i.e. 11520 ticks of 90 kHz; 64 ms
+   for G.711 at 16 kHz), continuity counters restarting at 0 in every part, MPEG-2 CRC32 on the tables.
 4. Finish with `{"type":"request","seq":1235,"params":{"method":"do","finish":"null"}}` (header `X-Session-Id`);
    `error_code` 0 in the answer within 8 seconds means the clip is stored. The app then sends `do stop` and
    re-reads `getQuickRespList`. `setQuickRespList` is not part of the upload (it only renames or reorders).
 
 Audio format: the app chooses it from the device (`getAudioConfig` with
 `{"audio_capability":{"name":["device_sourcefile"]}}` for devices that report `audioSourceCapability`, otherwise
-from the microphone capability), preferring OPUS, AAC, G.722, G.711 u-law, G.711 a-law. A D205 reports G.711 for
-speaker and microphone, so expect raw 8-bit G.711, mono, 16 kHz u-law (or 8 kHz a-law), without any header:
+from the microphone capability), preferring OPUS, AAC, G.722, G.711 u-law, G.711 a-law. **Measured on a D205
+(read-only call): `device_sourcefile` = `{"encode_type":["G722"],"sampling_rate":["16"]}`**, so the upload source is
+raw headerless G.722, mono, 16 kHz (64 kbit/s = 8000 bytes/s, 15 s max = 120000 bytes). The app encodes on the phone
+with a native G.722 encoder while recording; the sender only reads that file in 1024-byte chunks. ffmpeg produces the
+same byte stream (6 s clip -> 8000 bytes per second, decodes back to 16 kHz mono):
 
 ```sh
-ffmpeg -i clip.wav -t 15 -ac 1 -ar 16000 -c:a pcm_mulaw -f mulaw clip.ulaw
-ffmpeg -i clip.wav -t 15 -ac 1 -ar 8000  -c:a pcm_alaw  -f alaw  clip.alaw
+ffmpeg -i clip.wav -t 15 -ac 1 -ar 16000 -c:a g722 -f g722 clip.g722
 ```
+
+(G.711 variants `pcm_mulaw`/`pcm_alaw` exist in the app for devices that report them; this one does not.)
 
 Related calls: `delQuickResp` `{"quick_response":{"delete_usr_def_audio":{"id":["13184"]}}}`; rename via
 `setQuickRespList` with `{"quick_response":{"quick_resp_audio":[{"file_1":{"id":"13184","index":"1","name":"New"}}]}}`.
@@ -220,12 +224,13 @@ obtains from a voice-package listing (`setPreDownloadInfo`, then `getDownloadSta
 decided by that cloud list, not by the app, so a pack for a given language cannot be assumed.
 
 What is needed in pytapo for a script of roughly 250 lines: the existing `HttpMediaSession` (digest, key exchange,
-framing) plus a small MPEG-TS muxer for G.711, the two JSON requests above and a socket read loop that does not
-assume every response carries a `session_id`. pytapo currently has no two-way-audio or user-audio upload.
+framing) plus a small MPEG-TS muxer for G.722 (or G.711), the two JSON requests above and a socket read loop that does not
+assume every response carries a `session_id`. pytapo currently has no two-way-audio or user-audio upload, and its TS reader does not decode G.722 (stream type `0x93`).
 
 Inferred, not verified: the exact adaptation-field flag byte and PCR value of the app's muxer, the PMT PCR PID,
-whether the device accepts any standards-conforming TS, the real `device_sourcefile` codec list, and the error codes
-other than "line busy". Practical cautions: every login wakes a battery doorbell, an upload with an existing
+whether the device accepts any standards-conforming TS (and `0x93` as the G.722 stream type, which comes only from the
+app's muxer), that ffmpeg's G.722 encoder is acceptable in place of the app's native one, and the error codes other
+than "line busy". Practical cautions: every login wakes a battery doorbell, an upload with an existing
 `audio_file_id` overwrites that clip, and uploading must not overlap a call or talk session.
 
 ## Using it with tapo-monitor
