@@ -220,6 +220,7 @@ def collect(cfg, client_factory, cursor, *, now=time.time, sleep=time.sleep,
     jobs: list[Job] = []
     try:
         tc = int(client.getTimeCorrection() or 0)
+        log.info("battery camera %s: logged in, camera clock offset %ds", cfg.name, tc)
         deadline = now() + bw.event_wait
         events: list[dict] = []
         while True:
@@ -249,6 +250,10 @@ def collect(cfg, client_factory, cursor, *, now=time.time, sleep=time.sleep,
                                 cfg.name, type(exc).__name__)
                     recordings[date] = []
             rec = match_recording(start - tc, recordings[date])
+            log.info("battery camera %s: event start=%d end=%s alarm_type=%s events_1=%s "
+                     "ring=%s recording=%s", cfg.name, int(start), event.get("end_time"),
+                     event.get("alarm_type"), event.get("events_1"), is_ring(event),
+                     "matched" if rec is not None else "none")
             jobs.append(_job(cfg, client, event, rec, download, extract, job_dir,
                               snapshot, tc))
             cursor = max(cursor, start)
@@ -292,6 +297,9 @@ def _job(cfg, client, event, rec, download, extract, job_dir, snapshot=None, tc=
                 frames = [shot]
         except Exception as exc:  # noqa: BLE001 - no frame is today's behaviour
             log.warning("battery camera %s: snapshot failed (%s)", cfg.name, type(exc).__name__)
+    log.info("battery camera %s: clip=%s (%s bytes) frames=%d source=%s", cfg.name,
+             "yes" if clip else "no", os.path.getsize(clip) if clip and os.path.exists(clip) else 0,
+             len(frames), "clip" if clip and frames else ("snapshot" if frames else "none"))
     kept = set(frames)
     for name in os.listdir(directory):
         full = os.path.join(directory, name)

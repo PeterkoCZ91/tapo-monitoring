@@ -71,6 +71,9 @@ class WakeWatcher(threading.Thread):
             except Exception:  # noqa: BLE001 - a probe failure must not kill the watcher
                 log.exception("wakewatch %s: ping failed", self.camera)
                 up = False
+            if up != prev and prev is not None:
+                log.info("wakewatch %s: %s", self.camera, "awake (ping answers)" if up
+                         else "asleep (ping silent)")
             if woke(prev, up) and not (self._busy and self._busy(self.camera)):
                 try:
                     self.on_wake(self.camera)

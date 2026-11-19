@@ -117,8 +117,12 @@ class BatteryRunner:
         cfg = self._cams[name]
         with self._lock:
             cursor = self._cursors.get(name)
+        t0 = time.monotonic()
+        log.info("batterywake %s: wake, collecting since %s", name, cursor)
         jobs, new_cursor = self._collect(cfg, self._client_factory(cfg), cursor,
                                          now=self._now, sleep=self._sleep)
+        log.info("batterywake %s: collect done in %.1fs, %d job(s), cursor %s -> %s",
+                 name, time.monotonic() - t0, len(jobs), cursor, new_cursor)
         with self._lock:
             if self._stop.is_set():
                 # Stopping: the cursor stays so the next start collects these again.
