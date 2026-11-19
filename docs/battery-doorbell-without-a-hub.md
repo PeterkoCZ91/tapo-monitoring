@@ -168,10 +168,12 @@ doorbell **speaks out loud** when it is sent:
 which the app never does, so use `executeFunction` with the payload above. A battery doorbell is
 woken by the login that carries the call.
 
-### Custom quick responses: how the app uploads them (static analysis, not yet tested on a device)
+### Custom quick responses: how the app uploads them (tested on a D205, firmware 1.2.8)
 
-This section comes from reading the Tapo Android app (3.22.105) and the pytapo media session. It has not been
-run against a doorbell yet, so every byte-level detail marked "inferred" below still needs a live test.
+The protocol below was read from the Tapo Android app (3.22.105) and the pytapo media session, then
+confirmed on a D205: a 6-second Czech clip made with ffmpeg was stored as user clip 13184 (`finish` answered
+`error_code` 0, the clip showed up in `getQuickRespList` as writable) and played back intelligibly through
+`playQuickResp`.
 
 **Playing** a stored response is a plain control-channel call (HTTPS 443), see above.
 **Uploading** a user-defined response is different: it is not a JSON call on 443. The app records on the phone and
@@ -227,11 +229,12 @@ What is needed in pytapo for a script of roughly 250 lines: the existing `HttpMe
 framing) plus a small MPEG-TS muxer for G.722 (or G.711), the two JSON requests above and a socket read loop that does not
 assume every response carries a `session_id`. pytapo currently has no two-way-audio or user-audio upload, and its TS reader does not decode G.722 (stream type `0x93`).
 
-Inferred, not verified: the exact adaptation-field flag byte and PCR value of the app's muxer, the PMT PCR PID,
-whether the device accepts any standards-conforming TS (and `0x93` as the G.722 stream type, which comes only from the
-app's muxer), that ffmpeg's G.722 encoder is acceptable in place of the app's native one, and the error codes other
-than "line busy". Practical cautions: every login wakes a battery doorbell, an upload with an existing
-`audio_file_id` overwrites that clip, and uploading must not overlap a call or talk session.
+Confirmed on the device: the request JSON, stream type `0x93` for G.722, ffmpeg's G.722 encoder in place of the
+app's native one, 1024-byte parts with a fresh TS header each, `X-If-Encrypt` with the session key, and the `finish`
+answer. Still inferred: the exact adaptation-field and PCR bytes (the device accepted what was sent), and the error
+codes other than "line busy". The device checks nothing beyond the format, the 15-second limit and the five-clip
+limit, so anyone who can log in to the camera can store audio on it. Every login wakes a battery doorbell, an upload
+with an existing `audio_file_id` overwrites that clip, and uploading must not overlap a call or talk session.
 
 ## Using it with tapo-monitor
 
