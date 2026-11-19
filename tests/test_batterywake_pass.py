@@ -204,16 +204,18 @@ def test_runner_persists_cursor_with_its_jobs(tmp_path):
     assert runner.drain() == ([], {"door": 1000.0})
 
 
-def test_runner_cursor_none_first_then_stays(tmp_path):
+def test_runner_baseline_is_set_at_start_not_at_first_wake(tmp_path):
     seen = []
 
     def collect(cfg, client, cursor, **k):
         seen.append(cursor)
         return [], 42.0
     runner = _runner(_app(), collect)
+    start = runner.drain()[1]["door"]
+    assert start is not None
     runner.run_collect("door")
     runner.run_collect("door")
-    assert seen == [None, 42.0]
+    assert seen == [start, 42.0]
 
 
 def test_runner_wake_is_not_queued_twice_while_busy():

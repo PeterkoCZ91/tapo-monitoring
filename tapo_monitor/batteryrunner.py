@@ -50,6 +50,10 @@ class BatteryRunner:
         self._collect = collect
         self._ping = ping
         self._now = now
+        # No saved cursor: events older than this start are history, but the first wake
+        # (possibly the very press that woke the camera) must not become the baseline.
+        for n in self._cams:
+            self._cursors.setdefault(n, now())
         self._sleep = sleep
         self._lock = threading.Lock()
         self._jobs: list = []

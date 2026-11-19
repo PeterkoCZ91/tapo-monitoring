@@ -3245,6 +3245,11 @@ def _deliver_battery_ring(cfg, state, event, clip, frames, *, score, on_alert, s
         else:
             ok = notify.send_text(secrets["telegram_token"], secrets["telegram_chat"],
                                   caption)
+        log.info("batterywake %s: ring %s start=%s alarm_type=%s events_1=%s clip=%s "
+                 "age=%.0fs delivered=%s", cfg.name, state_word or "unknown",
+                 int(float(event.get("start_time") or 0)), event.get("alarm_type"),
+                 event.get("events_1"), bool(clip.get("path") or clip.get("clip")),
+                 max(0.0, now - float(event.get("start_time") or now)), ok)
         monitor.audit_event(cfg, event, "ring", "batterywake", "send", score=s,
                             telegram=ok)
         if ok:
