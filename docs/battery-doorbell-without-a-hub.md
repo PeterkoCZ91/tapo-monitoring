@@ -168,6 +168,18 @@ doorbell **speaks out loud** when it is sent:
 which the app never does, so use `executeFunction` with the payload above. A battery doorbell is
 woken by the login that carries the call.
 
+### What is official and what is not
+
+- **User clips are an app feature.** The app records up to five clips of 15 seconds on the phone and
+  uploads them; the doorbell reports `usr_def_audio_support` in `getQuickRespCapability`. Uploading from a
+  script copies what the app sends. It is not a documented TP-Link API, so a firmware update may change it.
+- **Language of the built-in clips.** `getQuickRespLanguage` returns `language_current` and `language_spare`
+  (both `EN` on the tested D205), and the capability says `support_new_language_download`. Language packs are
+  fetched by the doorbell from a TP-Link cloud list, not bundled in the app, so which languages exist is
+  decided by that list. Whether a Czech pack is offered has not been checked here.
+- **Not tested.** `setQuickRespLanguage` and the voice-pack download calls were read from the app but never
+  sent to a device.
+
 ### Custom quick responses: how the app uploads them (tested on a D205, firmware 1.2.8)
 
 The protocol below was read from the Tapo Android app (3.22.105) and the pytapo media session, then
