@@ -10,9 +10,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tapo_monitor import enrich
 from tapo_monitor import config as cfg
-from tapo_monitor import daemon, notify, runtime_state, snapshot
+from tapo_monitor import daemon, enrich, notify, runtime_state, snapshot
 from tests.conftest import FakeResponse as _Resp
 
 

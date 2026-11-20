@@ -1403,7 +1403,7 @@ any OpenAI-compatible vision server (llama.cpp, vLLM, Ollama, LM Studio):
 ```yaml
 groq:
   api_key_env: LOCAL_VISION_KEY
-  base_url: http://192.168.2.215:11436/v1
+  base_url: http://192.168.1.50:11436/v1
   model: local-vision
   json_mode: false
 

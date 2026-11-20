@@ -1,6 +1,8 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tapo_monitor import enrich
@@ -254,3 +256,27 @@ def test_vision_endpoint_failure_is_no_description(monkeypatch, tmp_path):
 
     monkeypatch.setattr(enrich.urllib.request, "urlopen", boom)
     assert enrich.groq_describe("key", _img(tmp_path)) == ""
+
+
+@pytest.mark.parametrize("reply,expected", [
+    ('{"person": false, "animal": null, "description": ""}', "empty scene"),
+    ('```json\n{"person": false, "animal": null, "description": ""}\n```', "empty scene"),
+    ('{"person": true, "animal": null, "description": "man walks left"}', "man walks left"),
+    ("man walks left", "man walks left"),
+    ("empty scene", "empty scene"),
+])
+def test_groq_describe_text_mode_reads_the_default_json_prompt(monkeypatch, tmp_path, reply, expected):
+    """json_mode: false with the default (JSON-asking) prompt must not leak raw JSON."""
+    import io
+    import json as _json
+
+    class _R(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    body = _json.dumps({"choices": [{"message": {"content": reply}}]}).encode()
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _R(body))
+    assert enrich.groq_describe("key", _img(tmp_path), json_mode=False) == expected

@@ -135,6 +135,22 @@ def _content_to_description(content):
     return EMPTY_SCENE
 
 
+def _text_to_description(reply):
+    """Map a free-text reply onto the caller contract (see ``groq_describe``)."""
+    text = str(reply or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+        if text[:4].lower() == "json":
+            text = text[4:].strip()
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return text      # plain text; a blank or "empty scene" still reads as empty
+    if isinstance(data, dict):
+        return _content_to_description(text)
+    return text
+
+
 def groq_describe(api_key, images, prompt=VISION_PROMPT, model=DEFAULT_MODEL,
                   max_tokens=160, timeout=20, base_url=DEFAULT_BASE_URL,
                   json_mode=True, user_agent=USER_AGENT):
@@ -185,10 +201,11 @@ def groq_describe(api_key, images, prompt=VISION_PROMPT, model=DEFAULT_MODEL,
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             reply = json.load(resp)["choices"][0]["message"]["content"]
         if not json_mode:
-            # Text mode: the prompt carries the marker, so the answer is the
-            # description. "empty scene" (or a blank) still reads as empty.
-            text = str(reply or "").strip()
-            return text
+            # Text mode: the server was not asked for JSON mode, but the default prompt
+            # still requests a JSON object, so read that first (tolerating a code fence)
+            # and fall back to the plain text of a custom prompt. The raw reply must never
+            # reach a caption: an unparsed {"person": false, ...} would not read as empty.
+            return _text_to_description(reply)
         return _content_to_description(reply)
     except Exception:
         return ""
