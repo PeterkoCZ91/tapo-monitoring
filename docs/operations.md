@@ -620,6 +620,46 @@ How it works and how to read it:
   `lowrest` resembles it and that labels are right. Label a random draw, not the frames the
   labeling queue finds most interesting, or the estimate is biased.
 
+### A vision model as a shadow target (optional)
+
+`tools/vision_shadow.py` is a shadow target for an OpenAI-compatible vision-language model
+(llama.cpp, vLLM, Ollama, LM Studio). It answers the scorer's `POST /score` (JPEG body) with
+`{"person": 0.9 | 0.0, "animal": 0.9 | 0.0, "description": ...}`: a verdict, not a calibrated
+probability, so it compares at thresholds only. It never takes part in an alert and never
+changes one; it exists to measure how a local model would have judged the same frames and to
+review its descriptions before using it for captions (`groq:` block, see
+[configuration](configuration.md)).
+
+```sh
+# the model server (llama.cpp shown; any OpenAI-compatible server works)
+llama-server -m model.gguf --mmproj mmproj.gguf --host 127.0.0.1 --port 11437 -t 8 -c 4096 --alias local-vision
+# the adapter, on loopback
+tools/vision_shadow.py --base-url http://127.0.0.1:11437/v1 --model local-vision \
+    --listen 127.0.0.1:8774 --log /srv/tapo-scorer/shadow/vision-shadow.jsonl
+```
+
+Then point a free shadow slot of the scorer at it:
+
+```sh
+TAPO_SCORER_SHADOW3_URL=http://127.0.0.1:8774/score
+TAPO_SCORER_SHADOW3_LOG=/srv/tapo-scorer/shadow/vision.jsonl
+TAPO_SCORER_SHADOW3_NAME=vision
+TAPO_SCORER_SHADOW3_TIMEOUT=60          # a cold model needs tens of seconds
+TAPO_SCORER_SHADOW3_QUEUE=4
+TAPO_SCORER_SHADOW3_MIN_INTERVAL=10     # at most one frame per 10 s; a model answers in 2-4 s warm
+```
+
+- The adapter's own log has `frame` (the same 16-character SHA-256 prefix the scorer writes
+  to its shadow log), `person`, `animal`, `animal_name`, `description`, `latency`, `model`
+  and `error`; join the two logs on `frame` to read descriptions next to the scores. It
+  rotates at 200 MB.
+- A reply that is not the JSON object the default prompt asks for (also inside a code fence,
+  or with a dropped quote or brace) is read as well as possible; free text answers `502`
+  (`bad_reply`) and is logged as an error, never as a score.
+- Compare with `tools/shadow_report.py` as for any other shadow. Small models (3B) hallucinate
+  persons; measure against hand labels before trusting any verdict.
+- Rollback: remove the `TAPO_SCORER_SHADOW3_*` lines and restart the scorer.
+
 ### Build a labeling set from two to four shadow targets
 
 `tools/label_selection.py` joins `shadow.jsonl` and `shadow2.jsonl` (plus the optional

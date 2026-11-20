@@ -179,6 +179,81 @@ def _text_to_description(reply):
     return text
 
 
+def vision_reply(api_key, images, prompt=VISION_PROMPT, model=DEFAULT_MODEL,
+                 max_tokens=160, timeout=20, base_url=DEFAULT_BASE_URL,
+                 json_mode=True, user_agent=USER_AGENT):
+    """The raw message content an OpenAI-compatible vision server answers for ``images``.
+
+    ``images`` is a path or a list of paths (thinned to ``MAX_IMAGES``). Raises on any
+    transport or HTTP failure; :func:`groq_describe` turns that into ``''``.
+    """
+    if isinstance(images, (str, bytes)) or not hasattr(images, "__iter__"):
+        images = [images]
+    content = [{"type": "text", "text": prompt}]
+    for image_path in select_frames(images):
+        with open(image_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        content.append({"type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+        "max_tokens": max_tokens,
+    }
+    if json_mode:
+        # The contract is a JSON object; an endpoint that does not support
+        # response_format runs in text mode instead.
+        payload["response_format"] = {"type": "json_object"}
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": user_agent,
+    }
+    if api_key:
+        # A local server needs no key, and some reject an empty bearer.
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(
+        base_url.rstrip("/") + "/chat/completions",
+        data=json.dumps(payload).encode(),
+        headers=headers,
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.load(resp)["choices"][0]["message"]["content"]
+
+
+def parse_verdict(reply):
+    """``{"person": bool|None, "animal": str, "description": str}`` from a model reply.
+
+    Reads the JSON object the default prompt asks for (also inside a code fence, and
+    when a small model dropped a quote or a brace). ``person`` is ``None`` when the
+    reply is not that object at all (free text): the caller decides what that means.
+    """
+    text = str(reply or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+        if text[:4].lower() == "json":
+            text = text[4:].strip()
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = None
+    if isinstance(data, dict):
+        person = data.get("person")
+        if isinstance(person, str):
+            person = person.strip().lower() in ("true", "yes", "1")
+        animal = data.get("animal")
+        return {"person": bool(person),
+                "animal": animal.strip() if isinstance(animal, str) else "",
+                "description": str(data.get("description") or "").strip()}
+    if text.lstrip().startswith("{") and _PERSON_RE.search(text):
+        person = _PERSON_RE.search(text).group(1).strip('"').lower() in ("true", "yes", "1")
+        animal = _ANIMAL_RE.search(text)
+        desc = _DESC_RE.search(text)
+        return {"person": person,
+                "animal": (animal.group(2) or "").strip() if animal else "",
+                "description": (desc.group(1) if desc else "").strip().rstrip('"}').strip()}
+    return {"person": None, "animal": "", "description": text}
+
+
 def groq_describe(api_key, images, prompt=VISION_PROMPT, model=DEFAULT_MODEL,
                   max_tokens=160, timeout=20, base_url=DEFAULT_BASE_URL,
                   json_mode=True, user_agent=USER_AGENT):
@@ -196,38 +271,10 @@ def groq_describe(api_key, images, prompt=VISION_PROMPT, model=DEFAULT_MODEL,
     of dropping it. The fast path (Pi 4) still returns in ~1-2 s, so the higher ceiling
     only rescues the slow uploads.
     """
-    if isinstance(images, (str, bytes)) or not hasattr(images, "__iter__"):
-        images = [images]
     try:
-        content = [{"type": "text", "text": prompt}]
-        for image_path in select_frames(images):
-            with open(image_path, "rb") as f:
-                b64 = base64.b64encode(f.read()).decode()
-            content.append({"type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-        payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": content}],
-            "max_tokens": max_tokens,
-        }
-        if json_mode:
-            # The contract is a JSON object; an endpoint that does not support
-            # response_format runs in text mode instead.
-            payload["response_format"] = {"type": "json_object"}
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": user_agent,
-        }
-        if api_key:
-            # A local server needs no key, and some reject an empty bearer.
-            headers["Authorization"] = f"Bearer {api_key}"
-        req = urllib.request.Request(
-            base_url.rstrip("/") + "/chat/completions",
-            data=json.dumps(payload).encode(),
-            headers=headers,
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            reply = json.load(resp)["choices"][0]["message"]["content"]
+        reply = vision_reply(api_key, images, prompt=prompt, model=model,
+                             max_tokens=max_tokens, timeout=timeout, base_url=base_url,
+                             json_mode=json_mode, user_agent=user_agent)
         if not json_mode:
             # Text mode: the server was not asked for JSON mode, but the default prompt
             # still requests a JSON object, so read that first (tolerating a code fence)

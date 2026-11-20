@@ -5,6 +5,18 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- The caption call (`groq:` block) can use any OpenAI-compatible vision endpoint:
+  `base_url`, `model`, `prompt`, `max_tokens`, `timeout` and `json_mode`, with the key still
+  read from the environment variable named by `api_key_env` and no `Authorization` header
+  when no key is set. Defaults are Groq's, so an unchanged configuration behaves as before.
+  With `json_mode: false` the reply is read as text: the JSON object the default prompt asks
+  for first (also inside a code fence, or with a dropped quote or brace), plain text otherwise.
+  Contributed by famewolf (#10).
+- `tools/vision_shadow.py`: a scorer shadow target backed by an OpenAI-compatible vision
+  model (llama.cpp, vLLM, Ollama, LM Studio). It answers the scorer's `/score` with a person
+  / animal verdict and writes the model's description and latency to its own log, keyed by
+  the same `frame` hash as the scorer's shadow log. It never takes part in an alert. See
+  [operations](docs/operations.md#a-vision-model-as-a-shadow-target-optional).
 - Opt-in detection source `batterywake` for a sleeping battery camera such as the Tapo
   D205 doorbell, which must not be polled because every login wakes it. The camera is
   only pinged; when it wakes by itself (motion, a person, a press) the monitor logs in
@@ -70,6 +82,10 @@ All notable changes to this project are documented here.
   (owner-only) and the index, and never overwrites a frame already in the dataset.
 
 ### Fixed
+- A download of an SD recording or of an event snapshot no longer ends with
+  "Task was destroyed but it is pending!" in the log: the event loop of the download now lets
+  the async generators it abandoned close (pytapo's snapshot helper returns from inside an
+  `async for`) before it is closed.
 - A camera follow-up from the SD card that delivers a photo showing a person now also
   closes the still-open sampler group of that passage. The group has no event start for
   the alert gate, so once the 120 s wall-clock cooldown was over, a later frame of the
