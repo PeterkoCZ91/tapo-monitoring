@@ -280,3 +280,29 @@ def test_groq_describe_text_mode_reads_the_default_json_prompt(monkeypatch, tmp_
     body = _json.dumps({"choices": [{"message": {"content": reply}}]}).encode()
     monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _R(body))
     assert enrich.groq_describe("key", _img(tmp_path), json_mode=False) == expected
+
+
+@pytest.mark.parametrize("reply,expected", [
+    # a real reply of a small local model: the closing quote is missing
+    ('{"person": true, "animal": null, "description": "Person in suit points and yells in frame 3.}',
+     "Person in suit points and yells in frame 3."),
+    ('{"person": true, "animal": null, "description": "Man walks left"', "Man walks left"),
+    ('{"person": false, "animal": null, "description": ""', "empty scene"),
+    ('{"person": false, "animal": "fox", "description": "A fox crosses"}x', "A fox crosses"),
+    ('{"person": true}', "person"),
+    ("{not json at all", "{not json at all"),
+])
+def test_text_mode_salvages_a_broken_json_reply(monkeypatch, tmp_path, reply, expected):
+    import io
+    import json as _json
+
+    class _R(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    body = _json.dumps({"choices": [{"message": {"content": reply}}]}).encode()
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _R(body))
+    assert enrich.groq_describe("key", _img(tmp_path), json_mode=False) == expected

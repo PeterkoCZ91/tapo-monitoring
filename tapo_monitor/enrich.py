@@ -7,6 +7,7 @@ I/O-bound and stay with the daemon for now — only the selection logic is extra
 
 import base64
 import json
+import re
 import urllib.request
 
 VISION_PROMPT = (
@@ -135,6 +136,32 @@ def _content_to_description(content):
     return EMPTY_SCENE
 
 
+_PERSON_RE = re.compile(r'"person"\s*:\s*(true|false|"[^"]*")', re.IGNORECASE)
+_ANIMAL_RE = re.compile(r'"animal"\s*:\s*(null|"([^"]*)")', re.IGNORECASE)
+_DESC_RE = re.compile(r'"description"\s*:\s*"(.*?)(?:"\s*[,}]|"?\s*}?\s*$)', re.DOTALL)
+
+
+def _salvage_json_text(text):
+    """Best effort on a reply that looks like the JSON object but does not parse.
+
+    Small local models drop a quote or a brace now and then. The raw text must never
+    become a caption, so the three fields are read with patterns; ``None`` when the text
+    is not that object at all (plain prose is returned as it is by the caller).
+    """
+    if not text.lstrip().startswith("{") or not _PERSON_RE.search(text):
+        return None
+    person = _PERSON_RE.search(text).group(1).strip('"').lower() in ("true", "yes", "1")
+    animal = _ANIMAL_RE.search(text)
+    animal = (animal.group(2) or "").strip() if animal else ""
+    desc = _DESC_RE.search(text)
+    desc = (desc.group(1) if desc else "").strip().rstrip('"}').strip()
+    if person:
+        return desc or "person"
+    if animal:
+        return desc or animal
+    return EMPTY_SCENE
+
+
 def _text_to_description(reply):
     """Map a free-text reply onto the caller contract (see ``groq_describe``)."""
     text = str(reply or "").strip()
@@ -145,7 +172,8 @@ def _text_to_description(reply):
     try:
         data = json.loads(text)
     except ValueError:
-        return text      # plain text; a blank or "empty scene" still reads as empty
+        salvaged = _salvage_json_text(text)
+        return text if salvaged is None else salvaged
     if isinstance(data, dict):
         return _content_to_description(text)
     return text
