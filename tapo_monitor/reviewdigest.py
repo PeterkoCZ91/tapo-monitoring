@@ -32,6 +32,7 @@ log = logging.getLogger(__name__)
 ENV_TIME = "TAPO_REVIEW_DIGEST_TIME"
 ENV_MAX_PHOTOS = "TAPO_REVIEW_DIGEST_MAX_PHOTOS"
 ENV_PROBLEMS_ONLY = "TAPO_REVIEW_DIGEST_PROBLEMS_ONLY"
+ENV_LOG_ONLY = "TAPO_REVIEW_DIGEST_LOG_ONLY"
 ENV_EXPECTED_FINGERPRINT = "TAPO_EXPECTED_FINGERPRINT"
 DEFAULT_MAX_PHOTOS = 4
 # Scorer failures below this share of requests are noise (a handful of timeouts in
@@ -799,6 +800,13 @@ def run_if_due(*, env=None, now=None, send_text, send_photo, health=None, ledger
                     if fleet else network + alerts)
         if sections:
             text = text + "\n\n" + "\n".join(sections)
+        if (env.get(ENV_LOG_ONLY) or "").strip().lower() in ("1", "true", "yes", "on"):
+            # Journal only: no Telegram text or photos, but the day is still marked and
+            # the scorer baseline advanced, exactly as after a delivered digest.
+            mark_sent(review_dir, now)
+            _save_scorer_baseline(review_dir, raw_scorer)
+            log.info("review digest logged (log only)\n%s", text)
+            return True
         if not send_text(text):
             log.warning("review digest delivery failed; will retry next tick")
             return False

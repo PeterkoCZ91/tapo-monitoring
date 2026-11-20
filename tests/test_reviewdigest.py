@@ -241,6 +241,26 @@ def test_run_if_due_sends_text_and_capped_photos_once(tmp_path):
     assert len(texts) == 1 and len(photos) == 3
 
 
+def test_run_if_due_log_only_sends_nothing_but_marks_the_day(tmp_path, caplog):
+    review_dir = str(tmp_path)
+    now = _local_ts(2026, 8, 13, 21, 0)
+    _write_entry(review_dir, "e0.jpg", now - 60, "front", 0.64)
+    texts, photos = [], []
+    env = dict(_env(tmp_path), TAPO_REVIEW_DIGEST_LOG_ONLY="1")
+
+    def run(at):
+        return reviewdigest.run_if_due(
+            env=env, now=at,
+            send_text=lambda t: texts.append(t) or True,
+            send_photo=lambda p, c: photos.append((p, c)) or True)
+
+    with caplog.at_level("INFO", logger=reviewdigest.log.name):
+        assert run(now) is True
+    assert texts == [] and photos == []
+    assert "1 suppressed frame(s)" in caplog.text
+    assert run(now + 600) is False
+
+
 def test_run_if_due_logs_the_full_digest_text(tmp_path, caplog):
     # The message went only to Telegram, so reading what a host said meant asking the owner
     # to paste it. The journal now carries the same text.

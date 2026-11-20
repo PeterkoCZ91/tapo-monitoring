@@ -1540,7 +1540,12 @@ alerts. A failed send retries on the next tick; nothing here can raise into the 
 export TAPO_REVIEW_DIGEST_TIME=20:45      # off when unset
 export TAPO_REVIEW_DIGEST_MAX_PHOTOS=4    # optional, default 4
 export TAPO_REVIEW_DIGEST_PROBLEMS_ONLY=1 # optional: skip healthy daily digests and photos
+export TAPO_REVIEW_DIGEST_LOG_ONLY=1      # optional: write the digest to the journal, send nothing
 ```
+
+With `TAPO_REVIEW_DIGEST_LOG_ONLY=1` the digest is built on schedule and written to the
+journal (`review digest logged (log only)`), but no Telegram text or photos are sent; the
+day is still marked and the scorer baseline advanced.
 
 With `TAPO_REVIEW_DIGEST_PROBLEMS_ONLY=1`, a healthy fleet stays silent. Degraded or
 unknown fleet health still produces the scheduled daily digest; delivery failures retry.
