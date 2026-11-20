@@ -5,6 +5,12 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Tapo C100 4.0 (firmware 1.9.1) is a documented model: [model notes](docs/c100.md) and an
+  anonymized report fixture. It is a fixed-lens camera whose events carry `alarm_type 2` only,
+  so it runs with `event_profile: default`; the daemon no longer tries to repair vehicle
+  detection, SmartTrack or auto-track on it (each control pass used to log three warnings).
+- `TAPO_REVIEW_DIGEST_LOG_ONLY=1` writes the daily review digest to the journal instead of
+  sending it to Telegram; the day is still marked and the scorer baseline advanced.
 - The caption call (`groq:` block) can use any OpenAI-compatible vision endpoint:
   `base_url`, `model`, `prompt`, `max_tokens`, `timeout` and `json_mode`, with the key still
   read from the environment variable named by `api_key_env` and no `Authorization` header
