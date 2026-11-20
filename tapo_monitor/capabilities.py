@@ -164,17 +164,32 @@ def collect_snapshot(client, channels=()):
     return {"schema_version": SCHEMA_VERSION, "groups": groups}
 
 
-def _verified_vehicle_identity(basic_info):
-    """Whether this is the exact hardware/firmware with verified absent vehicle AI."""
+# Exact hardware/firmware identities whose answers were verified on a real unit (see
+# tests/fixtures/cameras/): vehicle AI is absent on both, and the C100 also has a fixed
+# lens, i.e. no SmartTrack or auto-track to repair.
+_VERIFIED_NO_VEHICLE = (
+    ("C216", "1.0", "1.3.2 Build 260820 Rel.65461n"),
+    ("C100", "4.0", "1.9.1 Build 260519 Rel.2746n"),
+)
+_VERIFIED_FIXED_LENS = (
+    ("C100", "4.0", "1.9.1 Build 260519 Rel.2746n"),
+)
+
+
+def _identity(basic_info):
+    """(model, hw, firmware) from a getBasicInfo answer, or None."""
     if not isinstance(basic_info, Mapping):
-        return False
+        return None
     device = basic_info.get("device_info")
     info = device.get("basic_info") if isinstance(device, Mapping) else None
-    return isinstance(info, Mapping) and all(info.get(key) == value for key, value in {
-        "device_model": "C216",
-        "hw_version": "1.0",
-        "sw_version": "1.3.2 Build 260820 Rel.65461n",
-    }.items())
+    if not isinstance(info, Mapping):
+        return None
+    return (info.get("device_model"), info.get("hw_version"), info.get("sw_version"))
+
+
+def _verified_vehicle_identity(basic_info):
+    """Whether this is the exact hardware/firmware with verified absent vehicle AI."""
+    return _identity(basic_info) in _VERIFIED_NO_VEHICLE
 
 
 def verified_unsupported_operation(basic_info, group, name, reading):
@@ -192,37 +207,47 @@ def verified_unsupported_operation(basic_info, group, name, reading):
     )
 
 
+def _fresh_basic_info(client):
+    """The client's identity: a fresh ``getBasicInfo`` read, cached on it for an hour.
+
+    The login-time ``basicInfo`` can be flat (KLAP) or stale after a firmware upgrade, so
+    it is only the fallback for a client without that getter; an unreadable fresh
+    identity returns None (unverified). The repair runs every control pass and a
+    reconnect (new client) rereads it anyway.
+    """
+    cached = getattr(client, "_tapo_vehicle_identity", None)
+    if isinstance(cached, tuple) and time.monotonic() - cached[0] < 3600:
+        return cached[1]
+    fresh = _probe(client, "getBasicInfo")
+    if fresh.get("state") == "available":
+        basic_info = fresh.get("value")
+    elif fresh.get("reason") == "missing_method":
+        basic_info = getattr(client, "basicInfo", None)
+    else:
+        return None
+    try:
+        client._tapo_vehicle_identity = (time.monotonic(), basic_info)
+    except AttributeError:
+        pass
+    return basic_info
+
+
 def absent_vehicle_detection(client):
     """Whether an OFF repair targets verified absent vehicle AI on this client.
 
-    The identity is the twin's source: a fresh ``getBasicInfo`` read, because the
-    login-time ``basicInfo`` can be flat (KLAP) or stale after a firmware upgrade. Only
-    a client without that getter falls back to the login identity; an unreadable fresh
-    identity counts as unverified, so the repair still runs. Only the exact tested
-    identity gets the extra vehicle getter; each repair rechecks it. No persistent
-    absence cache.
+    Only the exact tested identities get the extra vehicle getter; each repair rechecks
+    it. No persistent absence cache.
     """
-    # The identity verdict is cached on the client for an hour: the repair runs every
-    # control pass and a reconnect (new client) rereads it anyway.
-    cached = getattr(client, "_tapo_vehicle_identity", None)
-    if isinstance(cached, tuple) and time.monotonic() - cached[0] < 3600:
-        basic_info = cached[1]
-    else:
-        fresh = _probe(client, "getBasicInfo")
-        if fresh.get("state") == "available":
-            basic_info = fresh.get("value")
-        elif fresh.get("reason") == "missing_method":
-            basic_info = getattr(client, "basicInfo", None)
-        else:
-            return False
-        try:
-            client._tapo_vehicle_identity = (time.monotonic(), basic_info)
-        except AttributeError:
-            pass
+    basic_info = _fresh_basic_info(client)
     if not _verified_vehicle_identity(basic_info):
         return False
     return verified_unsupported_operation(
         basic_info, "detection", "vehicle", _probe(client, "getVehicleDetection"))
+
+
+def fixed_lens(client):
+    """Whether this client is a verified fixed-lens model (nothing to track or aim)."""
+    return _identity(_fresh_basic_info(client)) in _VERIFIED_FIXED_LENS
 
 
 def storage_warnings(snapshot):

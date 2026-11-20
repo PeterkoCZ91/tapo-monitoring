@@ -670,6 +670,10 @@ def apply_plan(cam, plan: CameraPlan, reliability_config=None, *,
     # master switch, so ensure_autotrack (setAutoTrackTarget) has to stay truly last.
     # Clear the separate tracking filters when parked as well: switching the master
     # off alone leaves the previous night's people-following filter enabled.
+    if not plan.autotrack_on and capabilities.fixed_lens(cam):
+        # A verified fixed-lens model has no SmartTrack or auto-track: the writes are
+        # refused and the read-back can never confirm, which warned on every pass.
+        return True
     if _repair_allowed(reliability_config, "smarttrack"):
         kinds = plan.smarttrack if plan.autotrack_on else ()
         _repair("smarttrack", lambda: tracking.apply_smarttrack(cam, kinds),

@@ -76,6 +76,97 @@ def test_absent_vehicle_repairs_when_fresh_identity_is_unreadable():
     assert capabilities.absent_vehicle_detection(Client()) is False
 
 
+C100_FW = "1.9.1 Build 260519 Rel.2746n"
+
+
+def _c100(firmware=C100_FW, model="C100", hw="4.0"):
+    return {"device_info": {"basic_info": {
+        "device_model": model, "hw_version": hw, "sw_version": firmware}}}
+
+
+def test_fixed_lens_only_for_the_verified_c100_identity():
+    def client(info):
+        class Client:
+            def getBasicInfo(self):
+                return info
+        return Client()
+
+    assert capabilities.fixed_lens(client(_c100())) is True
+    assert capabilities.fixed_lens(client(_c100(firmware="1.9.2 Build 1"))) is False
+    assert capabilities.fixed_lens(client(_c100(hw="5.0"))) is False
+    assert capabilities.fixed_lens(client(_info(GOOD_FW))) is False   # a C216 has a motor
+
+
+def test_absent_vehicle_covers_the_verified_c100():
+    class Client:
+        def getBasicInfo(self):
+            return _c100()
+
+        def getVehicleDetection(self):
+            raise REFUSED
+
+    assert capabilities.absent_vehicle_detection(Client()) is True
+
+
+class _FixedLensClient:
+    def __init__(self):
+        self.writes = []
+        self.reads = []
+
+    def getBasicInfo(self):
+        return _c100()
+
+    def getVehicleDetection(self):
+        raise REFUSED
+
+    def getMotionDetection(self):
+        return {"enabled": "on"}
+
+    def setMotionDetection(self, **kwargs):
+        self.writes.append("motion")
+
+    def setPersonDetection(self, *args, **kwargs):
+        self.writes.append("person")
+
+    def setVehicleDetection(self, *args, **kwargs):
+        self.writes.append("vehicle")
+
+    def executeFunction(self, name, payload=None):
+        self.writes.append(name)
+        raise REFUSED
+
+    def setAutoTrackTarget(self, enabled):
+        self.writes.append("autotrack")
+
+    def getAutoTrackTarget(self):
+        self.reads.append("autotrack")
+        raise REFUSED
+
+
+def test_apply_plan_leaves_tracking_alone_on_a_fixed_lens():
+    cam = _FixedLensClient()
+    plan = daemon.plan_camera(_cam(), night=False, rain_active=False)
+    assert plan.autotrack_on is False
+    failures = {}
+    assert daemon.apply_plan(cam, plan, repair_failures=failures) is True
+    assert "setSmartTrackConfig" not in cam.writes
+    assert "setTargetTrackConfig" not in cam.writes and "autotrack" not in cam.writes
+    assert "vehicle" not in cam.writes
+    assert cam.reads == []
+    assert failures == {}
+
+
+def test_apply_plan_still_asks_a_fixed_lens_for_tracking_when_configured(monkeypatch):
+    from tapo_monitor import tracking
+    monkeypatch.setattr(tracking._time, "sleep", lambda _: None)
+    cam = _FixedLensClient()
+    plan = daemon.plan_camera(_cam(tracking={"smarttrack": ["people"]}),
+                              night=True, rain_active=False)
+    assert plan.autotrack_on is True
+    daemon.apply_plan(cam, plan, repair_failures={})
+    assert "setSmartTrackConfig" in cam.writes     # a requested feature is never hidden
+
+
 # 2. motion sensitivity failure is counted --------------------------------------------
 
 def test_apply_plan_counts_refused_motion_sensitivity(monkeypatch):
