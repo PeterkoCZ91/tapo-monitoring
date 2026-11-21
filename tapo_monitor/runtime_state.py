@@ -22,7 +22,7 @@ from . import health
 
 SCHEMA_VERSION = 1
 # Hub retries and SD follow-ups both expire after ten minutes; an hour-old file can
-# only replay stale work.
+# only replay stale work. (Announced notice states are exempt, see load().)
 MAX_AGE = 3600
 
 
@@ -173,6 +173,22 @@ def _restore_cooldowns(rows, target):
         target[(camera, key)] = float(ts)
 
 
+def _restore_announced(payload, state):
+    """Restore what was already announced. Age does not matter: an announcement is a fact
+    about the past, and forgetting it makes every restart repeat the same notice."""
+    announced = payload.get("privacy_announced") or {}
+    if isinstance(announced, dict) and hasattr(state, "privacy_announced"):
+        state.privacy_announced.update(
+            {str(k): v for k, v in announced.items() if isinstance(v, bool)})
+    app_push = payload.get("app_push_announced") or {}
+    if isinstance(app_push, dict) and hasattr(state, "app_push_announced"):
+        state.app_push_announced.update(
+            {str(k): v for k, v in app_push.items() if isinstance(v, bool)})
+    detection = payload.get("detection_announced") or {}
+    if isinstance(detection, dict) and hasattr(state, "detection_announced"):
+        state.detection_announced.update(_detection_announced(detection))
+
+
 def load(path, state, now, logger=None, max_age=MAX_AGE):
     """Restore queues and cooldowns into ``state``. Returns what was restored, as counts.
 
@@ -191,7 +207,9 @@ def load(path, state, now, logger=None, max_age=MAX_AGE):
             raise ValueError("runtime state has no saved_at")
         if now - saved_at > max_age:
             if logger is not None:
-                logger.info("runtime state is %ds old; discarded", int(now - saved_at))
+                logger.info("runtime state is %ds old; queues and cooldowns discarded",
+                            int(now - saved_at))
+            _restore_announced(payload, state)
             return empty
         hub = payload.get("pending_hub") or []
         sd = payload.get("pending_sd") or []
@@ -225,17 +243,7 @@ def load(path, state, now, logger=None, max_age=MAX_AGE):
     state.pending_sd.extend(kept_sd)
     state.last_alert.update(last_alert)
     state.last_event_start.update(last_event_start)
-    announced = payload.get("privacy_announced") or {}
-    if isinstance(announced, dict) and hasattr(state, "privacy_announced"):
-        state.privacy_announced.update(
-            {str(k): v for k, v in announced.items() if isinstance(v, bool)})
-    app_push = payload.get("app_push_announced") or {}
-    if isinstance(app_push, dict) and hasattr(state, "app_push_announced"):
-        state.app_push_announced.update(
-            {str(k): v for k, v in app_push.items() if isinstance(v, bool)})
-    detection = payload.get("detection_announced") or {}
-    if isinstance(detection, dict) and hasattr(state, "detection_announced"):
-        state.detection_announced.update(_detection_announced(detection))
+    _restore_announced(payload, state)
     if hasattr(state, "battery_cursor"):
         state.battery_cursor.update(_cursor_map(payload.get("battery_cursor")))
     state.runtime_saved = snapshot(state, logger)

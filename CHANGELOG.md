@@ -88,6 +88,7 @@ All notable changes to this project are documented here.
   (owner-only) and the index, and never overwrites a frame already in the dataset.
 
 ### Fixed
+- A restart after more than an hour no longer repeats status notices (privacy, detection, Tapo app notifications): the runtime state file is discarded when stale, and with it the record of what had been announced. The announced states are now restored regardless of age; queues and cooldowns still expire.
 - A download of an SD recording or of an event snapshot no longer ends with
   "Task was destroyed but it is pending!" in the log: the event loop of the download now lets
   the async generators it abandoned close (pytapo's snapshot helper returns from inside an

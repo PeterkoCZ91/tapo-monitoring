@@ -71,6 +71,19 @@ def test_stale_file_is_discarded_whole(tmp_path):
     assert after.pending_hub == [] and after.last_alert == {}
 
 
+def test_stale_file_still_remembers_what_was_announced(tmp_path):
+    path = tmp_path / "runtime.json"
+    before = _state_with_work(tmp_path)
+    before.app_push_announced["cam"] = False
+    before.privacy_announced["cam"] = True
+    runtime_state.save(path, runtime_state.snapshot(before), now=1000)
+    after = daemon.MonitorState()
+    runtime_state.load(path, after, now=1000 + runtime_state.MAX_AGE + 1)
+    assert after.app_push_announced == {"cam": False}
+    assert after.privacy_announced == {"cam": True}
+    assert after.pending_hub == [] and after.last_alert == {}
+
+
 def test_corrupt_or_foreign_file_starts_empty(tmp_path):
     path = tmp_path / "runtime.json"
     for content in ("{not json", json.dumps({"version": 99, "saved_at": 1000}),
