@@ -798,8 +798,50 @@ def summarize(report):
                  f"alarm_type values {sorted(alarms) or '-'}")
     lines.append("unknown events_1 bits: " + (", ".join(
         f"{bit} (value {1 << bit})" for bit in sorted(unknown)) or "none"))
+    lines += _suggestions(cam, profile, pairs, getters)
     redacted = report.get("redacted_keys") or []
     lines.append(f"redacted values: {len(redacted)}")
+    return lines
+
+
+def _suggestions(cam, profile, pairs, getters):
+    """Lines that help a contributor write a profile row and a camera entry. Pure.
+
+    Only what the report supports: a bit keeps the name the default table gives it, a bit
+    the table does not know is marked as needing the app, and a report with no events says
+    so instead of guessing.
+    """
+    lines = []
+    table = (profile or detection.DEFAULT_PROFILE).bits
+    seen: dict = {}
+    for events_1, alarm in pairs:
+        raw = detection.decode_events_1(events_1, profile, alarm)["raw"]
+        for bit in range(raw.bit_length()):
+            if raw & (1 << bit):
+                names = seen.setdefault(bit, set())
+                if alarm is not None:
+                    names.add(f"alarm_type {alarm}")
+    if not pairs:
+        lines.append("suggested bits: none, the report has no events "
+                     "(run again with --watch while someone walks past)")
+    elif profile is None:
+        lines.append("suggested event_profile row (bit: name the default table gives it; "
+                     "'?' means confirm in the app before naming it):")
+        for bit in sorted(seen):
+            alarms = sorted(seen[bit])
+            lines.append(f"  bit {bit} (value {1 << bit}): {table.get(bit) or '?'}"
+                         + (f"  [{', '.join(alarms)}]" if alarms else ""))
+    unsupported = sorted({g.get("method") for g in getters
+                          if g.get("state") == "error" and g.get("method")})
+    if unsupported:
+        lines.append("answered an error to: " + ", ".join(unsupported))
+    model = str(cam.get("model") or "model").lower()
+    lines += ["camera entry to start from (fill in host and credentials):",
+              f"  - name: {model}",
+              "    host: <camera address>",
+              "    user_env: TAPO_USER",
+              "    password_env: TAPO_PASSWORD",
+              f"    event_profile: {profile.name if profile else 'default'}"]
     return lines
 
 

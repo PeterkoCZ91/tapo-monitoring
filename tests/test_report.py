@@ -521,3 +521,24 @@ def test_resanitize_is_idempotent_and_drops_unknown_fields():
     assert "values.detection.motion.note" in again["redacted_keys"]
     with pytest.raises(ValueError):
         report.resanitize({"schema": "other"})
+
+
+def test_summarize_suggests_a_row_and_a_camera_entry_for_an_unknown_model():
+    built = _build()
+    built["camera"]["model"] = "D999"
+    built["events"]["recent"] = [{"alarm_type": 6, "events_1": 32},
+                                 {"alarm_type": 9, "events_1": 128}]
+    lines = report.summarize(built)
+    assert "  bit 5 (value 32): pir  [alarm_type 6]" in lines
+    assert "  bit 7 (value 128): ?  [alarm_type 9]" in lines
+    assert "  - name: d999" in lines
+    assert "    event_profile: default" in lines
+
+
+def test_summarize_without_events_asks_for_a_watch_and_keeps_a_known_profile():
+    built = _build(camera=FakeCamera(events=[]))
+    built["camera"]["model"] = "C545D"
+    lines = report.summarize(built)
+    assert any("no events" in line and "--watch" in line for line in lines)
+    assert "    event_profile: c545d" in lines
+    assert not any(line.startswith("suggested event_profile row") for line in lines)

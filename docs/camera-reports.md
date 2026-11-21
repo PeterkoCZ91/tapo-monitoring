@@ -38,7 +38,7 @@ tapo-monitor report --summarize private/reports/my-camera.json
 | `--watch SECONDS` | poll `getEvents` every `--interval` seconds (default 5, minimum 3) while you walk past; stops early after 5 failed polls in a row |
 | `--rtsp` | `ffprobe` `stream1` / `stream2` (codec, size, frame rate only), when ffmpeg is installed |
 | `--yes` | skip the confirmation prompt |
-| `--summarize FILE` | offline: working and failing getters, unknown `events_1` bits, matching `event_profile` |
+| `--summarize FILE` | offline: working and failing getters, unknown `events_1` bits, matching `event_profile`, a suggested profile row and a camera entry to start from |
 
 ## What is in the file
 

@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Added
+- `tapo-monitor report --summarize` now also prints a suggested `event_profile` row (each
+  `events_1` bit seen, with the name the default table gives it or `?` when it needs
+  confirming in the app, and the `alarm_type` it came with), the getters the camera
+  answered an error to, and a camera entry to start a `cameras.yaml` from. A report with
+  no events says to run again with `--watch`.
+
 ## [0.16.0] - 2026-11-21
 
 ### Added
