@@ -35,6 +35,30 @@ def _cam(**overrides):
 
 # ── plan_camera (pure) ───────────────────────────────────────────────────────
 
+def test_camera_answers_tcp_reachability_uses_tcp_not_ping(monkeypatch):
+    # Opt-in reachability: tcp lets an unprivileged container skip ICMP. The
+    # default path must still call ping.
+    cfg = _cam(reachability="tcp")
+    calls = {"ping": 0, "tcp": 0}
+
+    def fake_ping(host):
+        calls["ping"] += 1
+        return False
+
+    def fake_tcp(host, timeout=1):
+        calls["tcp"] += 1
+        return True
+
+    monkeypatch.setattr(daemon.camera, "ping_reachable", fake_ping)
+    monkeypatch.setattr(daemon.camera, "tcp_reachable", fake_tcp)
+    assert daemon._camera_answers(cfg, None, 0) is True
+    assert calls == {"ping": 0, "tcp": 1}
+
+    default = _cam()
+    assert daemon._camera_answers(default, None, 0) is False
+    assert calls == {"ping": 1, "tcp": 1}
+
+
 def test_plan_tracking_night_dry():
     plan = daemon.plan_camera(_cam(), night=True, rain_active=False)
     assert plan.autotrack_on is True
