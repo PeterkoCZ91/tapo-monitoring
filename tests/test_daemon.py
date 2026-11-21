@@ -495,6 +495,49 @@ def test_select_recording_frame_picks_sharpest_above_threshold():
     assert s == 0.7
 
 
+def test_select_recording_frame_rejects_a_sequence_of_only_small_people(monkeypatch):
+    # Every card frame holds a confident but distant person. No usable close
+    # picture exists, so the follow-up records too_far and sends nothing.
+    cam = _cam(sd_snapshot=True, snapshot_source="sd",
+               scorer={"url": "http://x/score", "threshold": 0.4},
+               min_person_height=0.30)
+    monkeypatch.setattr(daemon.snapshot, "image_size", lambda p: (1280, 720))
+    actions = []
+    monkeypatch.setattr(daemon.monitor, "audit_event",
+                        lambda cfg, ev, etype, path, action, **kw: actions.append((action, kw.get("reason"))))
+    monkeypatch.setattr(daemon.monitor, "sample_drop", lambda *a, **kw: None)
+    scores = {"f0.jpg": 0.9, "f1.jpg": 0.8}
+
+    def score(f):
+        return scores[f]
+    score.boxes = {"f0.jpg": [10, 300, 60, 330], "f1.jpg": [10, 320, 60, 350]}
+
+    image, s = daemon._select_recording_frame(
+        cam, event={"start_time": 1}, etype="person", frames=["f0.jpg", "f1.jpg"],
+        score=score, blur_score=lambda f, box=None: 1.0, pick="largest")
+    assert (image, s) == (None, None)
+    assert ("drop", "too_far") in actions
+
+
+def test_select_recording_frame_falls_back_to_small_person_when_opted_in(monkeypatch):
+    # Cameras with a fixed wide view may never get a close frame. The fallback
+    # sends the best small one instead of losing the alert.
+    cam = _cam(sd_snapshot=True, snapshot_source="sd",
+               scorer={"url": "http://x/score", "threshold": 0.4},
+               min_person_height=0.30, min_person_height_fallback=True)
+    monkeypatch.setattr(daemon.snapshot, "image_size", lambda p: (1280, 720))
+    scores = {"f0.jpg": 0.9, "f1.jpg": 0.8}
+
+    def score(f):
+        return scores[f]
+    score.boxes = {"f0.jpg": [10, 300, 60, 330], "f1.jpg": [10, 320, 60, 350]}
+
+    image, s = daemon._select_recording_frame(
+        cam, event={"start_time": 1}, etype="person", frames=["f0.jpg", "f1.jpg"],
+        score=score, blur_score=lambda f, box=None: 1.0, pick="largest")
+    assert (image, s) == ("f0.jpg", 0.9)
+
+
 def test_select_recording_frame_audits_a_drop_only_when_no_frame_passes(monkeypatch):
     # A sequence whose best frame is sent is one send, not also a drop: soak and incident
     # reports would otherwise count the incident twice.
