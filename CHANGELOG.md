@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.16.0] - 2026-11-21
 
 ### Added
 - Tapo C100 4.0 (firmware 1.9.1) is a documented model: [model notes](docs/c100.md) and an
@@ -122,6 +122,17 @@ All notable changes to this project are documented here.
   first read after a pose outage are not counted. A new episode's first OFF is no
   longer held back by an OFF sent late in the previous episode. Re-arm conditions are
   unchanged.
+
+### Known issues
+- **PTZ stop guard on a weak link.** On the one camera where the stop guard runs over a weak
+  Wi-Fi link, a 24 h soak of this release again showed that about 40 % of Stop calls fail
+  (2678 of 6572, in 929 episodes, with 5637 failed position reads and 1353 problem lines)
+  while no limit crossing and no peak after a verified OFF was observed. This is the same
+  picture as in 0.12.0 to 0.14.0, not a new regression: the camera briefly stops answering,
+  and the guard reports it rather than hiding it. The changes in this release (an immediate
+  Stop on uncommanded motion, no wasted recall attempt, `pan_limit.stop_rearm_quiet_s`) make
+  the guard safer but do not fix the transport. Where Stop failures are frequent, prefer
+  the default recall mode, or improve the link; do not read the problem lines as overshoot.
 
 ## [0.14.0] - 2026-11-15
 

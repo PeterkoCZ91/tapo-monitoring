@@ -1,3 +1,29 @@
+# Upgrading to 0.16.0
+
+No action is needed when coming from 0.14.0 (0.15 was never published; this release
+includes its changes): install the new package and restart. Everything new is off unless
+set.
+
+- **New opt-ins:** the `batterywake` detection source for a sleeping battery doorbell
+  (`battery_wake:`), `pan_limit.recall_evidence`, `pan_limit.stop_rearm_quiet_s`,
+  `mac_helper`, `firmware_auto_upgrade`, an OpenAI-compatible caption endpoint in the
+  `groq:` block, and `TAPO_REVIEW_DIGEST_LOG_ONLY=1`; see the
+  [configuration reference](configuration.md) and [operations](operations.md).
+- **Daily digest in the log only.** If you do not want the review digest in Telegram, set
+  `TAPO_REVIEW_DIGEST_LOG_ONLY=1`; the digest then appears in the journal as
+  `review digest logged (log only)`. Do not combine it with `TAPO_REVIEW_DIGEST_PROBLEMS_ONLY`,
+  which would still send when there is a problem.
+- **Status notices are no longer repeated after a restart.** The record of what had been
+  announced (privacy, detection, Tapo app notifications) is kept even when the runtime state
+  file is old. Note that the Tapo app notification switch the camera reports is a device
+  setting, not your phone's settings in the app, so `app_notifications_notice` can say
+  "switched off" while the app shows notifications on.
+- **Tapo C100 4.0** is a documented model ([notes](c100.md)); it needs no special setting.
+- **Known issue:** the PTZ stop guard still reports many failed Stop calls on a weak link
+  (see the changelog); no overshoot is observed, but the transport is not fixed.
+
+Coming from 0.13.0 or older, also read the notes below.
+
 # Upgrading to 0.14.0
 
 No action is needed when coming from 0.13.0: install the new package and restart. All new

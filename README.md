@@ -56,6 +56,11 @@ see [camera reports](https://github.com/PeterkoCZ91/tapo-monitoring/blob/main/do
 
 ## What's new
 
+**0.16.0** adds an opt-in detection source for a sleeping battery doorbell (`batterywake`),
+any OpenAI-compatible vision endpoint for captions, a vision model as a scorer shadow target,
+the Tapo C100, lamp and night-vision checks in the digital twin, a stop guard that stops the
+lens at once on uncommanded motion, a digest that can go to the log only, and no repeated
+status notices after a restart (0.15 was not published and is included);
 **0.14.0** can name the camera in alert captions (`caption_camera`), end the tracking night
 at a fixed clock time (`tracking.night_end`), offer a Home Assistant Vehicle sensor
 (`mqtt.separate_event_types`), treats dense fog like rain for weather parking and keeps

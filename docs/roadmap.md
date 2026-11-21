@@ -39,7 +39,7 @@ private operator notes.
 
 ## Where it stands
 
-The latest release is **0.14.0** (2026-11-15). Details per version are in the
+The latest release is **0.16.0** (2026-11-21). Details per version are in the
 [changelog](../CHANGELOG.md).
 
 | Capability | State |
