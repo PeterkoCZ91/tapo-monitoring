@@ -57,7 +57,9 @@ The latest release is **0.16.0** (2026-11-21); 0.15 was never published and its 
 | Virtual PTZ endstops (stop guard) | Released through 0.16.0 (immediate Stop on uncommanded motion, `stop_rearm_quiet_s`, `recall_evidence`), **not accepted**: a 24 h soak of 0.16.0 still showed about 40 % failed Stop calls on a weak link, without an observed limit crossing (see theme C) |
 | Problems-only daily digest | Released opt-in (0.11.0); soak open |
 | Night-vision mode drift and a log of a white lamp lit for no cause | Released in 0.16.0 (log and ledger only), **not accepted** (see theme C) |
-| Battery doorbell without a hub (`batterywake` source, Tapo D205) | Released opt-in in 0.16.0; soaked on one doorbell outside the fleet, not accepted |
+| Battery doorbell without a hub (`batterywake` source, Tapo D205) | Released opt-in in 0.16.0; one doorbell now runs through the daemon on a remote site with its photo and clip going to Telegram, not accepted |
+| Battery level and silence notices for a `batterywake` camera | Local candidate, not released: the level is read inside the login every wake already makes, notices at 30 % and 15 %, on the camera's own low-battery flag and after `silent_hours` without a wake |
+| White lamp kept dark in rain, snow and fog (`light_trigger.weather: veto`) | Local candidate, not released: running on one site since a review fixed the weather read to the control pass, not accepted |
 | Any OpenAI-compatible vision endpoint for captions | Released opt-in in 0.16.0 (contributed in issue 9) |
 | A vision model as a scorer shadow target (`tools/vision_shadow.py`) | Released in 0.16.0; a local model runs as a shadow on one scorer host, on 80 hand labels it never raised a false alarm but missed a quarter of the persons, so it is a second opinion, not a replacement |
 | Daily review digest to the log only (`TAPO_REVIEW_DIGEST_LOG_ONLY`) | Released opt-in in 0.16.0 |
@@ -187,6 +189,23 @@ Devices and network:
 - [ ] Dual-lens camera (C545D): grow the event sample (night, pets, vehicles) and re-check
   the 180 s hold; compare `lens_pick_stream` photos with wide-lens ones and decide from
   per-lens scores whether the pan/tilt lens goes first or gets a lower threshold (was 8.6).
+- [ ] Battery doorbell: after the first nights, check the battery readings the candidate
+  stores (level per wake, drain per day, days left) and that no notice repeats after a
+  restart. Decide whether `silent_hours: 48` fits a quiet entrance; a doorbell that is
+  simply never used would otherwise report silence.
+- [ ] White lamp and weather: with `weather: veto` on a software `light_trigger`, count per
+  night the lamp lights and the `not lit ... rain, snow or fog` refusals, and check that
+  insects and bare motion no longer light the lamp once the camera is on `person` only.
+  Only then accept it. The same camera must have had its night-vision mode written once
+  to plain IR, which software mode does not do on its own.
+- [ ] Second doorbell: prefer a standalone Wi-Fi model. A battery model (D205 or D210) takes
+  the existing `batterywake` path with one more camera block; a wired model (D130)
+  could be polled like any camera, which removes the battery and the wake problem, but
+  its `getEvents` and clip access must be tried on a real unit first. The hub-based D230
+  has no known local API for events or clips and is out. One service per site holds every
+  doorbell on that network; a doorbell is never put in a service that polls other
+  cameras, because every login wakes it. Ring presses are not reliably reported as
+  events on any model researched, so a ring is told from the recording or detection.
 - [ ] White lamp: read the first week of `lamp without cause:` lines and the
   `night_vision` drift warnings per camera. The intended setup is IR at night and the
   white light only after a detection, unless a camera is configured otherwise. Then
@@ -206,6 +225,14 @@ reolink-aio); a release is soaked on real cameras before the line is bumped. The
 [local API reference](tapo-local-api.md) is published (was 10.7); it records the tracker
 moving after a verified OFF (was 10.15).
 
+- [ ] Review the open contributor changes one at a time, each opt-in with defaults unchanged:
+  the minimum person size before a live photo (a failed size lookup or a missing box must
+  never drop a person), cropping an alert to the box of the class that raised it (a
+  fallback to another class must not change existing cameras), and a TCP reachability
+  probe without raw sockets (must never reach a sleeping camera).
+- [ ] Add the C120, C110 and D130 reports as model fixtures only once their event bits are
+  confirmed against the app; none has a built-in profile yet and only the D130 report
+  carries events.
 - [ ] Camera firmware watch: notice when a camera's firmware version changes, say so in
   the digest, and re-run the camera report for that model so its fixture stays current.
 - [ ] Add confirmed device findings to the local API reference as they land.
