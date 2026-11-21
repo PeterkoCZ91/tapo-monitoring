@@ -39,7 +39,7 @@ private operator notes.
 
 ## Where it stands
 
-The latest release is **0.16.0** (2026-11-21). Details per version are in the
+The latest release is **0.16.0** (2026-11-21); 0.15 was never published and its changes are in 0.16.0. Details per version are in the
 [changelog](../CHANGELOG.md).
 
 | Capability | State |
@@ -53,10 +53,15 @@ The latest release is **0.16.0** (2026-11-21). Details per version are in the
 | Shadow ledger, labelling, `label-stats`, `replay` and the detector comparison tools | Released |
 | Watch zones, loitering and vehicle alerts | Released opt-in (0.9.0); MQTT Vehicle sensor 0.14.0 |
 | Home Assistant over MQTT discovery | Released (0.8.0) |
-| Network history, network diagnosis lines, camera address failover and MAC rediscovery | Released (0.13.0 for diagnosis and MAC rediscovery); helper-host MAC lookup across a subnet route (`mac_helper`) unreleased opt-in |
-| Virtual PTZ endstops (stop guard) | Deployed candidate, **not accepted** (see theme C) |
+| Network history, network diagnosis lines, camera address failover and MAC rediscovery | Released (0.13.0 for diagnosis and MAC rediscovery); helper-host MAC lookup across a subnet route (`mac_helper`) released opt-in in 0.16.0 |
+| Virtual PTZ endstops (stop guard) | Released through 0.16.0 (immediate Stop on uncommanded motion, `stop_rearm_quiet_s`, `recall_evidence`), **not accepted**: a 24 h soak of 0.16.0 still showed about 40 % failed Stop calls on a weak link, without an observed limit crossing (see theme C) |
 | Problems-only daily digest | Released opt-in (0.11.0); soak open |
-| Night-vision mode drift and a log of a white lamp lit for no cause | Deployed candidate, **not accepted** (see theme C) |
+| Night-vision mode drift and a log of a white lamp lit for no cause | Released in 0.16.0 (log and ledger only), **not accepted** (see theme C) |
+| Battery doorbell without a hub (`batterywake` source, Tapo D205) | Released opt-in in 0.16.0; soaked on one doorbell outside the fleet, not accepted |
+| Any OpenAI-compatible vision endpoint for captions | Released opt-in in 0.16.0 (contributed in issue 9) |
+| A vision model as a scorer shadow target (`tools/vision_shadow.py`) | Released in 0.16.0; a local model runs as a shadow on one scorer host, on 80 hand labels it never raised a false alarm but missed a quarter of the persons, so it is a second opinion, not a replacement |
+| Daily review digest to the log only (`TAPO_REVIEW_DIGEST_LOG_ONLY`) | Released opt-in in 0.16.0 |
+| Tapo C100 4.0 | Documented in 0.16.0 ([notes](c100.md)); ran overnight in the daemon with Telegram alerts |
 
 ## Themes
 
@@ -127,7 +132,7 @@ second machine; forum feedback asked for exactly this.
   the Supervisor's MQTT service (was Phase 11).
 - [ ] Ship it from a separate app repository with the same release gate as the package: a
   tagged image and a real overnight soak on one Home Assistant OS install (was Phase 11).
-- [ ] An opt-in OpenAI-compatible vision endpoint for the optional captions, so a local
+- [x] An opt-in OpenAI-compatible vision endpoint for the optional captions (released in 0.16.0), so a local
   server (llama.cpp, vLLM, Ollama, LM Studio) or any hosted provider can replace Groq:
   configurable base URL, model and key variable, the same JSON reply contract, and the
   same fail-closed behaviour on any error. Default stays Groq; frames then go only to the
@@ -145,9 +150,9 @@ somewhere it must not.
 **Current state.** The stop guard is a deployed candidate, not accepted. Stop calls failed
 31–38 % of the time. On 2026-11-16 a read-outage tolerance was rejected (the lens moved
 during read outages, once past the limit), and the firmware tracker crossed the limit
-39–64 s after a verified tracking OFF. Both stop-mode sites run recall mode. An unreleased
-candidate stops the lens at once on uncommanded motion and adds opt-in
-`stop_rearm_quiet_s`. Recall mode has an unreleased opt-in recall first
+39–64 s after a verified tracking OFF. Both stop-mode sites run recall mode. 0.16.0
+stops the lens at once on uncommanded motion and adds opt-in
+`stop_rearm_quiet_s`. Recall mode has an opt-in recall first
 (`recall_evidence: false`) that sends `GotoPreset` without the 3 s evidence grab. See [stop guard safety](stop-guard-safety.md).
 
 Endstops (was 10.15):
@@ -240,7 +245,7 @@ Out of production until evidence repeats ([details](roadmap-history.md#research-
 4. Known/unknown-face alert policy with local mappings only (`learn-face` shipped).
 5. A capability manifest across models and firmware from anonymized
    `tapo-monitor report` submissions; TC46 tracking, lighting and SD still need checks.
-6. Standalone battery camera onboarding without a hub (paused).
+6. Standalone battery camera onboarding without a hub (paused). The `batterywake` detection source for an already onboarded doorbell shipped in 0.16.0.
 
 ## Contributing
 
