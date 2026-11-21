@@ -1271,7 +1271,9 @@ events with `tapo-monitor replay --compare` first (see [observability](observabi
   triggers an alert.
 - `tiles: 1` scores only the whole frame; larger values also score a grid.
 - `crop_to_subject` uses the best returned person box and safely falls back to the full
-  frame.
+  frame. Set `crop_from_native: true` as well: the zoom is then cut from the camera's native
+  HD frame, not the delivery-width (or SD-card) frame. A crop from a small frame has too few
+  pixels to identify anyone even when the box is right. `crop_min_px` applies to native crops.
 - `crop_min_frac` sets the smallest crop the zoom may produce (see below).
 - `crop_min_px` (default 400, 0 = off): with `crop_from_native`, a crop narrower than this
   many source pixels is not sent as the alert; the whole frame is, and the crop follows as a

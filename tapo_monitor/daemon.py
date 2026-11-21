@@ -1803,7 +1803,7 @@ def _run_crop_ffmpeg(image, out_path, rect):
 
 
 def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_ffmpeg=None,
-                     source=None, source_width=None, source_height=None):
+                     source=None, source_width=None, source_height=None, etype=None):
     """Crop ``image`` to the detected person (a zoom) for ``crop_to_subject`` cameras.
 
     Re-scores the chosen frame with tiling to get the person box + frame dims, then
@@ -1839,7 +1839,24 @@ def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_f
                                     alert_zones_mode=cfg.scorer.alert_zones_mode)
     if not result:
         return image
-    box = scorer.subject_box(result)
+    vboxes = result.get("vehicle_boxes") or []
+    if etype == "vehicle":
+        # A vehicle alert zooms on the car even when the same frame also holds
+        # a person; the person alert is a separate message with its own crop.
+        box = None
+        if vboxes:
+            try:
+                box = [float(v) for v in vboxes[0]]
+            except (TypeError, ValueError):
+                box = None
+    else:
+        box = scorer.subject_box(result)
+        if not box and vboxes:
+            # No person box: a car is still a subject worth cropping to.
+            try:
+                box = [float(v) for v in vboxes[0]]
+            except (TypeError, ValueError):
+                box = None
     w, h = result.get("w"), result.get("h")
     if not box or not w or not h:
         return image
@@ -1953,7 +1970,7 @@ def send_alert_photo(cfg, secrets, image, caption, downscale=None, score=None,
     """
     notify.clear_last_message_id()
     ok = _deliver_alert_photo(cfg, secrets, image, caption, downscale=downscale, score=score,
-                              incident=incident, send_path=send_path)
+                              incident=incident, send_path=send_path, etype=etype)
     if ok:
         mqtt.note_alert(cfg.name, image=image, score=score, etype=etype)
         # Only a photo Telegram really took has an id: collect-only sends none.
@@ -2123,7 +2140,7 @@ def outbox_pass(app, state, *, now, secrets, box=None, probe=None, score_for_fn=
 
 
 def _deliver_alert_photo(cfg, secrets, image, caption, downscale=None, score=None,
-                         incident=None, send_path=None):
+                         incident=None, send_path=None, etype=None):
     """Send one alert frame: the zoom goes to Telegram, the whole scene to the sent log.
 
     ``crop_to_subject`` cameras push a close-up, which is what the user wants to look at
@@ -2177,7 +2194,8 @@ def _deliver_alert_photo(cfg, secrets, image, caption, downscale=None, score=Non
         cropped = crop_for_subject(cfg, image, out_dir, secrets,
                                    source=getattr(image, "native", None),
                                    source_width=getattr(image, "native_width", None),
-                                   source_height=getattr(image, "native_height", None))
+                                   source_height=getattr(image, "native_height", None),
+                                   etype=etype)
     crop_temp = cropped if cropped != image else None      # crop_for_subject has no None
     if crop_temp and not getattr(image, "native", None) and _crop_too_small(
             cfg, crop_temp, floor=getattr(cfg, "crop_min_px_delivery", 0)):
