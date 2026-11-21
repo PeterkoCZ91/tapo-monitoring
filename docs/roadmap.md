@@ -227,6 +227,13 @@ moving after a verified OFF (was 10.15).
   none by day); the open question is missed persons, which a button on a delivered alert
   cannot reveal. The random drop sample answers that first (was 10.14).
 - [ ] A local fallback scorer while the shared one is unreachable (was 10.9).
+- [ ] Optional licence plate reading for vehicle alerts, only as an explicit opt-in and
+  local-only: find the vehicle, then the plate, then read it with a local vision model
+  and vote across frames of a parked car. Plates are personal data, so it ships off,
+  stores nothing by default, never sends frames to a hosted provider and needs its own
+  retention setting. An early offline test read a plate on well under half of the vehicle
+  crops, so it stays parked until a fixed measurement on labelled plates shows it is
+  reliable enough to be useful.
 - [ ] Extend camera-address failover to recorder paths, MQTT and hub cameras (was 10.13).
 - [ ] Dual-camera handoff through `HandoffManager`, observe-only at first, once a second
   overlapping camera is deployed (was 8.5, Phase 5).
