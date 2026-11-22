@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tapo_monitor import detection
+from tapo_monitor import config, detection
 
 # ── has_person_bit ───────────────────────────────────────────────────────────
 
@@ -162,3 +162,24 @@ def test_vehicle_alert_needs_enabled_and_threshold():
 
 def test_vehicle_is_a_known_event_type():
     assert "vehicle" in detection.EVENT_TYPES
+
+
+# ── config-defined event profiles in the decoder ────────────────────────────
+
+def test_config_profile_decodes_bits_and_classifies_vehicle():
+    config.load_config_from_dict({"cameras": [
+        {"name": "garage", "host": "192.0.2.1", "event_profile": "c120z"}],
+        "event_profiles": {"c120z": {
+            "bits": {5: "person", 7: "vehicle", 8: "pet"},
+            "alarm_types": {8: "vehicle", 9: "pet"}}}})
+    flags = detection.decode_events_1(32 | 128 | 256, "c120z")
+    assert flags["person"] and flags["vehicle"] and flags["pet"]
+    assert flags["unknown_bits"] == []
+    assert detection.classify_getevent(None, events_1=128, profile="c120z",
+                                       alarm_type=8) == "vehicle"
+    assert detection.classify_getevent(None, events_1=256, profile="c120z",
+                                       alarm_type=9) == "pet"
+    # Built-in tables still ignore a config row's vehicle bit.
+    assert detection.classify_getevent(None, events_1=128, profile="default",
+                                       alarm_type=8) not in ("vehicle", "pet")
+    detection.EVENT_PROFILES.pop("c120z", None)

@@ -753,7 +753,7 @@ def _migrate_renamed_keys(mapping, where):
     return migrated
 
 
-def _check_keys(data, cls, where):
+def _check_keys(data, cls, where, extra=()):
     """Migrate renamed keys, then reject unknown ones, in ``data`` and its sections.
 
     Every dataclass-typed field of ``cls`` is a nested section (a camera's scorer,
@@ -763,7 +763,7 @@ def _check_keys(data, cls, where):
     renamed key reaches them under its new name.
     """
     data = _migrate_renamed_keys(data, where)
-    _reject_unknown_keys(data, _field_names(cls), where)
+    _reject_unknown_keys(data, _field_names(cls) | set(extra), where)
     for f in fields(cls):
         if not is_dataclass(f.default_factory):
             continue
@@ -1662,7 +1662,8 @@ def _camera(data, index):
     _check_hold_expiry(sampler, scorer, where)
     _check_loiter(sampler, scorer, where)
     event_profile = _check_enum(str(data.get("event_profile", "default")).lower(),
-                                set(event_detection.EVENT_PROFILES), "event_profile", where)
+                                set(event_detection.EVENT_PROFILES) | {"auto"},
+                                "event_profile", where)
     if scorer.alert_zones and event_detection.event_profile(event_profile).pt_channel is not None:
         # A zone is drawn on one view; a second lens or a moving pan/tilt lens has another.
         raise ConfigError(f"{where}: scorer alert_zones need a fixed view; this event_profile "
@@ -1884,6 +1885,50 @@ def _clip_int(data, key, default, low, high, where):
     return value
 
 
+def _event_profiles(data, where="config"):
+    """Register config-defined event profiles before cameras are parsed."""
+    raw = data.get("event_profiles") or {}
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where}: 'event_profiles' must be a mapping")
+    for name, spec in raw.items():
+        key = str(name).lower()
+        if key in event_detection.EVENT_PROFILES:
+            raise ConfigError(f"{where}: event profile {key!r} is already built in")
+        if not isinstance(spec, dict):
+            raise ConfigError(f"{where}: event profile {key!r} must be a mapping")
+        unknown = set(spec) - {"bits", "alarm_types"}
+        if unknown:
+            raise ConfigError(
+                f"{where}: event profile {key!r} has unknown keys {sorted(unknown)}; "
+                "expected 'bits' and/or 'alarm_types'")
+
+        def parse_flags(mapping, kind, allow_negative=False, key=key):
+            out = {}
+            for raw_key, flag in (mapping or {}).items():
+                try:
+                    num = int(raw_key)
+                except (TypeError, ValueError):
+                    raise ConfigError(
+                        f"{where}: event profile {key!r} {kind} {raw_key!r} must be an integer"
+                    ) from None
+                if not allow_negative and num < 0:
+                    raise ConfigError(
+                        f"{where}: event profile {key!r} {kind} {num} must not be negative")
+                if flag not in event_detection.EVENT_TYPES:
+                    raise ConfigError(
+                        f"{where}: event profile {key!r} {kind} {num} maps to {flag!r}; "
+                        f"expected one of {list(event_detection.EVENT_TYPES)}")
+                out[num] = flag
+            return out
+
+        event_detection.register_event_profile(
+            event_detection.EventProfile(
+                name=key,
+                bits=parse_flags(spec.get("bits"), "bit"),
+                alarm_types=parse_flags(spec.get("alarm_types"), "alarm_type",
+                                        allow_negative=True)))
+
+
 def load_config_from_dict(data) -> AppConfig:
     """Validate a parsed config mapping and return an AppConfig. Pure (no I/O)."""
     if not isinstance(data, dict):
@@ -1891,11 +1936,12 @@ def load_config_from_dict(data) -> AppConfig:
     # Dataclass-typed top-level fields are the checked sections (location, alerts, loop,
     # observability, reliability, mqtt, outbox); telegram/groq/faces are plain dicts and stay opaque,
     # and the cameras list is checked entry by entry in _camera.
-    data = _check_keys(data, AppConfig, "")
+    data = _check_keys(data, AppConfig, "", extra=("event_profiles",))
     raw_cameras = data.get("cameras")
     if not raw_cameras or not isinstance(raw_cameras, list):
         raise ConfigError("config must define a non-empty 'cameras' list")
 
+    _event_profiles(data)
     cameras = [_camera(c, i) for i, c in enumerate(raw_cameras)]
 
     seen = set()
