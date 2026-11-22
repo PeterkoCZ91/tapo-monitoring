@@ -482,6 +482,119 @@ def test_apply_plan_ir_daytime_restores_colour(monkeypatch):
     assert cam.daynight == "off"
 
 
+def test_crop_for_subject_person_alert_uses_person_box_when_both_exist(monkeypatch, tmp_path):
+    # The companion to the vehicle case: a person alert on a frame that also
+    # holds a car must zoom on the person, not the car.
+    cam = _cam(crop_to_subject=True, scorer={"url": "http://x/score"})
+    image = str(tmp_path / "frame.jpg")
+    open(image, "wb").write(b"frame")
+    result = {"w": 1280, "h": 720, "box": [600, 100, 700, 300],
+              "vehicle_boxes": [[100, 400, 500, 600]]}
+    rects = []
+
+    def fake_ffmpeg(src, out, rect):
+        rects.append(rect)
+        open(out, "wb").write(b"crop")
+
+    cropped = daemon.crop_for_subject(cam, image, str(tmp_path),
+                                      score_result=result, run_ffmpeg=fake_ffmpeg,
+                                      etype="person")
+    assert cropped != image
+    x, y, cw, ch = rects[0]
+    # The person box is high and right; the vehicle box is low and left.
+    assert y < 300 and x > 200
+
+
+def test_crop_for_subject_person_alert_without_person_box_stays_uncropped(monkeypatch, tmp_path):
+    # A person alert must never zoom on a car in the frame. With no person box
+    # the whole frame is the honest photo.
+    cam = _cam(crop_to_subject=True, scorer={"url": "http://x/score"})
+    image = str(tmp_path / "frame.jpg")
+    open(image, "wb").write(b"frame")
+    result = {"w": 1280, "h": 720, "box": None,
+              "vehicle_boxes": [[100, 400, 500, 600]], "vehicle_scores": [0.9]}
+    called = []
+
+    def fake_ffmpeg(src, out, rect):
+        called.append(rect)
+        open(out, "wb").write(b"crop")
+
+    cropped = daemon.crop_for_subject(cam, image, str(tmp_path),
+                                      score_result=result, run_ffmpeg=fake_ffmpeg,
+                                      etype="person")
+    assert cropped == image
+    assert called == []
+
+
+def test_crop_for_subject_vehicle_alert_picks_best_scoring_vehicle(monkeypatch, tmp_path):
+    # vehicle_scores is parallel to vehicle_boxes; the first box is not always
+    # the best one. The crop should follow the highest-scoring vehicle.
+    cam = _cam(crop_to_subject=True, scorer={"url": "http://x/score"})
+    image = str(tmp_path / "frame.jpg")
+    open(image, "wb").write(b"frame")
+    result = {"w": 1280, "h": 720,
+              "vehicle_boxes": [[100, 400, 200, 480], [900, 100, 1100, 400]],
+              "vehicle_scores": [0.4, 0.9]}
+    rects = []
+
+    def fake_ffmpeg(src, out, rect):
+        rects.append(rect)
+        open(out, "wb").write(b"crop")
+
+    cropped = daemon.crop_for_subject(cam, image, str(tmp_path),
+                                      score_result=result, run_ffmpeg=fake_ffmpeg,
+                                      etype="vehicle")
+    assert cropped != image
+    x, y, cw, ch = rects[0]
+    assert x > 800 and y < 200
+
+
+def test_crop_for_subject_vehicle_alert_uses_vehicle_box_not_person_box(monkeypatch, tmp_path):
+    # A single frame can hold both a person and a car. The person alert and the
+    # vehicle alert are separate messages, and each must zoom on its own subject.
+    cam = _cam(crop_to_subject=True, scorer={"url": "http://x/score"})
+    image = str(tmp_path / "frame.jpg")
+    open(image, "wb").write(b"frame")
+    result = {"w": 1280, "h": 720, "box": [600, 100, 700, 300],
+              "vehicle_boxes": [[100, 400, 500, 600]]}
+    rects = []
+
+    def fake_ffmpeg(src, out, rect):
+        rects.append(rect)
+        open(out, "wb").write(b"crop")
+
+    cropped = daemon.crop_for_subject(cam, image, str(tmp_path),
+                                      score_result=result, run_ffmpeg=fake_ffmpeg,
+                                      etype="vehicle")
+    assert cropped != image
+    x, y, cw, ch = rects[0]
+    # The vehicle box is low and left; the person box is high and right.
+    assert y > 300 and x < 200
+
+
+def test_crop_for_subject_falls_back_to_vehicle_box(monkeypatch, tmp_path):
+    # A vehicle alert whose score has no person box should still be cropped to
+    # the car. Without the fallback the whole frame goes out.
+    cam = _cam(crop_to_subject=True, scorer={"url": "http://x/score"})
+    image = str(tmp_path / "frame.jpg")
+    open(image, "wb").write(b"frame")
+    result = {"w": 1280, "h": 720, "box": None,
+              "vehicle_boxes": [[100, 100, 500, 500]]}
+    rects = []
+
+    def fake_ffmpeg(src, out, rect):
+        rects.append(rect)
+        open(out, "wb").write(b"crop")
+
+    cropped = daemon.crop_for_subject(cam, image, str(tmp_path),
+                                      score_result=result, run_ffmpeg=fake_ffmpeg,
+                                      etype="vehicle")
+    assert cropped != image
+    assert len(rects) == 1
+    x, y, cw, ch = rects[0]
+    assert x <= 100 and y <= 100 and x + cw >= 500 and y + ch >= 500
+
+
 def test_select_recording_frame_picks_sharpest_above_threshold():
     cam = _cam(sd_snapshot=True, snapshot_source="recording",
                scorer={"url": "http://x/score", "threshold": 0.4})
