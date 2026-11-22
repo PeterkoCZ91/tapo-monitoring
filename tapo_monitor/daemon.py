@@ -3552,6 +3552,36 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
                      cfg.name, path, len(above) - len(steady))
             above = steady
     boxes = getattr(score, "boxes", None) or {}
+    if getattr(cfg, "min_person_height", None):
+        # All candidates in one sequence share a source, so measuring the first
+        # frame's size is enough. An unknown size or missing box is "unknown",
+        # not "too small": keep that frame instead of dropping the alert.
+        try:
+            size = snapshot.image_size(above[0][0])
+        except (OSError, TypeError, ValueError):
+            size = None
+        if size and size[1]:
+            close = []
+            for fs in above:
+                height = monitor.person_box_height_fraction(score, fs[0], size)
+                if height is None or height >= cfg.min_person_height:
+                    close.append(fs)
+            if not close:
+                if getattr(cfg, "min_person_height_fallback", False):
+                    log.info("frame selection %s [%s]: all %d frame(s) show only a "
+                             "distant person (min height %.2f); sending the closest "
+                             "available", cfg.name, path, len(above), cfg.min_person_height)
+                else:
+                    log.info("frame selection %s [%s]: all %d frame(s) show only a "
+                             "distant person (min height %.2f)", cfg.name, path, len(above),
+                             cfg.min_person_height)
+                    monitor.audit_event(cfg, event, etype, path, "drop",
+                                        score=max(s for _, s in above),
+                                        threshold=cfg.scorer.threshold, reason="too_far",
+                                        extra=audit_extra)
+                    return None, None
+            else:
+                above = close
     if getattr(cfg, "sd_prefer_face", False) and len(above) > 1:
         # A frame showing the person's face beats a bigger or sharper one of their back or
         # with the head cut off. Only a known answer counts, and only a face on the chosen

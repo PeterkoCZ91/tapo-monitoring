@@ -16,6 +16,7 @@ from datetime import datetime
 
 from . import camera, detection, enrich, logsafe, notify, scheduling, sentlog, snapshot
 from . import mqtt as mqtt_bridge
+from . import snapshot as snapshot_module
 from .incident import incident_id
 from .snapshot import album_lens
 
@@ -251,6 +252,18 @@ def has_known_face(event, face_names=None):
     """True only when the event contains a face ID mapped to a configured name."""
     face_names = face_names or {}
     return any(face_names.get(fid) for fid in face_ids(event))
+
+
+def person_box_height_fraction(score, image, size):
+    """Person box height as a fraction of the frame, or None when unknown. Pure."""
+    box = (getattr(score, "boxes", None) or {}).get(image)
+    if not box or len(box) != 4:
+        return None
+    try:
+        h = float(size[1])
+        return (float(box[3]) - float(box[1])) / h if h > 0 else None
+    except (TypeError, ValueError, IndexError):
+        return None
 
 
 def collect_detections(events, last_seen, strict_people=True, profile=None, event_seen=None):
@@ -506,6 +519,7 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
         try:
             description = ""
             s = None
+            too_small = False
             if score is not None:
                 # Local scorer is the arbiter; Groq no longer decides anything.
                 s = score(image)
@@ -522,6 +536,19 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                     empty = False
                 else:
                     empty = s < cfg.scorer.threshold
+                    if (not empty and etype == "person"
+                            and getattr(cfg, "min_person_height", None)):
+                        try:
+                            size = snapshot_module.image_size(image)
+                        except (OSError, TypeError, ValueError):
+                            size = None
+                        height = (person_box_height_fraction(score, image, size)
+                                  if size else None)
+                        if height is not None and height < cfg.min_person_height:
+                            log.info("defer %s: person too small (%.2f < %.2f of frame)",
+                                     etype, height, cfg.min_person_height)
+                            empty = True
+                            too_small = True
             elif cfg.enrich.groq:
                 description = enrich.groq_describe(groq_key, image, **(vision or {}))
                 empty = notify.is_empty_scene(description)
@@ -584,7 +611,8 @@ def run_monitor(cam, cfg, last_seen, *, now, groq_key, telegram_token, telegram_
                 defer(event, etype, False)
                 audit_event(cfg, event, etype, "live", "defer", score=s,
                             threshold=cfg.scorer.threshold if score is not None else None,
-                            reason="below_threshold" if score is not None else "empty")
+                            reason=("too_far" if too_small else
+                                    "below_threshold" if score is not None else "empty"))
                 # Deliberately not "sent": the recorder look is extra evidence, not a
                 # replacement, so the live sampler keeps working this burst instead of
                 # standing down for a look that may find nothing. Both cannot reach the

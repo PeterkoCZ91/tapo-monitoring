@@ -799,6 +799,38 @@ def test_run_monitor_scorer_person_below_threshold_still_defers(monkeypatch):
     assert observed == [True]                   # handed to SD = handled, group stops
 
 
+def test_run_monitor_defers_when_live_person_is_too_small(monkeypatch):
+    # A distant person passes the score but fills only 40 of 720 px. Without
+    # min_person_height the live frame goes out unreadable; with it the SD
+    # follow-up gets the chance to pick a closer frame.
+    sent = []
+    deferred = []
+    monkeypatch.setattr(monitor.notify, "send_photo", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(monitor.enrich, "groq_describe", lambda *a, **k: "Person")
+    monkeypatch.setattr(monitor.snapshot, "image_size", lambda p: (1280, 720))
+
+    def score(image):
+        return 0.832
+    score.boxes = {"/tmp/live.jpg": [600, 320, 640, 360]}
+
+    cfg = config.load_config_from_dict(
+        {"cameras": [{"name": "a", "host": "203.0.113.10",
+                      "scorer": {"url": "http://127.0.0.1:8765/score", "threshold": 0.4},
+                      "min_person_height": 0.30}]}).cameras[0]
+
+    class Cam:
+        def getEvents(self):
+            return [_person_event(100)]
+
+    monitor.run_monitor(
+        Cam(), cfg, 0, now=1000, groq_key="k", telegram_token="t", telegram_chat="c",
+        snapshot=lambda cam, ev: "/tmp/live.jpg", time_str=lambda ev: "T",
+        score=score,
+        defer=lambda ev, et, live_sent: deferred.append((et, live_sent)))
+    assert sent == []
+    assert deferred == [("person", False)]
+
+
 def test_run_monitor_observe_reports_sent_alert(monkeypatch):
     sent = []
     monkeypatch.setattr(

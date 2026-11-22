@@ -332,6 +332,13 @@ class CameraConfig:
     # blur), "largest" (biggest person box among frames not much blurrier than the
     # sharpest) or "tallest" (tallest box, edge-clear first); sharpest again without boxes.
     sd_frame_pick: str = "sharpest"
+    # Minimum person box height as a fraction of the frame. A live frame whose
+    # subject is smaller is deferred to the SD follow-up; a sequence whose boxes
+    # are all too small is audited as too_far. None (default) keeps score-only.
+    min_person_height: float | None = None
+    # With min_person_height: send the best small frame when no close one exists.
+    # Off by default — cameras that can get a close view should not send tiny ones.
+    min_person_height_fallback: bool = False
     # Extra frames every 2 s over the event's first 12 s of the follow-up window. Unset in
     # the YAML it follows sd_frame_pick: on for "largest", off for "sharpest".
     sd_dense_start: bool = False
@@ -1465,6 +1472,16 @@ def _camera(data, index):
             raise ConfigError(f"{where}: 'sd_jobs_per_tick' must be >= 1")
     sd_frame_pick = _check_enum(data.get("sd_frame_pick", "sharpest"), SD_FRAME_PICKS,
                                 "sd_frame_pick", where)
+    min_person_height = data.get("min_person_height")
+    if min_person_height is not None:
+        try:
+            min_person_height = float(min_person_height)
+        except (TypeError, ValueError):
+            raise ConfigError(f"{where}: min_person_height must be a number") from None
+        if not 0.0 <= min_person_height <= 1.0:
+            raise ConfigError(f"{where}: min_person_height must be between 0 and 1")
+    min_person_height_fallback = _check_bool(
+        data.get("min_person_height_fallback", False), "min_person_height_fallback", where)
     sd_dense_start = data.get("sd_dense_start")
     if sd_dense_start is None:
         sd_dense_start = sd_frame_pick in ("largest", "tallest")
@@ -1745,6 +1762,8 @@ def _camera(data, index):
         sd_motion=bool(data.get("sd_motion", False)),
         sd_jobs_per_tick=sd_jobs_per_tick,
         sd_frame_pick=sd_frame_pick,
+        min_person_height=min_person_height,
+        min_person_height_fallback=min_person_height_fallback,
         telegram_alerts=_check_bool(data.get("telegram_alerts", True), "telegram_alerts", where),
         privacy_notice=bool(data.get("privacy_notice", False)),
         detection_notice=_check_bool(data.get("detection_notice", False),
