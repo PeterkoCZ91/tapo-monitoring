@@ -1765,3 +1765,14 @@ def test_sleeps_helper():
     assert cfg.sleeps(cam(["batterywake"])) is True
     assert cfg.sleeps(cam(["hubpoll"])) is True
     assert cfg.sleeps(cam(["getevents"])) is False
+
+
+# ── observe-only cameras ────────────────────────────────────────────────────
+
+def test_camera_control_is_a_boolean_per_camera():
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "a", "host": "192.0.2.1", "camera_control": False}]})
+    assert app.cameras[0].camera_control is False
+    app = cfg.load_config_from_dict({"cameras": [
+        {"name": "a", "host": "192.0.2.1"}]})
+    assert app.cameras[0].camera_control is True
