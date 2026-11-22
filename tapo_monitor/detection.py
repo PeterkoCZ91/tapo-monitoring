@@ -85,6 +85,15 @@ EVENT_PROFILES = {
 DEFAULT_PROFILE = EVENT_PROFILES["default"]
 
 
+def register_event_profile(profile):
+    """Register a config-defined EventProfile without touching built-in rows."""
+    name = str(profile.name).lower()
+    if name in EVENT_PROFILES:
+        raise ValueError(f"event profile {name!r} is already defined")
+    EVENT_PROFILES[name] = profile
+    return profile
+
+
 def event_profile(name=None):
     """The :class:`EventProfile` called ``name``; ``None`` or unknown gives the default."""
     if isinstance(name, EventProfile):
@@ -284,9 +293,16 @@ def classify_getevent(event_type, has_face=False, strict_people=True, events_1=N
     # Typeless firmware events: the bitmask is the only signal we have.
     if has_person_bit(events_1):
         return "person"
-    if event_profile(profile) is not DEFAULT_PROFILE and decode_events_1(
-            events_1, profile, alarm_type)["person"]:
-        return "person"
+    if event_profile(profile) is not DEFAULT_PROFILE:
+        flags = decode_events_1(events_1, profile, alarm_type)
+        if flags["person"]:
+            return "person"
+        # A config row names this model's own vehicle and pet bits. The built-in
+        # tables name none, so those cameras keep dropping them as before.
+        if flags.get("vehicle"):
+            return "vehicle"
+        if flags.get("pet"):
+            return "pet"
     # Bare motion (the C560WS AI routinely misses a real person and fires only motion).
     # We no longer blind-drop it under strict; it becomes a candidate that run_monitor
     # funnels through Groq, which alerts only on a confirmed person/animal and drops a

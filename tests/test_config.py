@@ -6,6 +6,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tapo_monitor import config as cfg
+from tapo_monitor import detection
 
 
 def _minimal():
@@ -1765,3 +1766,57 @@ def test_sleeps_helper():
     assert cfg.sleeps(cam(["batterywake"])) is True
     assert cfg.sleeps(cam(["hubpoll"])) is True
     assert cfg.sleeps(cam(["getevents"])) is False
+
+
+# ── config-defined event profiles ───────────────────────────────────────────
+
+def _profile_cfg(**over):
+    data = {"cameras": [{"name": "garage", "host": "192.0.2.1",
+                         "user_env": "U", "password_env": "P"}]}
+    data.update(over)
+    return data
+
+
+def test_a_config_profile_is_registered_and_selectable():
+    c = cfg.load_config_from_dict(_profile_cfg(
+        event_profiles={"c120reg": {"bits": {5: "person", 7: "vehicle"},
+                                    "alarm_types": {6: "person"}}},
+        cameras=[{"name": "garage", "host": "192.0.2.1", "user_env": "U",
+                  "password_env": "P", "event_profile": "c120reg"}]))
+    assert c.cameras[0].event_profile == "c120reg"
+    profile = detection.event_profile("c120reg")
+    assert profile.bits == {5: "person", 7: "vehicle"}
+    assert profile.alarm_types == {6: "person"}
+    detection.EVENT_PROFILES.pop("c120reg", None)
+
+
+def test_built_in_profiles_are_untouched_by_config_rows():
+    cfg.load_config_from_dict(_profile_cfg(
+        event_profiles={"c120x": {"bits": {5: "person"}}}))
+    assert detection.event_profile("default") is detection.DEFAULT_PROFILE
+    assert detection.event_profile("c545d").bits[5] == "person"
+    detection.EVENT_PROFILES.pop("c120x", None)
+
+
+def test_config_profile_cannot_shadow_a_built_in():
+    import pytest
+    with pytest.raises(cfg.ConfigError, match="already built in"):
+        cfg.load_config_from_dict(_profile_cfg(
+            event_profiles={"default": {"bits": {5: "person"}}}))
+
+
+def test_config_profile_rejects_unknown_flag_and_key():
+    import pytest
+    with pytest.raises(cfg.ConfigError, match="expected one of"):
+        cfg.load_config_from_dict(_profile_cfg(
+            event_profiles={"bogus": {"bits": {5: "human"}}}))
+    with pytest.raises(cfg.ConfigError, match="unknown keys"):
+        cfg.load_config_from_dict(_profile_cfg(
+            event_profiles={"bogus": {"bits": {5: "person"}, "typo": 1}}))
+
+
+def test_auto_is_a_valid_event_profile():
+    c = cfg.load_config_from_dict(_profile_cfg(cameras=[
+        {"name": "garage", "host": "192.0.2.1", "user_env": "U",
+         "password_env": "P", "event_profile": "auto"}]))
+    assert c.cameras[0].event_profile == "auto"
