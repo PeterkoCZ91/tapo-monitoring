@@ -46,6 +46,7 @@ def test_camera_answers_tcp_reachability_uses_tcp_not_ping(monkeypatch):
         return False
 
     def fake_tcp(host, timeout=1):
+        assert timeout == 1
         calls["tcp"] += 1
         return True
 

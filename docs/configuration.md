@@ -474,8 +474,11 @@ top-level `events_1` (OR of the lenses) plus `channels`, which audit lines show 
 
 `reachability: tcp` is opt-in (default `ping`). It replaces the ICMP probe in the main
 loop with a TCP connect to the camera API port, so the container needs no `CAP_NET_RAW` and
-a camera that answers TCP but drops ICMP still counts as up. The ping path stays the default
-and is unchanged when the option is off. RTSP viewing is independent of either probe.
+a camera that answers TCP but drops ICMP still counts as up. The probe uses a 1 s timeout,
+matching ping, so a down camera costs no more per pass. A camera that answers ICMP but has
+its API port closed is treated as unreachable with this option, which is expected because
+the daemon's API session needs that port. The ping path stays the default and is unchanged
+when the option is off. RTSP viewing is independent of either probe.
 
 `lens_pick_stream` is off unless set. When an event fired on the pan/tilt lens, the live
 pass grabs `rtsp_stream` and this stream, scores both and keeps the frame with the larger

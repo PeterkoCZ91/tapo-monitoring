@@ -6379,7 +6379,8 @@ def _camera_answers(cfg, state, now):
                                   cfg.name, host, iface)
             return False
     if getattr(cfg, "reachability", "ping") == "tcp":
-        if not camera.tcp_reachable(host):
+        # Match the ping probe's 1 s budget so a down camera costs the same per pass.
+        if not camera.tcp_reachable(host, timeout=1):
             return False
     elif not camera.ping_reachable(host):
         return False
