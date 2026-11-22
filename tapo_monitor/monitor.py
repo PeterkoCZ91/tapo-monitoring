@@ -15,8 +15,8 @@ import weakref
 from datetime import datetime
 
 from . import camera, detection, enrich, logsafe, notify, scheduling, sentlog, snapshot
-from . import snapshot as snapshot_module
 from . import mqtt as mqtt_bridge
+from . import snapshot as snapshot_module
 from .incident import incident_id
 from .snapshot import album_lens
 

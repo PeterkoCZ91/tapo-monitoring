@@ -495,6 +495,45 @@ def test_select_recording_frame_picks_sharpest_above_threshold():
     assert s == 0.7
 
 
+def test_select_recording_frame_keeps_frames_when_size_unknown(monkeypatch):
+    # A failed ffprobe returns (None, None), which is truthy. An unknown size
+    # must keep the frame: the option gates size, it must not drop every frame
+    # when the size cannot be measured.
+    cam = _cam(sd_snapshot=True, snapshot_source="sd",
+               scorer={"url": "http://x/score", "threshold": 0.4},
+               min_person_height=0.30)
+    monkeypatch.setattr(daemon.snapshot, "image_size", lambda p: (None, None))
+    scores = {"f0.jpg": 0.9}
+
+    def score(f):
+        return scores[f]
+    score.boxes = {"f0.jpg": [10, 300, 60, 330]}
+
+    image, s = daemon._select_recording_frame(
+        cam, event={"start_time": 1}, etype="person", frames=["f0.jpg"],
+        score=score, blur_score=lambda f, box=None: 1.0, pick="largest")
+    assert (image, s) == ("f0.jpg", 0.9)
+
+
+def test_select_recording_frame_keeps_frames_without_boxes(monkeypatch):
+    # A scorer that returns no boxes leaves the size gate unable to judge.
+    # Keep the frame rather than treating a missing box as "too small".
+    cam = _cam(sd_snapshot=True, snapshot_source="sd",
+               scorer={"url": "http://x/score", "threshold": 0.4},
+               min_person_height=0.30)
+    monkeypatch.setattr(daemon.snapshot, "image_size", lambda p: (1280, 720))
+    scores = {"f0.jpg": 0.9}
+
+    def score(f):
+        return scores[f]
+    score.boxes = {}
+
+    image, s = daemon._select_recording_frame(
+        cam, event={"start_time": 1}, etype="person", frames=["f0.jpg"],
+        score=score, blur_score=lambda f, box=None: 1.0, pick="largest")
+    assert (image, s) == ("f0.jpg", 0.9)
+
+
 def test_select_recording_frame_rejects_a_sequence_of_only_small_people(monkeypatch):
     # Every card frame holds a confident but distant person. No usable close
     # picture exists, so the follow-up records too_far and sends nothing.

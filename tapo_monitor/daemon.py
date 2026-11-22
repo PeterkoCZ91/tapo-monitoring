@@ -3553,14 +3553,19 @@ def _select_recording_frame(cfg, event, etype, frames, score, blur_score=None,
             above = steady
     boxes = getattr(score, "boxes", None) or {}
     if getattr(cfg, "min_person_height", None):
+        # All candidates in one sequence share a source, so measuring the first
+        # frame's size is enough. An unknown size or missing box is "unknown",
+        # not "too small": keep that frame instead of dropping the alert.
         try:
             size = snapshot.image_size(above[0][0])
         except (OSError, TypeError, ValueError):
             size = None
-        if size:
-            close = [fs for fs in above
-                     if (monitor.person_box_height_fraction(score, fs[0], size) or 0)
-                     >= cfg.min_person_height]
+        if size and size[1]:
+            close = []
+            for fs in above:
+                height = monitor.person_box_height_fraction(score, fs[0], size)
+                if height is None or height >= cfg.min_person_height:
+                    close.append(fs)
             if not close:
                 if getattr(cfg, "min_person_height_fallback", False):
                     log.info("frame selection %s [%s]: all %d frame(s) show only a "
