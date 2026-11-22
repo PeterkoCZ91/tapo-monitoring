@@ -1843,20 +1843,22 @@ def crop_for_subject(cfg, image, out_dir, secrets=None, score_result=None, run_f
     if etype == "vehicle":
         # A vehicle alert zooms on the car even when the same frame also holds
         # a person; the person alert is a separate message with its own crop.
+        # vehicle_scores is parallel to vehicle_boxes: crop to the best-scoring car.
         box = None
-        if vboxes:
+        scores = result.get("vehicle_scores") or []
+        ranked = sorted(
+            ((float(scores[i]) if i < len(scores) else 0.0), vb)
+            for i, vb in enumerate(vboxes))
+        if ranked:
+            _, best = ranked[-1]
             try:
-                box = [float(v) for v in vboxes[0]]
+                box = [float(v) for v in best]
             except (TypeError, ValueError):
                 box = None
     else:
+        # Person alerts (and callers without an explicit etype) only use the
+        # person box. Without one the full frame is the honest photo.
         box = scorer.subject_box(result)
-        if not box and vboxes:
-            # No person box: a car is still a subject worth cropping to.
-            try:
-                box = [float(v) for v in vboxes[0]]
-            except (TypeError, ValueError):
-                box = None
     w, h = result.get("w"), result.get("h")
     if not box or not w or not h:
         return image
