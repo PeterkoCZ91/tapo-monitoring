@@ -997,6 +997,11 @@ def run_once(app: AppConfig, now=None, connect=None, is_night=None, is_raining=N
         plan = plan_camera(cfg, effective_night(cfg, night), rain_active,
                            datetime.fromtimestamp(now))
         plans[cfg.name] = plan
+        if not getattr(cfg, "camera_control", True):
+            # Observe only: still plan and log, but never write to the camera.
+            # This gates apply_plan below, which owns PTZ recall, day/night,
+            # detection settings and the lamp config repair.
+            continue
         if privacy_seen is not None:
             privacy_seen.pop(cfg.name, None)
         if detection_seen is not None:

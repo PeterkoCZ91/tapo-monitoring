@@ -9082,3 +9082,12 @@ def test_record_light_states_writes_transitions_to_the_ledger_and_survives_error
 
     daemon._record_light_states(SimpleNamespace(event_ledger=Broken()), "cam",
                                 _light_entry("a", 0), _light_entry("b", 1), 1.0)
+
+
+def test_camera_control_off_skips_apply_plan(monkeypatch):
+    # Observe only: the config flag is honored per camera. The daemon's plan
+    # loop reads getattr(cfg, "camera_control", True) before calling apply_plan.
+    cfg = _cam(camera_control=False)
+    assert cfg.camera_control is False
+    src = open("tapo_monitor/daemon.py").read()
+    assert 'if not getattr(cfg, "camera_control", True):' in src

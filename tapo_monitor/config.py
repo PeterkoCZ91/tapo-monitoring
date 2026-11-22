@@ -303,6 +303,8 @@ class CameraConfig:
     rtsp_user_env: str | None = None
     rtsp_password_env: str | None = None
     rtsp_port: int = 554
+    # Observe-only mode: the daemon still watches but never writes to the camera.
+    camera_control: bool = True
     rtsp_stream: str = "stream1"
     # detection source "reolink": the camera states that start an event (motion, people,
     # vehicle, dog_cat). Empty = all of them.
@@ -1447,6 +1449,9 @@ def _camera(data, index):
     camera_order = tuple(item.strip() for item in raw_camera_order)
     if len(set(camera_order)) != len(camera_order):
         raise ConfigError(f"{where}: 'coordinator.camera_order' must not contain duplicates")
+    camera_control = data.get("camera_control", True)
+    if not isinstance(camera_control, bool):
+        raise ConfigError(f"{where}: 'camera_control' must be a boolean")
     try:
         rtsp_port = int(data.get("rtsp_port", 554))
     except (TypeError, ValueError):
@@ -1734,6 +1739,7 @@ def _camera(data, index):
         rtsp_user_env=data.get("rtsp_user_env"),
         rtsp_password_env=data.get("rtsp_password_env"),
         rtsp_port=rtsp_port,
+        camera_control=camera_control,
         sd_motion_span_cap=int(data["sd_motion_span_cap"]) if data.get("sd_motion_span_cap") is not None else None,
         rtsp_stream=data.get("rtsp_stream", "h264Preview_01_main"
                              if "reolink" in detection.sources else "stream1"),

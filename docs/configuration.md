@@ -166,6 +166,18 @@ not a number is a `ConfigError` at load. A top-level section (`alerts`, `loop`,
 
 ## Camera fields
 
+`camera_control` (default `true`) is per camera. With `false` the daemon observes
+but does not call `apply_plan`, so it makes no PTZ preset recall, day/night or
+night-vision mode change, motion/person/vehicle/tamper detection write, or lamp
+configuration write. The plan is still computed for logs and the digital twin.
+
+Direct writes outside `apply_plan` are not gated yet: `tracking.py` writes
+`SmartTrackConfig`, `TargetTrackConfig` and `AutoTrackTarget`, and
+`sessionguard.py` clears `AutoTrackTarget` through its guard. They should move
+behind the same API deny-list before the switch can be described as covering
+every camera write. Until then, `camera_control: false` means the `apply_plan`
+writes above are off, not that every setter is unreachable.
+
 ### Host failover (optional)
 
 `host` may be a list of candidate addresses for a camera that can show up on another
